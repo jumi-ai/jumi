@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { BOARD_PORT, createBoardFetchHandler } from "./board.ts";
 import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
@@ -34,6 +35,7 @@ import {
   type ReviewJobStore,
   renderQueueMetrics,
 } from "./review_jobs.ts";
+import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { orderedRunners } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import type { ReviewJob } from "./types.ts";
@@ -634,6 +636,11 @@ export async function processEngineTick(
     const state = publishedState(result);
     await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
+    if (result.status === "skipped" && result.reason) {
+      await rememberSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, result.reason, logger);
+    } else {
+      await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
+    }
     await handoverFollowUp(store, api, config, row, result, logger);
     breaker.recordModelReached();
     return "processed";
@@ -801,6 +808,7 @@ export interface StartReviewerDeps {
 export interface StartedReviewer {
   role: ServiceConfig["role"];
   server?: ReturnType<typeof Bun.serve>;
+  boardServer?: ReturnType<typeof Bun.serve>;
   store?: ReviewJobStore;
   stop: () => void;
 }
@@ -871,12 +879,33 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
               logger,
             }),
           logger,
+          sits: store.sits,
         },
       }),
       logger,
       deps
     );
     if (deps.listen !== false) {
+      // Operator board on its own port. Same process (no sidecar, no new
+      // Deployment), same ledger, single replica with no leader election.
+      // Polling GET only; the webhook host never serves the board paths.
+      let boardServer: ReturnType<typeof Bun.serve>;
+      try {
+        boardServer = Bun.serve({
+          hostname: config.host,
+          port: BOARD_PORT,
+          fetch: createBoardFetchHandler({ store, logger, forge: config.forge, forgeUrl: config.giteaUrl }),
+        });
+      } catch (err) {
+        try {
+          started.stop();
+        } catch {
+          // Best-effort: the webhook listener must not leak on board bind failure.
+        }
+        throw err;
+      }
+      logger(`board listening on ${boardServer.hostname}:${boardServer.port} role=${config.role}`);
+      started.boardServer = boardServer;
       const reclaim = new AbortController();
       const run = async () => {
         while (!reclaim.signal.aborted) {
@@ -893,6 +922,11 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       const stop = started.stop;
       started.stop = () => {
         reclaim.abort();
+        try {
+          boardServer.stop(true);
+        } catch {
+          // Best-effort: webhook stop below still runs.
+        }
         stop();
       };
       bindAbort(deps.signal, () => started.stop());

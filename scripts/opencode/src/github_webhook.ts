@@ -25,6 +25,7 @@ import {
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
+import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
 import type { GiteaIssuePayload, IssueJob, ReviewJob } from "./types.ts";
 import {
   assertRepositoryPolicy,
@@ -80,6 +81,57 @@ function json(status: number, body: unknown): Response {
 function skipped(reason: string, logger: (message: string) => void): Response {
   logger(`skipped ${reason}`);
   return json(202, { skipped: reason });
+}
+
+function reviewSitsFor(deps: GithubWebhookDeps): RouterSitStore | undefined {
+  const fromWorker = deps.worker?.sits;
+  if (fromWorker) return fromWorker;
+  const review = deps.review as { sits?: RouterSitStore } | undefined;
+  return review?.sits;
+}
+
+async function rememberGithubSkip(
+  sits: RouterSitStore | undefined,
+  owner: string,
+  repo: string,
+  number: number,
+  reason: string,
+  logger: (message: string) => void
+): Promise<Response | undefined> {
+  const code = normalizeSitReason(reason);
+  if (!code) return undefined;
+  try {
+    await sits?.remember(owner, repo, number, code);
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`queue unavailable: ${(err as Error).message}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    logger(`sit remember failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  return undefined;
+}
+
+async function clearGithubSit(
+  sits: RouterSitStore | undefined,
+  owner: string,
+  repo: string,
+  number: number,
+  logger: (message: string) => void
+): Promise<Response | undefined> {
+  if (!sits) return undefined;
+  try {
+    await sits.clear(owner, repo, number);
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`queue unavailable: ${(err as Error).message}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    logger(`sit clear failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  return undefined;
 }
 
 function cancelKey(owner: string, repo: string, issueNumber: number): string {
@@ -292,13 +344,18 @@ async function enqueueJobs(
   jobs: IssueJob[],
   queue: HandleWorkerWebhookDeps["queue"],
   delivery: string,
-  logger: (message: string) => void
+  logger: (message: string) => void,
+  sits?: RouterSitStore
 ): Promise<Response> {
   if (jobs.length === 1) {
     const job = jobs[0];
     if (!job) return skipped("no blocked issues to wake", logger);
     const result: EnqueueResult = await queue.enqueue(job);
     logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    if (result.queued && sits) {
+      const cleared = await clearGithubSit(sits, job.owner, job.repo, job.issueNumber, logger);
+      if (cleared) return cleared;
+    }
     return json(202, result);
   }
   const keys: string[] = [];
@@ -306,6 +363,10 @@ async function enqueueJobs(
     const result: EnqueueResult = await queue.enqueue(job);
     keys.push(result.key);
     logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    if (result.queued && sits) {
+      const cleared = await clearGithubSit(sits, job.owner, job.repo, job.issueNumber, logger);
+      if (cleared) return cleared;
+    }
   }
   return json(202, { queued: true, keys });
 }
@@ -331,6 +392,16 @@ export async function handleGithubWebhookEvent(
         const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
         reviewResults.push(result);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        if (result.queued) {
+          const cleared = await clearGithubSit(
+            reviewSitsFor(deps),
+            partial.owner,
+            partial.repo,
+            partial.prNumber,
+            logger
+          );
+          if (cleared) return cleared;
+        }
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
@@ -350,7 +421,21 @@ export async function handleGithubWebhookEvent(
       try {
         const payload = parsePullRequestPayload(rawBody);
         const validation = validateGithubReview(payload, policy);
-        if ("skip" in validation) return skipped(validation.skip, logger);
+        if ("skip" in validation) {
+          const [owner, repo] = payload.repository.full_name.split("/");
+          if (owner && repo) {
+            const remembered = await rememberGithubSkip(
+              reviewSitsFor(deps),
+              owner,
+              repo,
+              payload.pull_request.number,
+              validation.skip,
+              logger
+            );
+            if (remembered) return remembered;
+          }
+          return skipped(validation.skip, logger);
+        }
         const job = { ...validation, delivery };
         if (deps.getPR) {
           try {
@@ -365,6 +450,10 @@ export async function handleGithubWebhookEvent(
         }
         const result = await deps.review.enqueue(job);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        if (result.queued) {
+          const cleared = await clearGithubSit(reviewSitsFor(deps), job.owner, job.repo, job.prNumber, logger);
+          if (cleared) return cleared;
+        }
         return json(202, result);
       } catch (err) {
         if (isQueueUnavailable(err)) {
@@ -379,17 +468,43 @@ export async function handleGithubWebhookEvent(
       try {
         const payload = parsePullRequestPayload(rawBody);
         const decision = await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger);
-        if (decision.type === "skip") return skipped(decision.reason, logger);
+        if (decision.type === "skip") {
+          const [owner, repo] = payload.repository.full_name.split("/");
+          if (owner && repo) {
+            const remembered = await rememberGithubSkip(
+              deps.worker.sits,
+              owner,
+              repo,
+              payload.pull_request.number,
+              decision.reason,
+              logger
+            );
+            if (remembered) return remembered;
+          }
+          return skipped(decision.reason, logger);
+        }
         if (decision.type === "cancel") {
           const result = deps.worker.cancel
             ? await deps.worker.cancel(decision.owner, decision.repo, decision.issueNumber)
             : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
           logger(`cancelled ${result.key}`);
+          const cleared = await clearGithubSit(
+            deps.worker.sits,
+            decision.owner,
+            decision.repo,
+            decision.issueNumber,
+            logger
+          );
+          if (cleared) return cleared;
           return json(202, result);
         }
         const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
         const result: EnqueueResult = await deps.worker.queue.enqueue(job);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        if (result.queued) {
+          const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
+          if (cleared) return cleared;
+        }
         return json(202, result);
       } catch (err) {
         if (isQueueUnavailable(err)) {
@@ -432,12 +547,22 @@ export async function handleGithubWebhookEvent(
             const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
             reviewResults.push(result);
             logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+            if (result.queued) {
+              const cleared = await clearGithubSit(
+                reviewSitsFor(deps),
+                partial.owner,
+                partial.repo,
+                partial.prNumber,
+                logger
+              );
+              if (cleared) return cleared;
+            }
           }
         }
       }
       if (decision.type === "enqueue") {
         const jobs: IssueJob[] = decision.jobs.map((partial) => ({ ...partial, delivery, receivedAt }));
-        return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+        return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
@@ -470,6 +595,7 @@ export async function handleGithubWebhookEvent(
         }
         jobs.push(job);
       }
+      // Push is out of scope for sits: enqueue without remembering or clearing.
       return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
     }
 
@@ -511,10 +637,40 @@ export async function handleGithubWebhookEvent(
               undefined,
               deps.worker.api
             );
-      if (decision.type === "skip") return skipped(decision.reason, logger);
+      if (decision.type === "skip") {
+        const fullName =
+          isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string"
+            ? (parsed.repository.full_name as string)
+            : undefined;
+        const prNumber =
+          isObject(parsed) && isObject(parsed.pull_request) && typeof parsed.pull_request.number === "number"
+            ? (parsed.pull_request.number as number)
+            : isObject(parsed) && isObject(parsed.issue) && typeof parsed.issue.number === "number"
+              ? (parsed.issue.number as number)
+              : undefined;
+        if (fullName) {
+          const [owner, repo] = fullName.split("/");
+          if (owner && repo && typeof prNumber === "number") {
+            const remembered = await rememberGithubSkip(
+              deps.worker.sits,
+              owner,
+              repo,
+              prNumber,
+              decision.reason,
+              logger
+            );
+            if (remembered) return remembered;
+          }
+        }
+        return skipped(decision.reason, logger);
+      }
       const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
       const result: EnqueueResult = await deps.worker.queue.enqueue(job);
       logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      if (result.queued) {
+        const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
+        if (cleared) return cleared;
+      }
       return json(202, result);
     }
 
@@ -528,6 +684,14 @@ export async function handleGithubWebhookEvent(
         ? await deps.worker.cancel(decision.owner, decision.repo, decision.issueNumber)
         : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
       logger(`cancelled ${result.key}`);
+      const cleared = await clearGithubSit(
+        deps.worker.sits,
+        decision.owner,
+        decision.repo,
+        decision.issueNumber,
+        logger
+      );
+      if (cleared) return cleared;
       return json(202, result);
     }
 
@@ -562,11 +726,36 @@ export async function handleGithubWebhookEvent(
     }
 
     if (jobs.length === 0) {
-      if (decision.type === "skip") return skipped(decision.reason, logger);
+      if (decision.type === "skip") {
+        if (payload.action === "closed" || payload.action === "merged") {
+          const cleared = await clearGithubSit(
+            deps.worker.sits,
+            payload.repository.full_name.split("/")[0] ?? "",
+            payload.repository.full_name.split("/")[1] ?? "",
+            payload.issue.number,
+            logger
+          );
+          if (cleared) return cleared;
+          return skipped(decision.reason, logger);
+        }
+        const [owner, repo] = payload.repository.full_name.split("/");
+        if (owner && repo) {
+          const remembered = await rememberGithubSkip(
+            deps.worker.sits,
+            owner,
+            repo,
+            payload.issue.number,
+            decision.reason,
+            logger
+          );
+          if (remembered) return remembered;
+        }
+        return skipped(decision.reason, logger);
+      }
       return skipped("no blocked issues to wake", logger);
     }
 
-    return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+    return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
   } catch (err) {
     if (isQueueUnavailable(err)) {
       logger(`queue unavailable: ${err.message}`);

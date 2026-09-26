@@ -3,6 +3,7 @@ import { isInfraRetryMarker } from "./infra.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import { MemoryRouterSitStore, PgRouterSitStore, ROUTER_SITS_SCHEMA_SQL, type RouterSitStore } from "./router_sits.ts";
 import {
   ISSUE_SKIP_LATCHES_SCHEMA_SQL,
   MemorySkipLatchStore,
@@ -109,7 +110,10 @@ export interface ReviewJobStore {
   countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
   oldestQueuedAgeSeconds(now?: Date): Promise<Record<JobKind, number>>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
+  /** Queued or leased rows for the operator board. No forge calls. Throws when the ledger is down. */
+  listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   readonly skipLatches: SkipLatchStore;
+  readonly sits: RouterSitStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -401,6 +405,7 @@ function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): 
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
   readonly skipLatches = new MemorySkipLatchStore();
+  readonly sits = new MemoryRouterSitStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
@@ -414,14 +419,17 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return run;
   }
 
-  async migrate(): Promise<void> {}
+  async migrate(): Promise<void> {
+    await this.sits.migrate();
+  }
 
   enqueue(job: ReviewJob): Promise<EnqueueResult> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const key = reviewJobKey(job);
       const now = Date.now();
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => isTerminalOutcome(row.state, row.resultReason))) {
+        await this.sits.remember(job.owner, job.repo, job.prNumber, "terminal-result");
         return { key, queued: false };
       }
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
@@ -437,6 +445,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
             row.updatedAt = now;
           }
         }
+        await this.sits.remember(job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
       if (hasNewerInflight(this.rows, job, key)) {
@@ -479,20 +488,28 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         createdAt: now,
         updatedAt: now,
       });
+      await this.sits.clear(job.owner, job.repo, job.prNumber);
       return { key, queued: true };
     });
   }
 
   enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const key = workerJobKey(job);
       const kind = workerJobKind(job);
       const now = Date.now();
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
+        await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
         return { key, queued: false };
       }
       if (kind === "implement" && sameKey.some((row) => isImplementTerminal(row, job))) {
+        const terminal = sameKey.find((row) => isImplementTerminal(row, job));
+        if (terminal?.resultReason === "no-changes") {
+          await this.sits.remember(job.owner, job.repo, job.issueNumber, "no-changes");
+        } else {
+          await this.sits.remember(job.owner, job.repo, job.issueNumber, "terminal-result");
+        }
         return { key, queued: false };
       }
       if (kind !== "implement" && job.prNumber) {
@@ -535,6 +552,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         createdAt: now,
         updatedAt: now,
       });
+      await this.sits.clear(job.owner, job.repo, job.issueNumber);
       return { key, queued: true };
     });
   }
@@ -761,8 +779,19 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
+  listInflight(limit = 200): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+      return this.rows
+        .filter((row) => row.state === "queued" || row.state === "leased")
+        .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
+    });
+  }
+
+  cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
+    return this.locked(async () => {
       const now = Date.now();
       let n = 0;
       for (const row of this.rows) {
@@ -775,6 +804,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         row.updatedAt = now;
         n++;
       }
+      await this.sits.clear(owner, repo, issueNumber);
       return n;
     });
   }
@@ -808,6 +838,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
       this.issueSkipLatches.set(key, next);
       await this.skipLatches.delete({ owner, repo, issueNumber });
+      await this.sits.clear(owner, repo, issueNumber);
       return { ...next };
     });
   }
@@ -937,18 +968,41 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
 
 export class PgReviewJobStore implements ReviewJobStore {
   readonly skipLatches: PgSkipLatchStore;
+  readonly sits: PgRouterSitStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
+    this.sits = new PgRouterSitStore(sql);
   }
 
   async migrate(): Promise<void> {
     try {
       await this.sql.unsafe(REVIEW_JOBS_SCHEMA_SQL);
       await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
+      await this.sql.unsafe(ROUTER_SITS_SCHEMA_SQL);
     } catch (err) {
       wrapSqlError(err);
     }
+  }
+
+  private async rememberSitTx(
+    tx: SqlClient,
+    owner: string,
+    repo: string,
+    number: number,
+    reason: "terminal-result" | "repo-mutex" | "no-changes"
+  ): Promise<void> {
+    await tx.unsafe(
+      `INSERT INTO router_sits (owner, repo, number, reason, decided_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (owner, repo, number)
+       DO UPDATE SET reason = EXCLUDED.reason, decided_at = NOW(), updated_at = NOW()`,
+      [owner, repo, number, reason]
+    );
+  }
+
+  private async clearSitTx(tx: SqlClient, owner: string, repo: string, number: number): Promise<void> {
+    await tx.unsafe(`DELETE FROM router_sits WHERE owner = $1 AND repo = $2 AND number = $3`, [owner, repo, number]);
   }
 
   async enqueue(job: ReviewJob): Promise<EnqueueResult> {
@@ -962,6 +1016,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         )
       );
       if (done.some((row) => isTerminalOutcome(str(row.state) as ReviewJobState, strOrNull(row.result_reason)))) {
+        await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "terminal-result");
         return { key, queued: false };
       }
 
@@ -987,6 +1042,7 @@ export class PgReviewJobStore implements ReviewJobStore {
              AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%'))`,
           [key]
         );
+        await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
       const incomingTs = jobPrUpdatedAtMs(job);
@@ -1011,7 +1067,10 @@ export class PgReviewJobStore implements ReviewJobStore {
           [key, job.owner, job.repo, job.prNumber, job.headSha, job.delivery, prUpdatedAt]
         )
       );
-      if (inserted.length === 0) return { key, queued: false };
+      if (inserted.length === 0) {
+        await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "repo-mutex");
+        return { key, queued: false };
+      }
 
       await tx.unsafe(
         `UPDATE review_jobs
@@ -1020,6 +1079,7 @@ export class PgReviewJobStore implements ReviewJobStore {
            AND ($5::timestamptz IS NULL OR pr_updated_at IS NULL OR pr_updated_at <= $5::timestamptz)`,
         [job.owner, job.repo, job.prNumber, key, prUpdatedAt, REVIEW_KIND]
       );
+      await this.clearSitTx(tx, job.owner, job.repo, job.prNumber);
       return { key, queued: true };
     });
   }
@@ -1035,19 +1095,23 @@ export class PgReviewJobStore implements ReviewJobStore {
             [key]
           )
         );
-        if (
-          done.some((row) =>
-            isImplementTerminal(
-              {
-                kind,
-                state: str(row.state) as ReviewJobState,
-                resultReason: strOrNull(row.result_reason),
-                payload: parsePayload(row.payload),
-              },
-              job
-            )
+        const terminal = done.find((row) =>
+          isImplementTerminal(
+            {
+              kind,
+              state: str(row.state) as ReviewJobState,
+              resultReason: strOrNull(row.result_reason),
+              payload: parsePayload(row.payload),
+            },
+            job
           )
-        ) {
+        );
+        if (terminal) {
+          if (strOrNull(terminal.result_reason) === "no-changes") {
+            await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "no-changes");
+          } else {
+            await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "terminal-result");
+          }
           return { key, queued: false };
         }
       }
@@ -1061,7 +1125,10 @@ export class PgReviewJobStore implements ReviewJobStore {
           [key]
         )
       );
-      if (inflight.length > 0) return { key, queued: false };
+      if (inflight.length > 0) {
+        await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+        return { key, queued: false };
+      }
 
       const latchRows = asRows<{ generation: unknown }>(
         await tx.unsafe(
@@ -1092,7 +1159,10 @@ export class PgReviewJobStore implements ReviewJobStore {
           ]
         )
       );
-      if (inserted.length === 0) return { key, queued: false };
+      if (inserted.length === 0) {
+        await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+        return { key, queued: false };
+      }
 
       if (kind !== "implement" && job.prNumber) {
         await tx.unsafe(
@@ -1102,6 +1172,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           [job.owner, job.repo, job.prNumber, kind, key]
         );
       }
+      await this.clearSitTx(tx, job.owner, job.repo, job.issueNumber);
       return { key, queued: true };
     });
   }
@@ -1422,6 +1493,17 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows[0] ? mapRow(rows[0]) : undefined;
   }
 
+  async listInflight(limit = 200): Promise<ReviewJobRecord[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs WHERE state IN ('queued', 'leased') ORDER BY created_at ASC, id ASC LIMIT $1`,
+        [cap]
+      )
+    );
+    return rows.map(mapRow);
+  }
+
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
@@ -1431,6 +1513,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
       )
     );
+    await this.sits.clear(owner, repo, issueNumber);
     return rows.length;
   }
 
@@ -1474,6 +1557,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         [owner, repo, issueNumber]
       )
     );
+    await this.sits.clear(owner, repo, issueNumber);
     return rows[0] ? mapIssueSkipLatch(rows[0]) : emptyIssueSkipLatch();
   }
 

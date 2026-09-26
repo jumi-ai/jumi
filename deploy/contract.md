@@ -66,6 +66,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 
 #### ports
 - `3000`
+- `3001`
 
 #### runAs
 - `10001:10001`

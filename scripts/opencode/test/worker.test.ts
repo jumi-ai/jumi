@@ -1542,4 +1542,17 @@ describe("processWorkerTick", () => {
       skipReason: "stuck: repeated error",
     });
   });
+
+  test("stuck result remembers a sit alongside the shared latch", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 19, headSha: "headsha" }));
+    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      conflict: async () => ({ status: "stuck" }),
+    });
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
+      generation: 0,
+      skipReason: "stuck: cannot resolve conflicts",
+    });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toMatchObject({ reason: "implement-latch" });
+  });
 });

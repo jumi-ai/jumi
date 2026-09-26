@@ -982,7 +982,10 @@ export async function implementFollowUp(
     if (description == null || !description.replaceAll("\0", "").trim()) return;
     try {
       const live = await opts.api.getPR(owner, repo, pr.number);
-      const body = replaceJumiPrBodyRegion(live.body, buildPullRequestBody(issueNumber, description, runner));
+      const body = replaceJumiPrBodyRegion(
+        live.body,
+        buildPullRequestBody(issueNumber, description, runner, [loop.auth.token])
+      );
       if (body == null || body === live.body) return;
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
     } catch (err) {

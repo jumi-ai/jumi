@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryReviewJobStore, QueueUnavailableError } from "../src/review_jobs.ts";
+import { MemoryRouterSitStore } from "../src/router_sits.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -218,6 +219,48 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs).toHaveLength(0);
     expect(cancelled).toEqual([]);
     expect(loaded).toEqual([12]);
+  });
+
+  test("standalone worker mailbox remembers an explicit skip as a sit", async () => {
+    const queue = makeQueue();
+    const sits = new MemoryRouterSitStore();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      sits,
+      api: {
+        listOpenPulls: async () => [],
+        getIssue: async () => makeIssue(),
+      },
+    });
+    const repository = makePayload().repository;
+    const response = await handler(
+      await signedRequest(
+        makePayload({
+          action: "assigned",
+          pull_request: makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #12",
+            user: makeUser({ login: "jumi" }),
+            assignee: makeUser({ login: "jumi" }),
+            assignees: [makeUser({ login: "jumi" })],
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo: repository,
+              repo_id: repository.id,
+            },
+          }),
+        }),
+        { event: "pull_request", eventType: "pull_request_assign" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "closing issue already assigned" });
+    expect(queue.jobs).toHaveLength(0);
+    expect(await sits.get("kirmanak", "demo", 127)).toMatchObject({ reason: "implement-latch" });
   });
 
   test("skips PR-assign when getIssue of the closer fails", async () => {

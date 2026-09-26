@@ -8,6 +8,7 @@ import {
   verifyGithubSignature,
 } from "../src/github_webhook.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { MemoryRouterSitStore } from "../src/router_sits.ts";
 import { createFetchHandler } from "../src/server.ts";
 import type { IssueJob, ReviewJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
@@ -1105,6 +1106,45 @@ describe("worker POST /webhooks/github", () => {
     expect(queue.jobs[0]?.mode).toBe("follow-up");
     expect(queue.jobs[0]?.issueNumber).toBe(55);
     expect(queue.jobs[0]?.prNumber).toBe(55);
+  });
+
+  test("worker mailbox remembers a label skip as a sit", async () => {
+    const queue = makeIssueQueue();
+    const sits = new MemoryRouterSitStore();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), {
+      queue,
+      sits,
+    });
+    const response = await handler(
+      await signedGithubRequest(
+        makePayload({
+          action: "labeled",
+          label: { name: "other" },
+          repository: githubRepo,
+          sender: makeUser({ login: "alice", type: "User" }),
+          pull_request: makePR({
+            number: 55,
+            title: "chore(deps)",
+            body: "",
+            user: makeUser({ login: "renovate[bot]" }),
+            labels: [{ name: "other" }],
+            html_url: "https://github.com/kirmanak/demo/pull/55",
+            head: {
+              label: "kirmanak:renovate/all-digest",
+              ref: "renovate/all-digest",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        }),
+        { event: "pull_request", url: "https://worker.test/webhooks/github" }
+      )
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "labeled other label" });
+    expect(queue.jobs).toHaveLength(0);
+    expect(await sits.get("kirmanak", "demo", 55)).toMatchObject({ reason: "not-labeled" });
   });
 
   test("does not enqueue review jobs on the worker mailbox", async () => {

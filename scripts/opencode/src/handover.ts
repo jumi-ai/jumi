@@ -5,6 +5,7 @@ import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { parseReviewOutput, trailerSuggestionCount } from "./verdict.ts";
@@ -104,7 +105,17 @@ export async function enqueueFollowUpFromReview(
     closer === undefined &&
     isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, opts) &&
     !isJumiPrIdentity(pr, opts.botUsername);
-  if (closer === undefined && !foreign) return logSkip("no closer");
+  if (closer === undefined && !foreign) {
+    await rememberSitBestEffort(
+      opts.store.sits,
+      opts.row.owner,
+      opts.row.repo,
+      opts.row.prNumber,
+      "no closing issue",
+      opts.logger
+    );
+    return logSkip("no closer");
+  }
 
   const issueNumber = closer ?? pr.number;
   const [issue, repo] = await Promise.all([

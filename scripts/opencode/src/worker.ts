@@ -22,6 +22,7 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
+import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { orderedRunners } from "./runners.ts";
 import { releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
@@ -335,6 +336,7 @@ export async function processWorkerTick(
       await store.markPublished(row.id, leasedBy, { state: "skipped", reason: latch.skipReason ?? undefined });
       recordJobCompleted(row.kind, "skipped");
       logger(`${issueJobKey(job)} skipped: ${latch.skipReason}`);
+      await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latch.skipReason, logger);
       return "processed";
     }
     const shared = {
@@ -428,6 +430,17 @@ export async function processWorkerTick(
     await store.markPublished(row.id, leasedBy, { state, reason });
     recordJobCompleted(row.kind, state);
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
+    if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
+      await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, reason, logger);
+    } else if (result.status === "pr" || result.status === "pushed" || state === "succeeded") {
+      await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
+    }
+    // A freshly latched object gets its board row now, not on some later run:
+    // latchReason is already computed above, and still flows through normalizeSitReason.
+    // Placed after the clear branch because stuck publishes as succeeded.
+    if (latchReason) {
+      await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latchReason, logger);
+    }
     breaker.recordModelReached();
     const prNumber = pushedPrNumber(result);
     if (prNumber !== undefined) {

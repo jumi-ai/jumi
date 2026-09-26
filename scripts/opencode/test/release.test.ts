@@ -411,7 +411,7 @@ describe("deploy/contract.md", () => {
       "MAX_JOB_ATTEMPTS",
       "PHOENIX_OTLP_ENDPOINT",
     ]);
-    expect(parsed.reviewer.ports).toEqual(["3000"]);
+    expect(parsed.reviewer.ports).toEqual(["3000", "3001"]);
     expect(parsed.worker.ports).toEqual(["3000"]);
     expect(parsed.reviewer.runAs).toBe("10001:10001");
     expect(parsed.worker.runAs).toBe("10001:10001");

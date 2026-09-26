@@ -121,6 +121,19 @@ describe("skipDiaryText", () => {
     expect(skipDiaryText("already\0 done")).toBe("already done");
     expect(skipDiaryText("x".repeat(9000))).toBe("x".repeat(8000));
   });
+
+  test("redacts the spawn token, bare or in a push URL, preserving the rest", () => {
+    const token = "secret-token-123";
+    expect(skipDiaryText(`nothing to do ${token} done`, [token])).toBe("nothing to do *** done");
+    expect(skipDiaryText(`push failed https://x-access-token:${token}@example.com/o/r.git end`, [token])).not.toContain(
+      token
+    );
+    const redactedUrl = skipDiaryText(`push failed https://x-access-token:${token}@example.com/o/r.git end`, [token]);
+    expect(redactedUrl.startsWith("push failed https://")).toBe(true);
+    expect(redactedUrl.endsWith("@example.com/o/r.git end")).toBe(true);
+    expect(redactedUrl).toContain("***");
+    expect(skipDiaryText("nothing to do", [])).toBe("nothing to do");
+  });
 });
 
 describe("buildPullRequestBody", () => {
@@ -154,6 +167,22 @@ describe("buildPullRequestBody", () => {
 
   test("strips NUL bytes", () => {
     expect(buildPullRequestBody(12, "Caches\0 categories.")).toBe("Caches categories.\n\nFixes #12");
+  });
+
+  test("redacts the spawn token, bare or in a push URL, preserving the rest", () => {
+    const token = "secret-token-123";
+    expect(buildPullRequestBody(12, `Caches ${token} categories.`, undefined, [token])).toBe(
+      "Caches *** categories.\n\nFixes #12"
+    );
+    const redactedUrl = buildPullRequestBody(
+      12,
+      `push failed https://x-access-token:${token}@example.com/o/r.git`,
+      undefined,
+      [token]
+    );
+    expect(redactedUrl).not.toContain(token);
+    expect(redactedUrl).toContain("***");
+    expect(redactedUrl.endsWith("\n\nFixes #12")).toBe(true);
   });
 });
 

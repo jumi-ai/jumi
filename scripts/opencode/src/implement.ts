@@ -77,8 +77,8 @@ export function isValidatedSkipText(text: string | null | undefined): boolean {
   return parentOwnedProse(text).length > 0;
 }
 
-export function skipDiaryText(text: string): string {
-  return parentOwnedProse(text);
+export function skipDiaryText(text: string, secrets: readonly (string | undefined)[] = []): string {
+  return redactGitSecrets(parentOwnedProse(text), secrets);
 }
 
 /** Non-empty regular file text, else null: missing, empty, directory, and symlink are incomplete. */
@@ -169,9 +169,10 @@ export function buildTaskMarkdown(job: IssueJob): string {
 export function buildPullRequestBody(
   issueNumber: number,
   fileContents: string | null | undefined,
-  runner?: RunnerStamp
+  runner?: RunnerStamp,
+  secrets: readonly (string | undefined)[] = []
 ): string {
-  return appendRunnerStamp(pullRequestText(issueNumber, fileContents), runner);
+  return redactGitSecrets(appendRunnerStamp(pullRequestText(issueNumber, fileContents), runner), secrets);
 }
 
 function pullRequestText(issueNumber: number, fileContents: string | null | undefined): string {
@@ -601,7 +602,7 @@ export async function implementIssue(
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
           if (validatedSkip) {
             await loop.stopHeartbeat();
-            await diary(skipDiaryText(validatedSkip));
+            await diary(skipDiaryText(validatedSkip, [loop.auth.token]));
             await loop.stampTerminalClaim(opts.api);
             await loop.detachWorktree();
             return { status: "no-changes" };
@@ -637,7 +638,7 @@ export async function implementIssue(
 
       const pr = await opts.api.createPullRequest(owner, repo, {
         title: liveJob.title,
-        body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner)),
+        body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner, [loop.auth.token])),
         head: branch,
         base: opts.job.defaultBranch,
       });

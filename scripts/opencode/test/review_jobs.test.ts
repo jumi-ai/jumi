@@ -504,7 +504,7 @@ describe("PgReviewJobStore.enqueue", () => {
     expect(wake).toContain("ci-lookup-retry:%");
     expect(wake).toContain("leased_until");
     expect(wake).not.toContain("error = CASE");
-    expect(queries.some((query) => query.includes("INSERT"))).toBe(false);
+    expect(queries.some((query) => query.includes("INSERT INTO review_jobs"))).toBe(false);
   });
 
   test("locks inflight rows FOR UPDATE in id order", async () => {
@@ -524,7 +524,7 @@ describe("PgReviewJobStore.enqueue", () => {
       key: "kirmanak/demo#7:headsha",
       queued: false,
     });
-    expect(queries.some((query) => query.includes("INSERT"))).toBe(false);
+    expect(queries.some((query) => query.includes("INSERT INTO review_jobs"))).toBe(false);
   });
 });
 
