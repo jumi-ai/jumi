@@ -1,6 +1,6 @@
-import { isKickPath, parseKickBody } from "./kick.ts";
-import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
-import { isQueueUnavailable } from "./review_jobs.ts";
+import { isKickPath, isReopenKickId, parseKickBody, parseReopenKickBody, rawKickIdOf } from "./kick.ts";
+import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import { isQueueUnavailable, isUniqueViolation, reopenIdempotencyMismatch } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
@@ -198,6 +198,21 @@ export interface BoardHandlerDeps {
   forge?: string;
   /** Server-configured forge origin for links. Rendered as href only, never fetched. */
   forgeUrl?: string;
+  /**
+   * Forge client for the close-then-reopen kick. Only getPR/close/reopen are
+   * used; there is never a push and never a job insert on this path.
+   */
+  forgeApi?: BoardPullForge;
+}
+
+export interface BoardPullForge {
+  getPR(
+    owner: string,
+    repo: string,
+    index: number
+  ): Promise<{ state: string; merged: boolean; head?: { sha: string } }>;
+  closePullRequest(owner: string, repo: string, index: number): Promise<unknown>;
+  reopenPullRequest(owner: string, repo: string, index: number): Promise<unknown>;
 }
 
 function normalizePathname(raw: string): string {
@@ -584,7 +599,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     // /board/kick is an alias for the requeue path. The client never invents
     // kick ids for sits; identity is owner/repo/number and the server
     // re-checks kickability.
-    if (pathname === BOARD_KICK_PATH || isKickPath(pathname)) return handleKick(request, deps.store, logger);
+    if (pathname === BOARD_KICK_PATH || isKickPath(pathname)) {
+      return handleKick(request, deps.store, logger, deps.forgeApi);
+    }
     if (pathname === BOARD_API_PATH) {
       if (request.method !== "GET") return json(405, { error: "method not allowed" });
       // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
@@ -624,7 +641,8 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
 async function handleKick(
   request: Request,
   store: ReviewJobStore,
-  logger: (message: string) => void
+  logger: (message: string) => void,
+  forgeApi?: BoardPullForge
 ): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "method not allowed" });
   // Edge identity only. The actor never comes from a body field.
@@ -647,9 +665,13 @@ async function handleKick(
   }
   // Sit-clear kick (default branch): an owner/repo/number-only payload clears
   // a kickable sit. Requeue payloads carry a commit and kick id and fall
-  // through to requeueKick below.
+  // through to requeueKick below. The reopen kick carries kick=reopen and
+  // never inserts a job: close-then-reopen wakes via the reopen webhook.
   if (isSitClearPayload(body)) {
     return handleSitClear(request, body, store, logger);
+  }
+  if (isReopenKickId(rawKickIdOf(body))) {
+    return handleReopenKick(request, body, store, logger, forgeApi, actor);
   }
   const parsed = parseKickBody(body, idempotencyKeyOf(request));
   if ("error" in parsed) return json(400, { error: parsed.error });
@@ -708,6 +730,302 @@ async function handleKick(
 
 function nonEmptyString(value: unknown): boolean {
   return typeof value === "string" && value.trim() !== "";
+}
+
+function isNotFoundForgeError(err: unknown): boolean {
+  return err instanceof Error && /→ 404\b/.test(err.message);
+}
+
+/**
+ * Reopen kick for a foreign or reuse pull.
+ *
+ * Same route and same edge-identity/idempotency rules as the requeue kick,
+ * but a different kick id (`reopen`). It never inserts a job and never
+ * pushes: a closed pull is closed-then-reopened so the existing reopen
+ * webhook wake enqueues, and the board waits for that row. An already-open
+ * pull is a no-op: an open pull is never closed to "refresh" it.
+ */
+async function handleReopenKick(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  forgeApi: BoardPullForge | undefined,
+  actor: string
+): Promise<Response> {
+  const parsed = parseReopenKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const item = { owner: parsed.owner, repo: parsed.repo, number: parsed.number, kick: parsed.kick };
+
+  if (parsed.idempotencyKey) {
+    let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>>;
+    try {
+      prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+    } catch (err) {
+      logger(`reopen kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (prior) {
+      if (reopenIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return replayReopenPrior(prior, item);
+    }
+  }
+
+  if (!forgeApi) {
+    logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: no forge`);
+    return json(503, { error: "forge unavailable" });
+  }
+
+  let pr: { state: string; merged: boolean; head?: { sha: string } };
+  try {
+    pr = await forgeApi.getPR(item.owner, item.repo, item.number);
+  } catch (err) {
+    if (isNotFoundForgeError(err)) {
+      const logged = await recordReopenBestEffort(store, logger, parsed, actor, "", "not-found");
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        return reopenKeyConflictResponse(prior, item);
+      }
+      return json(404, {
+        error: `No pull request for ${item.owner}/${item.repo}#${item.number}.`,
+        code: "not-found",
+        terminalJobId: null,
+        newJobId: null,
+      });
+    }
+    logger(
+      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return json(503, { error: "forge unavailable" });
+  }
+
+  if (pr.merged) {
+    const logged = await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-kickable");
+    if (logged === "conflict") {
+      const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+      return reopenKeyConflictResponse(prior, item);
+    }
+    logger(`reopen kick not-kickable actor=${actor} ${item.owner}/${item.repo}#${item.number}: merged`);
+    return json(422, {
+      error: "No kick: pull request is merged; reopen would not wake.",
+      code: "not-kickable",
+      terminalJobId: null,
+      newJobId: null,
+    });
+  }
+
+  if (pr.state === "open") {
+    try {
+      const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "noop-open");
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        return reopenKeyConflictResponse(prior, item);
+      }
+    } catch (err) {
+      logger(
+        `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return json(503, { error: "queue unavailable" });
+    }
+    logger(`reopen kick noop-open actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
+    return json(200, {
+      ok: true,
+      owner: item.owner,
+      repo: item.repo,
+      number: item.number,
+      reopened: false,
+      noop: true,
+      deduped: false,
+    });
+  }
+
+  try {
+    await forgeApi.closePullRequest(item.owner, item.repo, item.number);
+    await forgeApi.reopenPullRequest(item.owner, item.repo, item.number);
+  } catch (err) {
+    if (isNotFoundForgeError(err)) {
+      const logged = await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-found");
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        return reopenKeyConflictResponse(prior, item);
+      }
+      return json(404, {
+        error: `No pull request for ${item.owner}/${item.repo}#${item.number}.`,
+        code: "not-found",
+        terminalJobId: null,
+        newJobId: null,
+      });
+    }
+    logger(
+      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return json(503, { error: "forge unavailable" });
+  }
+
+  try {
+    const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "ok");
+    if (logged === "conflict") {
+      const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+      return reopenKeyConflictResponse(prior, item);
+    }
+  } catch (err) {
+    logger(
+      `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return json(503, { error: "queue unavailable" });
+  }
+  logger(`reopen kick ok actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
+  return json(200, {
+    ok: true,
+    owner: item.owner,
+    repo: item.repo,
+    number: item.number,
+    reopened: true,
+    deduped: false,
+  });
+}
+
+/**
+ * Response for a lost idempotency race: the insert hit a unique violation
+ * after the pre-check saw nothing. A same-item prior replays; a
+ * different-item prior is the same 400 the pre-check returns; a failed
+ * re-read is 503, never a success claim for an item with no ledger row.
+ */
+function reopenKeyConflictResponse(
+  prior: KickLogRecord | undefined,
+  item: { owner: string; repo: string; number: number; kick: string }
+): Response {
+  if (!prior) return json(503, { error: "queue unavailable" });
+  if (reopenIdempotencyMismatch(item, prior)) {
+    return json(400, {
+      error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+      code: "bad-request",
+      terminalJobId: null,
+      newJobId: null,
+    });
+  }
+  return replayReopenPrior(prior, item);
+}
+
+function replayReopenPrior(
+  prior: { owner: string; repo: string; number: number; commit: string; result: string },
+  item: { owner: string; repo: string; number: number }
+): Response {
+  if (prior.result === "ok") {
+    return json(200, {
+      ok: true,
+      owner: item.owner,
+      repo: item.repo,
+      number: item.number,
+      reopened: true,
+      deduped: true,
+    });
+  }
+  if (prior.result === "noop-open") {
+    return json(200, {
+      ok: true,
+      owner: item.owner,
+      repo: item.repo,
+      number: item.number,
+      reopened: false,
+      noop: true,
+      deduped: true,
+    });
+  }
+  if (prior.result === "not-found") {
+    return json(404, {
+      error: "already decided: not-found",
+      code: "not-found",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "not-kickable") {
+    return json(422, {
+      error: "already decided: not-kickable",
+      code: "not-kickable",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "stale-kick") {
+    return json(409, {
+      error: "already decided: stale-kick",
+      code: "stale-kick",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "conflict") {
+    return json(409, {
+      error: "already decided: conflict",
+      code: "conflict",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  return json(422, {
+    error: `already decided: ${prior.result}`,
+    code: "not-kickable",
+    terminalJobId: null,
+    newJobId: null,
+    deduped: true,
+  });
+}
+
+async function recordReopenLogged(
+  store: ReviewJobStore,
+  parsed: { owner: string; repo: string; number: number; kick: string; idempotencyKey: string },
+  actor: string,
+  commit: string,
+  result: string
+): Promise<"ok" | "conflict"> {
+  try {
+    await store.recordReopenKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      number: parsed.number,
+      commit,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      result,
+    });
+    return "ok";
+  } catch (err) {
+    if (parsed.idempotencyKey && isUniqueViolation(err)) return "conflict";
+    throw err;
+  }
+}
+
+async function recordReopenBestEffort(
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  parsed: { owner: string; repo: string; number: number; kick: string; idempotencyKey: string },
+  actor: string,
+  commit: string,
+  result: string
+): Promise<"ok" | "conflict"> {
+  try {
+    return await recordReopenLogged(store, parsed, actor, commit, result);
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`reopen kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return "ok";
+    }
+    throw err;
+  }
 }
 
 /** Owner/repo/number-only payloads are sit clears; commit/kick payloads requeue. */
