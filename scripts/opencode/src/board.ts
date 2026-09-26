@@ -235,7 +235,8 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
   const repo = typeof rec.repo === "string" ? rec.repo : undefined;
   const reason = typeof rec.reason === "string" ? rec.reason : undefined;
   const kind = typeof rec.kind === "string" ? rec.kind : undefined;
-  const number = typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
+  const number =
+    typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
   if (!owner || !repo || !reason || !kind || number === undefined) return undefined;
   const item: BoardItem = { reason, owner, repo, number, kind };
   const forge = typeof rec.forge === "string" && rec.forge.trim() !== "" ? rec.forge.trim() : fallbackForge;
