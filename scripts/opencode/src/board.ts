@@ -309,7 +309,8 @@ export async function fetchPeerBoard(
     const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
     const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
     const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
-    const peerForgeUrl = typeof body.forgeUrl === "string" && body.forgeUrl.trim() !== "" ? body.forgeUrl.trim() : undefined;
+    const peerForgeUrl =
+      typeof body.forgeUrl === "string" && body.forgeUrl.trim() !== "" ? body.forgeUrl.trim() : undefined;
     return {
       available: true,
       forge: PEER_FORGE,
