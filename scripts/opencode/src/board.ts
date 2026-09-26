@@ -269,16 +269,16 @@ export async function fetchPeerBoard(
     });
     if (!response.ok) throw new Error("peer unavailable");
     const body = (await response.json()) as Record<string, unknown>;
-    const forge =
-      typeof body.forge === "string" && (body.forge as string).trim() !== ""
-        ? (body.forge as string).trim()
-        : PEER_FORGE;
-    const in_progress = sanitizeBoardList(body.in_progress ?? body.inProgress, forge);
-    const needs_kick = sanitizeBoardList(body.needs_kick ?? body.needsKick, forge);
-    const sitting = sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, forge);
+    // Pin every row to PEER_FORGE. Both the top-level body.forge and each
+    // row's own rec.forge are peer-supplied and untrusted for filtering, so
+    // a compromised peer cannot tag rows with the local forge name.
+    const pinForge = (items: BoardItem[]): BoardItem[] => items.map((item) => ({ ...item, forge: PEER_FORGE }));
+    const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
+    const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
+    const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
     return {
       available: true,
-      forge,
+      forge: PEER_FORGE,
       in_progress,
       inProgress: [...in_progress],
       needs_kick,

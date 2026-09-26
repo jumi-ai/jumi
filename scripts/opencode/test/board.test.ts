@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildBoardGroups, createBoardFetchHandler } from "../src/board.ts";
+import { BOARD_PEER_TOKEN_ENV, BOARD_PEER_URL_ENV, buildBoardGroups, createBoardFetchHandler, PEER_FORGE } from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { createFetchHandler } from "../src/server.ts";
 import { makeConfig, makeIssueJob, makeJob } from "./fixtures.ts";
@@ -153,5 +153,123 @@ describe("operator board read API", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = (await response.json()) as Record<string, unknown>;
     expect(body).toEqual({ error: "queue unavailable" });
+  });
+
+  test("peer env constants stay in sync with loadConfig literals", async () => {
+    // loadConfig must keep string literals so the deploy-contract gate can
+    // statically resolve them; this pins the two sides together instead.
+    expect(BOARD_PEER_URL_ENV).toBe("BOARD_PEER_URL");
+    expect(BOARD_PEER_TOKEN_ENV).toBe("BOARD_PEER_TOKEN");
+  });
+
+  test("peer listener is bearer-only and ignores forwarded edge headers", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({
+      store,
+      forge: "github",
+      peerToken: "s3cret",
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const forged = await handler(boardRequest("/board", EDGE_HEADERS));
+    expect(forged.status).toBe(401);
+
+    const bearer = await handler(boardRequest("/board", { Authorization: "Bearer s3cret" }));
+    expect(bearer.status).toBe(200);
+    const body = (await bearer.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ forge: "github", peers: {} });
+  });
+
+  test("homelab never accepts the bearer without edge identity", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({
+      store,
+      peerToken: "s3cret",
+      peerUrl: "https://peer.internal/board",
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const bearerOnly = await handler(boardRequest("/board", { Authorization: "Bearer s3cret" }));
+    expect(bearerOnly.status).toBe(401);
+  });
+
+  test("unset peer hop is unavailable without a fetch", async () => {
+    const store = await seedStore();
+    let called = false;
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      fetchFn: (async () => {
+        called = true;
+        throw new Error("must not fetch");
+      }) as unknown as typeof fetch,
+    });
+
+    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(called).toBe(false);
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+  });
+
+  test("spoofed peer forge stays under peers.github with pinned row forges", async () => {
+    const store = await seedStore();
+    const fetchFn = (async () =>
+      new Response(
+        JSON.stringify({
+          forge: "gitea",
+          in_progress: [{ reason: "review leased", owner: "o", repo: "r", number: 1, kind: "review", forge: "gitea" }],
+          needs_kick: [],
+          sitting: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.forge).toBe("gitea");
+    expect(Object.keys(body.peers as object)).toEqual([PEER_FORGE]);
+    const peer = (body.peers as Record<string, Record<string, unknown>>)[PEER_FORGE];
+    expect(peer).toMatchObject({ available: true, forge: PEER_FORGE });
+    const rows = peer.in_progress as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].forge).toBe(PEER_FORGE);
+    // Top-level lists stay local-only: the peer row is not merged there.
+    const local = body.in_progress as unknown[];
+    expect(local).toHaveLength(2);
+  });
+
+  test("unreachable peer falls back to unavailable without failing the board", async () => {
+    const store = await seedStore();
+    const fetchFn = (async () => {
+      throw new Error("peer down");
+    }) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
   });
 });
