@@ -1122,9 +1122,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       if (input.idempotencyKey) {
         const prior = this.kickLog.find((entry) => entry.idempotencyKey === input.idempotencyKey);
         if (prior) {
-          throw Object.assign(new Error(`duplicate key value violates unique constraint "review_kicks_idempotency_key"`), {
-            code: "23505",
-          });
+          throw Object.assign(
+            new Error(`duplicate key value violates unique constraint "review_kicks_idempotency_key"`),
+            {
+              code: "23505",
+            }
+          );
         }
       }
       const entry: KickLogRecord = {

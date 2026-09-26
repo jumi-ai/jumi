@@ -822,7 +822,9 @@ async function handleReopenKick(
         if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
       }
     } catch (err) {
-      logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(
+        `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
       return json(503, { error: "queue unavailable" });
     }
     logger(`reopen kick noop-open actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
@@ -863,7 +865,9 @@ async function handleReopenKick(
       if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
     }
   } catch (err) {
-    logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`);
+    logger(
+      `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return json(503, { error: "queue unavailable" });
   }
   logger(`reopen kick ok actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
