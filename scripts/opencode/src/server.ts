@@ -894,7 +894,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         boardServer = Bun.serve({
           hostname: config.host,
           port: BOARD_PORT,
-          fetch: createBoardFetchHandler({ store, logger }),
+          fetch: createBoardFetchHandler({ store, logger, forge: config.forge, forgeUrl: config.giteaUrl }),
         });
       } catch (err) {
         try {
