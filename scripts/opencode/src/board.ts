@@ -1,13 +1,16 @@
+import { isKickPath, parseKickBody } from "./kick.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import { isQueueUnavailable } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
 /**
- * Operator board read API.
+ * Operator board read API + same-commit requeue kick.
  *
  * Served by the router on a second port (3001), never on the webhook host.
- * Polling GET only; no forge webhooks are pushed to the browser and no
- * per-row forge calls are made. In-progress comes from the job ledger
+ * Polling GET only for the page; POST /api/board/kick requeues a failed or
+ * skipped review of the same commit without a push, without rerunning CI,
+ * and without an empty commit. In-progress comes from the job ledger
  * (queued or leased); sitting rows come from persisted refusals
  * (`router_sits`). The router stays a single replica; no leader election.
  */
@@ -29,11 +32,20 @@ const EDGE_IDENTITY_HEADERS = [
 ] as const;
 
 export function hasEdgeIdentity(request: Request): boolean {
+  return edgeActor(request) !== "";
+}
+
+export function edgeActor(request: Request): string {
   for (const header of EDGE_IDENTITY_HEADERS) {
     const value = request.headers.get(header);
-    if (value != null && value.trim() !== "") return true;
+    if (value != null && value.trim() !== "") return value.trim();
   }
-  return false;
+  return "";
+}
+
+function idempotencyKeyOf(request: Request): string {
+  const value = request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
+  return value.trim();
 }
 
 export interface BoardKick {
@@ -566,48 +578,13 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = normalizePathname(url.pathname);
-    // Kick commit: same origin POST. Only a sit the server marked kickable
-    // can be cleared. The client never invents kick ids; identity is
-    // owner/repo/number and the server re-checks kickability.
-    if (pathname === BOARD_KICK_PATH) {
-      if (request.method !== "POST") return json(405, { error: "method not allowed" });
-      if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
-      const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
-      if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-      const origin = request.headers.get("origin");
-      if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
-      let payload: unknown;
-      try {
-        payload = await request.json();
-      } catch {
-        return json(400, { error: "invalid kick payload" });
-      }
-      const record = payload as { owner?: unknown; repo?: unknown; number?: unknown };
-      const owner = typeof record.owner === "string" ? record.owner.trim() : "";
-      const repo = typeof record.repo === "string" ? record.repo.trim() : "";
-      const number = typeof record.number === "number" ? record.number : Number.NaN;
-      if (!owner || !repo || !Number.isInteger(number) || number <= 0) {
-        return json(400, { error: "invalid kick payload" });
-      }
-      let sit: RouterSitRecord | undefined;
-      try {
-        sit = await deps.store.sits.get(owner, repo, number);
-      } catch (err) {
-        logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
-        return json(503, { error: "queue unavailable" });
-      }
-      if (!sit) return json(404, { error: "sit not found" });
-      const kick = kickForSit(sit.reason);
-      if (!kick) return json(409, { error: "no kick for this row" });
-      try {
-        await deps.store.sits.clear(owner, repo, number);
-      } catch (err) {
-        logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
-        return json(503, { error: "queue unavailable" });
-      }
-      logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
-      return json(200, { ok: true, owner, repo, number, effect: kick.effect });
-    }
+    // Same-commit requeue kick (HEAD) plus sit-clear kick (main). Both share
+    // /api/board/kick: payloads carrying a commit and kick id requeue a
+    // terminal review; owner/repo/number-only payloads clear a kickable sit.
+    // /board/kick is an alias for the requeue path. The client never invents
+    // kick ids for sits; identity is owner/repo/number and the server
+    // re-checks kickability.
+    if (pathname === BOARD_KICK_PATH || isKickPath(pathname)) return handleKick(request, deps.store, logger);
     if (pathname === BOARD_API_PATH) {
       if (request.method !== "GET") return json(405, { error: "method not allowed" });
       // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
@@ -642,4 +619,155 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     }
     return json(404, { error: "not found" });
   };
+}
+
+async function handleKick(
+  request: Request,
+  store: ReviewJobStore,
+  logger: (message: string) => void
+): Promise<Response> {
+  if (request.method !== "POST") return json(405, { error: "method not allowed" });
+  // Edge identity only. The actor never comes from a body field.
+  const actor = edgeActor(request);
+  if (!actor) return json(401, { error: "missing edge identity" });
+  // Same-origin JSON only: the kick is state-changing behind edge-proxy
+  // cookie auth, so a simple-request CSRF (e.g. cross-origin text/plain
+  // form) must not fire it. Matches the sit-clear guards below.
+  const url = new URL(request.url);
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
+  const origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  let body: unknown;
+  try {
+    const text = await request.text();
+    body = text.trim() === "" ? {} : (JSON.parse(text) as unknown);
+  } catch {
+    return json(400, { error: "invalid JSON" });
+  }
+  // Sit-clear kick (default branch): an owner/repo/number-only payload clears
+  // a kickable sit. Requeue payloads carry a commit and kick id and fall
+  // through to requeueKick below.
+  if (isSitClearPayload(body)) {
+    return handleSitClear(request, body, store, logger);
+  }
+  const parsed = parseKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  try {
+    const outcome = await store.requeueKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      prNumber: parsed.number,
+      headSha: parsed.commit,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      delivery,
+    });
+    if (outcome.status === "ok") {
+      logger(
+        `kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+      );
+      return json(200, {
+        ok: true,
+        jobId: outcome.job.id,
+        newJobId: outcome.job.id,
+        key: outcome.job.jobKey,
+        terminalJobId: outcome.terminalId,
+        deduped: outcome.deduped,
+      });
+    }
+    logger(
+      `kick ${outcome.code} actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)}: ${outcome.why}`
+    );
+    const status =
+      outcome.code === "not-found"
+        ? 404
+        : outcome.code === "stale-kick" || outcome.code === "conflict"
+          ? 409
+          : outcome.code === "not-kickable"
+            ? 422
+            : 400;
+    return json(status, {
+      error: outcome.why,
+      code: outcome.code,
+      terminalJobId: outcome.terminalId,
+      newJobId: outcome.newJobId,
+      ...(outcome.deduped ? { deduped: true } : {}),
+    });
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    logger(`kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+}
+
+function nonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+/** Owner/repo/number-only payloads are sit clears; commit/kick payloads requeue. */
+function isSitClearPayload(body: unknown): boolean {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const rec = body as Record<string, unknown>;
+  if (
+    nonEmptyString(rec.commit) ||
+    nonEmptyString(rec.headSha) ||
+    nonEmptyString(rec.head_sha) ||
+    nonEmptyString(rec.sha)
+  ) {
+    return false;
+  }
+  if (
+    nonEmptyString(rec.kick) ||
+    nonEmptyString(rec.kickId) ||
+    nonEmptyString(rec.kick_id) ||
+    nonEmptyString(rec.id) ||
+    nonEmptyString(rec.reason)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+async function handleSitClear(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void
+): Promise<Response> {
+  const url = new URL(request.url);
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
+  const origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  const record = body as { owner?: unknown; repo?: unknown; number?: unknown };
+  const owner = typeof record.owner === "string" ? record.owner.trim() : "";
+  const repo = typeof record.repo === "string" ? record.repo.trim() : "";
+  const number = typeof record.number === "number" ? record.number : Number.NaN;
+  if (!owner || !repo || !Number.isInteger(number) || number <= 0) {
+    return json(400, { error: "invalid kick payload" });
+  }
+  let sit: RouterSitRecord | undefined;
+  try {
+    sit = await store.sits.get(owner, repo, number);
+  } catch (err) {
+    logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  if (!sit) return json(404, { error: "sit not found" });
+  const kick = kickForSit(sit.reason);
+  if (!kick) return json(409, { error: "no kick for this row" });
+  try {
+    await store.sits.clear(owner, repo, number);
+  } catch (err) {
+    logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+  logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
+  return json(200, { ok: true, owner, repo, number, effect: kick.effect });
 }
