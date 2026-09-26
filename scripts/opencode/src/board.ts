@@ -815,10 +815,15 @@ async function handleReopenKick(
   }
 
   if (pr.state === "open") {
-    const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "noop-open");
-    if (logged === "conflict") {
-      const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
-      if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+    try {
+      const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "noop-open");
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+      }
+    } catch (err) {
+      logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
     }
     logger(`reopen kick noop-open actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
     return json(200, {
@@ -851,10 +856,15 @@ async function handleReopenKick(
     return json(503, { error: "forge unavailable" });
   }
 
-  const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "ok");
-  if (logged === "conflict") {
-    const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
-    if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+  try {
+    const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "ok");
+    if (logged === "conflict") {
+      const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+      if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+    }
+  } catch (err) {
+    logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
   }
   logger(`reopen kick ok actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
   return json(200, {
@@ -901,8 +911,35 @@ function replayReopenPrior(
       deduped: true,
     });
   }
+  if (prior.result === "not-kickable") {
+    return json(422, {
+      error: "already decided: not-kickable",
+      code: "not-kickable",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "stale-kick") {
+    return json(409, {
+      error: "already decided: stale-kick",
+      code: "stale-kick",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "conflict") {
+    return json(409, {
+      error: "already decided: conflict",
+      code: "conflict",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
   return json(422, {
-    error: "already decided: not-kickable",
+    error: `already decided: ${prior.result}`,
     code: "not-kickable",
     terminalJobId: null,
     newJobId: null,
