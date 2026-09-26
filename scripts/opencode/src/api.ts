@@ -368,6 +368,10 @@ export class GiteaAPI {
     return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }
 
+  async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
+    return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
+  }
+
   private async getAllOrEmptyOn404<T>(path: string): Promise<T[]> {
     try {
       return await this.getAll<T>(path);

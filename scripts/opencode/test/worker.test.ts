@@ -776,7 +776,16 @@ describe("processWorkerTick", () => {
     expect(store.rows[0]?.state).toBe("skipped");
     expect(store.rows[0]?.resultReason).toBe("no-changes");
     expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: false });
-    expect(await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z" }))).toEqual({
+    // A label-only bump (new updated_at, same body) stays terminal.
+    expect(
+      await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z" }))
+    ).toEqual({ key: "implement:kirmanak/demo#12", queued: false });
+    // A body edit wakes again.
+    expect(
+      await store.enqueueIssue(
+        makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z", body: "Please implement this now." })
+      )
+    ).toEqual({
       key: "implement:kirmanak/demo#12",
       queued: true,
     });
