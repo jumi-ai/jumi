@@ -235,7 +235,7 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
   const repo = typeof rec.repo === "string" ? rec.repo : undefined;
   const reason = typeof rec.reason === "string" ? rec.reason : undefined;
   const kind = typeof rec.kind === "string" ? rec.kind : undefined;
-  const number = typeof rec.number === "number" && Number.isFinite(rec.number) ? rec.number : undefined;
+  const number = typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
   if (!owner || !repo || !reason || !kind || number === undefined) return undefined;
   const item: BoardItem = { reason, owner, repo, number, kind };
   const forge = typeof rec.forge === "string" && rec.forge.trim() !== "" ? rec.forge.trim() : fallbackForge;
@@ -310,7 +310,9 @@ export async function fetchPeerBoard(
     const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
     const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
     const peerForgeUrl =
-      typeof body.forgeUrl === "string" && body.forgeUrl.trim() !== "" ? body.forgeUrl.trim() : undefined;
+      typeof body.forgeUrl === "string" && /^https?:\/\/[^/\s]/i.test(body.forgeUrl.trim())
+        ? body.forgeUrl.trim()
+        : undefined;
     return {
       available: true,
       forge: PEER_FORGE,
@@ -504,7 +506,7 @@ function forgeHref(item, data) {
   if (item.kind === "sit") return null;
   const forge = forgeOf(item, data);
   const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
-  return base + "/" + item.owner + "/" + item.repo + "/" + path + "/" + item.number;
+  return base + "/" + encodeURIComponent(item.owner) + "/" + encodeURIComponent(item.repo) + "/" + path + "/" + item.number;
 }
 async function load() {
   const errBox = $("load-error");
