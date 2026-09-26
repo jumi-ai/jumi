@@ -799,8 +799,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           return json(503, { error: "queue unavailable" });
         }
         const grant = getGrant();
-        const grantLine =
-          typeof grant === "string" && grant.trim() !== "" ? grant.split("\n")[0]?.trim() : undefined;
+        const grantLine = typeof grant === "string" && grant.trim() !== "" ? grant.split("\n")[0]?.trim() : undefined;
         const body: Record<string, unknown> = {
           in_progress: groups.in_progress,
           inProgress: [...groups.in_progress],
