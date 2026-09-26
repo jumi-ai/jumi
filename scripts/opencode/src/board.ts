@@ -630,6 +630,14 @@ async function handleKick(
   // Edge identity only. The actor never comes from a body field.
   const actor = edgeActor(request);
   if (!actor) return json(401, { error: "missing edge identity" });
+  // Same-origin JSON only: the kick is state-changing behind edge-proxy
+  // cookie auth, so a simple-request CSRF (e.g. cross-origin text/plain
+  // form) must not fire it. Matches the sit-clear guards below.
+  const url = new URL(request.url);
+  const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
+  if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
+  const origin = request.headers.get("origin");
+  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
   let body: unknown;
   try {
     const text = await request.text();

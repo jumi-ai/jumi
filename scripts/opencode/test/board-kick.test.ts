@@ -134,6 +134,25 @@ describe("board kick contract (#162)", () => {
     expect(raw).not.toContain("deduped");
   });
 
+  test("kick requires JSON content type and same origin", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedFailed(store);
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const item = { owner: "kirmanak", repo: "demo", number: 7, commit: "abc123", kick: "boom" };
+
+    const plain = await handler(
+      new Request("https://board.test/api/board/kick", {
+        method: "POST",
+        headers: new Headers({ "Content-Type": "text/plain", "X-Forwarded-User": "operator" }),
+        body: JSON.stringify(item),
+      })
+    );
+    expect(plain.status).toBe(400);
+
+    const crossOrigin = await handler(kickRequest(item, { Origin: "https://evil.test" }));
+    expect(crossOrigin.status).toBe(403);
+  });
+
   test("non-kickable reasons stay status lines with a 422", async () => {
     for (const reason of ["provider auth death", "draft or WIP pull request"]) {
       const store = new MemoryReviewJobStore();
