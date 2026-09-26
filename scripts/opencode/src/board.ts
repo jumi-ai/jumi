@@ -307,6 +307,7 @@ export async function fetchPeerBoard(
       method: "GET",
       headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       signal: controller.signal,
+      redirect: "error",
     });
     if (!response.ok) return peerUnavailable();
     const declaredLength = response.headers?.get("content-length");
