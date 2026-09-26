@@ -900,6 +900,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             store,
             logger,
             forge: config.forge,
+            forgeUrl: config.giteaUrl,
             peerUrl: config.boardPeerUrl,
             peerToken: config.boardPeerToken,
           }),

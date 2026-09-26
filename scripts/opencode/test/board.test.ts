@@ -1,17 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BOARD_KICK_CATALOG_VERSION,
   BOARD_PEER_TOKEN_ENV,
   BOARD_PEER_URL_ENV,
   buildBoardGroups,
   createBoardFetchHandler,
   PEER_FORGE,
+  renderBoardPage,
 } from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { createFetchHandler } from "../src/server.ts";
 import { makeConfig, makeIssueJob, makeJob } from "./fixtures.ts";
 
-function boardRequest(path = "/board", headers: Record<string, string> = {}): Request {
+function boardRequest(path = "/api/board", headers: Record<string, string> = {}): Request {
   return new Request(`https://board.test${path}`, { method: "GET", headers: new Headers(headers) });
+}
+
+function kickRequest(body: unknown, headers: Record<string, string> = {}): Request {
+  return new Request("https://board.test/api/board/kick", {
+    method: "POST",
+    headers: new Headers({ "Content-Type": "application/json", ...headers }),
+    body: JSON.stringify(body),
+  });
 }
 
 const EDGE_HEADERS = { "X-Forwarded-User": "operator" };
@@ -37,7 +47,7 @@ describe("operator board read API", () => {
     expect(missing.headers.get("Cache-Control")).toBe("no-store");
 
     const signatureOnly = await handler(
-      boardRequest("/board", {
+      boardRequest("/api/board", {
         "X-Gitea-Signature": "deadbeef",
         Authorization: "Bearer webhook-secret",
       })
@@ -47,9 +57,15 @@ describe("operator board read API", () => {
 
   test("200 group split with kick present/omitted and commit omitted when unknown", async () => {
     const store = await seedStore();
-    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forge: "gitea",
+      forgeUrl: "https://gitea.example",
+    });
 
-    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = (await response.json()) as Record<string, unknown>;
@@ -96,8 +112,16 @@ describe("operator board read API", () => {
     expect(body.needsKick).not.toBe(needsKick);
     expect(body.sitting_on_purpose).not.toBe(sitting);
 
+    // Same-origin page metadata: forge, forge origin, and kick catalog.
+    expect(body.forge).toBe("gitea");
+    expect(body.forgeUrl).toBe("https://gitea.example");
+    expect(body.catalog).toBe(BOARD_KICK_CATALOG_VERSION);
+    for (const item of [...inProgress, ...needsKick, ...sitting]) {
+      expect(item.forge).toBe("gitea");
+    }
+
     // Single trailing slash serves instead of 404.
-    const slashed = await handler(boardRequest("/board/", EDGE_HEADERS));
+    const slashed = await handler(boardRequest("/api/board/", EDGE_HEADERS));
     expect(slashed.status).toBe(200);
   });
 
@@ -136,7 +160,7 @@ describe("operator board read API", () => {
       logger: () => {},
     });
     const response = await handler(
-      new Request("https://board.test/board", { method: "HEAD", headers: new Headers(EDGE_HEADERS) })
+      new Request("https://board.test/api/board", { method: "HEAD", headers: new Headers(EDGE_HEADERS) })
     );
     expect(response.status).toBe(405);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
@@ -154,7 +178,7 @@ describe("operator board read API", () => {
       getGrantNotice: () => undefined,
       logger: () => {},
     });
-    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(response.status).toBe(503);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = (await response.json()) as Record<string, unknown>;
@@ -178,10 +202,10 @@ describe("operator board read API", () => {
       logger: () => {},
     });
 
-    const forged = await handler(boardRequest("/board", EDGE_HEADERS));
+    const forged = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(forged.status).toBe(401);
 
-    const bearer = await handler(boardRequest("/board", { Authorization: "Bearer s3cret" }));
+    const bearer = await handler(boardRequest("/api/board", { Authorization: "Bearer s3cret" }));
     expect(bearer.status).toBe(200);
     const body = (await bearer.json()) as Record<string, unknown>;
     expect(body).toMatchObject({ forge: "github", peers: {} });
@@ -197,7 +221,7 @@ describe("operator board read API", () => {
       logger: () => {},
     });
 
-    const bearerOnly = await handler(boardRequest("/board", { Authorization: "Bearer s3cret" }));
+    const bearerOnly = await handler(boardRequest("/api/board", { Authorization: "Bearer s3cret" }));
     expect(bearerOnly.status).toBe(401);
   });
 
@@ -214,7 +238,7 @@ describe("operator board read API", () => {
       }) as unknown as typeof fetch,
     });
 
-    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     const peers = body.peers as Record<string, Record<string, unknown>>;
@@ -243,7 +267,7 @@ describe("operator board read API", () => {
       logger: () => {},
     });
 
-    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     expect(body.forge).toBe("gitea");
@@ -272,10 +296,88 @@ describe("operator board read API", () => {
       logger: () => {},
     });
 
-    const response = await handler(boardRequest("/board", EDGE_HEADERS));
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
     expect(response.status).toBe(200);
     const body = (await response.json()) as Record<string, unknown>;
     const peers = body.peers as Record<string, Record<string, unknown>>;
     expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+  });
+
+  test("page is served with the board on the same origin", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+
+    for (const path of ["/", "/board", "/board/"]) {
+      const response = await handler(boardRequest(path, EDGE_HEADERS));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      const html = await response.text();
+      // Two lists on the phone; reason is the headline elsewhere via payload.
+      expect(html).toContain("<h2>In progress</h2>");
+      expect(html).toContain("<h2>Sitting</h2>");
+      // Forge switch, inspector, and phone sheet.
+      expect(html).toContain('id="forge-switch"');
+      expect(html).toContain('id="inspector"');
+      expect(html).toContain('id="sheet"');
+      // Confirm names the side effect; consequence is a note; one primary control per confirm.
+      expect(html).toContain("This will:");
+      expect(html).toContain("consequence");
+      // Same origin: the browser talks to /api/board, never to the forge.
+      expect(html).toContain('fetch("/api/board"');
+      expect(html).toContain('fetch("/api/board/kick"');
+      expect(html).not.toContain('fetch("http');
+      expect(html).not.toContain("fetch('http");
+      // No generic action label.
+      expect(html.toLowerCase()).not.toContain("retry");
+      // Tablet is list plus detail, not a centered phone column.
+      expect(html).toContain("@media (min-width: 700px)");
+      expect(html).toContain("@media (min-width: 1100px)");
+      // Cache-busted with the image catalog.
+      expect(html).toContain(BOARD_KICK_CATALOG_VERSION);
+      expect(renderBoardPage(BOARD_KICK_CATALOG_VERSION)).toContain(BOARD_KICK_CATALOG_VERSION);
+    }
+
+    const anon = await handler(boardRequest("/board", {}));
+    expect(anon.status).toBe(401);
+  });
+
+  test("kick the server did not send cannot be clicked", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+
+    // Sitting on purpose has no kick.
+    const sittingGone = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 22 }, EDGE_HEADERS));
+    expect(sittingGone.status).toBe(409);
+
+    // Unknown row has no kick.
+    const missing = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 99 }, EDGE_HEADERS));
+    expect(missing.status).toBe(404);
+
+    // In-progress rows carry no kick button, so kicking them 404s.
+    const inflight = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 7 }, EDGE_HEADERS));
+    expect(inflight.status).toBe(404);
+
+    // Bad payload and missing identity fail closed.
+    expect((await handler(kickRequest({ owner: "", repo: "demo", number: 21 }, EDGE_HEADERS))).status).toBe(400);
+    expect((await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 21 }, {}))).status).toBe(401);
+    expect((await handler(new Request("https://board.test/api/board/kick", { method: "GET" }))).status).toBe(405);
+  });
+
+  test("kickable sit clears only after an explicit confirm POST", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+
+    const ok = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 21 }, EDGE_HEADERS));
+    expect(ok.status).toBe(200);
+    const okBody = (await ok.json()) as Record<string, unknown>;
+    expect(okBody).toMatchObject({ ok: true, owner: "kirmanak", repo: "demo", number: 21 });
+
+    // Second confirm finds nothing: nothing auto-lands twice.
+    const again = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 21 }, EDGE_HEADERS));
+    expect(again.status).toBe(404);
+
+    const board = (await (await handler(boardRequest("/api/board", EDGE_HEADERS))).json()) as { needs_kick: unknown[] };
+    expect(board.needs_kick).toHaveLength(0);
   });
 });
