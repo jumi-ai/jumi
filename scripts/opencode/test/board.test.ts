@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { BOARD_PEER_TOKEN_ENV, BOARD_PEER_URL_ENV, buildBoardGroups, createBoardFetchHandler, PEER_FORGE } from "../src/board.ts";
+import {
+  BOARD_PEER_TOKEN_ENV,
+  BOARD_PEER_URL_ENV,
+  buildBoardGroups,
+  createBoardFetchHandler,
+  PEER_FORGE,
+} from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { createFetchHandler } from "../src/server.ts";
 import { makeConfig, makeIssueJob, makeJob } from "./fixtures.ts";
