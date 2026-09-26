@@ -1686,6 +1686,20 @@ export class PgReviewJobStore implements ReviewJobStore {
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
     return this.sql.begin(async (tx) => {
+      const inflight = asRows<{ job_key: unknown }>(
+        await tx.unsafe(
+          `SELECT job_key FROM review_jobs
+           WHERE job_key = $1 AND state IN ('queued', 'leased')
+           ORDER BY id
+           FOR UPDATE`,
+          [key]
+        )
+      );
+      if (inflight.length > 0) {
+        await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+        return { key, queued: false };
+      }
+
       if (kind === "implement") {
         const done = asRows<{ state: unknown; result_reason: unknown; payload: unknown }>(
           await tx.unsafe(
@@ -1712,20 +1726,6 @@ export class PgReviewJobStore implements ReviewJobStore {
           }
           return { key, queued: false };
         }
-      }
-
-      const inflight = asRows<{ job_key: unknown }>(
-        await tx.unsafe(
-          `SELECT job_key FROM review_jobs
-           WHERE job_key = $1 AND state IN ('queued', 'leased')
-           ORDER BY id
-           FOR UPDATE`,
-          [key]
-        )
-      );
-      if (inflight.length > 0) {
-        await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
-        return { key, queued: false };
       }
 
       const latchRows = asRows<{ generation: unknown }>(

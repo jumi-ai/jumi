@@ -1094,7 +1094,7 @@ async function handleImplementKick(
           newJobId: null,
         });
       }
-      return replayImplementPrior(prior, item);
+      return await replayImplementPrior(store, prior, item);
     }
   }
 
@@ -1136,7 +1136,7 @@ async function handleImplementKick(
           newJobId: null,
         });
       }
-      return replayImplementPrior(prior, item);
+      return await replayImplementPrior(store, prior, item);
     }
     logger(`implement kick failed: ${err instanceof Error ? err.message : String(err)}`);
     return json(503, { error: "queue unavailable" });
@@ -1187,12 +1187,31 @@ async function handleImplementKick(
   });
 }
 
-function replayImplementPrior(
+async function replayImplementPrior(
+  store: ReviewJobStore,
   prior: KickLogRecord,
   item: { owner: string; repo: string; issueNumber: number }
-): Response {
+): Promise<Response> {
   void item;
   if (prior.result === "ok") {
+    if (prior.newJobId != null) {
+      try {
+        const job = await store.get(prior.newJobId);
+        if (job) {
+          return json(200, {
+            ok: true,
+            jobId: prior.newJobId,
+            newJobId: prior.newJobId,
+            key: job.jobKey,
+            terminalJobId: prior.terminalJobId,
+            deduped: true,
+          });
+        }
+      } catch {
+        // Fall through to the key-less shape rather than failing a replay
+        // for a ledger row that already committed.
+      }
+    }
     return json(200, {
       ok: true,
       jobId: prior.newJobId,
