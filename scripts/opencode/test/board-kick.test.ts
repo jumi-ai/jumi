@@ -77,6 +77,12 @@ describe("board kick contract (#162)", () => {
     expect(mismatch.status).toBe(400);
     const mismatchBody = (await mismatch.json()) as Record<string, unknown>;
     expect(mismatchBody.code).toBe("bad-request");
+    // Mismatch is not a replay: no prior job ids leak, no deduped flag.
+    expect(mismatchBody.jobId).toBeUndefined();
+    expect(mismatchBody.newJobId).toBeNull();
+    expect(mismatchBody.terminalJobId).toBeNull();
+    expect(mismatchBody.deduped).toBeUndefined();
+    expect(String(mismatchBody.error)).toContain("kirmanak/demo#7 @ abc123");
 
     // In-flight job for that key is a conflict, not a second queued row.
     const conflict = await handler(kickRequest({ ...item, idempotencyKey: "key-2" }));

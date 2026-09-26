@@ -213,14 +213,15 @@ function kickIdempotencyMismatchOutcome(
   prior: KickLogRecord
 ): Extract<RequeueKickOutcome, { status: "rejected" }> {
   void input;
+  // 400 carries only the rejected item and the prior binding — never the
+  // first item's job ids, and never deduped (this is not a replay).
   return {
     status: "rejected",
     code: "bad-request",
     why: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
-    terminalId: prior.terminalJobId,
-    newJobId: prior.newJobId,
-    kickLogId: prior.id,
-    deduped: true,
+    terminalId: null,
+    newJobId: null,
+    kickLogId: null,
   };
 }
 
