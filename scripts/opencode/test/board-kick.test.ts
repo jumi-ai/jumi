@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createBoardFetchHandler } from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { QueueUnavailableError } from "../src/sql_client.ts";
 import { makeJob } from "./fixtures.ts";
 
 const EDGE_HEADERS = { "X-Forwarded-User": "operator" };
@@ -165,5 +166,283 @@ describe("board kick contract (#162)", () => {
       const body = (await response.json()) as Record<string, unknown>;
       expect(body.code).toBe("not-kickable");
     }
+  });
+});
+
+describe("board reopen kick contract (#163)", () => {
+  function reopenForge(pr: { state: string; merged: boolean; sha?: string }, calls: string[]) {
+    return {
+      getPR: async () => ({ state: pr.state, merged: pr.merged, head: { sha: pr.sha ?? "deadbeef" } }),
+      closePullRequest: async () => {
+        calls.push("close");
+        return {};
+      },
+      reopenPullRequest: async () => {
+        calls.push("reopen");
+        return {};
+      },
+    };
+  }
+
+  function reopenRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+    return kickRequest(body, headers);
+  }
+
+  test("closed reopens with close+reopen calls and no job row; replay dedupes", async () => {
+    const store = new MemoryReviewJobStore();
+    const calls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+    });
+    const item = { owner: "kirmanak", repo: "demo", number: 9, kick: "reopen", idempotencyKey: "reopen-1" };
+
+    const ok = await handler(reopenRequest(item));
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toMatchObject({ ok: true, reopened: true, deduped: false });
+    expect(calls).toEqual(["close", "reopen"]);
+    // No job is inserted: the reopen webhook wake is the enqueue.
+    expect(await store.listInflight()).toHaveLength(0);
+    const logged = await store.getKickByIdempotencyKey("reopen-1");
+    expect(logged?.result).toBe("ok");
+
+    const replay = await handler(reopenRequest(item));
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ ok: true, reopened: true, deduped: true });
+    // Replay never touches the forge again.
+    expect(calls).toEqual(["close", "reopen"]);
+  });
+
+  test("open is a noop with no forge writes; merged is 422", async () => {
+    const openCalls: string[] = [];
+    const openStore = new MemoryReviewJobStore();
+    const openHandler = createBoardFetchHandler({
+      store: openStore,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: reopenForge({ state: "open", merged: false }, openCalls),
+    });
+    const noop = await openHandler(reopenRequest({ owner: "o", repo: "r", number: 1, kick: "reopen" }));
+    expect(noop.status).toBe(200);
+    expect(await noop.json()).toMatchObject({ ok: true, reopened: false, noop: true });
+    expect(openCalls).toHaveLength(0);
+
+    const mergedCalls: string[] = [];
+    const mergedStore = new MemoryReviewJobStore();
+    const mergedHandler = createBoardFetchHandler({
+      store: mergedStore,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: reopenForge({ state: "closed", merged: true }, mergedCalls),
+    });
+    const merged = await mergedHandler(reopenRequest({ owner: "o", repo: "r", number: 2, kick: "reopen" }));
+    expect(merged.status).toBe(422);
+    expect(((await merged.json()) as Record<string, unknown>).code).toBe("not-kickable");
+    expect(mergedCalls).toHaveLength(0);
+  });
+
+  test("mismatch is 400, missing edge identity is 401, body actor ignored", async () => {
+    const store = new MemoryReviewJobStore();
+    const calls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+    });
+    const first = await handler(
+      reopenRequest({ owner: "kirmanak", repo: "demo", number: 9, kick: "reopen", idempotencyKey: "reopen-x" })
+    );
+    expect(first.status).toBe(200);
+
+    const mismatch = await handler(
+      reopenRequest({ owner: "kirmanak", repo: "demo", number: 10, kick: "reopen", idempotencyKey: "reopen-x" })
+    );
+    expect(mismatch.status).toBe(400);
+
+    const noIdentity = await handler(
+      new Request("https://board.test/api/board/kick", {
+        method: "POST",
+        headers: new Headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ owner: "o", repo: "r", number: 1, kick: "reopen" }),
+      })
+    );
+    expect(noIdentity.status).toBe(401);
+
+    const forged = await handler(
+      reopenRequest({ owner: "o", repo: "r", number: 3, kick: "reopen", actor: "mallory", idempotencyKey: "actor-x" })
+    );
+    expect(forged.status).toBe(200);
+    expect((await store.getKickByIdempotencyKey("actor-x"))?.actor).toBe("operator");
+  });
+
+  test("ledger outage on the ok path is 503, not 500", async () => {
+    const store = new MemoryReviewJobStore();
+    const failing = Object.create(store) as MemoryReviewJobStore;
+    failing.recordReopenKick = async () => {
+      throw new QueueUnavailableError(new Error("ledger down"));
+    };
+    const calls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store: failing,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+    });
+    const response = await handler(reopenRequest({ owner: "o", repo: "r", number: 4, kick: "reopen" }));
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as Record<string, unknown>).error).toBe("queue unavailable");
+  });
+
+  test("memory store enforces the shared idempotency key space", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.recordReopenKick({
+      owner: "o",
+      repo: "r",
+      number: 1,
+      commit: "",
+      kick: "reopen",
+      actor: "operator",
+      idempotencyKey: "dup",
+      result: "ok",
+    });
+    await expect(
+      store.recordReopenKick({
+        owner: "o",
+        repo: "r",
+        number: 1,
+        commit: "",
+        kick: "reopen",
+        actor: "operator",
+        idempotencyKey: "dup",
+        result: "ok",
+      })
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+
+  test("lost race on the ok path: same-key different-item is 400, re-read failure is 503", async () => {
+    async function racedStore(key: string, seedNumber: number): Promise<{ store: MemoryReviewJobStore }> {
+      const inner = new MemoryReviewJobStore();
+      await inner.recordReopenKick({
+        owner: "o",
+        repo: "r",
+        number: seedNumber,
+        commit: "sha9",
+        kick: "reopen",
+        actor: "operator",
+        idempotencyKey: key,
+        result: "ok",
+      });
+      // Simulate the pre-check racing: the first read sees nothing even
+      // though the key already won elsewhere.
+      let reads = 0;
+      const store = Object.create(inner) as MemoryReviewJobStore;
+      store.getKickByIdempotencyKey = async (k: string) => {
+        reads++;
+        if (reads === 1) return undefined;
+        return inner.getKickByIdempotencyKey(k);
+      };
+      return { store };
+    }
+
+    // Same-key different-item after a lost race must mirror the pre-check 400,
+    // not claim success for an item with no ledger row.
+    {
+      const { store } = await racedStore("race-400", 9);
+      const calls: string[] = [];
+      const handler = createBoardFetchHandler({
+        store,
+        getGrantNotice: () => undefined,
+        logger: () => {},
+        forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+      });
+      const response = await handler(
+        reopenRequest({ owner: "o", repo: "r", number: 10, kick: "reopen", idempotencyKey: "race-400" })
+      );
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as Record<string, unknown>).code).toBe("bad-request");
+    }
+
+    // A failed re-read after a lost race must be 503, never a success claim.
+    {
+      const inner = new MemoryReviewJobStore();
+      await inner.recordReopenKick({
+        owner: "o",
+        repo: "r",
+        number: 9,
+        commit: "sha9",
+        kick: "reopen",
+        actor: "operator",
+        idempotencyKey: "race-503",
+        result: "ok",
+      });
+      let reads = 0;
+      const store = Object.create(inner) as MemoryReviewJobStore;
+      store.getKickByIdempotencyKey = async (_k: string) => {
+        reads++;
+        if (reads === 1) return undefined;
+        throw new QueueUnavailableError(new Error("ledger down"));
+      };
+      const calls: string[] = [];
+      const handler = createBoardFetchHandler({
+        store,
+        getGrantNotice: () => undefined,
+        logger: () => {},
+        forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+      });
+      const response = await handler(
+        reopenRequest({ owner: "o", repo: "r", number: 10, kick: "reopen", idempotencyKey: "race-503" })
+      );
+      expect(response.status).toBe(503);
+      expect(((await response.json()) as Record<string, unknown>).error).toBe("queue unavailable");
+    }
+  });
+
+  test("lost race on a terminal path replays the recorded prior", async () => {
+    const inner = new MemoryReviewJobStore();
+    await inner.recordReopenKick({
+      owner: "o",
+      repo: "r",
+      number: 5,
+      commit: "sha5",
+      kick: "reopen",
+      actor: "operator",
+      idempotencyKey: "race-terminal",
+      result: "ok",
+    });
+    let reads = 0;
+    const store = Object.create(inner) as MemoryReviewJobStore;
+    store.getKickByIdempotencyKey = async (k: string) => {
+      reads++;
+      if (reads === 1) return undefined;
+      return inner.getKickByIdempotencyKey(k);
+    };
+    const calls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: {
+        getPR: async () => {
+          throw new Error("GET pulls → 404 not found");
+        },
+        closePullRequest: async () => {
+          calls.push("close");
+          return {};
+        },
+        reopenPullRequest: async () => {
+          calls.push("reopen");
+          return {};
+        },
+      },
+    });
+    const response = await handler(
+      reopenRequest({ owner: "o", repo: "r", number: 5, kick: "reopen", idempotencyKey: "race-terminal" })
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, reopened: true, deduped: true });
+    expect(calls).toHaveLength(0);
   });
 });

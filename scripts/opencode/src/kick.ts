@@ -11,6 +11,20 @@ import { isCiWaitSkipReason } from "./ci.ts";
 
 export const KICK_PATHS = new Set(["/api/board/kick", "/board/kick"]);
 
+/**
+ * Reopen-a-pull kick ("wake without a push").
+ *
+ * A foreign branch, or a reuse branch that must not be pushed, is woken by
+ * close-then-reopen. An empty commit on that branch is the bug: this kick
+ * never pushes and never inserts a job. The existing reopen webhook wake is
+ * the enqueue; the board waits for that row.
+ */
+export const REOPEN_KICK_ID = "reopen";
+
+export function isReopenKickId(kick: string | null | undefined): boolean {
+  return typeof kick === "string" && kick.trim() === REOPEN_KICK_ID;
+}
+
 export function isKickPath(pathname: string): boolean {
   const normalized = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   return KICK_PATHS.has(normalized);
@@ -170,4 +184,58 @@ export function parseKickBody(body: unknown, headerIdempotencyKey: string): Kick
 /** Current reason of a terminal row: the publish reason, else the error text. */
 export function terminalReasonOf(row: { resultReason: string | null; error: string | null }): string {
   return (row.resultReason ?? row.error ?? "").trim();
+}
+
+export interface ReopenKickRequest {
+  owner: string;
+  repo: string;
+  number: number;
+  kick: string;
+  /** Idempotency key from header or body. Empty means no dedupe. */
+  idempotencyKey: string;
+}
+
+/** Raw kick id without requiring a commit: used to route to the reopen path. */
+export function rawKickIdOf(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const rec = body as Record<string, unknown>;
+  return (
+    strField(rec.kick) ||
+    strField(rec.kickId) ||
+    strField(rec.kick_id) ||
+    strField(rec.id) ||
+    strField(rec.reason)
+  ).trim();
+}
+
+/**
+ * Parse a reopen kick body. The actor is never read here: it always comes
+ * from the edge identity. Commit is ignored: the reopen wake never inserts
+ * a job, so there is no commit to match.
+ */
+export function parseReopenKickBody(
+  body: unknown,
+  headerIdempotencyKey: string
+): ReopenKickRequest | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "expected a JSON object" };
+  }
+  const rec = body as Record<string, unknown>;
+  const owner = strField(rec.owner).trim();
+  const repo = strField(rec.repo).trim();
+  const number = numField(rec.number) ?? numField(rec.prNumber) ?? numField(rec.pr_number) ?? numField(rec.issueNumber);
+  const kick = rawKickIdOf(rec);
+  const idempotencyKey = (
+    headerIdempotencyKey ||
+    strField(rec.idempotencyKey) ||
+    strField(rec.idempotency_key) ||
+    strField(rec["idempotency-key"])
+  ).trim();
+
+  if (!owner) return { error: "missing owner" };
+  if (!repo) return { error: "missing repo" };
+  if (number == null || !Number.isFinite(number) || number <= 0) return { error: "missing number" };
+  if (!kick) return { error: "missing kick" };
+  if (!isReopenKickId(kick)) return { error: "not a reopen kick" };
+  return { owner, repo, number, kick, idempotencyKey };
 }
