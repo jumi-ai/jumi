@@ -34,6 +34,9 @@ export const BOARD_PEER_TOKEN_ENV = "BOARD_PEER_TOKEN";
 /** Peer board fetch budget: a slow peer must not hang the homelab board. */
 export const PEER_BOARD_TIMEOUT_MS = 5_000;
 
+/** Peer board body cap: a compromised peer must not spike homelab memory per poll. */
+export const PEER_BOARD_MAX_BYTES = 1_048_576;
+
 /** Forge name of the isolated GitHub factory. Homelab is anything else (gitea). */
 export const PEER_FORGE = "github";
 
@@ -292,9 +295,9 @@ export async function fetchPeerBoard(
   try {
     parsed = new URL(url);
   } catch {
-    throw new Error("peer unavailable");
+    return peerUnavailable();
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("peer unavailable");
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return peerUnavailable();
   // Never forward edge identity headers and never send forge credentials:
   // the hop carries only the bearer.
   const controller = new AbortController();
@@ -305,8 +308,20 @@ export async function fetchPeerBoard(
       headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error("peer unavailable");
-    const body = (await response.json()) as Record<string, unknown>;
+    if (!response.ok) return peerUnavailable();
+    const declaredLength = response.headers?.get("content-length");
+    if (declaredLength != null) {
+      const declared = Number.parseInt(declaredLength, 10);
+      if (Number.isFinite(declared) && declared > PEER_BOARD_MAX_BYTES) return peerUnavailable();
+    }
+    let body: Record<string, unknown>;
+    try {
+      const text = await response.text();
+      if (new TextEncoder().encode(text).length > PEER_BOARD_MAX_BYTES) return peerUnavailable();
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return peerUnavailable();
+    }
     // Pin every row to PEER_FORGE. Both the top-level body.forge and each
     // row's own rec.forge are peer-supplied and untrusted for filtering, so
     // a compromised peer cannot tag rows with the local forge name.
@@ -509,7 +524,11 @@ function forgeBaseFor(item, data) {
   const forge = forgeOf(item, data);
   if (forge === (data.forge || "gitea")) return (data.forgeUrl || "").replace(/\\/+$/, "");
   const peer = data.peers && data.peers[forge];
-  if (peer && typeof peer.forgeUrl === "string") return peer.forgeUrl.replace(/\\/+$/, "");
+  if (peer && typeof peer.forgeUrl === "string") {
+    const trimmed = peer.forgeUrl.trim().replace(/\\/+$/, "");
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("http://") || lower.startsWith("https://")) return trimmed;
+  }
   return "";
 }
 function isLocalRow(item, data) { return forgeOf(item, data) === (data.forge || "gitea"); }
