@@ -2529,10 +2529,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       newJobId: null,
       kickLogId: null,
     });
-    const replayPrior = async (
-      tx: SqlClient,
-      prior: KickLogRecord
-    ): Promise<ImplementKickOutcome> => {
+    const replayPrior = async (tx: SqlClient, prior: KickLogRecord): Promise<ImplementKickOutcome> => {
       if (
         implementIdempotencyMismatch(
           { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber, kick: input.kick },
@@ -2674,14 +2671,7 @@ export class PgReviewJobStore implements ReviewJobStore {
              ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
              DO NOTHING
              RETURNING *`,
-            [
-              terminal.jobKey,
-              terminal.owner,
-              terminal.repo,
-              input.issueNumber,
-              JSON.stringify(payload),
-              input.delivery,
-            ]
+            [terminal.jobKey, terminal.owner, terminal.repo, input.issueNumber, JSON.stringify(payload), input.delivery]
           )
         );
         if (inserted.length === 0) {
