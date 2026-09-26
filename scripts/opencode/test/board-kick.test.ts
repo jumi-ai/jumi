@@ -448,10 +448,7 @@ describe("board reopen kick contract (#163)", () => {
 });
 
 describe("board implement kick contract (#164)", () => {
-  async function seedNoChanges(
-    store: MemoryReviewJobStore,
-    overrides: Record<string, unknown> = {}
-  ): Promise<number> {
+  async function seedNoChanges(store: MemoryReviewJobStore, overrides: Record<string, unknown> = {}): Promise<number> {
     await store.enqueueIssue(makeIssueJob({ delivery: "d-seed", ...overrides }));
     const leased = await store.lease("worker", 60_000, new Date(), ["implement"]);
     if (!leased) throw new Error("expected an implement lease");
@@ -545,9 +542,7 @@ describe("board implement kick contract (#164)", () => {
       logger: () => {},
       forgeApi: implementForge(labelCalls),
     });
-    const refused = await handler(
-      implementRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "implement" })
-    );
+    const refused = await handler(implementRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "implement" }));
     expect(refused.status).toBe(422);
     expect(((await refused.json()) as Record<string, unknown>).code).toBe("not-kickable");
     expect(labelCalls).toHaveLength(0);
