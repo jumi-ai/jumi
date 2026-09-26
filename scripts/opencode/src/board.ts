@@ -231,7 +231,6 @@ export interface BoardPullForge {
    * keep working. When present, the implement kick queues first and then
    * adds the pickup label so the forge matches; it never opens a pull.
    */
-  getIssue?(owner: string, repo: string, index: number): Promise<{ state: string }>;
   addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
 }
 
@@ -1060,9 +1059,11 @@ async function recordReopenBestEffort(
  * but a different kick id (`implement`). It clears the latch and inserts
  * the implement job in one transaction, then updates the forge label so the
  * forge matches. The label change alone is never the wake: a label
- * remove/re-add with the same body stays terminal, and the label webhook
- * after this kick dedupes against the queued row instead of inserting a
- * second job. It never opens a pull request; the worker owns PR creation.
+ * remove/re-add with the same body stays terminal, and the bot-applied
+ * label after this kick never reaches the queue (Gitea `labeled` is not an
+ * enqueue action; GitHub skips `sender is bot`). A human re-label still
+ * dedupes against the queued row instead of inserting a second job. It
+ * never opens a pull request; the worker owns PR creation.
  */
 async function handleImplementKick(
   request: Request,
