@@ -321,6 +321,21 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       });
     }
 
+    if (exitCode === 0) {
+      if (stderr) log(`[codex stderr] ${stderr}`);
+      if (opts.trace?.kind === "review" && (await reviewArtifactMissing(opts.workdir))) {
+        return observeEngineRun(opts, {
+          status: "exit",
+          exitCode: 0,
+          stdout,
+          message: "incomplete review: no artifact",
+          infra: false,
+          durationMs,
+        });
+      }
+      return observeEngineRun(opts, { status: "ok", exitCode: 0, stdout, durationMs });
+    }
+
     if (quota) {
       if (stderr) log(`[codex stderr] ${stderr}`);
       return observeEngineRun(opts, {
@@ -345,21 +360,6 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         auth: true,
         durationMs,
       });
-    }
-
-    if (exitCode === 0) {
-      if (stderr) log(`[codex stderr] ${stderr}`);
-      if (opts.trace?.kind === "review" && (await reviewArtifactMissing(opts.workdir))) {
-        return observeEngineRun(opts, {
-          status: "exit",
-          exitCode: 0,
-          stdout,
-          message: "incomplete review: no artifact",
-          infra: false,
-          durationMs,
-        });
-      }
-      return observeEngineRun(opts, { status: "ok", exitCode: 0, stdout, durationMs });
     }
 
     if (stderr) log(`[codex stderr] ${stderr}`);

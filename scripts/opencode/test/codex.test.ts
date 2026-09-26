@@ -317,6 +317,51 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
     });
   });
 
+  test("exit 0 wins over quota/auth-looking stderr, mirroring claude", async () => {
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${AGENT}'\nprintf '429 rate limit, retrying\\n' >&2`),
+      },
+      async ({ workdir, home, argsLog }) => {
+        const result = await runCodex({
+          type: "codex",
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "implement", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("ok");
+      }
+    );
+  });
+
+  test("exit-0 review with no artifact and quota-looking stderr is incomplete, not a hop", async () => {
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${AGENT}'\nprintf '429 rate limit, retrying\\n' >&2`),
+      },
+      async ({ workdir, home, argsLog }) => {
+        const result = await runCodex({
+          type: "codex",
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.exitCode).toBe(0);
+        expect(result.message).toContain("no artifact");
+        expect(result.auth).toBeFalsy();
+      }
+    );
+  });
+
   test("token counters move with source=codex including a killed child", async () => {
     await withFakeBins(
       {
