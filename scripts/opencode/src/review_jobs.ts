@@ -122,6 +122,14 @@ export interface ReviewJobStore {
   requeueKick(input: RequeueKickInput): Promise<RequeueKickOutcome>;
   /** Kick audit log. Never served by the board page. */
   listKickLog(limit?: number): Promise<KickLogRecord[]>;
+  /** Find a kick log row by idempotency key. Empty key never matches. */
+  getKickByIdempotencyKey(key: string): Promise<KickLogRecord | undefined>;
+  /**
+   * Record a reopen kick call. Never inserts a job: the reopen webhook wake
+   * is the enqueue. Used by the close-then-reopen kick for foreign or reuse
+   * pulls that must not be pushed.
+   */
+  recordReopenKick(input: RecordReopenKickInput): Promise<KickLogRecord>;
   readonly skipLatches: SkipLatchStore;
   readonly sits: RouterSitStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
@@ -184,6 +192,30 @@ export type RequeueKickOutcome =
       /** Set on replay so the caller can return the first job without a new insert. */
       job?: ReviewJobRecord;
     };
+
+export interface RecordReopenKickInput {
+  owner: string;
+  repo: string;
+  number: number;
+  commit: string;
+  kick: string;
+  actor: string;
+  idempotencyKey: string;
+  result: string;
+}
+
+/** Reopen kicks share the review_kicks idempotency key space with requeues. */
+export function reopenIdempotencyMismatch(
+  input: { owner: string; repo: string; number: number; kick: string },
+  prior: KickLogRecord
+): boolean {
+  return (
+    prior.owner !== input.owner ||
+    prior.repo !== input.repo ||
+    prior.number !== input.number ||
+    prior.kick !== input.kick
+  );
+}
 
 export function emptyIssueSkipLatch(): IssueSkipLatch {
   return { generation: 0, skipReason: null };
@@ -1074,6 +1106,35 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         .sort((a, b) => b.id - a.id)
         .slice(0, cap)
         .map((row) => ({ ...row }));
+    });
+  }
+
+  getKickByIdempotencyKey(key: string): Promise<KickLogRecord | undefined> {
+    return this.locked(() => {
+      if (!key) return undefined;
+      const row = this.kickLog.find((entry) => entry.idempotencyKey === key);
+      return row ? { ...row } : undefined;
+    });
+  }
+
+  recordReopenKick(input: RecordReopenKickInput): Promise<KickLogRecord> {
+    return this.locked(() => {
+      const entry: KickLogRecord = {
+        id: this.nextKickId++,
+        idempotencyKey: input.idempotencyKey,
+        actor: input.actor,
+        owner: input.owner,
+        repo: input.repo,
+        number: input.number,
+        commit: input.commit,
+        kick: input.kick,
+        result: input.result,
+        terminalJobId: null,
+        newJobId: null,
+        createdAt: Date.now(),
+      };
+      this.kickLog.push(entry);
+      return { ...entry };
     });
   }
 
@@ -2184,6 +2245,61 @@ export class PgReviewJobStore implements ReviewJobStore {
       created_at: unknown;
     }>(await this.sql.unsafe(`SELECT * FROM review_kicks ORDER BY id DESC LIMIT $1`, [cap]));
     return rows.map((row) => this.mapKickRow(row));
+  }
+
+  async getKickByIdempotencyKey(key: string): Promise<KickLogRecord | undefined> {
+    if (!key) return undefined;
+    const rows = asRows<{
+      id: unknown;
+      idempotency_key: unknown;
+      actor: unknown;
+      owner: unknown;
+      repo: unknown;
+      number: unknown;
+      commit: unknown;
+      kick: unknown;
+      result: unknown;
+      terminal_job_id: unknown;
+      new_job_id: unknown;
+      created_at: unknown;
+    }>(await this.sql.unsafe(`SELECT * FROM review_kicks WHERE idempotency_key = $1`, [key]));
+    return rows[0] ? this.mapKickRow(rows[0]) : undefined;
+  }
+
+  async recordReopenKick(input: RecordReopenKickInput): Promise<KickLogRecord> {
+    const rows = asRows<{
+      id: unknown;
+      idempotency_key: unknown;
+      actor: unknown;
+      owner: unknown;
+      repo: unknown;
+      number: unknown;
+      commit: unknown;
+      kick: unknown;
+      result: unknown;
+      terminal_job_id: unknown;
+      new_job_id: unknown;
+      created_at: unknown;
+    }>(
+      await this.sql.unsafe(
+        `INSERT INTO review_kicks (idempotency_key, actor, owner, repo, number, commit, kick, result, terminal_job_id, new_job_id)
+         VALUES (NULLIF($1, ''), $2, $3, $4, $5, $6, $7, $8, NULL, NULL)
+         RETURNING *`,
+        [
+          input.idempotencyKey,
+          input.actor,
+          input.owner,
+          input.repo,
+          input.number,
+          input.commit,
+          input.kick,
+          input.result,
+        ]
+      )
+    );
+    const row = rows[0];
+    if (!row) throw new Error("failed to record kick");
+    return this.mapKickRow(row);
   }
 }
 

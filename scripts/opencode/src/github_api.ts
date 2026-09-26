@@ -736,6 +736,10 @@ export class GithubAPI {
     );
   }
 
+  async reopenPullRequest(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { state: "open" }));
+  }
+
   async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
     return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
   }

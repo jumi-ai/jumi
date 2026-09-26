@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import { BOARD_PORT, createBoardFetchHandler } from "./board.ts";
+import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
 import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
@@ -894,7 +894,13 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         boardServer = Bun.serve({
           hostname: config.host,
           port: BOARD_PORT,
-          fetch: createBoardFetchHandler({ store, logger, forge: config.forge, forgeUrl: config.giteaUrl }),
+          fetch: createBoardFetchHandler({
+            store,
+            logger,
+            forge: config.forge,
+            forgeUrl: config.giteaUrl,
+            forgeApi: api as unknown as BoardPullForge,
+          }),
         });
       } catch (err) {
         try {
