@@ -321,4 +321,128 @@ describe("board reopen kick contract (#163)", () => {
       })
     ).rejects.toMatchObject({ code: "23505" });
   });
+
+  test("lost race on the ok path: same-key different-item is 400, re-read failure is 503", async () => {
+    async function racedStore(key: string, seedNumber: number): Promise<{ store: MemoryReviewJobStore }> {
+      const inner = new MemoryReviewJobStore();
+      await inner.recordReopenKick({
+        owner: "o",
+        repo: "r",
+        number: seedNumber,
+        commit: "sha9",
+        kick: "reopen",
+        actor: "operator",
+        idempotencyKey: key,
+        result: "ok",
+      });
+      // Simulate the pre-check racing: the first read sees nothing even
+      // though the key already won elsewhere.
+      let reads = 0;
+      const store = Object.create(inner) as MemoryReviewJobStore;
+      store.getKickByIdempotencyKey = async (k: string) => {
+        reads++;
+        if (reads === 1) return undefined;
+        return inner.getKickByIdempotencyKey(k);
+      };
+      return { store };
+    }
+
+    // Same-key different-item after a lost race must mirror the pre-check 400,
+    // not claim success for an item with no ledger row.
+    {
+      const { store } = await racedStore("race-400", 9);
+      const calls: string[] = [];
+      const handler = createBoardFetchHandler({
+        store,
+        getGrantNotice: () => undefined,
+        logger: () => {},
+        forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+      });
+      const response = await handler(
+        reopenRequest({ owner: "o", repo: "r", number: 10, kick: "reopen", idempotencyKey: "race-400" })
+      );
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as Record<string, unknown>).code).toBe("bad-request");
+    }
+
+    // A failed re-read after a lost race must be 503, never a success claim.
+    {
+      const inner = new MemoryReviewJobStore();
+      await inner.recordReopenKick({
+        owner: "o",
+        repo: "r",
+        number: 9,
+        commit: "sha9",
+        kick: "reopen",
+        actor: "operator",
+        idempotencyKey: "race-503",
+        result: "ok",
+      });
+      let reads = 0;
+      const store = Object.create(inner) as MemoryReviewJobStore;
+      store.getKickByIdempotencyKey = async (_k: string) => {
+        reads++;
+        if (reads === 1) return undefined;
+        throw new QueueUnavailableError(new Error("ledger down"));
+      };
+      const calls: string[] = [];
+      const handler = createBoardFetchHandler({
+        store,
+        getGrantNotice: () => undefined,
+        logger: () => {},
+        forgeApi: reopenForge({ state: "closed", merged: false }, calls),
+      });
+      const response = await handler(
+        reopenRequest({ owner: "o", repo: "r", number: 10, kick: "reopen", idempotencyKey: "race-503" })
+      );
+      expect(response.status).toBe(503);
+      expect(((await response.json()) as Record<string, unknown>).error).toBe("queue unavailable");
+    }
+  });
+
+  test("lost race on a terminal path replays the recorded prior", async () => {
+    const inner = new MemoryReviewJobStore();
+    await inner.recordReopenKick({
+      owner: "o",
+      repo: "r",
+      number: 5,
+      commit: "sha5",
+      kick: "reopen",
+      actor: "operator",
+      idempotencyKey: "race-terminal",
+      result: "ok",
+    });
+    let reads = 0;
+    const store = Object.create(inner) as MemoryReviewJobStore;
+    store.getKickByIdempotencyKey = async (k: string) => {
+      reads++;
+      if (reads === 1) return undefined;
+      return inner.getKickByIdempotencyKey(k);
+    };
+    const calls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: {
+        getPR: async () => {
+          throw new Error("GET pulls → 404 not found");
+        },
+        closePullRequest: async () => {
+          calls.push("close");
+          return {};
+        },
+        reopenPullRequest: async () => {
+          calls.push("reopen");
+          return {};
+        },
+      },
+    });
+    const response = await handler(
+      reopenRequest({ owner: "o", repo: "r", number: 5, kick: "reopen", idempotencyKey: "race-terminal" })
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, reopened: true, deduped: true });
+    expect(calls).toHaveLength(0);
+  });
 });

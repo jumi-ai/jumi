@@ -1,5 +1,5 @@
 import { isKickPath, isReopenKickId, parseKickBody, parseReopenKickBody, rawKickIdOf } from "./kick.ts";
-import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { isQueueUnavailable, isUniqueViolation, reopenIdempotencyMismatch } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
@@ -789,7 +789,10 @@ async function handleReopenKick(
   } catch (err) {
     if (isNotFoundForgeError(err)) {
       const logged = await recordReopenBestEffort(store, logger, parsed, actor, "", "not-found");
-      void logged;
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        return reopenKeyConflictResponse(prior, item);
+      }
       return json(404, {
         error: `No pull request for ${item.owner}/${item.repo}#${item.number}.`,
         code: "not-found",
@@ -804,7 +807,11 @@ async function handleReopenKick(
   }
 
   if (pr.merged) {
-    await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-kickable");
+    const logged = await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-kickable");
+    if (logged === "conflict") {
+      const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+      return reopenKeyConflictResponse(prior, item);
+    }
     logger(`reopen kick not-kickable actor=${actor} ${item.owner}/${item.repo}#${item.number}: merged`);
     return json(422, {
       error: "No kick: pull request is merged; reopen would not wake.",
@@ -819,7 +826,7 @@ async function handleReopenKick(
       const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "noop-open");
       if (logged === "conflict") {
         const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
-        if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+        return reopenKeyConflictResponse(prior, item);
       }
     } catch (err) {
       logger(
@@ -844,7 +851,11 @@ async function handleReopenKick(
     await forgeApi.reopenPullRequest(item.owner, item.repo, item.number);
   } catch (err) {
     if (isNotFoundForgeError(err)) {
-      await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-found");
+      const logged = await recordReopenBestEffort(store, logger, parsed, actor, pr.head?.sha ?? "", "not-found");
+      if (logged === "conflict") {
+        const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
+        return reopenKeyConflictResponse(prior, item);
+      }
       return json(404, {
         error: `No pull request for ${item.owner}/${item.repo}#${item.number}.`,
         code: "not-found",
@@ -862,7 +873,7 @@ async function handleReopenKick(
     const logged = await recordReopenLogged(store, parsed, actor, pr.head?.sha ?? "", "ok");
     if (logged === "conflict") {
       const prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey).catch(() => undefined);
-      if (prior && !reopenIdempotencyMismatch(item, prior)) return replayReopenPrior(prior, item);
+      return reopenKeyConflictResponse(prior, item);
     }
   } catch (err) {
     logger(
@@ -879,6 +890,28 @@ async function handleReopenKick(
     reopened: true,
     deduped: false,
   });
+}
+
+/**
+ * Response for a lost idempotency race: the insert hit a unique violation
+ * after the pre-check saw nothing. A same-item prior replays; a
+ * different-item prior is the same 400 the pre-check returns; a failed
+ * re-read is 503, never a success claim for an item with no ledger row.
+ */
+function reopenKeyConflictResponse(
+  prior: KickLogRecord | undefined,
+  item: { owner: string; repo: string; number: number; kick: string }
+): Response {
+  if (!prior) return json(503, { error: "queue unavailable" });
+  if (reopenIdempotencyMismatch(item, prior)) {
+    return json(400, {
+      error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+      code: "bad-request",
+      terminalJobId: null,
+      newJobId: null,
+    });
+  }
+  return replayReopenPrior(prior, item);
 }
 
 function replayReopenPrior(
@@ -983,14 +1016,13 @@ async function recordReopenBestEffort(
   actor: string,
   commit: string,
   result: string
-): Promise<void> {
+): Promise<"ok" | "conflict"> {
   try {
-    const outcome = await recordReopenLogged(store, parsed, actor, commit, result);
-    void outcome;
+    return await recordReopenLogged(store, parsed, actor, commit, result);
   } catch (err) {
     if (isQueueUnavailable(err)) {
       logger(`reopen kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      return;
+      return "ok";
     }
     throw err;
   }
