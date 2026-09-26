@@ -117,6 +117,8 @@ export interface BoardGroups {
 export interface BoardPeerStatus {
   available: boolean;
   forge: string;
+  /** Peer forge origin for row links. Rendered as href only, never fetched. */
+  forgeUrl?: string;
   in_progress?: BoardItem[];
   inProgress?: BoardItem[];
   needs_kick?: BoardItem[];
@@ -295,13 +297,23 @@ export async function fetchPeerBoard(
     // Pin every row to PEER_FORGE. Both the top-level body.forge and each
     // row's own rec.forge are peer-supplied and untrusted for filtering, so
     // a compromised peer cannot tag rows with the local forge name.
-    const pinForge = (items: BoardItem[]): BoardItem[] => items.map((item) => ({ ...item, forge: PEER_FORGE }));
+    // Peer sits are read-only from here: strip kick so the page never POSTs
+    // peer coordinates to the homelab kick endpoint (which acts only on the
+    // local sit store and has no forwarding hop).
+    const pinForge = (items: BoardItem[]): BoardItem[] =>
+      items.map((item) => {
+        const copy = { ...item, forge: PEER_FORGE };
+        delete copy.kick;
+        return copy;
+      });
     const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
     const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
     const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
+    const peerForgeUrl = typeof body.forgeUrl === "string" && body.forgeUrl.trim() !== "" ? body.forgeUrl.trim() : undefined;
     return {
       available: true,
       forge: PEER_FORGE,
+      ...(peerForgeUrl ? { forgeUrl: peerForgeUrl } : {}),
       in_progress,
       inProgress: [...in_progress],
       needs_kick,
@@ -464,14 +476,29 @@ const $ = (id) => document.getElementById(id);
 const narrow = () => !window.matchMedia("(min-width: 700px)").matches;
 function keyOf(item) { const forge = item.forge || (state.data && state.data.forge) || "gitea"; return forge + "/" + item.owner + "/" + item.repo + "/" + item.kind + "#" + item.number; }
 function groupsOf(data) {
-  const inProgress = data.in_progress || data.inProgress || [];
-  const needsKick = data.needs_kick || data.needsKick || [];
-  const sitting = data.sitting || data.sitting_on_purpose || [];
+  const inProgress = [...(data.in_progress || data.inProgress || [])];
+  const needsKick = [...(data.needs_kick || data.needsKick || [])];
+  const sitting = [...(data.sitting || data.sitting_on_purpose || [])];
+  const peers = data.peers && typeof data.peers === "object" ? Object.values(data.peers) : [];
+  for (const p of peers) {
+    if (!p || typeof p !== "object" || !p.available) continue;
+    inProgress.push(...(p.in_progress || p.inProgress || []));
+    needsKick.push(...(p.needs_kick || p.needsKick || []));
+    sitting.push(...(p.sitting || p.sitting_on_purpose || []));
+  }
   return { inProgress, sitting: [...needsKick, ...sitting] };
 }
 function forgeOf(item, data) { return item.forge || data.forge || "gitea"; }
+function forgeBaseFor(item, data) {
+  const forge = forgeOf(item, data);
+  if (forge === (data.forge || "gitea")) return (data.forgeUrl || "").replace(/\\/+$/, "");
+  const peer = data.peers && data.peers[forge];
+  if (peer && typeof peer.forgeUrl === "string") return peer.forgeUrl.replace(/\\/+$/, "");
+  return "";
+}
+function isLocalRow(item, data) { return forgeOf(item, data) === (data.forge || "gitea"); }
 function forgeHref(item, data) {
-  const base = (data.forgeUrl || "").replace(/\\/+$/, "");
+  const base = forgeBaseFor(item, data);
   if (!base) return null;
   if (item.kind === "sit") return null;
   const forge = forgeOf(item, data);
@@ -535,7 +562,7 @@ function rowItem(item, opts) {
   if (item.commit) subText += " · " + String(item.commit).slice(0, 8);
   sub.textContent = subText;
   li.appendChild(sub);
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "");
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "") && isLocalRow(item, state.data);
   if (opts.section === "sitting" && hasKick && state.catalogOk) {
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -590,7 +617,7 @@ function selectedItem() {
 }
 function confirmBlock(item, data, confirmIdPrefix) {
   const wrap = document.createElement("div");
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string");
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string") && isLocalRow(item, data);
   if (hasKick && state.catalogOk) {
     const note = document.createElement("p");
     note.className = "consequence";
