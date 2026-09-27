@@ -98,6 +98,10 @@ export type WorkspacePreparer = (opts: {
 
 export interface ReviewOptions {
   api: ReviewApi;
+  /** Tracker capability (linked-issue briefs). Defaults to `api`. A git-host adapter satisfies both. */
+  tracker?: Pick<ReviewApi, "getIssue"> | ReviewApi;
+  /** Forge capability (PR + status). Defaults to `api`. A git-host adapter satisfies both. */
+  forge?: ReviewApi;
   owner: string;
   repo: string;
   prNumber: number;
@@ -153,6 +157,8 @@ export interface ReviewResult {
 
 export interface PublishReviewOptions {
   api: ReviewApi;
+  tracker?: Pick<ReviewApi, "getIssue"> | ReviewApi;
+  forge?: ReviewApi;
   owner: string;
   repo: string;
   prNumber: number;
@@ -964,6 +970,8 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
+  const trackerApi = (opts.tracker ?? opts.api) as ReviewApi;
+  const forgeApi = (opts.forge ?? opts.api) as ReviewApi;
   const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
     chain: opts.chain,
     fallbackModel: opts.fallbackModel,
@@ -974,7 +982,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   });
   throwIfAborted(opts.abortSignal);
   const repoFullName = `${opts.owner}/${opts.repo}`;
-  const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+  const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewedHeadSha = opts.expectedHeadSha ?? pr.head.sha;
 
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
@@ -1036,13 +1044,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
     const [repoInfo, prFiles, prCommentResult] = await Promise.all([
-      opts.api.getRepo(opts.owner, opts.repo),
-      opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
-      loadPrComments(opts.api, opts.owner, opts.repo, pr.number),
+      forgeApi.getRepo(opts.owner, opts.repo),
+      forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
+      loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
     ]);
 
     const ids = extractClosingIssueNumbers(pr);
-    const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(opts.api, opts.owner, opts.repo, id)));
+    const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
     if (prCommentResult.note) notes.push(prCommentResult.note);
@@ -1060,7 +1068,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       permissionDetail,
       lookups: permissionLookups,
       failures: permissionFailures,
-    } = await resolveThreadPermissions(opts.api, opts.owner, opts.repo, prComments, linkedIssues, log);
+    } = await resolveThreadPermissions(forgeApi, opts.owner, opts.repo, prComments, linkedIssues, log);
     const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
 
     const maxFiles = opts.maxFiles ?? 100;
@@ -1289,7 +1297,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             }
           }
           return await publishReviewResult({
-            api: opts.api,
+            api: forgeApi,
+            tracker: trackerApi,
+            forge: forgeApi,
             owner: opts.owner,
             repo: opts.repo,
             prNumber: opts.prNumber,

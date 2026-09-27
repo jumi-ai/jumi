@@ -67,6 +67,8 @@ export function createIssueQueue(
       try {
         const shared = {
           api,
+          tracker: api,
+          forge: api,
           job,
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
@@ -341,6 +343,8 @@ export async function processWorkerTick(
     }
     const shared = {
       api,
+      tracker: api,
+      forge: api,
       job,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
