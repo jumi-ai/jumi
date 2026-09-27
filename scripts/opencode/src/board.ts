@@ -26,9 +26,32 @@ import { latchedXaiGrantNotice } from "./xai_auth.ts";
  * and without an empty commit. In-progress comes from the job ledger
  * (queued or leased); sitting rows come from persisted refusals
  * (`router_sits`). The router stays a single replica; no leader election.
+ *
+ * Two factories, one page: the browser talks only to the homelab board.
+ * The homelab board (FORGE unset/empty/gitea) may include the other factory
+ * by calling that factory's board listener server-side. The peer listener
+ * is internal-only (no public ingress; ingress changes live outside this
+ * repo) and trusts only the bearer, never an identity header forwarded from
+ * an arbitrary caller. The username attached after the homelab edge check is
+ * the identity kick logging must record; it is never forwarded to the peer
+ * and the peer never reads it.
  */
 
 export const BOARD_PORT = 3001;
+
+/** Env: internal peer board listener URL (homelab only). Unset disables the hop. */
+export const BOARD_PEER_URL_ENV = "BOARD_PEER_URL";
+/** Env: bearer for the peer board hop. Unset means that forge is unavailable. */
+export const BOARD_PEER_TOKEN_ENV = "BOARD_PEER_TOKEN";
+
+/** Peer board fetch budget: a slow peer must not hang the homelab board. */
+export const PEER_BOARD_TIMEOUT_MS = 5_000;
+
+/** Peer board body cap: a compromised peer must not spike homelab memory per poll. */
+export const PEER_BOARD_MAX_BYTES = 1_048_576;
+
+/** Forge name of the isolated GitHub factory. Homelab is anything else (gitea). */
+export const PEER_FORGE = "github";
 
 const BOARD_API_PATH = "/api/board";
 const BOARD_KICK_PATH = "/api/board/kick";
@@ -45,15 +68,41 @@ const EDGE_IDENTITY_HEADERS = [
 ] as const;
 
 export function hasEdgeIdentity(request: Request): boolean {
-  return edgeActor(request) !== "";
+  return boardUsername(request) !== undefined;
 }
 
-export function edgeActor(request: Request): string {
+/**
+ * Username attached after the homelab edge check. First non-empty edge
+ * identity header. Kick logging must record this value; the peer must never
+ * accept it from a forwarded header (it trusts the bearer instead).
+ */
+export function boardUsername(request: Request): string | undefined {
   for (const header of EDGE_IDENTITY_HEADERS) {
     const value = request.headers.get(header);
     if (value != null && value.trim() !== "") return value.trim();
   }
-  return "";
+  return undefined;
+}
+
+export function edgeActor(request: Request): string {
+  return boardUsername(request) ?? "";
+}
+
+/**
+ * Peer bearer check. Accepts `Bearer <token>` (and the bare token, like the
+ * webhook auth token). Never reads edge identity headers.
+ */
+export function hasBearerAuth(request: Request, expectedToken?: string): boolean {
+  const expected = (expectedToken ?? "").trim();
+  if (expected === "") return false;
+  const actual = (request.headers.get("authorization") ?? "").trim();
+  if (actual === "") return false;
+  return actual === expected || actual === `Bearer ${expected}`;
+}
+
+/** Only the homelab board fans out. The peer never calls back (one-way hop). */
+export function isHomelabForge(forge?: string): boolean {
+  return (forge ?? "gitea") !== PEER_FORGE;
 }
 
 function idempotencyKeyOf(request: Request): string {
@@ -75,7 +124,7 @@ export interface BoardItem {
   number: number;
   /** Job kind for ledger rows; "sit" for refusal rows. */
   kind: string;
-  /** Forge this row belongs to (server-configured). Used by the forge switch. */
+  /** Which factory produced this row. Local rows carry the local forge. Used by the forge switch. */
   forge?: string;
   /** Commit SHA when the ledger knows one. Omitted otherwise. */
   commit?: string;
@@ -91,6 +140,21 @@ export interface BoardGroups {
   in_progress: BoardItem[];
   needs_kick: BoardItem[];
   sitting: BoardItem[];
+}
+
+export interface BoardPeerStatus {
+  available: boolean;
+  forge: string;
+  /** Peer forge origin for row links. Rendered as href only, never fetched. */
+  forgeUrl?: string;
+  in_progress?: BoardItem[];
+  inProgress?: BoardItem[];
+  needs_kick?: BoardItem[];
+  needsKick?: BoardItem[];
+  sitting?: BoardItem[];
+  sitting_on_purpose?: BoardItem[];
+  /** Stable unavailable marker. Never a token, URL, or forge secret. */
+  error?: string;
 }
 
 /** Sits with no button: already done, nothing to ship, or already queued. */
@@ -141,7 +205,7 @@ function primaryNumber(row: ReviewJobRecord): number {
   return row.prNumber;
 }
 
-function inflightItem(row: ReviewJobRecord): BoardItem {
+function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
   const item: BoardItem = {
     reason: `${row.kind} ${row.state}`,
     owner: row.owner,
@@ -149,6 +213,7 @@ function inflightItem(row: ReviewJobRecord): BoardItem {
     number: primaryNumber(row),
     kind: row.kind,
   };
+  if (forge) item.forge = forge;
   const sha = (row.headSha ?? "").trim();
   if (sha !== "") {
     item.commit = sha;
@@ -157,7 +222,7 @@ function inflightItem(row: ReviewJobRecord): BoardItem {
   return item;
 }
 
-function sitItem(sit: RouterSitRecord): { item: BoardItem; kickable: boolean } {
+function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kickable: boolean } {
   const item: BoardItem = {
     reason: sit.reason,
     owner: sit.owner,
@@ -166,6 +231,7 @@ function sitItem(sit: RouterSitRecord): { item: BoardItem; kickable: boolean } {
     kind: "sit",
     decidedAt: sit.decidedAt,
   };
+  if (forge) item.forge = forge;
   const kick = kickForSit(sit.reason);
   if (kick) item.kick = kick;
   return { item, kickable: kick !== undefined };
@@ -176,17 +242,149 @@ export interface BoardStore {
   sits: { list(): Promise<RouterSitRecord[]> };
 }
 
-export async function buildBoardGroups(store: BoardStore): Promise<BoardGroups> {
+export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
   const [inflight, sits] = await Promise.all([store.listInflight(200), store.sits.list()]);
-  const in_progress = inflight.map(inflightItem);
+  const in_progress = inflight.map((row) => inflightItem(row, forge));
   const needs_kick: BoardItem[] = [];
   const sitting: BoardItem[] = [];
   for (const sit of sits) {
-    const { item, kickable } = sitItem(sit);
+    const { item, kickable } = sitItem(sit, forge);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
   }
   return { in_progress, needs_kick, sitting };
+}
+
+/** Keep only the public board shape. Drops tokens, payloads, and forge secrets. */
+function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  const owner = typeof rec.owner === "string" ? rec.owner : undefined;
+  const repo = typeof rec.repo === "string" ? rec.repo : undefined;
+  const reason = typeof rec.reason === "string" ? rec.reason : undefined;
+  const kind = typeof rec.kind === "string" ? rec.kind : undefined;
+  const number =
+    typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
+  if (!owner || !repo || !reason || !kind || number === undefined) return undefined;
+  const item: BoardItem = { reason, owner, repo, number, kind };
+  const forge = typeof rec.forge === "string" && rec.forge.trim() !== "" ? rec.forge.trim() : fallbackForge;
+  if (forge) item.forge = forge;
+  if (typeof rec.commit === "string" && rec.commit.trim() !== "") item.commit = rec.commit.trim();
+  if (typeof rec.headSha === "string" && rec.headSha.trim() !== "") item.headSha = rec.headSha.trim();
+  if (typeof rec.decidedAt === "number" && Number.isFinite(rec.decidedAt)) item.decidedAt = rec.decidedAt;
+  const kick = rec.kick as { effect?: unknown } | undefined;
+  if (kick && typeof kick === "object" && typeof kick.effect === "string" && kick.effect.trim() !== "") {
+    item.kick = { effect: kick.effect };
+  }
+  return item;
+}
+
+function sanitizeBoardList(value: unknown, fallbackForge: string): BoardItem[] {
+  if (!Array.isArray(value)) return [];
+  const out: BoardItem[] = [];
+  for (const entry of value) {
+    const item = sanitizeBoardItem(entry, fallbackForge);
+    if (item) out.push(item);
+  }
+  return out.slice(0, 500);
+}
+
+function peerUnavailable(forge: string = PEER_FORGE): BoardPeerStatus {
+  return { available: false, forge, error: "peer unavailable" };
+}
+
+export type BoardFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
+
+export async function fetchPeerBoard(
+  peerUrl: string,
+  peerToken: string,
+  fetchFn: BoardFetchFn = fetch,
+  timeoutMs: number = PEER_BOARD_TIMEOUT_MS
+): Promise<BoardPeerStatus> {
+  const url = peerUrl.trim();
+  const token = peerToken.trim();
+  if (url === "" || token === "") return peerUnavailable();
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return peerUnavailable();
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return peerUnavailable();
+  // Never forward edge identity headers and never send forge credentials:
+  // the hop carries only the bearer.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchFn(parsed.toString(), {
+      method: "GET",
+      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!response.ok) return peerUnavailable();
+    const declaredLength = response.headers?.get("content-length");
+    if (declaredLength != null) {
+      const declared = Number.parseInt(declaredLength, 10);
+      if (Number.isFinite(declared) && declared > PEER_BOARD_MAX_BYTES) return peerUnavailable();
+    }
+    // Stream with an incremental budget: a peer can omit Content-Length and
+    // send a chunked body, so never buffer it whole before the cap runs.
+    const reader = response.body?.getReader();
+    if (!reader) return peerUnavailable();
+    const chunks: Uint8Array[] = [];
+    let seen = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      seen += value.byteLength;
+      if (seen > PEER_BOARD_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return peerUnavailable();
+      }
+      chunks.push(value);
+    }
+    let body: Record<string, unknown>;
+    try {
+      const text = new TextDecoder().decode(Buffer.concat(chunks));
+      body = JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return peerUnavailable();
+    }
+    // Pin every row to PEER_FORGE. Both the top-level body.forge and each
+    // row's own rec.forge are peer-supplied and untrusted for filtering, so
+    // a compromised peer cannot tag rows with the local forge name.
+    // Peer sits are read-only from here: strip kick so the page never POSTs
+    // peer coordinates to the homelab kick endpoint (which acts only on the
+    // local sit store and has no forwarding hop).
+    const pinForge = (items: BoardItem[]): BoardItem[] =>
+      items.map((item) => {
+        const copy = { ...item, forge: PEER_FORGE };
+        delete copy.kick;
+        return copy;
+      });
+    const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
+    const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
+    const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
+    const peerForgeUrl =
+      typeof body.forgeUrl === "string" && /^https?:\/\/[^/\s]/i.test(body.forgeUrl.trim())
+        ? body.forgeUrl.trim()
+        : undefined;
+    return {
+      available: true,
+      forge: PEER_FORGE,
+      ...(peerForgeUrl ? { forgeUrl: peerForgeUrl } : {}),
+      in_progress,
+      inProgress: [...in_progress],
+      needs_kick,
+      needsKick: [...needs_kick],
+      sitting,
+      sitting_on_purpose: [...sitting],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function json(status: number, body: unknown): Response {
@@ -207,10 +405,16 @@ export interface BoardHandlerDeps {
   store: ReviewJobStore;
   getGrantNotice?: () => string | undefined;
   logger?: (message: string) => void;
-  /** Server-configured forge name (gitea or github). Used for filtering and links. */
+  /** Local factory name for forge tagging/filtering. Defaults to homelab gitea. */
   forge?: string;
   /** Server-configured forge origin for links. Rendered as href only, never fetched. */
   forgeUrl?: string;
+  /** Internal peer listener URL. Unset disables the hop (peer unavailable). */
+  peerUrl?: string;
+  /** Bearer for the peer hop. Unset means that forge is unavailable. Never invent one. */
+  peerToken?: string;
+  fetchFn?: BoardFetchFn;
+  peerTimeoutMs?: number;
   /**
    * Forge client for the close-then-reopen kick. Only getPR/close/reopen are
    * used; there is never a push and never a job insert on this path.
@@ -354,19 +558,38 @@ const $ = (id) => document.getElementById(id);
 const narrow = () => !window.matchMedia("(min-width: 700px)").matches;
 function keyOf(item) { const forge = item.forge || (state.data && state.data.forge) || "gitea"; return forge + "/" + item.owner + "/" + item.repo + "/" + item.kind + "#" + item.number; }
 function groupsOf(data) {
-  const inProgress = data.in_progress || data.inProgress || [];
-  const needsKick = data.needs_kick || data.needsKick || [];
-  const sitting = data.sitting || data.sitting_on_purpose || [];
+  const inProgress = [...(data.in_progress || data.inProgress || [])];
+  const needsKick = [...(data.needs_kick || data.needsKick || [])];
+  const sitting = [...(data.sitting || data.sitting_on_purpose || [])];
+  const peers = data.peers && typeof data.peers === "object" ? Object.values(data.peers) : [];
+  for (const p of peers) {
+    if (!p || typeof p !== "object" || !p.available) continue;
+    inProgress.push(...(p.in_progress || p.inProgress || []));
+    needsKick.push(...(p.needs_kick || p.needsKick || []));
+    sitting.push(...(p.sitting || p.sitting_on_purpose || []));
+  }
   return { inProgress, sitting: [...needsKick, ...sitting] };
 }
 function forgeOf(item, data) { return item.forge || data.forge || "gitea"; }
+function forgeBaseFor(item, data) {
+  const forge = forgeOf(item, data);
+  if (forge === (data.forge || "gitea")) return (data.forgeUrl || "").replace(/\\/+$/, "");
+  const peer = data.peers && data.peers[forge];
+  if (peer && typeof peer.forgeUrl === "string") {
+    const trimmed = peer.forgeUrl.trim().replace(/\\/+$/, "");
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("http://") || lower.startsWith("https://")) return trimmed;
+  }
+  return "";
+}
+function isLocalRow(item, data) { return forgeOf(item, data) === (data.forge || "gitea"); }
 function forgeHref(item, data) {
-  const base = (data.forgeUrl || "").replace(/\\/+$/, "");
+  const base = forgeBaseFor(item, data);
   if (!base) return null;
   if (item.kind === "sit") return null;
   const forge = forgeOf(item, data);
   const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
-  return base + "/" + item.owner + "/" + item.repo + "/" + path + "/" + item.number;
+  return base + "/" + encodeURIComponent(item.owner) + "/" + encodeURIComponent(item.repo) + "/" + path + "/" + item.number;
 }
 async function load() {
   const errBox = $("load-error");
@@ -425,7 +648,7 @@ function rowItem(item, opts) {
   if (item.commit) subText += " · " + String(item.commit).slice(0, 8);
   sub.textContent = subText;
   li.appendChild(sub);
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "");
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "") && isLocalRow(item, state.data);
   if (opts.section === "sitting" && hasKick && state.catalogOk) {
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -480,7 +703,7 @@ function selectedItem() {
 }
 function confirmBlock(item, data, confirmIdPrefix) {
   const wrap = document.createElement("div");
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string");
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string") && isLocalRow(item, data);
   if (hasKick && state.catalogOk) {
     const note = document.createElement("p");
     note.className = "consequence";
@@ -606,34 +829,82 @@ load();
 export function createBoardFetchHandler(deps: BoardHandlerDeps) {
   const logger = deps.logger ?? ((message: string) => console.log(`[board] ${message}`));
   const getGrant = deps.getGrantNotice ?? latchedXaiGrantNotice;
-  const forgeName = deps.forge ?? "gitea";
+  const localForge = (deps.forge ?? "gitea").trim() || "gitea";
   const forgeUrl = deps.forgeUrl ?? "";
+  const peerUrl = (deps.peerUrl ?? "").trim();
+  const peerToken = (deps.peerToken ?? "").trim();
+  const fetchFn = deps.fetchFn ?? fetch;
+  const peerTimeoutMs = deps.peerTimeoutMs ?? PEER_BOARD_TIMEOUT_MS;
+  // One-way hop: only the homelab board fans out. The peer (github factory)
+  // never calls back, so the other factory still cannot reach the homelab forge.
+  const shouldFetchPeer = isHomelabForge(localForge) && peerUrl !== "" && peerToken !== "";
+  const homelab = isHomelabForge(localForge);
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = normalizePathname(url.pathname);
-    // Same-commit requeue kick (HEAD) plus sit-clear kick (main). Both share
-    // /api/board/kick: payloads carrying a commit and kick id requeue a
-    // terminal review; owner/repo/number-only payloads clear a kickable sit.
-    // /board/kick is an alias for the requeue path. The client never invents
-    // kick ids for sits; identity is owner/repo/number and the server
-    // re-checks kickability.
+    // Same-commit requeue kick plus sit-clear kick, both forge-gated.
+    // Homelab requires the edge identity (and logs the username attached after
+    // that check); the peer trusts only the bearer and never reads forwarded
+    // identity headers. The client never invents kick ids for sits; identity
+    // is owner/repo/number and the server re-checks kickability.
+    // /board/kick is an alias for the requeue path.
     if (pathname === BOARD_KICK_PATH || isKickPath(pathname)) {
-      return handleKick(request, deps.store, logger, deps.forgeApi);
+      if (request.method !== "POST") return json(405, { error: "method not allowed" });
+      if (!homelab) {
+        if (!hasBearerAuth(request, peerToken)) return json(401, { error: "missing bearer" });
+        return handleKick(request, deps.store, logger, deps.forgeApi, { peer: true });
+      }
+      const kickActor = boardUsername(request);
+      if (!kickActor) return json(401, { error: "missing edge identity" });
+      return handleKick(request, deps.store, logger, deps.forgeApi, { actor: kickActor });
     }
     if (pathname === BOARD_API_PATH) {
       if (request.method !== "GET") return json(405, { error: "method not allowed" });
-      // Edge identity only. The webhook HMAC secret and auth token are not accepted here.
-      if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
+      // Auth path is gated on the forge. The peer listener is bearer-only and
+      // never reads edge headers; homelab requires edge identity and never
+      // accepts the bearer (the outgoing hop credential is not an incoming one).
+      if (!homelab) {
+        if (!hasBearerAuth(request, peerToken)) return json(401, { error: "missing bearer" });
+        let groups: BoardGroups;
+        try {
+          groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
+        } catch (err) {
+          logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        const grant = getGrant();
+        const grantLine = typeof grant === "string" && grant.trim() !== "" ? grant.split("\n")[0]?.trim() : undefined;
+        const body: Record<string, unknown> = {
+          in_progress: groups.in_progress,
+          inProgress: [...groups.in_progress],
+          needs_kick: groups.needs_kick,
+          needsKick: [...groups.needs_kick],
+          sitting: groups.sitting,
+          sitting_on_purpose: [...groups.sitting],
+          forge: localForge,
+          forgeUrl,
+          catalog: BOARD_KICK_CATALOG_VERSION,
+          peers: {},
+        };
+        if (grantLine) body.grant = grantLine;
+        return json(200, body);
+      }
+      // Browser path: the homelab edge checks the person. The webhook HMAC
+      // secret and auth token are not accepted here.
+      const username = boardUsername(request);
+      if (!username) return json(401, { error: "missing edge identity" });
       let groups: BoardGroups;
       try {
-        groups = withForgeGroups(await buildBoardGroups(deps.store), forgeName);
+        groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
       } catch (err) {
         logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
         return json(503, { error: "queue unavailable" });
       }
       const grant = getGrant();
       const grantLine = typeof grant === "string" && grant.trim() !== "" ? grant.split("\n")[0]?.trim() : undefined;
+      // Top-level lists stay local-only: the homelab side does not list the
+      // other factory's rows there. Peer rows live under `peers`.
       const body: Record<string, unknown> = {
         in_progress: groups.in_progress,
         inProgress: [...groups.in_progress],
@@ -641,15 +912,56 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         needsKick: [...groups.needs_kick],
         sitting: groups.sitting,
         sitting_on_purpose: [...groups.sitting],
-        forge: forgeName,
+        forge: localForge,
         forgeUrl,
         catalog: BOARD_KICK_CATALOG_VERSION,
+        peers: {} as Record<string, BoardPeerStatus>,
       };
       if (grantLine) body.grant = grantLine;
+      if (!shouldFetchPeer) {
+        (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peerUnavailable();
+        return json(200, body);
+      }
+      try {
+        const peer = await fetchPeerBoard(peerUrl, peerToken, fetchFn, peerTimeoutMs);
+        // Key by the constant, not the peer-supplied forge string, so a
+        // misconfigured or compromised peer cannot collide with the local namespace.
+        peer.forge = PEER_FORGE;
+        (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peer;
+      } catch (err) {
+        // No invented token, no crash: an unset or unreachable peer is unavailable.
+        logger(`peer board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peerUnavailable();
+      }
       return json(200, body);
     }
     if (BOARD_PAGE_PATHS.has(pathname)) {
       if (request.method !== "GET") return json(405, { error: "method not allowed" });
+      if (!homelab) {
+        // The peer has no browser page; keep the bearer JSON shape so a
+        // peerUrl pointing at /board still serves the hop. Edge headers
+        // alone never authenticate the peer.
+        if (!hasBearerAuth(request, peerToken)) return json(401, { error: "missing bearer" });
+        let groups: BoardGroups;
+        try {
+          groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
+        } catch (err) {
+          logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return json(200, {
+          forge: localForge,
+          forgeUrl,
+          catalog: BOARD_KICK_CATALOG_VERSION,
+          in_progress: groups.in_progress,
+          inProgress: [...groups.in_progress],
+          needs_kick: groups.needs_kick,
+          needsKick: [...groups.needs_kick],
+          sitting: groups.sitting,
+          sitting_on_purpose: [...groups.sitting],
+          peers: {},
+        });
+      }
       if (!hasEdgeIdentity(request)) return json(401, { error: "missing edge identity" });
       return pageResponse(renderBoardPage(BOARD_KICK_CATALOG_VERSION));
     }
@@ -661,12 +973,24 @@ async function handleKick(
   request: Request,
   store: ReviewJobStore,
   logger: (message: string) => void,
-  forgeApi?: BoardPullForge
+  forgeApi?: BoardPullForge,
+  opts?: { actor?: string; peer?: boolean }
 ): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "method not allowed" });
-  // Edge identity only. The actor never comes from a body field.
-  const actor = edgeActor(request);
-  if (!actor) return json(401, { error: "missing edge identity" });
+  // Forge-gated auth happens at the call site. Homelab passes the username
+  // attached after the edge check (the actor kick logging must record); the
+  // peer passes peer:true after the bearer check and never reads forwarded
+  // identity headers. The actor never comes from a body field.
+  const isPeer = opts?.peer === true;
+  let actor: string;
+  if (isPeer) {
+    actor = "";
+  } else if (opts?.actor) {
+    actor = opts.actor;
+  } else {
+    actor = edgeActor(request);
+  }
+  if (!isPeer && !actor) return json(401, { error: "missing edge identity" });
   // Same-origin JSON only: the kick is state-changing behind edge-proxy
   // cookie auth, so a simple-request CSRF (e.g. cross-origin text/plain
   // form) must not fire it. Matches the sit-clear guards below.
@@ -689,7 +1013,7 @@ async function handleKick(
   // The implement kick carries kick=implement and requeues a no-changes
   // implement without opening a pull request.
   if (isSitClearPayload(body)) {
-    return handleSitClear(request, body, store, logger);
+    return handleSitClear(request, body, store, logger, isPeer ? undefined : actor);
   }
   if (isReopenKickId(rawKickIdOf(body))) {
     return handleReopenKick(request, body, store, logger, forgeApi, actor);
@@ -1277,7 +1601,8 @@ async function handleSitClear(
   request: Request,
   body: unknown,
   store: ReviewJobStore,
-  logger: (message: string) => void
+  logger: (message: string) => void,
+  kickActor?: string
 ): Promise<Response> {
   const url = new URL(request.url);
   const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
@@ -1307,6 +1632,9 @@ async function handleSitClear(
     logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
     return json(503, { error: "queue unavailable" });
   }
-  logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
+  // The username attached after the edge check is what the kick log records.
+  // The peer never forwards identity headers, so its kicks log without one.
+  if (kickActor) logger(`board kick ${owner}/${repo}#${number} ${sit.reason} by ${kickActor}`);
+  else logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
   return json(200, { ok: true, owner, repo, number, effect: kick.effect });
 }

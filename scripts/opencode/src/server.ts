@@ -896,6 +896,8 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       // Operator board on its own port. Same process (no sidecar, no new
       // Deployment), same ledger, single replica with no leader election.
       // Polling GET only; the webhook host never serves the board paths.
+      // Homelab fans out to the peer board (one-way, bearer-only); the peer
+      // never calls back, so the GitHub factory cannot reach the homelab forge.
       let boardServer: ReturnType<typeof Bun.serve>;
       try {
         boardServer = Bun.serve({
@@ -906,6 +908,8 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             logger,
             forge: config.forge,
             forgeUrl: config.giteaUrl,
+            peerUrl: config.boardPeerUrl,
+            peerToken: config.boardPeerToken,
             forgeApi: boardForge,
           }),
         });
