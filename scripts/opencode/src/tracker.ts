@@ -62,6 +62,7 @@ export function cloneUrlTargetsRepo(cloneUrl: string | null | undefined, owner: 
 export function isExternalIssueJob(job: { tracker?: string | null; trackerId?: string | null }): boolean {
   const tracker = (job.tracker ?? "").trim();
   if (!tracker) return false;
+  if (!(job.trackerId ?? "").trim()) return false;
   const lower = tracker.toLowerCase();
   return lower !== "gitea" && lower !== "github";
 }

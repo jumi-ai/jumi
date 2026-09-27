@@ -304,6 +304,7 @@ export async function processWorkerTick(
     issueNumber: row.issueNumber ?? 0,
     tracker: row.payload?.tracker,
     trackerId: row.payload?.trackerId,
+    mode: row.kind,
   });
   const abort = new AbortController();
   aborts?.set(key, abort);

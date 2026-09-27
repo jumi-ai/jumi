@@ -178,10 +178,13 @@ export function issueJobKey(job: {
   issueNumber: number;
   tracker?: string | null;
   trackerId?: string | null;
+  mode?: string | null;
 }): string {
+  const mode = (job.mode ?? "implement").trim();
+  if (mode !== "implement") return `${job.owner}/${job.repo}#${job.issueNumber}`;
   const tracker = (job.tracker ?? "").trim();
   const lower = tracker.toLowerCase();
-  if (tracker && lower !== "gitea" && lower !== "github" && job.trackerId) {
+  if (tracker && lower !== "gitea" && lower !== "github" && (job.trackerId ?? "").trim()) {
     // Stable tracker id alone is the identity (mirrors workerJobKey): a brief
     // retargeted to another repo dedupes as the same job in both the queue
     // and the ledger instead of looking new to one of them.
