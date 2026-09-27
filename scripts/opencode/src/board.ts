@@ -1,6 +1,19 @@
-import { isKickPath, isReopenKickId, parseKickBody, parseReopenKickBody, rawKickIdOf } from "./kick.ts";
+import {
+  isImplementKickId,
+  isKickPath,
+  isReopenKickId,
+  parseImplementKickBody,
+  parseKickBody,
+  parseReopenKickBody,
+  rawKickIdOf,
+} from "./kick.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
-import { isQueueUnavailable, isUniqueViolation, reopenIdempotencyMismatch } from "./review_jobs.ts";
+import {
+  implementIdempotencyMismatch,
+  isQueueUnavailable,
+  isUniqueViolation,
+  reopenIdempotencyMismatch,
+} from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
@@ -401,6 +414,12 @@ export interface BoardPullForge {
   ): Promise<{ state: string; merged: boolean; head?: { sha: string } }>;
   closePullRequest(owner: string, repo: string, index: number): Promise<unknown>;
   reopenPullRequest(owner: string, repo: string, index: number): Promise<unknown>;
+  /**
+   * Implement kick forge surface. Optional so existing reopen-only seams
+   * keep working. When present, the implement kick queues first and then
+   * adds the pickup label so the forge matches; it never opens a pull.
+   */
+  addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
 }
 
 function normalizePathname(raw: string): string {
@@ -975,11 +994,16 @@ async function handleKick(
   // a kickable sit. Requeue payloads carry a commit and kick id and fall
   // through to requeueKick below. The reopen kick carries kick=reopen and
   // never inserts a job: close-then-reopen wakes via the reopen webhook.
+  // The implement kick carries kick=implement and requeues a no-changes
+  // implement without opening a pull request.
   if (isSitClearPayload(body)) {
     return handleSitClear(request, body, store, logger, isPeer ? undefined : actor);
   }
   if (isReopenKickId(rawKickIdOf(body))) {
     return handleReopenKick(request, body, store, logger, forgeApi, actor);
+  }
+  if (isImplementKickId(rawKickIdOf(body))) {
+    return handleImplementKick(request, body, store, logger, forgeApi, actor);
   }
   const parsed = parseKickBody(body, idempotencyKeyOf(request));
   if ("error" in parsed) return json(400, { error: parsed.error });
@@ -1334,6 +1358,203 @@ async function recordReopenBestEffort(
     }
     throw err;
   }
+}
+
+/**
+ * Implement kick for a no-changes terminal.
+ *
+ * Same route and same edge-identity/idempotency rules as the requeue kick,
+ * but a different kick id (`implement`). It clears the latch and inserts
+ * the implement job in one transaction, then updates the forge label so the
+ * forge matches. The label change alone is never the wake: a label
+ * remove/re-add with the same body stays terminal, and the bot-applied
+ * label after this kick never reaches the queue (Gitea `labeled` is not an
+ * enqueue action; GitHub skips `sender is bot`). A human re-label still
+ * dedupes against the queued row instead of inserting a second job. It
+ * never opens a pull request; the worker owns PR creation.
+ */
+async function handleImplementKick(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  forgeApi: BoardPullForge | undefined,
+  actor: string
+): Promise<Response> {
+  const parsed = parseImplementKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const item = { owner: parsed.owner, repo: parsed.repo, issueNumber: parsed.number, kick: parsed.kick };
+
+  if (parsed.idempotencyKey) {
+    let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>>;
+    try {
+      prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+    } catch (err) {
+      logger(`implement kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (prior) {
+      if (implementIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayImplementPrior(store, prior, item);
+    }
+  }
+
+  if (!forgeApi?.addIssueLabel) {
+    logger(`implement kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: no forge`);
+    return json(503, { error: "forge unavailable" });
+  }
+
+  const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  let outcome: Awaited<ReturnType<ReviewJobStore["implementKick"]>>;
+  try {
+    outcome = await store.implementKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      issueNumber: parsed.number,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      delivery,
+    });
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`implement kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (parsed.idempotencyKey && isUniqueViolation(err)) {
+      let prior: KickLogRecord | undefined;
+      try {
+        prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+      } catch {
+        return json(503, { error: "queue unavailable" });
+      }
+      if (!prior) return json(503, { error: "queue unavailable" });
+      if (implementIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayImplementPrior(store, prior, item);
+    }
+    logger(`implement kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+
+  if (outcome.status === "ok") {
+    // The latch clear + job insert already committed. Now make the forge
+    // match by ensuring the pickup label is present. Best-effort: the job
+    // is already queued, so a label failure is logged, never a rollback
+    // and never a second pull request.
+    try {
+      await forgeApi.addIssueLabel(item.owner, item.repo, item.issueNumber, "jumi");
+    } catch (err) {
+      logger(
+        `implement kick label failed actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+    logger(
+      `implement kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+    );
+    return json(200, {
+      ok: true,
+      jobId: outcome.job.id,
+      newJobId: outcome.job.id,
+      key: outcome.job.jobKey,
+      terminalJobId: outcome.terminalId,
+      deduped: outcome.deduped,
+    });
+  }
+
+  logger(
+    `implement kick ${outcome.code} actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)}: ${outcome.why}`
+  );
+  const status =
+    outcome.code === "not-found"
+      ? 404
+      : outcome.code === "stale-kick" || outcome.code === "conflict"
+        ? 409
+        : outcome.code === "not-kickable"
+          ? 422
+          : 400;
+  return json(status, {
+    error: outcome.why,
+    code: outcome.code,
+    terminalJobId: outcome.terminalId,
+    newJobId: outcome.newJobId,
+    ...(outcome.deduped ? { deduped: true } : {}),
+  });
+}
+
+async function replayImplementPrior(
+  store: ReviewJobStore,
+  prior: KickLogRecord,
+  item: { owner: string; repo: string; issueNumber: number }
+): Promise<Response> {
+  void item;
+  if (prior.result === "ok") {
+    if (prior.newJobId != null) {
+      try {
+        const job = await store.get(prior.newJobId);
+        if (job) {
+          return json(200, {
+            ok: true,
+            jobId: prior.newJobId,
+            newJobId: prior.newJobId,
+            key: job.jobKey,
+            terminalJobId: prior.terminalJobId,
+            deduped: true,
+          });
+        }
+      } catch {
+        // Fall through to the key-less shape rather than failing a replay
+        // for a ledger row that already committed.
+      }
+    }
+    return json(200, {
+      ok: true,
+      jobId: prior.newJobId,
+      newJobId: prior.newJobId,
+      terminalJobId: prior.terminalJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "not-found") {
+    return json(404, {
+      error: "already decided: not-found",
+      code: "not-found",
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "stale-kick" || prior.result === "conflict") {
+    const code = prior.result === "conflict" ? "conflict" : "stale-kick";
+    const status = 409;
+    return json(status, {
+      error: `already decided: ${prior.result}`,
+      code,
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  return json(422, {
+    error: `already decided: ${prior.result}`,
+    code: "not-kickable",
+    terminalJobId: prior.terminalJobId,
+    newJobId: prior.newJobId,
+    deduped: true,
+  });
 }
 
 /** Owner/repo/number-only payloads are sit clears; commit/kick payloads requeue. */
