@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createBoardFetchHandler } from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { QueueUnavailableError } from "../src/sql_client.ts";
-import { makeJob } from "./fixtures.ts";
+import { makeIssueJob, makeJob } from "./fixtures.ts";
 
 const EDGE_HEADERS = { "X-Forwarded-User": "operator" };
 
@@ -444,5 +444,125 @@ describe("board reopen kick contract (#163)", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, reopened: true, deduped: true });
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("board implement kick contract (#164)", () => {
+  async function seedNoChanges(store: MemoryReviewJobStore, overrides: Record<string, unknown> = {}): Promise<number> {
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-seed", ...overrides }));
+    const leased = await store.lease("worker", 60_000, new Date(), ["implement"]);
+    if (!leased) throw new Error("expected an implement lease");
+    await store.saveResult(leased.id, "worker", { kind: "skip", reason: "no-changes" });
+    await store.markPublished(leased.id, "worker", { state: "skipped", reason: "no-changes" });
+    // The terminal wake leaves a sit latch for the board to clear.
+    await store.sits.remember("kirmanak", "demo", 12, "no-changes");
+    return leased.id;
+  }
+
+  function implementForge(labelCalls: string[]) {
+    return {
+      getPR: async () => ({ state: "closed", merged: false, head: { sha: "deadbeef" } }),
+      closePullRequest: async () => ({}),
+      reopenPullRequest: async () => ({}),
+      addIssueLabel: async (_owner: string, _repo: string, _index: number, label: string) => {
+        labelCalls.push(label);
+        return {};
+      },
+    };
+  }
+
+  function implementRequest(body: Record<string, unknown>): Request {
+    return kickRequest(body);
+  }
+
+  test("ok clears the sit and queues, replay returns the same key with no second forge call", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedNoChanges(store);
+    const labelCalls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: implementForge(labelCalls),
+    });
+    const item = { owner: "kirmanak", repo: "demo", number: 12, kick: "implement", idempotencyKey: "impl-1" };
+
+    const ok = await handler(implementRequest(item));
+    expect(ok.status).toBe(200);
+    const okBody = (await ok.json()) as Record<string, unknown>;
+    expect(okBody.terminalJobId).toBe(terminalId);
+    expect(okBody.deduped).toBe(false);
+    expect(typeof okBody.jobId).toBe("number");
+    expect(okBody.jobId).not.toBe(terminalId);
+    expect(okBody.key).toBe("implement:kirmanak/demo#12");
+    expect(labelCalls).toEqual(["jumi"]);
+    // Latch cleared, terminal kept, new row queued with the same key.
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+    expect((await store.get(terminalId))?.state).toBe("skipped");
+    const queued = await store.get(okBody.jobId as number);
+    expect(queued?.state).toBe("queued");
+    expect(queued?.jobKey).toBe("implement:kirmanak/demo#12");
+
+    const replay = await handler(implementRequest(item));
+    expect(replay.status).toBe(200);
+    const replayBody = (await replay.json()) as Record<string, unknown>;
+    expect(replayBody).toMatchObject({
+      jobId: okBody.jobId,
+      newJobId: okBody.jobId,
+      key: "implement:kirmanak/demo#12",
+      terminalJobId: terminalId,
+      deduped: true,
+    });
+    expect(labelCalls).toEqual(["jumi"]);
+
+    // In-flight row for that key is a conflict, not a second queued row.
+    const conflict = await handler(implementRequest({ ...item, idempotencyKey: "impl-2" }));
+    expect(conflict.status).toBe(409);
+    expect(((await conflict.json()) as Record<string, unknown>).code).toBe("conflict");
+
+    // Same key reused for a different item is a client error.
+    const mismatch = await handler(
+      implementRequest({ owner: "kirmanak", repo: "demo", number: 13, kick: "implement", idempotencyKey: "impl-1" })
+    );
+    expect(mismatch.status).toBe(400);
+    expect(((await mismatch.json()) as Record<string, unknown>).code).toBe("bad-request");
+  });
+
+  test("succeeded and non-no-changes terminals are not kickable", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-done" }));
+    const leased = await store.lease("worker", 60_000, new Date(), ["implement"]);
+    if (!leased) throw new Error("expected an implement lease");
+    await store.saveResult(leased.id, "worker", { kind: "markdown", markdown: "done" });
+    await store.markPublished(leased.id, "worker", { state: "succeeded" });
+    const labelCalls: string[] = [];
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: implementForge(labelCalls),
+    });
+    const refused = await handler(implementRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "implement" }));
+    expect(refused.status).toBe(422);
+    expect(((await refused.json()) as Record<string, unknown>).code).toBe("not-kickable");
+    expect(labelCalls).toHaveLength(0);
+
+    const other = new MemoryReviewJobStore();
+    await other.enqueueIssue(makeIssueJob({ delivery: "d-other" }));
+    const leasedOther = await other.lease("worker", 60_000, new Date(), ["implement"]);
+    if (!leasedOther) throw new Error("expected an implement lease");
+    await other.saveResult(leasedOther.id, "worker", { kind: "skip", reason: "blocked on #196" });
+    await other.markPublished(leasedOther.id, "worker", { state: "skipped", reason: "blocked on #196" });
+    const otherHandler = createBoardFetchHandler({
+      store: other,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      forgeApi: implementForge(labelCalls),
+    });
+    const blocked = await otherHandler(
+      implementRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "implement" })
+    );
+    expect(blocked.status).toBe(422);
+    expect(((await blocked.json()) as Record<string, unknown>).code).toBe("not-kickable");
   });
 });

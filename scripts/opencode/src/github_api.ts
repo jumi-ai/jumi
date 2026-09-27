@@ -748,6 +748,10 @@ export class GithubAPI {
     return toTask(await this.get<GithubIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }
 
+  async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
+    return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
+  }
+
   async listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
     const issues = await this.getPagesOrEmptyOn404<GithubIssue>(
       `/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies/blocked_by`

@@ -25,6 +25,21 @@ export function isReopenKickId(kick: string | null | undefined): boolean {
   return typeof kick === "string" && kick.trim() === REOPEN_KICK_ID;
 }
 
+/**
+ * Implement retry kick ("queue again without a second pull").
+ *
+ * A no-changes implement stays terminal until the issue body changes: a
+ * label remove/re-add with the same body does nothing. This kick bypasses
+ * that latch, clears it, and queues the work again. It never opens a pull
+ * request itself; the worker owns PR creation and already skips when a
+ * closer exists. The label change alone is never the wake.
+ */
+export const IMPLEMENT_KICK_ID = "implement";
+
+export function isImplementKickId(kick: string | null | undefined): boolean {
+  return typeof kick === "string" && kick.trim() === IMPLEMENT_KICK_ID;
+}
+
 export function isKickPath(pathname: string): boolean {
   const normalized = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   return KICK_PATHS.has(normalized);
@@ -237,5 +252,46 @@ export function parseReopenKickBody(
   if (number == null || !Number.isFinite(number) || number <= 0) return { error: "missing number" };
   if (!kick) return { error: "missing kick" };
   if (!isReopenKickId(kick)) return { error: "not a reopen kick" };
+  return { owner, repo, number, kick, idempotencyKey };
+}
+
+export interface ImplementKickRequest {
+  owner: string;
+  repo: string;
+  number: number;
+  kick: string;
+  /** Idempotency key from header or body. Empty means no dedupe. */
+  idempotencyKey: string;
+}
+
+/**
+ * Parse an implement kick body. The actor is never read here: it always
+ * comes from the edge identity. Commit is ignored: the implement wake
+ * requeues by issue identity and never opens a pull request.
+ */
+export function parseImplementKickBody(
+  body: unknown,
+  headerIdempotencyKey: string
+): ImplementKickRequest | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "expected a JSON object" };
+  }
+  const rec = body as Record<string, unknown>;
+  const owner = strField(rec.owner).trim();
+  const repo = strField(rec.repo).trim();
+  const number = numField(rec.number) ?? numField(rec.prNumber) ?? numField(rec.pr_number) ?? numField(rec.issueNumber);
+  const kick = rawKickIdOf(rec);
+  const idempotencyKey = (
+    headerIdempotencyKey ||
+    strField(rec.idempotencyKey) ||
+    strField(rec.idempotency_key) ||
+    strField(rec["idempotency-key"])
+  ).trim();
+
+  if (!owner) return { error: "missing owner" };
+  if (!repo) return { error: "missing repo" };
+  if (number == null || !Number.isFinite(number) || number <= 0) return { error: "missing number" };
+  if (!kick) return { error: "missing kick" };
+  if (!isImplementKickId(kick)) return { error: "not an implement kick" };
   return { owner, repo, number, kick, idempotencyKey };
 }
