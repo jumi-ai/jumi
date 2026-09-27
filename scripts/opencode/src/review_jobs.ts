@@ -463,8 +463,8 @@ export function workerJobKind(job: IssueJob): JobKind {
 
 export function workerJobKey(job: IssueJob): string {
   const kind = workerJobKind(job);
-  if (kind === "implement" && isExternalJobRef(job)) {
-    return `implement:${job.tracker}:${job.trackerId ?? ""}`;
+  if (kind === "implement" && isExternalJobRef(job) && job.trackerId) {
+    return `implement:${job.tracker}:${job.trackerId}`;
   }
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
   const base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
