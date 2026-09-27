@@ -328,10 +328,26 @@ export async function fetchPeerBoard(
       const declared = Number.parseInt(declaredLength, 10);
       if (Number.isFinite(declared) && declared > PEER_BOARD_MAX_BYTES) return peerUnavailable();
     }
+    // Stream with an incremental budget: a peer can omit Content-Length and
+    // send a chunked body, so never buffer it whole before the cap runs.
+    const reader = response.body?.getReader();
+    if (!reader) return peerUnavailable();
+    const chunks: Uint8Array[] = [];
+    let seen = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      seen += value.byteLength;
+      if (seen > PEER_BOARD_MAX_BYTES) {
+        await reader.cancel().catch(() => {});
+        return peerUnavailable();
+      }
+      chunks.push(value);
+    }
     let body: Record<string, unknown>;
     try {
-      const text = await response.text();
-      if (new TextEncoder().encode(text).length > PEER_BOARD_MAX_BYTES) return peerUnavailable();
+      const text = new TextDecoder().decode(Buffer.concat(chunks));
       body = JSON.parse(text) as Record<string, unknown>;
     } catch {
       return peerUnavailable();
@@ -393,7 +409,7 @@ export interface BoardHandlerDeps {
   forge?: string;
   /** Server-configured forge origin for links. Rendered as href only, never fetched. */
   forgeUrl?: string;
-<  /** Internal peer listener URL. Unset disables the hop (peer unavailable). */
+  /** Internal peer listener URL. Unset disables the hop (peer unavailable). */
   peerUrl?: string;
   /** Bearer for the peer hop. Unset means that forge is unavailable. Never invent one. */
   peerToken?: string;

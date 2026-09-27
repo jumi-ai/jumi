@@ -5,6 +5,7 @@ import {
   BOARD_PEER_URL_ENV,
   buildBoardGroups,
   createBoardFetchHandler,
+  PEER_BOARD_MAX_BYTES,
   PEER_FORGE,
   renderBoardPage,
 } from "../src/board.ts";
@@ -301,6 +302,93 @@ describe("operator board read API", () => {
     const body = (await response.json()) as Record<string, unknown>;
     const peers = body.peers as Record<string, Record<string, unknown>>;
     expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+  });
+
+  test("chunked peer body without Content-Length is capped while streaming", async () => {
+    const store = await seedStore();
+    const chunkSize = 256 * 1024;
+    let pulled = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(chunkSize).fill(0x20));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    // A test double, not a real Response: no Content-Length, and text()
+    // throws so the cap must trip on the streamed bytes alone.
+    const fetchFn = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: stream,
+      text: async () => {
+        throw new Error("peer body must not be buffered with text()");
+      },
+    })) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+    expect(cancelled).toBe(true);
+    // Reading stops just past the cap instead of draining the endless body.
+    expect(pulled * chunkSize).toBeLessThanOrEqual(PEER_BOARD_MAX_BYTES + 2 * chunkSize);
+  });
+
+  test("chunked peer body under the cap still loads without Content-Length", async () => {
+    const store = await seedStore();
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        in_progress: [{ reason: "review leased", owner: "o", repo: "r", number: 3, kind: "review" }],
+        needs_kick: [],
+        sitting: [],
+      })
+    );
+    const half = Math.floor(payload.length / 2);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload.slice(0, half));
+        controller.enqueue(payload.slice(half));
+        controller.close();
+      },
+    });
+    const fetchFn = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: stream,
+      text: async () => {
+        throw new Error("peer body must not be buffered with text()");
+      },
+    })) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peer = (body.peers as Record<string, Record<string, unknown>>)[PEER_FORGE];
+    expect(peer).toMatchObject({ available: true, forge: PEER_FORGE });
+    expect(peer.in_progress as unknown[]).toHaveLength(1);
   });
 
   test("page is served with the board on the same origin", async () => {
