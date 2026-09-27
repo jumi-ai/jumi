@@ -8,6 +8,7 @@ import { type ReviewApi, reviewPullRequest } from "../src/review.ts";
 import { issueJobFromRecord, MemoryReviewJobStore, workerJobKey } from "../src/review_jobs.ts";
 import {
   type BriefTracker,
+  cloneUrlTargetsRepo,
   MISSING_REPOSITORY_COMMENT,
   makeExternalIssueJob,
   parseRepositoryLines,
@@ -226,6 +227,39 @@ describe("tracker reference", () => {
     expect(MISSING_REPOSITORY_COMMENT.split("\n")).toHaveLength(1);
     expect(MISSING_REPOSITORY_COMMENT).toContain("Repository: owner/repo");
   });
+
+  test("external queue key is the stable tracker id alone, matching the ledger key", () => {
+    const base = {
+      delivery: "d1",
+      action: "assigned",
+      title: "Fix",
+      body: "Repository: kirmanak/demo\n",
+      htmlUrl: "https://tracker.example/items/FAKE-1",
+      issueUpdatedAt: "2026-05-23T00:00:00Z",
+      defaultBranch: "main",
+      cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+      receivedAt: "2026-05-23T00:00:00Z",
+      issueNumber: 0,
+      tracker: "fake",
+      trackerId: "FAKE-1",
+      trackerUrl: "https://tracker.example/items/FAKE-1",
+    };
+    const here = { ...base, owner: "kirmanak", repo: "demo" };
+    const retargeted = { ...base, owner: "kirmanak", repo: "other" };
+    expect(issueJobKey(here)).toBe(workerJobKey(here));
+    expect(issueJobKey(here)).toBe("implement:fake:FAKE-1");
+    expect(issueJobKey(retargeted)).toBe(issueJobKey(here));
+    expect(issueJobKey(retargeted)).toBe(workerJobKey(retargeted));
+  });
+
+  test("clone URL must name the Repository: owner/repo", () => {
+    expect(cloneUrlTargetsRepo("https://gitea.kirmanak.stream/kirmanak/demo.git", "kirmanak", "demo")).toBe(true);
+    expect(cloneUrlTargetsRepo("https://gitea.kirmanak.stream/kirmanak/demo", "kirmanak", "demo")).toBe(true);
+    expect(cloneUrlTargetsRepo("https://gitea.kirmanak.stream/kirmanak/other.git", "kirmanak", "demo")).toBe(false);
+    expect(cloneUrlTargetsRepo("https://gitea.kirmanak.stream/other/demo.git", "kirmanak", "demo")).toBe(false);
+    expect(cloneUrlTargetsRepo("not a url", "kirmanak", "demo")).toBe(false);
+    expect(cloneUrlTargetsRepo("", "kirmanak", "demo")).toBe(false);
+  });
 });
 
 describe("external first-run implement", () => {
@@ -404,6 +438,53 @@ describe("external first-run implement", () => {
       expect(result.status).toBe("skipped");
       expect(forge.pulls).toHaveLength(0);
       expect(tracker.comments).toHaveLength(1);
+    });
+  });
+
+  test("clone URL disagreeing with the Repository line refuses before the engine starts", async () => {
+    await withDirs(async (home, workdir) => {
+      const tracker = makeFakeTracker();
+      const forge = makeForgeMock();
+      const job = makeExternalIssueJob({
+        tracker: "fake",
+        trackerId: "FAKE-127",
+        trackerUrl: "https://tracker.example/items/FAKE-127",
+        title: "Wrong clone",
+        body: "Please implement this.\n\nRepository: kirmanak/other\n",
+        owner: "kirmanak",
+        repo: "demo",
+        defaultBranch: "main",
+        cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+      });
+      let engineRan = false;
+      const result = await implementIssue({
+        api: forge as unknown as Parameters<typeof implementIssue>[0]["api"],
+        tracker: tracker as unknown as Parameters<typeof implementIssue>[0]["tracker"],
+        forge: forge as unknown as Parameters<typeof implementIssue>[0]["forge"],
+        job,
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git must not run when the clone URL disagrees with the Repository line");
+        },
+        openCodeRunner: async () => {
+          engineRan = true;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(engineRan).toBe(false);
+      expect(result.status).toBe("skipped");
+      if (result.status === "skipped") {
+        expect(result.reason).toContain("clone URL does not match");
+        expect(result.reason).toContain("kirmanak/other");
+      }
+      expect(forge.pulls).toHaveLength(0);
     });
   });
 

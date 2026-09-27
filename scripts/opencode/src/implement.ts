@@ -57,6 +57,7 @@ import {
 import {
   type BriefTracker,
   buildExternalPullRequestBody,
+  cloneUrlTargetsRepo,
   externalBranchName,
   isExternalIssueJob,
   MISSING_REPOSITORY_COMMENT,
@@ -181,7 +182,10 @@ export function issueJobKey(job: {
   const tracker = (job.tracker ?? "").trim();
   const lower = tracker.toLowerCase();
   if (tracker && lower !== "gitea" && lower !== "github" && job.trackerId) {
-    return `${job.owner}/${job.repo}@${tracker}:${job.trackerId}`;
+    // Stable tracker id alone is the identity (mirrors workerJobKey): a brief
+    // retargeted to another repo dedupes as the same job in both the queue
+    // and the ledger instead of looking new to one of them.
+    return `implement:${tracker}:${job.trackerId}`;
   }
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
 }
@@ -300,6 +304,9 @@ async function implementExternalIssue(
   if (!target) return { status: "skipped", reason: "missing Repository: owner/repo" };
   const owner = target.owner;
   const repo = target.repo;
+  if (!cloneUrlTargetsRepo(job.cloneUrl, owner, repo)) {
+    return { status: "skipped", reason: `clone URL does not match Repository: ${owner}/${repo}` };
+  }
   const branch = externalBranchName(ref.tracker, ref.id, job.title);
   if (branch === job.defaultBranch) {
     return { status: "skipped", reason: "refusing to commit on the default branch" };

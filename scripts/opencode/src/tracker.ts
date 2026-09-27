@@ -37,6 +37,28 @@ export function parseRepositoryLines(body: string | null | undefined): RepoRef[]
   return [...seen.values()];
 }
 
+/**
+ * True when `cloneUrl` names `owner/repo` (last two path segments, optional
+ * `.git` suffix). The external brief's `Repository:` line overrides the
+ * enqueued owner/repo, but the enqueued clone URL is what gets cloned, so a
+ * mismatch must refuse before the engine starts rather than clone one repo
+ * and open the pull on another.
+ */
+export function cloneUrlTargetsRepo(cloneUrl: string | null | undefined, owner: string, repo: string): boolean {
+  if (!cloneUrl) return false;
+  let path: string;
+  try {
+    path = new URL(cloneUrl).pathname;
+  } catch {
+    return false;
+  }
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  if (segments.length < 2) return false;
+  const repoSegment = segments[segments.length - 1]?.replace(/\.git$/i, "") ?? "";
+  const ownerSegment = segments[segments.length - 2] ?? "";
+  return ownerSegment.toLowerCase() === owner.toLowerCase() && repoSegment.toLowerCase() === repo.toLowerCase();
+}
+
 export function isExternalIssueJob(job: { tracker?: string | null; trackerId?: string | null }): boolean {
   const tracker = (job.tracker ?? "").trim();
   if (!tracker) return false;
