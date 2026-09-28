@@ -88,10 +88,12 @@ export function isExternalIssueJob(job: { tracker?: string | null; trackerId?: s
 }
 
 export function trackerRefOfJob(job: IssueJob): TrackerRef {
-  if (job.tracker && job.trackerId) {
+  const tracker = (job.tracker ?? "").trim();
+  const id = (job.trackerId ?? "").trim();
+  if (tracker && id) {
     return {
-      tracker: job.tracker,
-      id: job.trackerId,
+      tracker,
+      id,
       url: job.trackerUrl ?? job.htmlUrl,
     };
   }
