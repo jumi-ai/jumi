@@ -160,6 +160,8 @@ export async function runReviewJob(
   try {
     const result = await reviewPullRequest({
       api,
+      tracker: api,
+      forge: api,
       owner: job.owner,
       repo: job.repo,
       prNumber: job.prNumber,

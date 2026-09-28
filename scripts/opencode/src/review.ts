@@ -98,6 +98,10 @@ export type WorkspacePreparer = (opts: {
 
 export interface ReviewOptions {
   api: ReviewApi;
+  /** Tracker capability (linked-issue briefs). Defaults to `api`. A git-host adapter satisfies both. */
+  tracker?: Pick<ReviewApi, "getIssue" | "listIssueComments"> | ReviewApi;
+  /** Forge capability (PR + status). Defaults to `api`. A git-host adapter satisfies both. */
+  forge?: ReviewApi;
   owner: string;
   repo: string;
   prNumber: number;
@@ -153,6 +157,7 @@ export interface ReviewResult {
 
 export interface PublishReviewOptions {
   api: ReviewApi;
+  forge?: ReviewApi;
   owner: string;
   repo: string;
   prNumber: number;
@@ -786,7 +791,7 @@ async function loadPrComments(
 }
 
 async function loadLinkedIssue(
-  api: ReviewApi,
+  api: Pick<ReviewApi, "getIssue" | "listIssueComments">,
   owner: string,
   repo: string,
   id: number
@@ -861,18 +866,19 @@ async function resolveThreadPermissions(
 
 export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
-  const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+  const forgeApi = opts.forge ?? opts.api;
+  const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewLabel = `${opts.owner}/${opts.repo}#${opts.prNumber}`;
   const skipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, opts.expectedHeadSha);
   if (skipReason) {
     const result: ReviewResult = { status: "skipped", reason: skipReason };
     const { state, description } = statusForResult(result);
-    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
     return result;
   }
 
   if (opts.error && !opts.resultMarkdown) {
-    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, "failure", opts.error, pr.html_url);
+    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, "failure", opts.error, pr.html_url);
     return { status: "skipped", reason: opts.error };
   }
 
@@ -880,17 +886,17 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     const reason = opts.resultReason ?? "Incomplete review: no output";
     const result: ReviewResult = { status: "skipped", reason };
     if (reason === "Incomplete review: no output") {
-      await upsertStuckText(opts.api, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
+      await upsertStuckText(forgeApi, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
     }
     const { state, description } = statusForResult(result);
-    await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
     return result;
   }
 
   const marker = markerFor(opts.owner, opts.repo, pr.number);
   const parsed = parseReviewOutput(opts.resultMarkdown);
   const singleFilePath = needsSingleFilePath(parsed.comment)
-    ? await resolveSingleFilePath(opts.api, opts.owner, opts.repo, pr.number, log)
+    ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, pr.number, log)
     : undefined;
   const writeup = buildCommentBody(
     marker,
@@ -911,7 +917,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   if (!parsed.verdict.incomplete) {
     try {
       const landed = await postPullReview({
-        api: opts.api,
+        api: forgeApi,
         owner: opts.owner,
         repo: opts.repo,
         prNumber: pr.number,
@@ -939,7 +945,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       body_bytes: byteLength(stickyBody),
       body_bytes_h: formatBytes(byteLength(stickyBody)),
     });
-    const existing = await opts.api.findStickyIssueComment(opts.owner, opts.repo, pr.number, opts.botUsername, marker);
+    const existing = await forgeApi.findStickyIssueComment(opts.owner, opts.repo, pr.number, opts.botUsername, marker);
     await logParentDiag(log, "post_sticky_result", {
       review: reviewLabel,
       sticky_id: existing?.id ?? null,
@@ -947,23 +953,25 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     });
     if (existing) {
       await logParentDiag(log, "post_comment_update", { review: reviewLabel, sticky_id: existing.id });
-      const updated = await opts.api.updateIssueComment(opts.owner, opts.repo, existing.id, stickyBody);
+      const updated = await forgeApi.updateIssueComment(opts.owner, opts.repo, existing.id, stickyBody);
       result = { status: "updated", commentId: updated.id };
     } else {
       await logParentDiag(log, "post_comment_create", { review: reviewLabel });
-      const created = await opts.api.createIssueComment(opts.owner, opts.repo, pr.number, stickyBody);
+      const created = await forgeApi.createIssueComment(opts.owner, opts.repo, pr.number, stickyBody);
       result = { status: "posted", commentId: created.id };
     }
   }
 
   const { state, description } = statusForResult(result, parsed.verdict);
-  await postReviewStatus(opts.api, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+  await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
 }
 
 export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
+  const trackerApi = opts.tracker ?? opts.api;
+  const forgeApi = opts.forge ?? opts.api;
   const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
     chain: opts.chain,
     fallbackModel: opts.fallbackModel,
@@ -974,7 +982,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   });
   throwIfAborted(opts.abortSignal);
   const repoFullName = `${opts.owner}/${opts.repo}`;
-  const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+  const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewedHeadSha = opts.expectedHeadSha ?? pr.head.sha;
 
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
@@ -990,7 +998,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // equivalent to the worker cancel path.
     if (isReviewQuotaStuck(stuckState)) {
       await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
-      await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+      await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
       return { status: "skipped", reason: QUOTA_STUCK_TEXT };
     }
     if (stuckState.quota) {
@@ -1000,18 +1008,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const stuckReason = evaluateStuck(stuckState.fingerprints);
     if (stuckReason) {
       await opts.persistResult?.({ kind: "skip", reason: stuckComment(stuckReason) });
-      await upsertStuckComment(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
+      await upsertStuckComment(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReason);
       return { status: "skipped", reason: stuckComment(stuckReason) };
     }
   }
 
   if (opts.inspectOtherChecks !== false) {
-    const ciSkip = await skipReasonForOtherChecks(opts, reviewedHeadSha, log);
+    const ciSkip = await skipReasonForOtherChecks({ ...opts, api: forgeApi }, reviewedHeadSha, log);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
   }
 
   await postReviewStatus(
-    opts.api,
+    forgeApi,
     opts.owner,
     opts.repo,
     reviewedHeadSha,
@@ -1036,13 +1044,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
     const [repoInfo, prFiles, prCommentResult] = await Promise.all([
-      opts.api.getRepo(opts.owner, opts.repo),
-      opts.api.getPRFiles(opts.owner, opts.repo, pr.number),
-      loadPrComments(opts.api, opts.owner, opts.repo, pr.number),
+      forgeApi.getRepo(opts.owner, opts.repo),
+      forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
+      loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
     ]);
 
     const ids = extractClosingIssueNumbers(pr);
-    const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(opts.api, opts.owner, opts.repo, id)));
+    const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
     if (prCommentResult.note) notes.push(prCommentResult.note);
@@ -1060,7 +1068,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       permissionDetail,
       lookups: permissionLookups,
       failures: permissionFailures,
-    } = await resolveThreadPermissions(opts.api, opts.owner, opts.repo, prComments, linkedIssues, log);
+    } = await resolveThreadPermissions(forgeApi, opts.owner, opts.repo, prComments, linkedIssues, log);
     const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
 
     const maxFiles = opts.maxFiles ?? 100;
@@ -1238,10 +1246,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       const result: ReviewResult = { status: "skipped", reason };
       await persistOutcome({ kind: "skip", reason });
       if (stuckText) {
-        await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckText);
+        await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckText);
       }
       const { state, description } = statusForResult(result);
-      await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, htmlUrl);
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, state, description, htmlUrl);
       return result;
     };
     try {
@@ -1249,7 +1257,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       let extrasUsed = 0;
       while (true) {
         await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
-        const currentPR = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+        const currentPR = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
         const currentSkipReason = skipReasonForPR(currentPR) ?? skipReasonForHeadChange(currentPR, reviewedHeadSha);
         if (currentSkipReason) return await persistSkipAndStatus(currentSkipReason, currentPR.html_url);
 
@@ -1289,7 +1297,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             }
           }
           return await publishReviewResult({
-            api: opts.api,
+            api: forgeApi,
+            forge: forgeApi,
             owner: opts.owner,
             repo: opts.repo,
             prNumber: opts.prNumber,
@@ -1342,10 +1351,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       }
       if (!persisted && !persistFailed) {
         await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
-        await upsertStuckText(opts.api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+        await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
         const skipped: ReviewResult = { status: "skipped", reason: QUOTA_STUCK_TEXT };
         const { state, description } = statusForResult(skipped);
-        await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, state, description, pr.html_url);
+        await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, state, description, pr.html_url);
         return skipped;
       }
       throw err;
@@ -1365,7 +1374,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           }).catch(() => undefined);
         }
       }
-      await postReviewStatus(opts.api, opts.owner, opts.repo, reviewedHeadSha, "failure", message, pr.html_url);
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", message, pr.html_url);
     }
     throw err;
   }

@@ -40,10 +40,10 @@ import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } 
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
-import type { IssueApi } from "./ports.ts";
+import type { Forge, IssueApi, Tracker } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { appendRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
+import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -54,6 +54,16 @@ import {
   readStuckLatch,
   stuckComment,
 } from "./stuck.ts";
+import {
+  type BriefTracker,
+  buildExternalPullRequestBody,
+  cloneUrlTargetsRepo,
+  externalBranchName,
+  isExternalIssueJob,
+  MISSING_REPOSITORY_COMMENT,
+  parseRepositoryLines,
+  trackerRefOfJob,
+} from "./tracker.ts";
 import type { IssueJob } from "./types.ts";
 import { type GitAuthResolver, type GitRunner, redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
 
@@ -106,6 +116,10 @@ export type ImplementResult =
 
 export interface ImplementOptions extends PickupPolicy {
   api: IssueApi;
+  /** Tracker capability (brief source). Defaults to `api`. A git-host adapter satisfies both. */
+  tracker?: Tracker | BriefTracker | IssueApi;
+  /** Forge capability (clone + PR). Defaults to `api`. A git-host adapter satisfies both. */
+  forge?: Forge | IssueApi;
   job: IssueJob;
   giteaUrl: string;
   giteaToken: string;
@@ -158,7 +172,24 @@ export function issueBranchName(issueNumber: number, title: string): string {
   return `jumi/issue-${issueNumber}-${slug}`;
 }
 
-export function issueJobKey(job: { owner: string; repo: string; issueNumber: number }): string {
+export function issueJobKey(job: {
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  tracker?: string | null;
+  trackerId?: string | null;
+  mode?: string | null;
+}): string {
+  const mode = (job.mode ?? "implement").trim();
+  if (mode !== "implement") return `${job.owner}/${job.repo}#${job.issueNumber}`;
+  if (isExternalIssueJob(job)) {
+    const tracker = (job.tracker ?? "").trim();
+    const trackerId = (job.trackerId ?? "").trim();
+    // Stable tracker id alone is the identity (mirrors workerJobKey): a brief
+    // retargeted to another repo dedupes as the same job in both the queue
+    // and the ledger instead of looking new to one of them.
+    return `implement:${tracker}:${trackerId}`;
+  }
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
 }
 
@@ -235,9 +266,175 @@ export async function readPullRequestDescription(worktree: string): Promise<stri
   }
 }
 
+function resolveImplementForge(opts: ImplementOptions): Forge & Partial<IssueApi> {
+  return (opts.forge ?? opts.api) as Forge & Partial<IssueApi>;
+}
+
+function resolveImplementTracker(opts: ImplementOptions): Tracker & Partial<IssueApi> & Partial<BriefTracker> {
+  return (opts.tracker ?? opts.api) as Tracker & Partial<IssueApi> & Partial<BriefTracker>;
+}
+
+async function implementExternalIssue(
+  opts: ImplementOptions
+): Promise<ImplementResult | FollowUpResult | ConflictResult> {
+  const log = opts.logger ?? logDefault;
+  const job = opts.job;
+  const ref = trackerRefOfJob(job);
+  const repos = parseRepositoryLines(job.body);
+  const briefTracker = resolveImplementTracker(opts) as Partial<BriefTracker>;
+  const forge = resolveImplementForge(opts) as IssueApi;
+
+  if (repos.length !== 1) {
+    const reason =
+      repos.length === 0
+        ? "missing Repository: owner/repo"
+        : "multiple repositories: refusing to split into several jobs";
+    if (typeof briefTracker.postBriefComment === "function") {
+      try {
+        await briefTracker.postBriefComment(ref, MISSING_REPOSITORY_COMMENT);
+      } catch (err) {
+        return {
+          status: "skipped",
+          reason: `failed to request repository: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      return { status: "skipped", reason };
+    }
+    return { status: "skipped", reason };
+  }
+
+  const target = repos[0];
+  if (!target) return { status: "skipped", reason: "missing Repository: owner/repo" };
+  const owner = target.owner;
+  const repo = target.repo;
+  if (!cloneUrlTargetsRepo(job.cloneUrl, owner, repo, opts.giteaUrl)) {
+    return { status: "skipped", reason: `clone URL does not match Repository: ${owner}/${repo}` };
+  }
+  const branch = externalBranchName(ref.tracker, ref.id, job.title);
+  if (branch === job.defaultBranch) {
+    return { status: "skipped", reason: "refusing to commit on the default branch" };
+  }
+
+  const effectiveJob: IssueJob = { ...job, owner, repo };
+  const claimed = await beginClaimedWorktree({
+    ...opts,
+    job: effectiveJob,
+    fallbackEngine: registeredEngine,
+    branch,
+  });
+  if (isClaimedEarlyResult(claimed)) return claimed;
+  const { worktree, sanitizeEnv, engine } = claimed;
+  const loop = openClaimedLoop(claimed, opts);
+  let runner: RunnerStamp | undefined;
+
+  return runClaimedLoop(
+    loop,
+    opts.abortSignal,
+    async () => {
+      await ensureBareCache(loop, {
+        cloneUrl: effectiveJob.cloneUrl,
+        giteaUrl: opts.giteaUrl,
+        abortSignal: opts.abortSignal,
+        log,
+      });
+      const headSha = await attachIssueWorktree(loop, {
+        branch,
+        defaultBranch: effectiveJob.defaultBranch,
+        abortSignal: opts.abortSignal,
+        log,
+      });
+      await loop.stampHeadSha(headSha);
+      throwIfAborted(opts.abortSignal);
+      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
+      await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
+      await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
+
+      log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
+      const runOpts: EngineRunOptions = {
+        model: opts.model,
+        variant: opts.variant,
+        workdir: worktree,
+        home: opts.home,
+        sanitizeEnv,
+        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+        timeoutMs: opts.timeoutMs,
+        maxOutputBytes: opts.maxOutputBytes,
+        reviewLabel: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
+        trace: {
+          kind: "implement",
+          owner,
+          repo,
+          sha: headSha,
+          jobId: opts.jobId ?? job.delivery,
+        },
+        logger: log,
+        abortSignal: opts.abortSignal,
+        onPid: loop.engineOnPid(opts.onPid),
+      };
+      const result = await runEngineStamped(engine, runOpts, (r) => {
+        runner = r;
+      });
+      throwIfEngineFailed(result);
+
+      throwIfAborted(opts.abortSignal);
+      const prFileContents = await readPullRequestDescription(worktree);
+      const validatedSkip = await readValidatedSkip(worktree);
+      await stripSentinels(worktree, [PR_DESCRIPTION_FILE, SKIP_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
+      const porcelain = await worktreePorcelain(loop);
+      if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
+        if (validatedSkip) {
+          await loop.stopHeartbeat();
+          await loop.detachWorktree();
+          return { status: "no-changes" };
+        }
+        await loop.stopHeartbeat();
+        await loop.detachWorktree();
+        return { status: "skipped", reason: INCOMPLETE_IMPLEMENT };
+      }
+
+      if (branch === effectiveJob.defaultBranch) {
+        throw new Error("refusing to commit on the default branch");
+      }
+      await commitIfDirty(loop, porcelain, `${job.title}`);
+      throwIfAborted(opts.abortSignal);
+      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = engineScratchTrackedReason(branch);
+        await loop.stopHeartbeat();
+        await loop.detachWorktree();
+        return { status: "skipped", reason };
+      }
+      await pushClaimedBranch(loop, branch);
+      throwIfAborted(opts.abortSignal);
+
+      const stamp = runner ? formatRunnerStamp(runner) : undefined;
+      const pr = await forge.createPullRequest(owner, repo, {
+        title: job.title,
+        body: wrapJumiPrBody(
+          redactGitSecrets(buildExternalPullRequestBody(prFileContents, ref.url, stamp), [loop.auth.token])
+        ),
+        head: branch,
+        base: effectiveJob.defaultBranch,
+      });
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized();
+      await loop.detachWorktree();
+      return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
+    },
+    async (err) => {
+      runner = thrownRunner(err) ?? runner;
+      await loop.stopHeartbeat();
+      await loop.forgetSerialized().catch(() => undefined);
+      await loop.detachWorktree();
+    }
+  );
+}
+
 export async function implementIssue(
   opts: ImplementOptions
 ): Promise<ImplementResult | FollowUpResult | ConflictResult> {
+  if (isExternalIssueJob(opts.job)) {
+    return implementExternalIssue(opts);
+  }
   const log = opts.logger ?? logDefault;
   const branch = issueBranchName(opts.job.issueNumber, opts.job.title);
   const claimed = await beginClaimedWorktree({

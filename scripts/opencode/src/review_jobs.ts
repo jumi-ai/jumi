@@ -12,6 +12,7 @@ import {
   type SkipLatchStore,
 } from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
 export {
@@ -40,6 +41,9 @@ export interface IssueJobPayload {
   action: string;
   trigger?: IssueJobTrigger;
   generation?: number;
+  tracker?: string;
+  trackerId?: string;
+  trackerUrl?: string;
 }
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
@@ -455,6 +459,11 @@ export function workerJobKind(job: IssueJob): JobKind {
 
 export function workerJobKey(job: IssueJob): string {
   const kind = workerJobKind(job);
+  if (kind === "implement" && isExternalIssueJob(job)) {
+    const tracker = (job.tracker ?? "").trim();
+    const trackerId = (job.trackerId ?? "").trim();
+    return `implement:${tracker}:${trackerId}`;
+  }
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
   const base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
   if (kind !== "follow-up" || job.trigger?.event !== "workflow_job") return base;
@@ -474,6 +483,9 @@ export function issueJobPayload(job: IssueJob): IssueJobPayload {
     cloneUrl: job.cloneUrl,
     action: job.action,
     trigger: job.trigger,
+    ...(job.tracker ? { tracker: job.tracker } : {}),
+    ...(job.trackerId ? { trackerId: job.trackerId } : {}),
+    ...(job.trackerUrl ? { trackerUrl: job.trackerUrl } : {}),
   };
 }
 
@@ -506,6 +518,9 @@ export function issueJobFromRecord(row: ReviewJobRecord): IssueJob {
     prNumber: row.prNumber || undefined,
     headSha: row.headSha || undefined,
     trigger: payload.trigger,
+    ...(payload.tracker ? { tracker: payload.tracker } : {}),
+    ...(payload.trackerId ? { trackerId: payload.trackerId } : {}),
+    ...(payload.trackerUrl ? { trackerUrl: payload.trackerUrl } : {}),
   };
 }
 
@@ -533,6 +548,9 @@ function parsePayload(value: unknown): IssueJobPayload | null {
     action: typeof rec.action === "string" ? rec.action : "",
     trigger: rec.trigger,
     ...(typeof rec.generation === "number" && Number.isFinite(rec.generation) ? { generation: rec.generation } : {}),
+    ...(typeof rec.tracker === "string" && rec.tracker ? { tracker: rec.tracker } : {}),
+    ...(typeof rec.trackerId === "string" && rec.trackerId ? { trackerId: rec.trackerId } : {}),
+    ...(typeof rec.trackerUrl === "string" && rec.trackerUrl ? { trackerUrl: rec.trackerUrl } : {}),
   };
 }
 

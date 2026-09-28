@@ -227,6 +227,12 @@ export interface IssueJob {
   prNumber?: number;
   headSha?: string;
   trigger?: IssueJobTrigger;
+  /** Tracker reference: which tracker owns the brief. Unset keeps the historical meaning (git-host issue). */
+  tracker?: string;
+  /** Stable id owned by `tracker`. Never a forge issue number for external trackers. */
+  trackerId?: string;
+  /** URL a human can open for the brief. */
+  trackerUrl?: string;
 }
 
 export interface GiteaPushPayload {
