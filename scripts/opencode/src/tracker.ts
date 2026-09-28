@@ -98,7 +98,7 @@ export function trackerRefOfJob(job: IssueJob): TrackerRef {
     };
   }
   return {
-    tracker: job.tracker ?? "gitea",
+    tracker: tracker || "gitea",
     id: String(job.issueNumber),
     url: job.htmlUrl,
   };
