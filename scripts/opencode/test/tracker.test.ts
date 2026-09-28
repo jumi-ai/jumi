@@ -260,12 +260,7 @@ describe("tracker reference", () => {
     expect(cloneUrlTargetsRepo("not a url", "kirmanak", "demo")).toBe(false);
     expect(cloneUrlTargetsRepo("", "kirmanak", "demo")).toBe(false);
     expect(
-      cloneUrlTargetsRepo(
-        "https://other-host/kirmanak/demo.git",
-        "kirmanak",
-        "demo",
-        "https://gitea.kirmanak.stream"
-      )
+      cloneUrlTargetsRepo("https://other-host/kirmanak/demo.git", "kirmanak", "demo", "https://gitea.kirmanak.stream")
     ).toBe(false);
     expect(
       cloneUrlTargetsRepo(
