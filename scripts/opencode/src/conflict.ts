@@ -21,7 +21,7 @@ import {
   withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
-import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -84,13 +84,12 @@ export interface MergeDefaultIntoWorktreeOpts {
   env: Record<string, string | undefined>;
   worktree: string;
   /**
-   * The computer this engine run boots. When `loop` is present the conflict
-   * engine runs through `runtime.runRuntimeEngine`; otherwise it falls back
-   * to `runEngineStamped` directly. Both live callers pass the loop in scope
-   * so a substituted runtime is never silently ignored.
+   * The computer this engine run boots. Required so a future caller can't
+   * silently bypass the seam: the conflict engine always runs through
+   * `runtime.runRuntimeEngine`.
    */
-  runtime?: StandingPodRuntime;
-  loop?: ClaimedLoop;
+  runtime: StandingPodRuntime;
+  loop: ClaimedLoop;
   defaultBranch: string;
   headRef: string;
   job: IssueJob;
@@ -481,15 +480,10 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       abortSignal: opts.abortSignal,
       onPid: opts.onPid,
     };
-    const engineResult = opts.loop
-      ? await (opts.runtime ?? standingPodRuntime).runRuntimeEngine(opts.loop, opts.openCodeRunner, runOpts, (r) => {
-          runner = r;
-          opts.onRunner?.(r);
-        })
-      : await runEngineStamped(opts.openCodeRunner, runOpts, (r) => {
-          runner = r;
-          opts.onRunner?.(r);
-        });
+    const engineResult = await opts.runtime.runRuntimeEngine(opts.loop, opts.openCodeRunner, runOpts, (r) => {
+      runner = r;
+      opts.onRunner?.(r);
+    });
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
@@ -610,7 +604,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       await loop.stampHeadSha(headSha);
 
       if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
-        return skipClaimedWork(loop, "same head and base already attempted");
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: "same head and base already attempted" };
       }
 
       const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
@@ -680,9 +675,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          await loop.stopHeartbeat();
-          await loop.forgetSerialized().catch(() => undefined);
-          await loop.detachWorktree();
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "stuck" };
         }
         mergeDefaultThrew = true;
@@ -691,18 +685,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
       runner = mergeResult.runner;
       if (mergeResult.status === "up-to-date") {
-        await loop.stopHeartbeat();
-        await loop.forgetSerialized();
-        await loop.detachWorktree();
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "up-to-date" };
       }
 
       if (mergeResult.status === "stuck") {
         await sticky("stuck: cannot resolve conflicts", pr.number);
         await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
-        await loop.stopHeartbeat();
-        await loop.forgetSerialized();
-        await loop.detachWorktree();
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "stuck" };
       }
 
@@ -774,9 +764,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             chain: opts.chain,
             previousError: opts.previousError,
           });
-          await loop.stopHeartbeat();
-          await loop.forgetSerialized().catch(() => undefined);
-          await loop.detachWorktree();
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "stuck" };
         }
         throw err;
@@ -793,7 +782,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         await pushClaimedBranch(loop, branch);
       } catch (err) {
         if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
-          return skipClaimedWork(loop, "remote already contains default");
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "remote already contains default" };
         }
         throw err;
       }
@@ -801,9 +791,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
       await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
       await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized();
-      await loop.detachWorktree();
+      // Push already landed; a failed destroy must not discard it.
+      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
@@ -818,9 +807,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-        await loop.stopHeartbeat();
-        await loop.forgetSerialized().catch(() => undefined);
-        await loop.detachWorktree();
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+          pushLanded: false,
+          logger: log,
+        });
         return;
       }
       await sticky(
@@ -836,9 +826,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
         await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
       }
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized().catch(() => undefined);
-      await loop.detachWorktree();
+      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
     }
   );
 }
