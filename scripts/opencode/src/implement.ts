@@ -184,11 +184,12 @@ export function issueJobKey(job: {
   if (mode !== "implement") return `${job.owner}/${job.repo}#${job.issueNumber}`;
   const tracker = (job.tracker ?? "").trim();
   const lower = tracker.toLowerCase();
-  if (tracker && lower !== "gitea" && lower !== "github" && (job.trackerId ?? "").trim()) {
+  const trackerId = (job.trackerId ?? "").trim();
+  if (tracker && lower !== "gitea" && lower !== "github" && trackerId) {
     // Stable tracker id alone is the identity (mirrors workerJobKey): a brief
     // retargeted to another repo dedupes as the same job in both the queue
     // and the ledger instead of looking new to one of them.
-    return `implement:${tracker}:${job.trackerId}`;
+    return `implement:${tracker}:${trackerId}`;
   }
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
 }
@@ -409,7 +410,9 @@ async function implementExternalIssue(
       const stamp = runner ? formatRunnerStamp(runner) : undefined;
       const pr = await forge.createPullRequest(owner, repo, {
         title: job.title,
-        body: wrapJumiPrBody(buildExternalPullRequestBody(prFileContents, ref.url, stamp)),
+        body: wrapJumiPrBody(
+          redactGitSecrets(buildExternalPullRequestBody(prFileContents, ref.url, stamp), [loop.auth.token])
+        ),
         head: branch,
         base: effectiveJob.defaultBranch,
       });
