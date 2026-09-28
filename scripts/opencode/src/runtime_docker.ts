@@ -152,7 +152,6 @@ export async function provisionDockerSession(opts?: {
       }
       void runDocker(["kill", name]).catch(() => undefined);
     };
-    if (execOpts?.abortSignal?.aborted) onAbort();
     execOpts?.abortSignal?.addEventListener("abort", onAbort, { once: true });
     let timedOut = false;
     const timeout =
