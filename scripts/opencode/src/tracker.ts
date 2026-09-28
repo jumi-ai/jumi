@@ -132,14 +132,18 @@ export function buildExternalPullRequestBody(
   trackerUrl: string,
   runnerStamp?: string
 ): string {
-  const prose = (fileContents ?? "").replaceAll("\0", "").trim();
+  // Truncate the child-controlled prose first so the tracker URL and the
+  // runner stamp appended after it can never be sliced off by a huge
+  // JUMI_PR.md. Mirrors parentOwnedProse + pullRequestText on the live path,
+  // where Fixes #n is appended after truncation.
+  const rawProse = (fileContents ?? "").replaceAll("\0", "").trim();
+  const prose = rawProse.length > 8000 ? rawProse.slice(0, 8000) : rawProse;
   const lines: string[] = [];
   if (prose) lines.push(prose);
   else lines.push("Implements the tracked brief.");
   if (trackerUrl) lines.push(trackerUrl);
   let body = lines.join("\n\n");
   if (runnerStamp) body = `${body}\n\n${runnerStamp}`;
-  if (body.length > 8000) body = body.slice(0, 8000);
   return body;
 }
 
