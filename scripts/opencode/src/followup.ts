@@ -1043,6 +1043,8 @@ export async function implementFollowUp(
           git: loop.runConfiguredGit,
           env: loop.env,
           worktree,
+          runtime,
+          loop,
           defaultBranch: opts.job.defaultBranch,
           headRef: branch,
           job: taskJob,

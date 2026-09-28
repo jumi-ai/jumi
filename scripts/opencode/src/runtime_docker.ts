@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 
 /**
  * Test-only Docker computer. Proves the runtime port is real.
@@ -20,6 +20,11 @@ import { basename, join } from "node:path";
  *   containers.
  * - Timeout and kill belong to the runtime. No memory API.
  * - Logs stream to the parent via `logger`. Not a second trace store.
+ *
+ * Timeout/cancel kill the container itself (`docker kill` stops the
+ * container's main process, not just the exec), so a session is single-use
+ * after a timeout or cancel: destroy it and provision a fresh session
+ * rather than exec-ing into it again.
  */
 
 export const DOCKER_RUNTIME_IMAGE = "public.ecr.aws/docker/library/debian:bookworm-slim";
@@ -109,7 +114,12 @@ export async function provisionDockerSession(opts?: {
   args.push("-v", `${hostWorkdir}:/work`);
   if (opts?.authMountSrc) args.push("-v", `${opts.authMountSrc}:/auth:ro`);
   args.push(image, "sleep", "infinity");
-  await runDocker(args);
+  try {
+    await runDocker(args);
+  } catch (err) {
+    await rm(hostWorkdir, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
   const containerWorkdir = "/work";
   try {
     await runDocker(["exec", name, "mkdir", "-p", containerWorkdir]);
@@ -181,8 +191,10 @@ export async function provisionDockerSession(opts?: {
   const destroy = async (): Promise<void> => {
     if (destroyed) return;
     destroyed = true;
-    await runDocker(["rm", "-f", name]).catch(() => undefined);
-    await rm(hostWorkdir, { recursive: true, force: true }).catch(() => undefined);
+    // Throws on failure so callers with a landed push can wrap this in
+    // `destroyPreservingPush`; test-only sessions with no push just let it throw.
+    await runDocker(["rm", "-f", name]);
+    await rm(hostWorkdir, { recursive: true, force: true });
   };
 
   return { name, hostWorkdir, containerWorkdir, authMountSrc: opts?.authMountSrc, exec, copyOut, destroy };
@@ -203,16 +215,4 @@ export async function destroyPreservingPush(
     opts.logger?.(`docker destroy failed: ${err instanceof Error ? err.message : String(err)}`);
     if (!opts.pushLanded) throw err;
   }
-}
-
-export function dockerImageForTest(): string {
-  return DOCKER_RUNTIME_IMAGE;
-}
-
-export function containerAuthMountForTest(session: DockerSession): string | undefined {
-  return session.authMountSrc;
-}
-
-export function basenameForTest(path: string): string {
-  return basename(path);
 }

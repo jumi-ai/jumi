@@ -13,8 +13,11 @@ describe("standing pod runtime", () => {
     expect(standingPodRuntime.name).toBe("standing-pod");
     // Both live engines run through it; docker is test-only and never selected.
     expect(typeof standingPodRuntime.runRuntimeEngine).toBe("function");
-    expect(typeof standingPodRuntime.provisionIssueWorkspace).toBe("function");
-    expect(typeof standingPodRuntime.provisionPrWorkspace).toBe("function");
+    // The seam boundary: clone/worktree through ensure/attach, engine run,
+    // destroy. Claim lifecycle (begin/open/terminal stamp) stays in core.
+    expect(typeof standingPodRuntime.ensureBareCache).toBe("function");
+    expect(typeof standingPodRuntime.attachIssueWorktree).toBe("function");
+    expect(typeof standingPodRuntime.attachPrWorktree).toBe("function");
     expect(registeredEngine).toBeDefined();
     const catalog = orderedRunners({
       runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },

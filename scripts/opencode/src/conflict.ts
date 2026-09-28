@@ -4,6 +4,7 @@ import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
+  type ClaimedLoop,
   commitIfDirty,
   ENGINE_TEMP_DIR,
   inspectRemoteContainsDefault,
@@ -30,7 +31,7 @@ import type { Pull } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
-import { standingPodRuntime } from "./runtime.ts";
+import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -82,6 +83,14 @@ export interface MergeDefaultIntoWorktreeOpts {
   git: GitRunner;
   env: Record<string, string | undefined>;
   worktree: string;
+  /**
+   * The computer this engine run boots. When `loop` is present the conflict
+   * engine runs through `runtime.runRuntimeEngine`; otherwise it falls back
+   * to `runEngineStamped` directly. Both live callers pass the loop in scope
+   * so a substituted runtime is never silently ignored.
+   */
+  runtime?: StandingPodRuntime;
+  loop?: ClaimedLoop;
   defaultBranch: string;
   headRef: string;
   job: IssueJob;
@@ -472,10 +481,15 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       abortSignal: opts.abortSignal,
       onPid: opts.onPid,
     };
-    const engineResult = await runEngineStamped(opts.openCodeRunner, runOpts, (r) => {
-      runner = r;
-      opts.onRunner?.(r);
-    });
+    const engineResult = opts.loop
+      ? await (opts.runtime ?? standingPodRuntime).runRuntimeEngine(opts.loop, opts.openCodeRunner, runOpts, (r) => {
+          runner = r;
+          opts.onRunner?.(r);
+        })
+      : await runEngineStamped(opts.openCodeRunner, runOpts, (r) => {
+          runner = r;
+          opts.onRunner?.(r);
+        });
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
@@ -630,6 +644,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           git: loop.runConfiguredGit,
           env: loop.env,
           worktree,
+          runtime,
+          loop,
           defaultBranch: opts.job.defaultBranch,
           headRef: branch,
           skipCleanMerge: true,

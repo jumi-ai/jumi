@@ -1,19 +1,12 @@
 import {
   attachIssueWorktree,
   attachPrWorktree,
-  type BeginClaimedWorktreeOpts,
-  beginClaimedWorktree,
   type ClaimedEarlyResult,
   type ClaimedLoop,
-  type ClaimedWorktree,
   ensureBareCache,
-  isClaimedEarlyResult,
-  openClaimedLoop,
 } from "./claimed_worktree.ts";
 import { type Engine, type EngineResult, type EngineRunOptions, runEngineStamped } from "./engine.ts";
-import { registeredEngine } from "./engine_dispatch.ts";
-import type { NamedRunner, RunnerStamp } from "./runners.ts";
-import type { GitAuthResolver, GitRunner } from "./workspace.ts";
+import type { RunnerStamp } from "./runners.ts";
 
 /**
  * Runtime seam: the live computer stays the standing pod.
@@ -31,7 +24,15 @@ import type { GitAuthResolver, GitRunner } from "./workspace.ts";
  *   No memory API: the pod limit stays the cgroup.
  * - Logs stream to the parent via `logger`. This is not a second trace store.
  * - The runtime owns clone and worktree. The parent does not clone on the
- *   host and hand over a path: it asks the runtime to provision at a ref.
+ *   host and hand over a path: it asks the runtime for the bare-cache clone
+ *   (`ensureBareCache`) and the worktree attach (`attachIssueWorktree` /
+ *   `attachPrWorktree`), then runs the engine and destroys through it.
+ *   The claim lifecycle around that — `beginClaimedWorktree` /
+ *   `openClaimedLoop` up front, and the terminal-claim stamp versus
+ *   `forgetSerialized` on the way out — stays in core: stamping a terminal
+ *   claim needs a forge read and follows the core's per-flow rules, so
+ *   `destroyRuntimeWorkspace` deliberately covers only the
+ *   stop-heartbeat / forget / detach teardown plus the push-landed contract.
  * - The engine child receives no forge token. Clone credentials are injected
  *   by the parent through `GitAuthResolver`, as today.
  * - Auth is a mount the operator already has (`/data`, `/work` volumes from
@@ -42,154 +43,6 @@ import type { GitAuthResolver, GitRunner } from "./workspace.ts";
 export type RuntimeName = "standing-pod";
 
 export const STANDING_POD_RUNTIME: RuntimeName = "standing-pod";
-
-export interface RuntimeProvisionBase {
-  home: string;
-  workdir: string;
-  branch: string;
-  defaultBranch: string;
-  cloneUrl: string;
-  giteaUrl: string;
-  giteaToken?: string;
-  botUsername?: string;
-  gitAuthResolver?: GitAuthResolver;
-  gitRunner?: GitRunner;
-  abortSignal?: AbortSignal;
-  logger?: (message: string) => void;
-  engine?: Engine;
-  openCodeRunner?: Engine;
-  fallbackEngine?: Engine;
-  chain?: NamedRunner[];
-  fallbackModel?: string;
-  fallbackVariant?: string;
-  remainingLeaseMs?: () => number | Promise<number>;
-  extendLease?: () => Promise<boolean>;
-  useClaim?: boolean;
-  sanitizeOpenCodeEnv?: boolean;
-  heartbeatIntervalMs?: number;
-  job: { owner: string; repo: string; issueNumber: number; issueUpdatedAt: string };
-}
-
-export interface RuntimeIssueSession {
-  kind: "issue";
-  claimed: ClaimedWorktree;
-  loop: ClaimedLoop;
-  workdir: string;
-  headSha: string;
-}
-
-export interface RuntimePrSession {
-  kind: "pr";
-  claimed: ClaimedWorktree;
-  loop: ClaimedLoop;
-  workdir: string;
-  headSha: string;
-  baseSha: string;
-}
-
-export type RuntimeSession = RuntimeIssueSession | RuntimePrSession;
-
-function beginOpts(opts: RuntimeProvisionBase, extra?: Partial<BeginClaimedWorktreeOpts>): BeginClaimedWorktreeOpts {
-  return {
-    job: opts.job,
-    home: opts.home,
-    workdir: opts.workdir,
-    engine: opts.engine,
-    openCodeRunner: opts.openCodeRunner,
-    gitRunner: opts.gitRunner,
-    abortSignal: opts.abortSignal,
-    useClaim: opts.useClaim,
-    sanitizeOpenCodeEnv: opts.sanitizeOpenCodeEnv,
-    fallbackEngine: opts.fallbackEngine ?? registeredEngine,
-    fallbackModel: opts.fallbackModel,
-    fallbackVariant: opts.fallbackVariant,
-    chain: opts.chain,
-    remainingLeaseMs: opts.remainingLeaseMs,
-    extendLease: opts.extendLease,
-    logger: opts.logger,
-    branch: opts.branch,
-    ...extra,
-  };
-}
-
-function loopOpts(opts: RuntimeProvisionBase): {
-  giteaUrl: string;
-  giteaToken: string;
-  botUsername: string;
-  gitAuthResolver?: GitAuthResolver;
-  heartbeatIntervalMs?: number;
-} {
-  return {
-    giteaUrl: opts.giteaUrl,
-    giteaToken: opts.giteaToken ?? "",
-    botUsername: opts.botUsername ?? "jumi",
-    gitAuthResolver: opts.gitAuthResolver,
-    heartbeatIntervalMs: opts.heartbeatIntervalMs,
-  };
-}
-
-/**
- * Provision a workspace at a ref through the standing pod.
- * Owns the bare cache clone and the worktree attach; the caller never clones
- * on the host itself.
- */
-export async function provisionIssueWorkspace(
-  opts: RuntimeProvisionBase
-): Promise<RuntimeIssueSession | ClaimedEarlyResult> {
-  const claimed = await beginClaimedWorktree(beginOpts(opts));
-  if (isClaimedEarlyResult(claimed)) return claimed;
-  const loop = openClaimedLoop(claimed, loopOpts(opts));
-  const log = opts.logger ?? (() => undefined);
-  await ensureBareCache(loop, {
-    cloneUrl: opts.cloneUrl,
-    giteaUrl: opts.giteaUrl,
-    abortSignal: opts.abortSignal,
-    log,
-  });
-  const headSha = await attachIssueWorktree(loop, {
-    branch: opts.branch,
-    defaultBranch: opts.defaultBranch,
-    abortSignal: opts.abortSignal,
-    log,
-  });
-  await loop.stampHeadSha(headSha);
-  return { kind: "issue", claimed, loop, workdir: claimed.worktree, headSha };
-}
-
-/** Provision a PR workspace at its head ref through the standing pod. */
-export async function provisionPrWorkspace(opts: RuntimeProvisionBase): Promise<RuntimePrSession | ClaimedEarlyResult> {
-  const claimed = await beginClaimedWorktree(beginOpts(opts));
-  if (isClaimedEarlyResult(claimed)) return claimed;
-  const loop = openClaimedLoop(claimed, loopOpts(opts));
-  const log = opts.logger ?? (() => undefined);
-  await ensureBareCache(loop, {
-    cloneUrl: opts.cloneUrl,
-    giteaUrl: opts.giteaUrl,
-    abortSignal: opts.abortSignal,
-    log,
-  });
-  const attached = await attachPrWorktree(loop, {
-    branch: opts.branch,
-    defaultBranch: opts.defaultBranch,
-    abortSignal: opts.abortSignal,
-    log,
-  });
-  if (isClaimedEarlyResult(attached)) {
-    await loop.stopHeartbeat();
-    await loop.forgetSerialized();
-    await loop.detachWorktree();
-    return attached;
-  }
-  await loop.stampHeadSha(attached.headSha);
-  return {
-    kind: "pr",
-    claimed,
-    loop,
-    workdir: claimed.worktree,
-    headSha: attached.headSha,
-    baseSha: attached.baseSha,
-  };
-}
 
 /**
  * Runtime-owned clone and worktree operations. The parent calls these rather
@@ -270,8 +123,6 @@ export async function destroyRuntimeWorkspace(
 /** The live runtime both factories keep using. Neither factory selects docker. */
 export const standingPodRuntime = {
   name: STANDING_POD_RUNTIME,
-  provisionIssueWorkspace,
-  provisionPrWorkspace,
   ensureBareCache: runtimeEnsureBareCache,
   attachIssueWorktree: runtimeAttachIssueWorktree,
   attachPrWorktree: runtimeAttachPrWorktree,

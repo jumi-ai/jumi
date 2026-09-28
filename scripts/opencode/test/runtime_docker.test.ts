@@ -128,7 +128,7 @@ describe("docker runtime (test-only proof)", () => {
       const s1 = await provisionDockerSession();
       sessions.push(s1);
       await expect(s1.exec(["sh", "-c", "exit 3"])).rejects.toThrow();
-      await s1.destroy();
+      await destroyPreservingPush(() => s1.destroy(), { pushLanded: false });
       sessions.pop();
       expect(await containerExists(s1.name)).toBe(false);
 
@@ -136,7 +136,7 @@ describe("docker runtime (test-only proof)", () => {
       const s2 = await provisionDockerSession();
       sessions.push(s2);
       await expect(s2.exec(["sleep", "30"], { timeoutMs: 1500 })).rejects.toThrow(/timed out/);
-      await s2.destroy();
+      await destroyPreservingPush(() => s2.destroy(), { pushLanded: false });
       sessions.pop();
       expect(await containerExists(s2.name)).toBe(false);
 
@@ -147,7 +147,7 @@ describe("docker runtime (test-only proof)", () => {
       const pending = s3.exec(["sleep", "30"], { abortSignal: abort.signal });
       abort.abort();
       await expect(pending).rejects.toThrow(/cancelled/);
-      await s3.destroy();
+      await destroyPreservingPush(() => s3.destroy(), { pushLanded: false });
       sessions.pop();
       expect(await containerExists(s3.name)).toBe(false);
 
