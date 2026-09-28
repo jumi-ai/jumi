@@ -130,6 +130,7 @@ export async function provisionDockerSession(opts?: {
   }
 
   let destroyed = false;
+  let containerRemoved = false;
   const exec = async (cmd: string[], execOpts?: DockerExecOpts): Promise<string> => {
     const child = childEnv({ ...process.env, ...execOpts?.env });
     const execArgs = ["exec"];
@@ -152,7 +153,7 @@ export async function provisionDockerSession(opts?: {
       void runDocker(["kill", name]).catch(() => undefined);
     };
     if (execOpts?.abortSignal?.aborted) onAbort();
-    else execOpts?.abortSignal?.addEventListener("abort", onAbort, { once: true });
+    execOpts?.abortSignal?.addEventListener("abort", onAbort, { once: true });
     let timedOut = false;
     const timeout =
       execOpts?.timeoutMs && execOpts.timeoutMs > 0
@@ -190,11 +191,16 @@ export async function provisionDockerSession(opts?: {
 
   const destroy = async (): Promise<void> => {
     if (destroyed) return;
-    destroyed = true;
     // Throws on failure so callers with a landed push can wrap this in
     // `destroyPreservingPush`; test-only sessions with no push just let it throw.
-    await runDocker(["rm", "-f", name]);
+    // Flags are set only after each step succeeds so a failed destroy stays
+    // retryable instead of poisoning the next call.
+    if (!containerRemoved) {
+      await runDocker(["rm", "-f", name]);
+      containerRemoved = true;
+    }
     await rm(hostWorkdir, { recursive: true, force: true });
+    destroyed = true;
   };
 
   return { name, hostWorkdir, containerWorkdir, authMountSrc: opts?.authMountSrc, exec, copyOut, destroy };
