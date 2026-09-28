@@ -59,7 +59,7 @@ describe("docker runtime (test-only proof)", () => {
   });
 
   itDocker("creates a real container, runs the engine in it, copies artifacts out, destroys", async () => {
-    if (!(await dockerAvailable())) return;
+    expect(await dockerAvailable()).toBe(true);
     const authDir = await mkdtemp(join(tmpdir(), "jumi-docker-auth-"));
     try {
       await writeFile(join(authDir, "auth.json"), JSON.stringify({ wellknown: true }));
@@ -117,7 +117,7 @@ describe("docker runtime (test-only proof)", () => {
   });
 
   itDocker("destroy runs on failure, timeout, and cancel; failed destroy preserves push", async () => {
-    if (!(await dockerAvailable())) return;
+    expect(await dockerAvailable()).toBe(true);
     // Failure: exec fails but destroy still runs.
     const s1 = await provisionDockerSession();
     sessions.push(s1);

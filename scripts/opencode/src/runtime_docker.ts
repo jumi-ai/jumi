@@ -22,7 +22,7 @@ import { basename, join } from "node:path";
  * - Logs stream to the parent via `logger`. Not a second trace store.
  */
 
-export const DOCKER_RUNTIME_IMAGE = "public.ecr.aws/docker/library/debian:bookworm-slim:latest";
+export const DOCKER_RUNTIME_IMAGE = "public.ecr.aws/docker/library/debian:bookworm-slim";
 
 export const DOCKER_RUNTIME_NAME = "docker-test-only";
 
