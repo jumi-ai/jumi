@@ -58,117 +58,125 @@ describe("docker runtime (test-only proof)", () => {
     expect(runnersSrc).not.toMatch(/docker/i);
   });
 
-  itDocker("creates a real container, runs the engine in it, copies artifacts out, destroys", async () => {
-    expect(await dockerAvailable()).toBe(true);
-    const authDir = await mkdtemp(join(tmpdir(), "jumi-docker-auth-"));
-    try {
-      await writeFile(join(authDir, "auth.json"), JSON.stringify({ wellknown: true }));
-      const logs: string[] = [];
-      const session = await provisionDockerSession({ authMountSrc: authDir, logger: (m) => logs.push(m) });
-      sessions.push(session);
-      expect(await containerExists(session.name)).toBe(true);
-
-      // The container can edit the workspace and run commands (writable, not read-only).
-      await session.exec(["sh", "-c", "echo hello > /work/artifact.txt && echo world"], {
-        logger: (m) => logs.push(m),
-      });
-      const inside = await session.exec(["cat", "/work/artifact.txt"]);
-      expect(inside).toContain("hello");
-      expect(logs.join("\n")).toMatch(/world|artifact/);
-
-      // Copies artifacts out (bind mount + docker cp both prove it).
-      const hostArtifact = join(session.hostWorkdir, "artifact.txt");
-      const hostText = await readFile(hostArtifact, "utf8");
-      expect(hostText).toContain("hello");
-      const cpDest = join(tmpdir(), `jumi-docker-cp-${Date.now()}.txt`);
+  itDocker(
+    "creates a real container, runs the engine in it, copies artifacts out, destroys",
+    async () => {
+      expect(await dockerAvailable()).toBe(true);
+      const authDir = await mkdtemp(join(tmpdir(), "jumi-docker-auth-"));
       try {
-        await session.copyOut("/work/artifact.txt", cpDest);
-        expect(await readFile(cpDest, "utf8")).toContain("hello");
+        await writeFile(join(authDir, "auth.json"), JSON.stringify({ wellknown: true }));
+        const logs: string[] = [];
+        const session = await provisionDockerSession({ authMountSrc: authDir, logger: (m) => logs.push(m) });
+        sessions.push(session);
+        expect(await containerExists(session.name)).toBe(true);
+
+        // The container can edit the workspace and run commands (writable, not read-only).
+        await session.exec(["sh", "-c", "echo hello > /work/artifact.txt && echo world"], {
+          logger: (m) => logs.push(m),
+        });
+        const inside = await session.exec(["cat", "/work/artifact.txt"]);
+        expect(inside).toContain("hello");
+        expect(logs.join("\n")).toMatch(/world|artifact/);
+
+        // Copies artifacts out (bind mount + docker cp both prove it).
+        const hostArtifact = join(session.hostWorkdir, "artifact.txt");
+        const hostText = await readFile(hostArtifact, "utf8");
+        expect(hostText).toContain("hello");
+        const cpDest = join(tmpdir(), `jumi-docker-cp-${Date.now()}.txt`);
+        try {
+          await session.copyOut("/work/artifact.txt", cpDest);
+          expect(await readFile(cpDest, "utf8")).toContain("hello");
+        } finally {
+          await rm(cpDest, { force: true }).catch(() => undefined);
+        }
+
+        // Engine child receives no forge token; clone creds injected by parent as today.
+        const envOut = await session.exec(["sh", "-c", "env | sort"], {
+          env: { GIT_AUTH_TOKEN: "parent-injected", GITEA_BOT_TOKEN: "must-not-reach-child" },
+        });
+        expect(envOut).toContain("GIT_AUTH_TOKEN=parent-injected");
+        expect(envOut).not.toContain("GITEA_BOT_TOKEN");
+        expect(envOut).not.toMatch(/GITHUB_APP_/);
+        const childEnv = dockerChildEnv({ GIT_AUTH_TOKEN: "a", GITEA_BOT_TOKEN: "b" });
+        expect(childEnv.GIT_AUTH_TOKEN).toBe("a");
+        expect(Object.keys(childEnv).join(",")).not.toContain("GITEA_BOT_TOKEN");
+
+        // Auth is a mount the operator already has: /auth is mounted ro, not copied.
+        const authSeen = await session.exec(["cat", "/auth/auth.json"]);
+        expect(authSeen).toContain("wellknown");
+        const inspectProc = Bun.spawn(["docker", "inspect", session.name], { stdout: "pipe", stderr: "pipe" });
+        const inspectText = await new Response(inspectProc.stdout).text();
+        await inspectProc.exited;
+        expect(inspectText).toContain("/auth");
+
+        // Destroy runs on success.
+        await session.destroy();
+        sessions.pop();
+        expect(await containerExists(session.name)).toBe(false);
       } finally {
-        await rm(cpDest, { force: true }).catch(() => undefined);
+        await rm(authDir, { recursive: true, force: true });
       }
+    },
+    120_000
+  );
 
-      // Engine child receives no forge token; clone creds injected by parent as today.
-      const envOut = await session.exec(["sh", "-c", "env | sort"], {
-        env: { GIT_AUTH_TOKEN: "parent-injected", GITEA_BOT_TOKEN: "must-not-reach-child" },
-      });
-      expect(envOut).toContain("GIT_AUTH_TOKEN=parent-injected");
-      expect(envOut).not.toContain("GITEA_BOT_TOKEN");
-      expect(envOut).not.toMatch(/GITHUB_APP_/);
-      const childEnv = dockerChildEnv({ GIT_AUTH_TOKEN: "a", GITEA_BOT_TOKEN: "b" });
-      expect(childEnv.GIT_AUTH_TOKEN).toBe("a");
-      expect(Object.keys(childEnv).join(",")).not.toContain("GITEA_BOT_TOKEN");
-
-      // Auth is a mount the operator already has: /auth is mounted ro, not copied.
-      const authSeen = await session.exec(["cat", "/auth/auth.json"]);
-      expect(authSeen).toContain("wellknown");
-      const inspectProc = Bun.spawn(["docker", "inspect", session.name], { stdout: "pipe", stderr: "pipe" });
-      const inspectText = await new Response(inspectProc.stdout).text();
-      await inspectProc.exited;
-      expect(inspectText).toContain("/auth");
-
-      // Destroy runs on success.
-      await session.destroy();
+  itDocker(
+    "destroy runs on failure, timeout, and cancel; failed destroy preserves push",
+    async () => {
+      expect(await dockerAvailable()).toBe(true);
+      // Failure: exec fails but destroy still runs.
+      const s1 = await provisionDockerSession();
+      sessions.push(s1);
+      await expect(s1.exec(["sh", "-c", "exit 3"])).rejects.toThrow();
+      await s1.destroy();
       sessions.pop();
-      expect(await containerExists(session.name)).toBe(false);
-    } finally {
-      await rm(authDir, { recursive: true, force: true });
-    }
-  });
+      expect(await containerExists(s1.name)).toBe(false);
 
-  itDocker("destroy runs on failure, timeout, and cancel; failed destroy preserves push", async () => {
-    expect(await dockerAvailable()).toBe(true);
-    // Failure: exec fails but destroy still runs.
-    const s1 = await provisionDockerSession();
-    sessions.push(s1);
-    await expect(s1.exec(["sh", "-c", "exit 3"])).rejects.toThrow();
-    await s1.destroy();
-    sessions.pop();
-    expect(await containerExists(s1.name)).toBe(false);
+      // Timeout belongs to the runtime.
+      const s2 = await provisionDockerSession();
+      sessions.push(s2);
+      await expect(s2.exec(["sleep", "30"], { timeoutMs: 1500 })).rejects.toThrow(/timed out/);
+      await s2.destroy();
+      sessions.pop();
+      expect(await containerExists(s2.name)).toBe(false);
 
-    // Timeout belongs to the runtime.
-    const s2 = await provisionDockerSession();
-    sessions.push(s2);
-    await expect(s2.exec(["sleep", "30"], { timeoutMs: 1500 })).rejects.toThrow(/timed out/);
-    await s2.destroy();
-    sessions.pop();
-    expect(await containerExists(s2.name)).toBe(false);
+      // Cancel belongs to the runtime.
+      const s3 = await provisionDockerSession();
+      sessions.push(s3);
+      const abort = new AbortController();
+      const pending = s3.exec(["sleep", "30"], { abortSignal: abort.signal });
+      abort.abort();
+      await expect(pending).rejects.toThrow(/cancelled/);
+      await s3.destroy();
+      sessions.pop();
+      expect(await containerExists(s3.name)).toBe(false);
 
-    // Cancel belongs to the runtime.
-    const s3 = await provisionDockerSession();
-    sessions.push(s3);
-    const abort = new AbortController();
-    const pending = s3.exec(["sleep", "30"], { abortSignal: abort.signal });
-    abort.abort();
-    await expect(pending).rejects.toThrow(/cancelled/);
-    await s3.destroy();
-    sessions.pop();
-    expect(await containerExists(s3.name)).toBe(false);
-
-    // Failed destroy must not discard a push that already landed.
-    let destroyed = false;
-    const pushLandedResult = { status: "pushed" };
-    try {
-      throw new Error("push ok");
-    } catch (pushErr) {
-      await destroyPreservingPush(
-        async () => {
-          destroyed = true;
-          throw new Error("destroy boom");
-        },
-        { pushLanded: true }
-      ).catch(() => undefined);
-      expect(destroyed).toBe(true);
-      expect((pushErr as Error).message).toBe("push ok");
-      expect(pushLandedResult.status).toBe("pushed");
-    }
-    await expect(
-      destroyPreservingPush(
-        async () => {
-          throw new Error("destroy boom");
-        },
-        { pushLanded: false }
-      )
-    ).rejects.toThrow("destroy boom");
-  });
+      // Failed destroy must not discard a push that already landed.
+      let destroyed = false;
+      const pushLandedResult = { status: "pushed" };
+      try {
+        throw new Error("push ok");
+      } catch (pushErr) {
+        await destroyPreservingPush(
+          async () => {
+            destroyed = true;
+            throw new Error("destroy boom");
+          },
+          { pushLanded: true }
+        ).catch(() => undefined);
+        expect(destroyed).toBe(true);
+        expect((pushErr as Error).message).toBe("push ok");
+        expect(pushLandedResult.status).toBe("pushed");
+      }
+      await expect(
+        destroyPreservingPush(
+          async () => {
+            throw new Error("destroy boom");
+          },
+          { pushLanded: false }
+        )
+      ).rejects.toThrow("destroy boom");
+    },
+    120_000
+  );
 });
