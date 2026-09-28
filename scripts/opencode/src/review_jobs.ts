@@ -12,6 +12,7 @@ import {
   type SkipLatchStore,
 } from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
 export {
@@ -452,20 +453,15 @@ function hasNewerInflight(rows: ReviewJobRecord[], job: ReviewJob, key: string):
   );
 }
 
-function isExternalJobRef(job: { tracker?: string | null }): boolean {
-  const tracker = (job.tracker ?? "").trim().toLowerCase();
-  return Boolean(tracker) && tracker !== "gitea" && tracker !== "github";
-}
-
 export function workerJobKind(job: IssueJob): JobKind {
   return job.mode ?? "implement";
 }
 
 export function workerJobKey(job: IssueJob): string {
   const kind = workerJobKind(job);
-  const trackerId = (job.trackerId ?? "").trim();
-  if (kind === "implement" && isExternalJobRef(job) && trackerId) {
+  if (kind === "implement" && isExternalIssueJob(job)) {
     const tracker = (job.tracker ?? "").trim();
+    const trackerId = (job.trackerId ?? "").trim();
     return `implement:${tracker}:${trackerId}`;
   }
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;

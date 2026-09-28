@@ -43,15 +43,35 @@ export function parseRepositoryLines(body: string | null | undefined): RepoRef[]
  * enqueued owner/repo, but the enqueued clone URL is what gets cloned, so a
  * mismatch must refuse before the engine starts rather than clone one repo
  * and open the pull on another.
+ *
+ * When `expectedBase` (e.g. the forge base URL) is given, the clone URL's
+ * host must also match, so a URL on another host with the same path does not
+ * pass. The credential helper keys the token off the expected host, and the
+ * check is one comparison.
  */
-export function cloneUrlTargetsRepo(cloneUrl: string | null | undefined, owner: string, repo: string): boolean {
+export function cloneUrlTargetsRepo(
+  cloneUrl: string | null | undefined,
+  owner: string,
+  repo: string,
+  expectedBase?: string | null
+): boolean {
   if (!cloneUrl) return false;
-  let path: string;
+  let url: URL;
   try {
-    path = new URL(cloneUrl).pathname;
+    url = new URL(cloneUrl);
   } catch {
     return false;
   }
+  if (expectedBase) {
+    let base: URL;
+    try {
+      base = new URL(expectedBase);
+    } catch {
+      return false;
+    }
+    if (url.host.toLowerCase() !== base.host.toLowerCase()) return false;
+  }
+  const path = url.pathname;
   const segments = path.split("/").filter((segment) => segment.length > 0);
   if (segments.length < 2) return false;
   const repoSegment = segments[segments.length - 1]?.replace(/\.git$/i, "") ?? "";

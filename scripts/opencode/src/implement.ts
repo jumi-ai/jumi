@@ -182,10 +182,9 @@ export function issueJobKey(job: {
 }): string {
   const mode = (job.mode ?? "implement").trim();
   if (mode !== "implement") return `${job.owner}/${job.repo}#${job.issueNumber}`;
-  const tracker = (job.tracker ?? "").trim();
-  const lower = tracker.toLowerCase();
-  const trackerId = (job.trackerId ?? "").trim();
-  if (tracker && lower !== "gitea" && lower !== "github" && trackerId) {
+  if (isExternalIssueJob(job)) {
+    const tracker = (job.tracker ?? "").trim();
+    const trackerId = (job.trackerId ?? "").trim();
     // Stable tracker id alone is the identity (mirrors workerJobKey): a brief
     // retargeted to another repo dedupes as the same job in both the queue
     // and the ledger instead of looking new to one of them.
@@ -308,7 +307,7 @@ async function implementExternalIssue(
   if (!target) return { status: "skipped", reason: "missing Repository: owner/repo" };
   const owner = target.owner;
   const repo = target.repo;
-  if (!cloneUrlTargetsRepo(job.cloneUrl, owner, repo)) {
+  if (!cloneUrlTargetsRepo(job.cloneUrl, owner, repo, opts.giteaUrl)) {
     return { status: "skipped", reason: `clone URL does not match Repository: ${owner}/${repo}` };
   }
   const branch = externalBranchName(ref.tracker, ref.id, job.title);

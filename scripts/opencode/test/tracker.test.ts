@@ -259,6 +259,22 @@ describe("tracker reference", () => {
     expect(cloneUrlTargetsRepo("https://gitea.kirmanak.stream/other/demo.git", "kirmanak", "demo")).toBe(false);
     expect(cloneUrlTargetsRepo("not a url", "kirmanak", "demo")).toBe(false);
     expect(cloneUrlTargetsRepo("", "kirmanak", "demo")).toBe(false);
+    expect(
+      cloneUrlTargetsRepo(
+        "https://other-host/kirmanak/demo.git",
+        "kirmanak",
+        "demo",
+        "https://gitea.kirmanak.stream"
+      )
+    ).toBe(false);
+    expect(
+      cloneUrlTargetsRepo(
+        "https://gitea.kirmanak.stream/kirmanak/demo.git",
+        "kirmanak",
+        "demo",
+        "https://gitea.kirmanak.stream"
+      )
+    ).toBe(true);
   });
 });
 
