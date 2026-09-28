@@ -3,12 +3,10 @@ import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
-  attachIssueWorktree,
   beginClaimedWorktree,
   clearLeftoverWorktree,
   commitIfDirty,
   commitsAheadOf,
-  ensureBareCache,
   isClaimedEarlyResult,
   openClaimedLoop,
   pushClaimedBranch,
@@ -32,7 +30,7 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { type Engine, type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type Engine, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { engineScratchTrackedReason, tipTracksEngineScratch } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
@@ -44,6 +42,7 @@ import type { Forge, IssueApi, Tracker } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
+import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -120,6 +119,13 @@ export interface ImplementOptions extends PickupPolicy {
   tracker?: Tracker | BriefTracker | IssueApi;
   /** Forge capability (clone + PR). Defaults to `api`. A git-host adapter satisfies both. */
   forge?: Forge | IssueApi;
+  /**
+   * The computer this job boots. Core asks the runtime for it; both live
+   * factories keep using the standing pod. Test-only docker is never passed
+   * here. Defaults to `standingPodRuntime` so existing callers keep the same
+   * pods, cgroup, and pickup.
+   */
+  runtime?: StandingPodRuntime;
   job: IssueJob;
   giteaUrl: string;
   giteaToken: string;
@@ -331,13 +337,14 @@ async function implementExternalIssue(
     loop,
     opts.abortSignal,
     async () => {
-      await ensureBareCache(loop, {
+      const runtime = opts.runtime ?? standingPodRuntime;
+      await runtime.ensureBareCache(loop, {
         cloneUrl: effectiveJob.cloneUrl,
         giteaUrl: opts.giteaUrl,
         abortSignal: opts.abortSignal,
         log,
       });
-      const headSha = await attachIssueWorktree(loop, {
+      const headSha = await runtime.attachIssueWorktree(loop, {
         branch,
         defaultBranch: effectiveJob.defaultBranch,
         abortSignal: opts.abortSignal,
@@ -371,7 +378,7 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         onPid: loop.engineOnPid(opts.onPid),
       };
-      const result = await runEngineStamped(engine, runOpts, (r) => {
+      const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
         runner = r;
       });
       throwIfEngineFailed(result);
@@ -383,12 +390,10 @@ async function implementExternalIssue(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
         if (validatedSkip) {
-          await loop.stopHeartbeat();
-          await loop.detachWorktree();
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "no-changes" };
         }
-        await loop.stopHeartbeat();
-        await loop.detachWorktree();
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "skipped", reason: INCOMPLETE_IMPLEMENT };
       }
 
@@ -399,8 +404,7 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
-        await loop.stopHeartbeat();
-        await loop.detachWorktree();
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "skipped", reason };
       }
       await pushClaimedBranch(loop, branch);
@@ -415,16 +419,15 @@ async function implementExternalIssue(
         head: branch,
         base: effectiveJob.defaultBranch,
       });
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized();
-      await loop.detachWorktree();
+      // Push already landed; a failed destroy must not discard it.
+      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {
       runner = thrownRunner(err) ?? runner;
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized().catch(() => undefined);
-      await loop.detachWorktree();
+      await (opts.runtime ?? standingPodRuntime)
+        .destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log })
+        .catch(() => undefined);
     }
   );
 }
@@ -524,13 +527,14 @@ export async function implementIssue(
     loop,
     opts.abortSignal,
     async () => {
-      await ensureBareCache(loop, {
+      const runtime = opts.runtime ?? standingPodRuntime;
+      await runtime.ensureBareCache(loop, {
         cloneUrl: opts.job.cloneUrl,
         giteaUrl: opts.giteaUrl,
         abortSignal: opts.abortSignal,
         log,
       });
-      const headSha = await attachIssueWorktree(loop, {
+      const headSha = await runtime.attachIssueWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
         abortSignal: opts.abortSignal,
@@ -597,7 +601,8 @@ export async function implementIssue(
         };
         runner = undefined;
         hopDeclined = false;
-        const result = await runEngineStamped(engine, runOpts, (r) => {
+        const runtime = opts.runtime ?? standingPodRuntime;
+        const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
           runner = r;
         });
         if (result.hopDeclined === true) {
@@ -840,9 +845,8 @@ export async function implementIssue(
         base: opts.job.defaultBranch,
       });
       await diary(`Opened ${pr.html_url}`);
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized();
-      await loop.detachWorktree();
+      // Push already landed; a failed destroy must not discard it.
+      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {

@@ -3,11 +3,9 @@ import { dirname, join } from "node:path";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
-  attachPrWorktree,
   beginClaimedWorktree,
   commitIfDirty,
   ENGINE_TEMP_DIR,
-  ensureBareCache,
   inspectRemoteContainsDefault,
   isClaimedEarlyResult,
   openClaimedLoop,
@@ -32,6 +30,7 @@ import type { Pull } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
+import { standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -577,13 +576,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     loop,
     opts.abortSignal,
     async () => {
-      await ensureBareCache(loop, {
+      const runtime = opts.runtime ?? standingPodRuntime;
+      await runtime.ensureBareCache(loop, {
         cloneUrl: opts.job.cloneUrl,
         giteaUrl: opts.giteaUrl,
         abortSignal: opts.abortSignal,
         log,
       });
-      const attached = await attachPrWorktree(loop, {
+      const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
         abortSignal: opts.abortSignal,
@@ -727,7 +727,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               onPid: loop.engineOnPid(opts.onPid),
             };
             runner = undefined;
-            const continued = await runEngineStamped(engine, continuedOpts, (r) => {
+            const runtime = opts.runtime ?? standingPodRuntime;
+            const continued = await runtime.runRuntimeEngine(loop, engine, continuedOpts, (r) => {
               runner = r;
             });
             // Gate on the message so a future non-quota `stuck` producer does
