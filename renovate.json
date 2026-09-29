@@ -61,7 +61,7 @@
       ],
       "matchPackageNames": [
         "eclipse-temurin",
-        "public.ecr.aws/docker/library/eclipse-temurin"
+        "docker.io/library/eclipse-temurin"
       ],
       "allowedVersions": "/^21\\./"
     }

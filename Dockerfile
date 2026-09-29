@@ -2,7 +2,7 @@ ARG BUN_VERSION
 ARG HELM_VERSION=3.18.6
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
-FROM public.ecr.aws/docker/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS tools
+FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS tools
 
 ARG BUN_VERSION
 ARG OPENCODE_VERSION=1.15.5
@@ -85,7 +85,7 @@ COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-FROM public.ecr.aws/docker/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
+FROM docker.io/library/debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
@@ -147,7 +147,7 @@ ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]
 
 ARG TEMURIN_TAG
-FROM public.ecr.aws/docker/library/eclipse-temurin:${TEMURIN_TAG} AS jdk
+FROM docker.io/library/eclipse-temurin:${TEMURIN_TAG} AS jdk
 
 FROM runtime AS worker
 USER root
