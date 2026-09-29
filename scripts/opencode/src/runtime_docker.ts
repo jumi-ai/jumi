@@ -27,7 +27,7 @@ import { join } from "node:path";
  * rather than exec-ing into it again.
  */
 
-export const DOCKER_RUNTIME_IMAGE = "public.ecr.aws/docker/library/debian:bookworm-slim";
+export const DOCKER_RUNTIME_IMAGE = "docker.io/library/debian:bookworm-slim";
 
 export const DOCKER_RUNTIME_NAME = "docker-test-only";
 
