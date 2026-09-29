@@ -623,7 +623,8 @@ export async function implementIssue(
           });
           await diary(QUOTA_STUCK_TEXT);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throwIfEngineFailed(result);
         return undefined;
@@ -677,7 +678,8 @@ export async function implementIssue(
 
       const skipBlocked = async (reason: string) => {
         await diary(reason);
-        return skipClaimedWork(loop, reason);
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped" as const, reason };
       };
 
       // Leaves the issue retryable: a diary so the last visible state is not the
@@ -786,12 +788,15 @@ export async function implementIssue(
               chain: opts.chain,
               previousError: opts.previousError,
             });
-            return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped" as const, reason: QUOTA_STUCK_TEXT };
           }
           throw err;
         }
         if (gate.action === "skip") {
-          return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+          if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped" as const, reason: gate.reason };
         }
         liveJob = jobWithIssue(opts.job, gate.issue);
         snapshot = gate.snapshot;
@@ -861,9 +866,10 @@ export async function implementIssue(
         });
         await diary(QUOTA_STUCK_TEXT).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-        await loop.stopHeartbeat();
-        await loop.forgetSerialized().catch(() => undefined);
-        await loop.detachWorktree();
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+          pushLanded: false,
+          logger: log,
+        });
         return;
       }
       await diary(

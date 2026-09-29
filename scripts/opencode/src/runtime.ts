@@ -93,18 +93,22 @@ export async function destroyRuntimeWorkspace(
   loop: ClaimedLoop,
   opts: { pushLanded: boolean; logger?: (message: string) => void }
 ): Promise<void> {
+  // Best-effort on the way out: attempt every step and throw the first error
+  // at the end (non-landed only), so one failing teardown step cannot leak the
+  // rest. Landed paths keep swallowing + logging as today.
+  let firstErr: unknown;
   try {
     await loop.stopHeartbeat();
   } catch (err) {
     opts.logger?.(`runtime destroy heartbeat failed: ${err instanceof Error ? err.message : String(err)}`);
-    if (!opts.pushLanded) throw err;
+    if (firstErr === undefined) firstErr = err;
   }
   if (!opts.pushLanded) {
     try {
       await loop.forgetSerialized();
     } catch (err) {
       opts.logger?.(`runtime destroy forget failed: ${err instanceof Error ? err.message : String(err)}`);
-      throw err;
+      if (firstErr === undefined) firstErr = err;
     }
   } else {
     await loop.forgetSerialized().catch((err: unknown) => {
@@ -116,8 +120,9 @@ export async function destroyRuntimeWorkspace(
   } catch (err) {
     // Best effort on the way out; a push that already landed stays landed.
     opts.logger?.(`runtime destroy detach failed: ${err instanceof Error ? err.message : String(err)}`);
-    if (!opts.pushLanded) throw err;
+    if (firstErr === undefined) firstErr = err;
   }
+  if (firstErr !== undefined && !opts.pushLanded) throw firstErr;
 }
 
 /** The live runtime both factories keep using. Neither factory selects docker. */

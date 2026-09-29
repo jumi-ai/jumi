@@ -144,7 +144,9 @@ export async function provisionDockerSession(opts?: {
       throw err;
     }
     const proc = Bun.spawn(["docker", ...execArgs], { stdout: "pipe", stderr: "pipe", env: process.env });
+    let done = false;
     const onAbort = () => {
+      if (done) return;
       try {
         proc.kill();
       } catch {
@@ -157,6 +159,7 @@ export async function provisionDockerSession(opts?: {
     const timeout =
       execOpts?.timeoutMs && execOpts.timeoutMs > 0
         ? setTimeout(() => {
+            if (done) return;
             timedOut = true;
             try {
               proc.kill();
@@ -168,17 +171,20 @@ export async function provisionDockerSession(opts?: {
         : undefined;
     try {
       const [out, errText, code] = await Promise.all([readStream(proc.stdout), readStream(proc.stderr), proc.exited]);
+      done = true;
+      if (timeout) clearTimeout(timeout);
+      if (timedOut) throw new Error(`docker exec timed out after ${execOpts?.timeoutMs}ms: ${cmd.join(" ")}`);
       if (execOpts?.abortSignal?.aborted) {
         const err = new Error("cancelled");
         err.name = "AbortError";
         throw err;
       }
-      if (timedOut) throw new Error(`docker exec timed out after ${execOpts?.timeoutMs}ms: ${cmd.join(" ")}`);
       if (code !== 0) throw new Error(`docker exec failed (${code}): ${[out, errText].filter(Boolean).join("\n")}`);
       if (out) log?.(out);
       if (errText) log?.(errText);
       return out;
     } finally {
+      done = true;
       execOpts?.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
     }
