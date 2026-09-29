@@ -24,6 +24,7 @@ import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quo
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { orderedRunners } from "./runners.ts";
+import { standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { isSkipLatchReason } from "./stuck.ts";
@@ -70,6 +71,11 @@ export function createIssueQueue(
           tracker: api,
           forge: api,
           job,
+          // Core asks the runtime for the computer. Both live factories keep
+          // using the standing pod: same pickup, same pods, same cgroup. No
+          // Kubernetes API, no Jobs, no Actions. Docker is test-only and never
+          // selected here.
+          runtime: standingPodRuntime,
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
           gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
@@ -353,6 +359,7 @@ export async function processWorkerTick(
       tracker: api,
       forge: api,
       job,
+      runtime: standingPodRuntime,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),

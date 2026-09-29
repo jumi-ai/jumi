@@ -11,11 +11,9 @@ import {
 } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
-  attachPrWorktree,
   beginClaimedWorktree,
   commitIfDirty,
   commitsAheadOf,
-  ensureBareCache,
   inspectMovedPrHead,
   isClaimedEarlyResult,
   openClaimedLoop,
@@ -36,7 +34,7 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { type EngineRunOptions, runEngineStamped, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -57,6 +55,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
+import { standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import {
   appendStuckLatchFingerprint,
@@ -1003,13 +1002,14 @@ export async function implementFollowUp(
     loop,
     opts.abortSignal,
     async () => {
-      await ensureBareCache(loop, {
+      const runtime = opts.runtime ?? standingPodRuntime;
+      await runtime.ensureBareCache(loop, {
         cloneUrl: opts.job.cloneUrl,
         giteaUrl: opts.giteaUrl,
         abortSignal: opts.abortSignal,
         log,
       });
-      const attached = await attachPrWorktree(loop, {
+      const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
         abortSignal: opts.abortSignal,
@@ -1027,7 +1027,8 @@ export async function implementFollowUp(
         previousConflict.lastHeadSha === headSha &&
         previousConflict.lastBaseSha === baseSha
       ) {
-        return skipClaimedWork(loop, "same head and base already attempted");
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: "same head and base already attempted" };
       }
 
       const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
@@ -1043,6 +1044,8 @@ export async function implementFollowUp(
           git: loop.runConfiguredGit,
           env: loop.env,
           worktree,
+          runtime,
+          loop,
           defaultBranch: opts.job.defaultBranch,
           headRef: branch,
           job: taskJob,
@@ -1076,7 +1079,8 @@ export async function implementFollowUp(
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         prefixMergeThrew = true;
         throw err;
@@ -1095,7 +1099,8 @@ export async function implementFollowUp(
       if (mergeResult.status === "stuck") {
         await persistConflictAttempt(mergeResult);
         await sticky("stuck: cannot resolve conflicts", pr.number);
-        return skipClaimedWork(loop, "stuck: cannot resolve conflicts");
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
       }
 
       throwIfAborted(opts.abortSignal);
@@ -1210,7 +1215,8 @@ export async function implementFollowUp(
           onPid: loop.engineOnPid(opts.onPid),
         };
         runner = undefined;
-        const result = await runEngineStamped(engine, runOpts, (r) => {
+        const runtime = opts.runtime ?? standingPodRuntime;
+        const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
           runner = r;
         });
         // Gate on the message so a future non-quota `stuck` producer uses the
@@ -1225,7 +1231,9 @@ export async function implementFollowUp(
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throwIfEngineFailed(result);
         return undefined;
@@ -1264,12 +1272,16 @@ export async function implementFollowUp(
             chain: opts.chain,
             previousError: opts.previousError,
           });
-          return skipClaimedWork(loop, QUOTA_STUCK_TEXT);
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throw err;
       }
       if (gate.action === "skip") {
-        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+        if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: gate.reason };
       }
 
       throwIfAborted(opts.abortSignal);
@@ -1278,11 +1290,9 @@ export async function implementFollowUp(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-        await loop.stopHeartbeat();
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
-        await loop.forgetSerialized();
-        await loop.detachWorktree();
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "no-changes" };
       }
 
@@ -1292,7 +1302,8 @@ export async function implementFollowUp(
       } catch (err) {
         const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);
         if (remoteSha) {
-          return skipClaimedWork(loop, prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha));
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha) };
         }
         throw err;
       }
@@ -1304,9 +1315,8 @@ export async function implementFollowUp(
       const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
       await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
       await recordAttempt(sha || pr.head.sha);
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized();
-      await loop.detachWorktree();
+      // Push already landed; a failed destroy must not discard it.
+      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
     },
     async (err) => {
@@ -1321,9 +1331,10 @@ export async function implementFollowUp(
         });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-        await loop.stopHeartbeat();
-        await loop.forgetSerialized().catch(() => undefined);
-        await loop.detachWorktree();
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+          pushLanded: false,
+          logger: log,
+        });
         return;
       }
       await sticky(
@@ -1355,9 +1366,7 @@ export async function implementFollowUp(
         updatedAt: now().toISOString(),
       }).catch(() => undefined);
       await persistCi().catch(() => undefined);
-      await loop.stopHeartbeat();
-      await loop.forgetSerialized().catch(() => undefined);
-      await loop.detachWorktree();
+      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
     }
   );
 }
