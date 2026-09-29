@@ -623,7 +623,8 @@ export async function implementIssue(
           });
           await diary(QUOTA_STUCK_TEXT);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throwIfEngineFailed(result);
@@ -788,7 +789,8 @@ export async function implementIssue(
               chain: opts.chain,
               previousError: opts.previousError,
             });
-            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            // The stuck outcome is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
             return { status: "skipped" as const, reason: QUOTA_STUCK_TEXT };
           }
           throw err;

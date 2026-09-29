@@ -771,7 +771,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         throw err;
       }
       if (gate.action === "skip") {
-        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+        if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: gate.reason };
       }
       if (gate.continued) {
         await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);

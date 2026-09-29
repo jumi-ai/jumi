@@ -1231,7 +1231,8 @@ export async function implementFollowUp(
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
           await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throwIfEngineFailed(result);
@@ -1271,13 +1272,16 @@ export async function implementFollowUp(
             chain: opts.chain,
             previousError: opts.previousError,
           });
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          // The stuck outcome is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throw err;
       }
       if (gate.action === "skip") {
-        return skipClaimedWork(loop, gate.reason, { detach: !gate.keepLocalWork });
+        if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason: gate.reason };
       }
 
       throwIfAborted(opts.abortSignal);
