@@ -43,7 +43,7 @@ async function provisionWithRetry(
   opts?: Parameters<typeof provisionDockerSession>[0],
   attempts = 3
 ): Promise<DockerSession> {
-  // Registry pulls have rate-limited CI before (public.ecr.aws 429) and the
+  // Registry pulls have rate-limited CI before (docker.io 429) and the
   // daemon can hiccup: retry transient `docker run` failures so the proof does
   // not go red on infra flakes. A persistent failure still throws after the
   // attempts. Failed attempts clean up after themselves inside

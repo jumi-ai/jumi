@@ -154,16 +154,16 @@ describe("reviewer image permissions", () => {
     expect(dockerfile).not.toMatch(/kubectl/);
   });
 
-  test("does not pull base images from Docker Hub", () => {
+  test("pulls base images from Docker Hub", () => {
     expect(dockerfile).toMatch(
-      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
+      /FROM docker\.io\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
     );
     expect(dockerfile).toMatch(
-      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS runtime/
+      /FROM docker\.io\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS runtime/
     );
     expect(dockerfile).toMatch(/github\.com\/oven-sh\/bun\/releases\/download\/bun-v\$\{BUN_VERSION\}/);
     expect(dockerfile).not.toMatch(/oven\/bun/);
-    expect(dockerfile).not.toMatch(/docker\.io/);
+    expect(dockerfile).not.toMatch(/public\.ecr\.aws/);
     expect(dockerfile).not.toMatch(/^FROM debian:/m);
     expect(dockerfile).not.toMatch(/^FROM eclipse-temurin:/m);
   });
@@ -177,7 +177,7 @@ describe("worker image JDK", () => {
 
   test("copies pinned Temurin 21 into the worker target only", () => {
     expect(dockerfile).toContain("ARG TEMURIN_TAG=21.0.12_8-jdk");
-    expect(dockerfile).toMatch(/FROM public\.ecr\.aws\/docker\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
+    expect(dockerfile).toMatch(/FROM docker\.io\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
     expect(dockerfile).toMatch(/FROM tools AS build/);
     expect(dockerfile).toMatch(/oven-sh\/bun\/releases\/download\/bun-v\$\{BUN_VERSION\}/);
     expect(dockerfile).not.toMatch(/FROM oven\/bun/);
@@ -198,7 +198,7 @@ describe("worker image JDK", () => {
     expect(dockerfile).not.toMatch(/^FROM oven\/bun:/m);
     expect(dockerfile).not.toMatch(/^FROM eclipse-temurin:/m);
     expect(dockerfile).toMatch(
-      /FROM public\.ecr\.aws\/docker\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
+      /FROM docker\.io\/library\/debian:bookworm-slim(?:@sha256:[0-9a-f]+)? AS tools/
     );
     expect(dockerfile).toMatch(/bun-v\$\{BUN_VERSION\}\/bun-\$\{bun_platform\}\.zip/);
   });
