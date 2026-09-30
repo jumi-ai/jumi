@@ -118,6 +118,21 @@ export function parseReviewFindings(text: string, opts?: { singleFilePath?: stri
   return findings;
 }
 
+/** Finding lines as written (`file:line:` or `L<line>:`), list prefix stripped. */
+export function reviewFindingLines(text: string): string[] {
+  const lines: string[] = [];
+  for (const original of text.split(/\r?\n/)) {
+    const line = stripFindingPrefix(original);
+    const lForm = L_LINE_RE.exec(line);
+    if (lForm && parseFindingLine(lForm[1])) {
+      lines.push(line);
+      continue;
+    }
+    if (findingFromLine(line)) lines.push(line);
+  }
+  return lines;
+}
+
 export function stripFindingLines(
   text: string,
   opts?: { singleFilePath?: string; posted?: ReadonlySet<string> }

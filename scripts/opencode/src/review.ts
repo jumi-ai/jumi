@@ -34,6 +34,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
@@ -1043,11 +1044,26 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   };
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
-    const [repoInfo, prFiles, prCommentResult] = await Promise.all([
+    const [repoInfo, prFiles, prCommentResult, prReviews, prInlines] = await Promise.all([
       forgeApi.getRepo(opts.owner, opts.repo),
       forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
       loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
+      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] => {
+        log(`previous reviews unavailable: ${errorMessage(err)}`);
+        return [];
+      }),
+      forgeApi.listPullReviewComments(opts.owner, opts.repo, pr.number).catch((err: unknown): InlineComment[] => {
+        log(`previous inlines unavailable: ${errorMessage(err)}`);
+        return [];
+      }),
     ]);
+    const previousReview = findPreviousReview({
+      comments: prCommentResult.comments,
+      reviews: prReviews,
+      inlines: prInlines,
+      botUsername: opts.botUsername,
+      marker: markerFor(opts.owner, opts.repo, pr.number),
+    });
 
     const ids = extractClosingIssueNumbers(pr);
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
@@ -1076,7 +1092,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
     const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const { files, notes: fileNotes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
-    notes.push(...fileNotes);
     const includedPatchBytes = files.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const reviewLabel = `${repoFullName}#${pr.number}`;
 
@@ -1091,7 +1106,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       included_patch_bytes: includedPatchBytes,
       included_patch_bytes_h: formatBytes(includedPatchBytes),
       max_patch_bytes: maxPatchBytes,
-      notes: notes.length,
+      notes: notes.length + fileNotes.length,
     });
 
     const fitted = fitReviewThread(thread, maxThreadBytes);
@@ -1135,12 +1150,61 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       logger: log,
     });
 
+    const git = opts.gitRunner ?? runGit;
+    const gitCmdEnv: Record<string, string | undefined> = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      LANG: process.env.LANG,
+      LC_ALL: process.env.LC_ALL,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+
+    let delta: ReviewDelta | undefined;
+    if (previousReview) {
+      const loaded = await loadReviewDelta({
+        previous: previousReview,
+        headSha: reviewedHeadSha,
+        pullFiles: prFiles,
+        git,
+        cwd: opts.workspace,
+        env: gitCmdEnv,
+        log,
+      });
+      if (loaded) {
+        const { files: deltaFiles, notes: deltaNotes } = prepareFiles(loaded.files, maxFiles, maxPatchBytes);
+        delta = { ...loaded, files: deltaFiles };
+        if (prFiles.length > maxFiles) {
+          notes.push(`Only the first ${maxFiles} of ${prFiles.length} changed files are listed.`);
+        }
+        notes.push(...deltaNotes);
+      }
+    }
+    if (!delta) notes.push(...fileNotes);
+    // A later review gets the finding lines, not the previous essay.
+    const promptThread = delta
+      ? {
+          ...fitted.thread,
+          comments: fitted.thread.comments.filter(
+            (comment) => !isJumiReviewComment({ body: comment.body, user: { login: comment.author } }, opts.botUsername)
+          ),
+        }
+      : fitted.thread;
+    logDiagnostic(log, "review_delta", {
+      review: reviewLabel,
+      later: Boolean(delta),
+      previous_sha: previousReview?.sha ?? null,
+      previous_findings: delta?.findings.length ?? null,
+      commits: delta?.commits.length ?? null,
+      delta_files: delta?.files.length ?? null,
+    });
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
-      prFiles: files,
+      prFiles: delta ? prFiles.slice(0, maxFiles) : files,
       reviewNotes: notes,
-      thread: fitted.thread,
+      thread: promptThread,
+      delta,
     });
 
     logDiagnostic(log, "review_prompt", {
@@ -1150,14 +1214,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       model: opts.model,
     });
 
-    const git = opts.gitRunner ?? runGit;
-    const gitCmdEnv: Record<string, string | undefined> = {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      LANG: process.env.LANG,
-      LC_ALL: process.env.LC_ALL,
-      GIT_TERMINAL_PROMPT: "0",
-    };
     let taskTracked = false;
     try {
       taskTracked =
