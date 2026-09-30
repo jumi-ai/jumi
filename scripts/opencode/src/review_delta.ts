@@ -1,4 +1,4 @@
-import { isJumiPullReviewWriteup, isJumiReviewSticky, parseReviewedCommitSha } from "./followup.ts";
+import { isJumiPullReviewWriteup, isJumiReviewSticky, lastCheckTrailer, parseReviewedCommitSha } from "./followup.ts";
 import type { Comment, InlineComment, PullFile, PullReview } from "./ports.ts";
 import { reviewFindingLines } from "./verdict.ts";
 import type { GitRunner } from "./workspace.ts";
@@ -81,6 +81,9 @@ export function findPreviousReview(opts: {
       findings.push(inline.new_position ? `${inline.path}:${inline.new_position}: ${text}` : `${inline.path}: ${text}`);
     }
   }
+  // A failed review with no finding lines (unfinished, or a finding without a
+  // path) has nothing to carry forward, so the next run is a first review.
+  if (findings.length === 0 && lastCheckTrailer(latest.body)?.state === "failure") return undefined;
   return { sha: latest.sha, findings: dedupe(findings) };
 }
 

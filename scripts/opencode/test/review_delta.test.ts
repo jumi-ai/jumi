@@ -107,9 +107,10 @@ function repoGit(head: string): GitRunner {
   };
 }
 
-async function reviewPrompt(dir: string, head: string, comments: Comment[]): Promise<string> {
+async function reviewPrompt(dir: string, head: string, comments: Comment[], maxThreadBytes?: number): Promise<string> {
   let prompt = "";
   const result = await reviewPullRequest({
+    maxThreadBytes,
     owner: "kirmanak",
     repo: "demo",
     prNumber: 7,
@@ -185,6 +186,35 @@ describe("later reviews", () => {
     });
   });
 
+  test("a failed previous review with no finding lines falls back to a first review", async () => {
+    await withPullRepo(async ({ dir, reviewed, head }) => {
+      const sticky = makeComment({
+        id: 50,
+        body: stickyBody(reviewed, "Could not finish the review.", "<!-- jumi-check: failure; unfinished -->"),
+      });
+      const prompt = await reviewPrompt(dir, head, [sticky]);
+      expect(prompt).toContain("A_FULL_PATCH");
+      expect(prompt).toContain("B_FULL_PATCH");
+      expect(prompt).not.toContain("<changes_since_last_review");
+      expect(prompt).not.toContain("The previous review had no findings.");
+    });
+  });
+
+  test("drops the previous essay before fitting the thread budget", async () => {
+    await withPullRepo(async ({ dir, reviewed, head }) => {
+      const older = makeComment({ id: 10, user: makeUser({ login: "alice" }), body: "HUMAN_NOTE: keep b small" });
+      const sticky = makeComment({
+        id: 50,
+        body: stickyBody(reviewed, `${ESSAY}\n\n${"x".repeat(4000)}\n\n- ${FINDING}`, "<!-- jumi-check: failure -->"),
+      });
+      const prompt = await reviewPrompt(dir, head, [older, sticky], 1000);
+      expect(prompt).toContain(`<finding>${FINDING}</finding>`);
+      expect(prompt).toContain("HUMAN_NOTE: keep b small");
+      expect(prompt).not.toContain("[omitted; thread budget]");
+      expect(prompt).not.toContain("PREVIOUS_ESSAY");
+    });
+  });
+
   test("falls back to a first review when the reviewed SHA is missing or not an ancestor", async () => {
     await withPullRepo(async ({ dir, reviewed, head }) => {
       const missing = makeComment({
@@ -234,6 +264,20 @@ describe("findPreviousReview", () => {
       marker: MARKER,
     });
     expect(previous).toEqual({ sha: "bbbbbbb", findings: ["a.ts:3: 🟡 risk: open one"] });
+  });
+
+  test("treats a failed review without finding lines as no previous review", () => {
+    expect(
+      findPreviousReview({
+        comments: [
+          makeComment({ body: stickyBody("aaaaaaa", "🔴 bug: no path here", "<!-- jumi-check: failure -->") }),
+        ],
+        reviews: [],
+        inlines: [],
+        botUsername: "jumi",
+        marker: MARKER,
+      })
+    ).toBeUndefined();
   });
 
   test("ignores another pull's sticky", () => {

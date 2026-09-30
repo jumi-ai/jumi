@@ -135,7 +135,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 
 The engine does not checkout or execute PR-head code as the review source of truth. It reviews forge PR metadata and file patches from the trusted Gitea API (workspace is for the artifact only).
 
-A later review is one where the newest Jumi review on the pull names a reviewed commit that is an ancestor of the current head. Its prompt carries the previous finding lines (or a line saying there were none), the commits since that commit, and the patches of pull files those commits touched. It lists the whole pull's changed files without patches and leaves out the previous review essay; the checkout of the head still has the older files. A missing or non-ancestor reviewed commit gets a first review with the full pull patches.
+A later review is one where the newest Jumi review on the pull names a reviewed commit that is an ancestor of the current head. Its prompt carries the previous finding lines (or a line saying there were none), the commits since that commit, and the patches of pull files those commits touched. It lists the whole pull's changed files without patches and leaves out the previous review essay; the checkout of the head still has the older files. A missing or non-ancestor reviewed commit gets a first review with the full pull patches, and so does a failed previous review with no finding lines (for example, one that could not finish).
 
 It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `JUMI_REVIEW.md` (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not from OpenCode stdout and not by grepping 🔴/🟡 in the prose:
 

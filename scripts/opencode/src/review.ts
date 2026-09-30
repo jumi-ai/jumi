@@ -1109,31 +1109,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       notes: notes.length + fileNotes.length,
     });
 
-    const fitted = fitReviewThread(thread, maxThreadBytes);
-    if (fitted.truncated) {
-      notes.push(`Thread context truncated to maxThreadBytes (dropped ${fitted.droppedCommentBodies} comment bodies).`);
-    }
-    const allFittedComments = [
-      ...fitted.thread.comments,
-      ...fitted.thread.linkedIssues.flatMap((issue) => issue.comments),
-    ];
-    const productComments = allFittedComments.filter((comment) => comment.intent === "product").length;
-    const discussionComments = allFittedComments.filter((comment) => comment.intent === "discussion").length;
-    logDiagnostic(log, "review_thread", {
-      review: reviewLabel,
-      pr_comments: fitted.thread.comments.length,
-      linked_issues: fitted.thread.linkedIssues.length,
-      linked_issue_comments: fitted.thread.linkedIssues.reduce((sum, issue) => sum + issue.comments.length, 0),
-      thread_bytes: fitted.threadBytes,
-      thread_bytes_h: formatBytes(fitted.threadBytes),
-      max_thread_bytes: maxThreadBytes,
-      truncated: fitted.truncated,
-      product_comments: productComments,
-      discussion_comments: discussionComments,
-      permission_lookups: permissionLookups,
-      permission_failures: permissionFailures,
-    });
-
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
     const gitAuth = await resolveGitAuth(opts);
     failureSecrets.push(gitAuth.token);
@@ -1160,6 +1135,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     };
 
     let delta: ReviewDelta | undefined;
+    let scopeNotes = fileNotes;
     if (previousReview) {
       const loaded = await loadReviewDelta({
         previous: previousReview,
@@ -1173,22 +1149,50 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       if (loaded) {
         const { files: deltaFiles, notes: deltaNotes } = prepareFiles(loaded.files, maxFiles, maxPatchBytes);
         delta = { ...loaded, files: deltaFiles };
-        if (prFiles.length > maxFiles) {
-          notes.push(`Only the first ${maxFiles} of ${prFiles.length} changed files are listed.`);
-        }
-        notes.push(...deltaNotes);
+        scopeNotes =
+          prFiles.length > maxFiles
+            ? [`Only the first ${maxFiles} of ${prFiles.length} changed files are listed.`, ...deltaNotes]
+            : deltaNotes;
       }
     }
-    if (!delta) notes.push(...fileNotes);
-    // A later review gets the finding lines, not the previous essay.
-    const promptThread = delta
-      ? {
-          ...fitted.thread,
-          comments: fitted.thread.comments.filter(
-            (comment) => !isJumiReviewComment({ body: comment.body, user: { login: comment.author } }, opts.botUsername)
-          ),
-        }
-      : fitted.thread;
+    // A later review gets the finding lines, not the previous essay. Drop it
+    // before fitting so it does not use up the thread budget.
+    const fitted = fitReviewThread(
+      delta
+        ? {
+            ...thread,
+            comments: thread.comments.filter(
+              (comment) =>
+                !isJumiReviewComment({ body: comment.body, user: { login: comment.author } }, opts.botUsername)
+            ),
+          }
+        : thread,
+      maxThreadBytes
+    );
+    if (fitted.truncated) {
+      notes.push(`Thread context truncated to maxThreadBytes (dropped ${fitted.droppedCommentBodies} comment bodies).`);
+    }
+    notes.push(...scopeNotes);
+    const allFittedComments = [
+      ...fitted.thread.comments,
+      ...fitted.thread.linkedIssues.flatMap((issue) => issue.comments),
+    ];
+    const productComments = allFittedComments.filter((comment) => comment.intent === "product").length;
+    const discussionComments = allFittedComments.filter((comment) => comment.intent === "discussion").length;
+    logDiagnostic(log, "review_thread", {
+      review: reviewLabel,
+      pr_comments: fitted.thread.comments.length,
+      linked_issues: fitted.thread.linkedIssues.length,
+      linked_issue_comments: fitted.thread.linkedIssues.reduce((sum, issue) => sum + issue.comments.length, 0),
+      thread_bytes: fitted.threadBytes,
+      thread_bytes_h: formatBytes(fitted.threadBytes),
+      max_thread_bytes: maxThreadBytes,
+      truncated: fitted.truncated,
+      product_comments: productComments,
+      discussion_comments: discussionComments,
+      permission_lookups: permissionLookups,
+      permission_failures: permissionFailures,
+    });
     logDiagnostic(log, "review_delta", {
       review: reviewLabel,
       later: Boolean(delta),
@@ -1203,7 +1207,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       pr,
       prFiles: delta ? prFiles.slice(0, maxFiles) : files,
       reviewNotes: notes,
-      thread: promptThread,
+      thread: fitted.thread,
       delta,
     });
 
