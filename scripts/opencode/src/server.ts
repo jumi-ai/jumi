@@ -12,11 +12,13 @@ import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError } from "./quota.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
+  PR_AUTHOR_CANNOT_PUSH,
   publishReviewResult,
   reviewJobKey,
   reviewPullRequest,
@@ -116,6 +118,10 @@ export async function runReviewJob(
   if (early) {
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
     return { status: "skipped", reason: early };
+  }
+  if (!(await pullAuthorCanPush(api, job.owner, job.repo, pr))) {
+    logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${PR_AUTHOR_CANNOT_PUSH}`);
+    return { status: "skipped", reason: PR_AUTHOR_CANNOT_PUSH };
   }
   let noCiNote: string | undefined;
   if (!extras.assumeNoCi) {
@@ -770,6 +776,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
+    getAppPermissions: api.getAppPermissions ? (slug) => api.getAppPermissions!(slug) : undefined,
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)

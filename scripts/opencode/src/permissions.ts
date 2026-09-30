@@ -2,10 +2,11 @@ import type { CollaboratorPermission } from "./ports.ts";
 
 export type { CollaboratorPermission };
 
-export type PermissionApi = Pick<
-  { getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> },
-  "getCollaboratorPermission"
->;
+export type PermissionApi = {
+  getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
+  /** GitHub only: the permissions an App's installations hold, e.g. `{ contents: "write" }`. */
+  getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
+};
 
 /**
  * Same write-or-stronger bar for people and Apps.
@@ -51,7 +52,7 @@ function permissionFromResult(result: CollaboratorPermission | undefined | null)
 export interface ResolvePermissionsResult {
   /** Raw forge permission per lowercased login, fail-closed `"none"` on any lookup failure. */
   detail: Map<string, string>;
-  /** Write-or-stronger per login, using the same bar as follow-up (`hasWriteAccessFromPermission`). */
+  /** Can push, per login, using the same bar as follow-up (`canPush`). */
   writes: Map<string, boolean>;
   /** Distinct logins queried. */
   lookups: number;
@@ -82,8 +83,7 @@ export async function resolvePermissions(
   }
   const out = new Map<string, string>();
   const writes = new Map<string, boolean>();
-  const fn = typeof api?.getCollaboratorPermission === "function" ? api.getCollaboratorPermission : undefined;
-  if (!fn) {
+  if (typeof api?.getCollaboratorPermission !== "function") {
     for (const key of distinct.keys()) {
       out.set(key, "none");
       writes.set(key, false);
@@ -99,15 +99,10 @@ export async function resolvePermissions(
   const errors: string[] = [];
   await Promise.all(
     [...distinct.entries()].map(async ([key, login]) => {
-      try {
-        const result = await fn.call(api, owner, repo, login);
-        out.set(key, normalizePermission(permissionFromResult(result)));
-        writes.set(key, hasWriteAccessFromPermission(result));
-      } catch (err) {
-        errors.push(err instanceof Error ? err.message : String(err));
-        out.set(key, "none");
-        writes.set(key, false);
-      }
+      const access = await pushAccess(api, owner, repo, login);
+      if (access.error !== undefined) errors.push(access.error);
+      out.set(key, access.permission);
+      writes.set(key, access.push);
     })
   );
   return {
@@ -119,32 +114,101 @@ export async function resolvePermissions(
   };
 }
 
+/** `renovate[bot]` → `renovate`. GitHub Apps act as `<slug>[bot]`; plain users return undefined. */
+export function appSlugFromLogin(login: string | undefined | null): string | undefined {
+  if (typeof login !== "string") return undefined;
+  const match = /^(.+)\[bot\]$/i.exec(login.trim());
+  return match?.[1] || undefined;
+}
+
+interface PushAccess {
+  /** Raw forge permission, lowercased; `"write"` for an App whose installation can push. */
+  permission: string;
+  push: boolean;
+  /** Collaborator lookup failure that the App check did not overrule. */
+  error?: string;
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
- * Fail-closed write check: returns true only when the forge positively reports
- * write (or maintain/admin/owner) for the login. Any lookup failure, missing
- * method, or unknown permission is false.
+ * Collaborator permission `none` (or a 404) is not a no for a GitHub App: GitHub
+ * reports no collaborator permission for Apps that push branches onto the repo,
+ * Renovate among them. The App acts on this repository, so its installation
+ * covers it; `contents: write` on that installation is push.
  */
-export async function hasWriteAccess(
-  api: Partial<PermissionApi> | undefined,
-  owner: string,
-  repo: string,
-  login: string | undefined
-): Promise<boolean> {
-  if (!api || typeof api.getCollaboratorPermission !== "function") return false;
-  if (typeof login !== "string" || !login.trim()) return false;
+async function appCanPush(api: Partial<PermissionApi>, login: string): Promise<boolean> {
+  const slug = appSlugFromLogin(login);
+  if (!slug || typeof api.getAppPermissions !== "function") return false;
   try {
-    const info = await api.getCollaboratorPermission(owner, repo, login);
-    return hasWriteAccessFromPermission(info);
+    const permissions = await api.getAppPermissions(slug);
+    return (permissions?.contents ?? "").toLowerCase() === "write";
   } catch {
     return false;
   }
 }
 
+async function pushAccess(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  login: string
+): Promise<PushAccess> {
+  if (!api || typeof api.getCollaboratorPermission !== "function") {
+    return { permission: "none", push: false, error: "collaborator permission API unavailable" };
+  }
+  let permission = "none";
+  let error: string | undefined;
+  try {
+    const result = await api.getCollaboratorPermission(owner, repo, login);
+    permission = normalizePermission(permissionFromResult(result));
+    if (hasWriteAccessFromPermission(result)) return { permission, push: true };
+  } catch (err) {
+    error = errorText(err);
+  }
+  if (await appCanPush(api, login)) return { permission: "write", push: true };
+  return { permission, push: false, ...(error !== undefined ? { error } : {}) };
+}
+
 /**
- * Batch write check with per-round caching. Fail-closed: logins that cannot
- * be confirmed as writers are absent from the returned set.
+ * Fail-closed push check. A person needs write, admin, or owner (or a
+ * maintain/push role). A GitHub App whose installation can write contents
+ * counts even when the collaborator lookup says none. Any other lookup
+ * failure, missing method, or unknown permission is false.
  */
-export async function trustedWriteLogins(
+export async function canPush(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  login: string | undefined
+): Promise<boolean> {
+  if (typeof login !== "string" || !login.trim()) return false;
+  return (await pushAccess(api, owner, repo, login.trim())).push;
+}
+
+/**
+ * A pull's author can push to the base repository. A head branch that already
+ * lives on the base repository is proof. A fork head is not, so fall back to
+ * the author's own push access.
+ */
+export async function pullAuthorCanPush(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  pr: { user?: { login?: string } | null; head?: { repo?: { full_name?: string } | null } | null }
+): Promise<boolean> {
+  const headRepo = pr.head?.repo?.full_name;
+  if (typeof headRepo === "string" && headRepo.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return true;
+  return canPush(api, owner, repo, pr.user?.login ?? undefined);
+}
+
+/**
+ * Batch push check with per-round caching. Fail-closed: logins that cannot
+ * be confirmed to push are absent from the returned set.
+ */
+export async function trustedPushLogins(
   api: Partial<PermissionApi> | undefined,
   owner: string,
   repo: string,
@@ -160,7 +224,7 @@ export async function trustedWriteLogins(
     seen.add(key);
     pending.push(
       (async () => {
-        if (await hasWriteAccess(api, owner, repo, raw)) trusted.add(key);
+        if (await canPush(api, owner, repo, raw)) trusted.add(key);
       })()
     );
   }

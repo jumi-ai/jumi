@@ -713,6 +713,11 @@ export class GithubAPI {
     return { permission: info.permission, role_name: info.role_name };
   }
 
+  async getAppPermissions(slug: string): Promise<Record<string, string> | undefined> {
+    const app = await this.get<{ permissions?: Record<string, string> }>(`/apps/${encodeURIComponent(slug)}`);
+    return app.permissions;
+  }
+
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {
     return toPull(await this.get<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
   }

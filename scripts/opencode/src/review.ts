@@ -670,6 +670,9 @@ async function gatePersonalJumiContractEnv(
   }
 }
 
+/** The pull's author cannot push to the base repository: the review ignores it. */
+export const PR_AUTHOR_CANNOT_PUSH = "PR author cannot push to the base repository";
+
 export function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
