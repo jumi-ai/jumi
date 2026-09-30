@@ -8,7 +8,10 @@ import {
   flagObjection,
   judgeEffortLevel,
   judgeNegativeRun,
+  judgeSkills,
   nonsenseValue,
+  PROBE_CHECKOUT_SKILL,
+  PROBE_FLEET_SKILL,
   pinnedFlagValues,
   withFlagValue,
 } from "../src/claude_flag_probe.ts";
@@ -222,5 +225,25 @@ describe("image verification paths", () => {
     // ship `claude`, so both have to prove the flags, not just the first.
     const checks = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
     expect(checks.split("bun src/claude_flag_probe.ts").length - 1).toBe(2);
+  });
+});
+
+describe("judgeSkills", () => {
+  const run = (skills: string[]) => ({
+    code: 0,
+    stdout: `${JSON.stringify({ type: "system", subtype: "init", skills })}\n`,
+    stderr: "",
+    timedOut: false,
+  });
+  const ok = (results: { ok: boolean }[]) => results.map((result) => result.ok);
+
+  test("passes only with both skill sources and no checkout hook", () => {
+    const both = run([PROBE_FLEET_SKILL, `checkout:${PROBE_CHECKOUT_SKILL}`]);
+    expect(ok(judgeSkills(both, false))).toEqual([true, true, true]);
+    expect(ok(judgeSkills(both, true))).toEqual([true, true, false]);
+    // A checkout skill read straight from `.claude/skills` would mean the
+    // project source is on, and with it the checkout's hooks.
+    expect(ok(judgeSkills(run([PROBE_FLEET_SKILL, PROBE_CHECKOUT_SKILL]), false))).toEqual([true, false, true]);
+    expect(ok(judgeSkills(run([]), false))).toEqual([false, false, true]);
   });
 });

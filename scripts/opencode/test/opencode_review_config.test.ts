@@ -6,6 +6,8 @@ import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } f
 interface OpenCodeReviewConfig {
   model?: unknown;
   small_model?: unknown;
+  plugin?: unknown;
+  experimental?: { hook?: unknown };
   enabled_providers?: unknown;
   skills?: { paths?: string[] };
   provider?: {
@@ -56,13 +58,35 @@ describe("opencode review config", () => {
     expect(config.permission.websearch).toBe("allow");
     expect(config.permission.edit).toBe("allow");
     expect(config.permission.write).toBe("allow");
-    expect(config.permission.skill).toEqual({ "*": "deny", "gitops-apply-review": "allow" });
-    expect(config.permission.skill).not.toHaveProperty("gitea-pull-review");
     expect(config.permission.lsp).toBe("deny");
     expect(config.permission.task).toBe("deny");
     expect(config.permission.question).toBe("deny");
     expect(config.permission.doom_loop).toBe("deny");
-    expect(config.skills?.paths).toEqual(["/app/review-skills"]);
+  });
+
+  test("allows every skill the reviewer can discover: image, fleet, and checkout", () => {
+    // No named allow-list: the model only sees a description until it loads one.
+    expect(config.permission.skill).toBe("allow");
+    // Image pack, checkout `.opencode/skill(s)` (relative paths resolve against
+    // `--dir`, and the sanitized spawn keeps project config off, so these are
+    // the only way they load), and fleet OpenCode skills under the real HOME
+    // (the sanitized spawn points XDG_CONFIG_HOME at a scratch dir). Checkout
+    // and fleet `.claude/skills` / `.agents/skills` are OpenCode's own scans.
+    expect(config.skills?.paths).toEqual([
+      "/app/review-skills",
+      ".opencode/skill",
+      ".opencode/skills",
+      "~/.config/opencode/skill",
+      "~/.config/opencode/skills",
+    ]);
+  });
+
+  test("brings no hooks or plugins of its own", () => {
+    // Checkout plugins stay off because the review spawn sets
+    // OPENCODE_DISABLE_PROJECT_CONFIG (test/git.test.ts); this config must not
+    // add a plugin or command hook back.
+    expect(config.plugin).toBeUndefined();
+    expect(config.experimental?.hook).toBeUndefined();
   });
 
   test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
@@ -90,11 +114,22 @@ describe("opencode review config", () => {
     expect(probe).toContain("DENY_PATTERNS");
   });
 
-  test("allows Read of baked review-skills after star deny (last-match)", () => {
+  test("allows Read of image and fleet skill dirs after star deny (last-match)", () => {
+    // OpenCode expands `~/` against the spawn's HOME, where fleet skills live.
     const rules = config.permission.external_directory;
-    expect(rules).toEqual({ "*": "deny", "/app/review-skills/**": "allow" });
     if (typeof rules === "string") throw new Error("expected last-match object, not scalar deny");
-    expect(Object.keys(rules)).toEqual(["*", "/app/review-skills/**"]);
+    expect(Object.keys(rules)).toEqual([
+      "*",
+      "/app/review-skills/**",
+      "~/.claude/skills/**",
+      "~/.agents/skills/**",
+      "~/.config/opencode/skill/**",
+      "~/.config/opencode/skills/**",
+    ]);
+    expect(rules["*"]).toBe("deny");
+    for (const [pattern, action] of Object.entries(rules)) {
+      if (pattern !== "*") expect(action).toBe("allow");
+    }
   });
 
   test("defaults bash to allow with no commit/push carve-outs", () => {
@@ -121,7 +156,7 @@ describe("reviewer image permissions", () => {
     expect(dockerfile).toContain("COPY review-skills /app/review-skills");
   });
 
-  test("copies gitea-pull-review into the same image pack without allowing it on the reviewer", () => {
+  test("copies gitea-pull-review into the same image pack", () => {
     const giteaSkillPath = join(repoRoot, "review-skills/gitea-pull-review/SKILL.md");
     expect(existsSync(giteaSkillPath)).toBe(true);
     expect(readFileSync(giteaSkillPath, "utf8")).toContain("name: gitea-pull-review");

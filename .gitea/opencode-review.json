@@ -29,7 +29,13 @@
     }
   },
   "skills": {
-    "paths": ["/app/review-skills"]
+    "paths": [
+      "/app/review-skills",
+      ".opencode/skill",
+      ".opencode/skills",
+      "~/.config/opencode/skill",
+      "~/.config/opencode/skills"
+    ]
   },
   "permission": {
     "read": "allow",
@@ -41,14 +47,21 @@
     "bash": {
       "*": "allow"
     },
-    "external_directory": { "*": "deny", "/app/review-skills/**": "allow" },
+    "external_directory": {
+      "*": "deny",
+      "/app/review-skills/**": "allow",
+      "~/.claude/skills/**": "allow",
+      "~/.agents/skills/**": "allow",
+      "~/.config/opencode/skill/**": "allow",
+      "~/.config/opencode/skills/**": "allow"
+    },
     "task": "deny",
     "todowrite": "deny",
     "question": "deny",
     "webfetch": "allow",
     "websearch": "allow",
     "lsp": "deny",
-    "skill": { "*": "deny", "gitops-apply-review": "allow" },
+    "skill": "allow",
     "doom_loop": "deny"
   }
 }

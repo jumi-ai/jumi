@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
@@ -19,7 +20,7 @@ import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 
 export const CLAUDE_SETTING_SOURCES = "user";
-export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch";
+export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch,Skill";
 export const CLAUDE_PERMISSION_MODE = "dontAsk";
 /** stream-json keeps per-message usage even when the child is killed before `result`. */
 export const CLAUDE_OUTPUT_FORMAT = "stream-json";
@@ -172,7 +173,11 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string
   return env;
 }
 
-export function claudeArgv(opts: EngineRunOptions): string[] {
+/**
+ * `checkoutSkillsPlugin` is the hook-free plugin `stageClaudeCheckoutSkills`
+ * wrote for this spawn, when the checkout has skills.
+ */
+export function claudeArgv(opts: EngineRunOptions, checkoutSkillsPlugin?: string): string[] {
   const args = [
     "claude",
     "-p",
@@ -199,6 +204,9 @@ export function claudeArgv(opts: EngineRunOptions): string[] {
   // `--setting-sources user` still keeps the untrusted checkout's hooks out.
   const tracingPlugin = claudeTracingPluginDir();
   if (tracingPlugin) args.push("--plugin-dir", tracingPlugin);
+  // Checkout skills ride the same way: staged by the parent, never read from
+  // the checkout's own `.claude/`, so `--setting-sources user` stays.
+  if (checkoutSkillsPlugin) args.push("--plugin-dir", checkoutSkillsPlugin);
   if (opts.continueSession) args.push("--continue");
   return args;
 }
@@ -231,7 +239,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   }
 
   try {
-    const args = claudeArgv(opts);
+    const checkoutSkills = await stageClaudeCheckoutSkills(opts.workdir, join(tmpDir, "checkout-skills"), log);
+    const args = claudeArgv(opts, checkoutSkills);
     const proc = (() => {
       try {
         return Bun.spawn(args, {

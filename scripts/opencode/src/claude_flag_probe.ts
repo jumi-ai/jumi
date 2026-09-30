@@ -32,7 +32,11 @@
  *     tests exec `hooks/*.sh` directly, so between them a release that stopped
  *     loading inline manifest hooks (or `--setting-sources user` starting to
  *     suppress them) would leave every homelab Claude run untraced with nothing
- *     anywhere saying so.
+ *     anywhere saying so;
+ *   - skills load without checkout hooks: a fleet skill under `~/.claude/skills`
+ *     and a checkout `.claude/skills` skill staged by
+ *     `stageClaudeCheckoutSkills` are both in the init event's skill list, while
+ *     a `SessionStart` hook in the checkout's `.claude/settings.json` never runs.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -41,10 +45,11 @@
  *
  * Exit 0 when every case matches its expectation, 1 otherwise.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
+import { CLAUDE_CHECKOUT_SKILLS_PLUGIN, stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
@@ -73,6 +78,12 @@ const PROBE_JOB_ID = "jumi-claude-flag-probe-job";
  * `timeout 600` the image verification wraps the probe in.
  */
 const RUN_TIMEOUT_MS = 60_000;
+/** Skill the probe puts in `~/.claude/skills`, the fleet/user location. */
+export const PROBE_FLEET_SKILL = "jumi-probe-fleet-skill";
+/** Skill the probe puts in the checkout's `.claude/skills`. */
+export const PROBE_CHECKOUT_SKILL = "jumi-probe-checkout-skill";
+/** File the checkout's hooks would create if the binary ran them. */
+const PROBE_HOOK_MARKER = "jumi-probe-checkout-hook-ran";
 
 /**
  * Production flags whose *value* the installed binary validates. Everything
@@ -274,6 +285,61 @@ export function judgeTracingPlugin(project: string, spans: readonly CapturedSpan
   return { name, ok: true, observed: `${mine.length} span(s) at ${wantPath}: ${mine.map((s) => s.name).join(", ")}` };
 }
 
+function probeSkill(name: string, hookMarker?: string): string {
+  const hooks = hookMarker
+    ? `hooks:\n  SessionStart:\n    - hooks:\n        - type: command\n          command: "touch ${hookMarker}"\n`
+    : "";
+  return `---\nname: ${name}\ndescription: Jumi claude flag probe skill\n${hooks}---\nProbe skill body.\n`;
+}
+
+/**
+ * A fleet skill in HOME, and a checkout that carries a skill *and* hooks: one
+ * in `.claude/settings.json` and one in the skill's own frontmatter. Returns
+ * the marker path either hook would create.
+ */
+async function seedSkillProbe(home: string, workdir: string): Promise<string> {
+  const marker = join(workdir, PROBE_HOOK_MARKER);
+  await mkdir(join(home, ".claude", "skills", PROBE_FLEET_SKILL), { recursive: true });
+  await writeFile(join(home, ".claude", "skills", PROBE_FLEET_SKILL, "SKILL.md"), probeSkill(PROBE_FLEET_SKILL));
+  await mkdir(join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
+  await writeFile(
+    join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
+    probeSkill(PROBE_CHECKOUT_SKILL, marker)
+  );
+  await writeFile(
+    join(workdir, ".claude", "settings.json"),
+    JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `touch ${marker}` }] }] } })
+  );
+  return marker;
+}
+
+/**
+ * Both skill sources reach the model, and the checkout's hooks do not run.
+ * Judged on the init event of the production run.
+ */
+export function judgeSkills(run: RunResult, hookRan: boolean): CaseResult[] {
+  const init = jsonLines(run.stdout).find((event) => event.type === "system" && event.subtype === "init");
+  const skills = Array.isArray(init?.skills) ? init.skills.map((skill) => String(skill)) : [];
+  const checkout = `${CLAUDE_CHECKOUT_SKILLS_PLUGIN}:${PROBE_CHECKOUT_SKILL}`;
+  return [
+    {
+      name: "a fleet skill in ~/.claude/skills is discoverable",
+      ok: skills.includes(PROBE_FLEET_SKILL),
+      observed: skills.includes(PROBE_FLEET_SKILL) ? PROBE_FLEET_SKILL : `skills: ${skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "a checkout .claude/skills skill is discoverable through the staged plugin",
+      ok: skills.includes(checkout),
+      observed: skills.includes(checkout) ? checkout : `skills: ${skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "the checkout's hooks do not run",
+      ok: !hookRan,
+      observed: hookRan ? `${PROBE_HOOK_MARKER} was created` : "no hook marker",
+    },
+  ];
+}
+
 export interface RunResult {
   readonly code: number;
   readonly stdout: string;
@@ -473,7 +539,9 @@ async function main(): Promise<number> {
     // above — never at whatever an operator exported — is also what lets the
     // production run below be judged on a span that actually arrived.
     process.env.PHOENIX_OTLP_ENDPOINT = `http://127.0.0.1:${phoenix.port}`;
-    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
+    const hookMarker = await seedSkillProbe(home, workdir);
+    const checkoutSkills = await stageClaudeCheckoutSkills(workdir, join(home, "checkout-skills"), console.error);
+    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir }, checkoutSkills);
     const pinned = pinnedFlagValues(argv);
     // The same env `runClaude` merges into a production spawn, so the plugin is
     // configured here exactly as it is in the homelab.
@@ -502,7 +570,9 @@ async function main(): Promise<number> {
       });
     }
 
-    results.push(...judgeProductionRun(argv, await runClaudeArgv(argv, origin, home, workdir, tracing)));
+    const production = await runClaudeArgv(argv, origin, home, workdir, tracing);
+    results.push(...judgeProductionRun(argv, production));
+    results.push(...judgeSkills(production, await Bun.file(hookMarker).exists()));
     // Only the production run is traced; the effort and negative-control runs
     // below keep the plain env, so the spans collected are unambiguously that
     // one run's.
