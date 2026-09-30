@@ -142,6 +142,12 @@ describe("selectReviewMdSections", () => {
     expect(selection.text).toBe("");
   });
 
+  test("treats an invalid glob heading as repo-wide instead of throwing", () => {
+    const selection = selectReviewMdSections("## [z-a].ts\nCheck this.\n", files("README.md"));
+    expect(selection.text).toContain("Check this.");
+    expect(selection.pathSections).toBe(0);
+  });
+
   test("truncates to the byte budget and says so", () => {
     const long = `## Rules\n\n${"é".repeat(200)}\n`;
     const selection = selectReviewMdSections(long, [], 51);

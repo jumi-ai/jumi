@@ -134,9 +134,17 @@ function parseSections(text: string): Section {
     const title = (heading[2] ?? "").replace(/(?:^|[ \t]+)#+$/, "").trim();
     while (stack[stack.length - 1].level >= level) stack.pop();
     const globs = headingGlobs(title);
+    // A repo-owned heading must never break the review: an invalid character
+    // class (e.g. `## [z-a].ts`) fails to compile, so fall back to repo-wide.
+    let compiled: RegExp[] | undefined;
+    try {
+      compiled = globs?.map(globToRegExp);
+    } catch {
+      compiled = undefined;
+    }
     const section: Section = {
       heading: line,
-      globs: globs?.map(globToRegExp),
+      globs: compiled,
       lines: [],
       children: [],
       level,
@@ -227,7 +235,13 @@ export async function loadReviewMdSections(
 ): Promise<ReviewMdSelection | undefined> {
   const file = await readReviewMd(workdir);
   if (!file) return undefined;
-  const selection = selectReviewMdSections(file.text, files, maxBytes);
+  // A malformed repo file must never fail the review: inject nothing instead.
+  let selection: ReviewMdSelection;
+  try {
+    selection = selectReviewMdSections(file.text, files, maxBytes);
+  } catch {
+    return undefined;
+  }
   if (!selection.text) return undefined;
   return file.truncated ? { ...selection, truncated: true } : selection;
 }
