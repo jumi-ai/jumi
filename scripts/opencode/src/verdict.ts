@@ -138,8 +138,9 @@ export function stripFindingLines(
 }
 
 // A severity marker leading the line, optionally after an `L<n>:` or `<path>:<n>:` location.
+// The location may be wrapped in backticks or emphasis and may be a range (`:12-14`).
 const FINDING_MARKER_RE =
-  /^(?:(?:L\d+|\S+:\d+):\s+)?(?:\*\*|__)?\s*(?:🔴|🟡|💡|❓|(?:bug|risk|simpler|suggestion|q|question)\s*:)/iu;
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🔴|🟡|💡|❓|(?:bug|risk|simpler|suggestion|q|question)\s*:)/iu;
 
 function isFindingMarkerLine(original: string): boolean {
   return FINDING_MARKER_RE.test(stripFindingPrefix(original));
@@ -148,23 +149,26 @@ function isFindingMarkerLine(original: string): boolean {
 /**
  * The published review body: finding lines only. A tour, verification essay,
  * restated diff, or "no findings" paragraph is dropped, never promoted. `keep`
- * lists exact parent-authored lines (e.g. the no-CI note) that survive.
+ * lists parent-authored notes (e.g. the no-CI note); a line that contains one
+ * publishes as that note alone, without the child's bullet or surrounding text.
  */
 export function keepReviewFindingLines(
   text: string,
   opts?: { singleFilePath?: string; keep?: readonly string[] }
 ): string {
-  const keep = new Set((opts?.keep ?? []).map((line) => line.trim()).filter(Boolean));
+  const keep = (opts?.keep ?? []).map((line) => line.trim()).filter(Boolean);
   let out = "";
   let previous = -2;
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const original = lines[i];
-    const kept =
-      keep.has(original.trim()) || findingFromLine(original, opts) !== undefined || isFindingMarkerLine(original);
-    if (!kept) continue;
+    const note = keep.find((k) => original.includes(k));
+    let kept: string | undefined;
+    if (note) kept = note;
+    else if (findingFromLine(original, opts) !== undefined || isFindingMarkerLine(original)) kept = original.trimEnd();
+    if (kept === undefined) continue;
     if (out) out += previous === i - 1 ? "\n" : "\n\n";
-    out += original.trimEnd();
+    out += kept;
     previous = i;
   }
   return out.trim();

@@ -195,6 +195,17 @@ describe("keepReviewFindingLines", () => {
     expect(keepReviewFindingLines("L12: 🔴 bug: null deref.")).toBe("L12: 🔴 bug: null deref.");
   });
 
+  test("keeps a marker line whose location is backticked, bolded, or a range", () => {
+    for (const line of [
+      "`src/foo.ts:12`: 🔴 bug: null deref.",
+      "**src/foo.ts:12**: 🔴 bug: null deref.",
+      "src/foo.ts:12-14: 🔴 bug: null deref.",
+      "- `L12`: 🟡 risk: retry swallows the error.",
+    ]) {
+      expect(keepReviewFindingLines(`Tour first.\n\n${line}`)).toBe(line);
+    }
+  });
+
   test("does not promote a narrated bug", () => {
     expect(keepReviewFindingLines("I think there might be a bug in the retry loop around line 40.")).toBe("");
   });
@@ -202,5 +213,11 @@ describe("keepReviewFindingLines", () => {
   test("keeps exact parent-authored lines", () => {
     const note = "This repository has no CI checks on this head.";
     expect(keepReviewFindingLines(`${note}\n\nLooks good overall.`, { keep: [note] })).toBe(note);
+  });
+
+  test("keeps a parent-authored note the child wrote as a bullet or inside a sentence", () => {
+    const note = "This repository has no CI checks on this head.";
+    expect(keepReviewFindingLines(`- ${note}\n\nLooks good overall.`, { keep: [note] })).toBe(note);
+    expect(keepReviewFindingLines(`Note: ${note} I ran the tests locally.`, { keep: [note] })).toBe(note);
   });
 });
