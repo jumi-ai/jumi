@@ -34,6 +34,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
@@ -124,6 +125,8 @@ export interface ReviewOptions {
   maxFiles?: number;
   maxPatchBytes?: number;
   maxThreadBytes?: number;
+  /** Byte budget for the head's REVIEW.md sections pasted into the prompt. */
+  maxReviewMdBytes?: number;
   maxOutputBytes?: number;
   engine?: Engine;
   openCodeRunner?: Engine;
@@ -1135,12 +1138,29 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       logger: log,
     });
 
+    // The workspace is the PR head checkout, so this is the head's REVIEW.md; no base-branch fallback.
+    // Match against every changed file, not only the ones that fit the patch budget.
+    const reviewMd = await loadReviewMdSections(
+      opts.workspace,
+      prFiles,
+      opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES
+    );
+    logDiagnostic(log, "review_md", {
+      review: reviewLabel,
+      injected: Boolean(reviewMd),
+      bytes: reviewMd?.bytes ?? 0,
+      truncated: reviewMd?.truncated ?? false,
+      path_sections: reviewMd?.pathSections ?? 0,
+      matched_path_sections: reviewMd?.matchedPathSections ?? 0,
+    });
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
       prFiles: files,
       reviewNotes: notes,
       thread: fitted.thread,
+      reviewMd,
     });
 
     logDiagnostic(log, "review_prompt", {
