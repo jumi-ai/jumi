@@ -122,7 +122,7 @@ describe("processEngineTick", () => {
       expect(row?.state).toBe("succeeded");
       expect(row?.resultMarkdown).toContain("Looks good");
       expect(row?.resultMarkdown).not.toContain("I'll inspect");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
       expect(api.comments).toHaveLength(0);
       expect(api.statuses.map((status) => status.state)).toEqual(["pending", "success"]);
@@ -181,7 +181,7 @@ describe("processEngineTick", () => {
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
     expect(ran).toBe(0);
     expect(store.rows[0]?.state).toBe("succeeded");
-    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
+    expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
     expect(api.comments).toHaveLength(0);
   });
@@ -302,7 +302,7 @@ describe("processEngineTick", () => {
     expect(reviewCalls).toBe(2);
     expect(store.rows[0]?.state).toBe("succeeded");
     expect(api.reviews).toHaveLength(1);
-    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
+    expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
   });
 
   test("expired lease without a result is retried", async () => {
@@ -356,7 +356,7 @@ describe("processEngineTick", () => {
       expect(reviewCalls).toBe(2);
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(store.rows[0]?.leasedUntil).toBeNull();
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 
@@ -399,7 +399,7 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((api.reviews[0] as { body: string }).body).not.toContain("cannot save result");
     });
   });
@@ -1015,7 +1015,7 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 
@@ -1121,7 +1121,7 @@ describe("processEngineTick", () => {
       });
       const published = await store.get(store.rows[0]!.id);
       expect(published?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 

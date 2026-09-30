@@ -1,6 +1,6 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
+import { CI_ABSENT_NOTE, CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
@@ -55,7 +55,13 @@ import {
   upsertStuckText,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
-import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "./verdict.ts";
+import {
+  findingFingerprint,
+  keepReviewFindingLines,
+  parseReviewFindings,
+  parseReviewOutput,
+  stripFindingLines,
+} from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
@@ -898,20 +904,16 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const singleFilePath = needsSingleFilePath(parsed.comment)
     ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, pr.number, log)
     : undefined;
+  // Publish finding lines and the trailer only; the child's tour is not published.
+  const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
   const writeup = buildCommentBody(
     marker,
     opts.expectedHeadSha,
-    stripFindingLines(parsed.comment, { singleFilePath }),
+    stripFindingLines(comment, { singleFilePath }),
     parsed.checkLine,
     opts.resultRunner
   );
-  const stickyBody = buildCommentBody(
-    marker,
-    opts.expectedHeadSha,
-    parsed.comment,
-    parsed.checkLine,
-    opts.resultRunner
-  );
+  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, parsed.checkLine, opts.resultRunner);
 
   let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
@@ -923,7 +925,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         prNumber: pr.number,
         headSha: opts.expectedHeadSha,
         marker,
-        comment: parsed.comment,
+        comment,
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
         event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),

@@ -440,7 +440,7 @@ describe("reviewPullRequest", () => {
         {
           commit_id: REVIEW_SHA,
           event: "APPROVED",
-          body: stampedWriteup("Looks good", "<!-- jumi-check: success -->", REVIEW_SHA),
+          body: stampedWriteup("", "<!-- jumi-check: success -->", REVIEW_SHA),
         },
       ]);
       expect(isJumiReviewFinding({ body: (reviews[0] as { body: string }).body }, REVIEW_SHA)).toBe(false);
@@ -497,7 +497,7 @@ describe("reviewPullRequest", () => {
         {
           commit_id: "headsha",
           event: "APPROVED",
-          body: stampedWriteup("Updated review", "<!-- jumi-check: success -->"),
+          body: stampedWriteup("", "<!-- jumi-check: success -->"),
         },
       ]);
     });
@@ -984,7 +984,7 @@ describe("reviewPullRequest", () => {
       });
 
       expect(result).toEqual({ status: "posted", commentId: 44 });
-      expect(createdBody).toContain("No correctness bugs found.");
+      expect(createdBody).not.toContain("No correctness bugs found.");
       expect(createdBody).not.toContain("I'll inspect");
       expect(createdBody).not.toContain("jumi-check");
       expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
@@ -1937,7 +1937,7 @@ optionalEnv(resolved, "DATABASE_URL");
       expect(ranOpenCode).toBe(true);
       expect(result).toEqual({ status: "posted" });
       expect(sticky).toBe("");
-      expect(reviews[0]?.body).toContain("Looks good");
+      expect(reviews[0]?.body).not.toContain("Looks good");
       expect(reviews[0]?.body).not.toContain("deploy/contract.md:1:");
       expect(lastNonEmptyLine(reviews[0]?.body ?? "")).toBe("<!-- jumi-check: failure; contract env drift -->");
       expect(reviews[0]?.comments?.some((comment) => comment.body.includes("MAX_FOLLOWUP_ROUNDS"))).toBe(true);
@@ -2009,7 +2009,7 @@ optionalEnv(resolved, "DATABASE_URL");
         },
       });
       expect(ranOpenCode).toBe(true);
-      expect(reviews[0]?.body).toContain("Looks good");
+      expect(reviews[0]?.body).not.toContain("Looks good");
       expect(reviews[0]?.comments?.some((comment) => comment.body.includes("🟡 risk:"))).toBe(true);
       expect(lastNonEmptyLine(reviews[0]?.body ?? "")).toBe("<!-- jumi-check: failure; contract env drift -->");
       expect(statuses.at(-1)?.state).toBe("failure");
@@ -2110,7 +2110,7 @@ describe("publishReviewResult", () => {
 
     const second = await publishReviewResult({
       ...publishOpts,
-      resultMarkdown: "second\n<!-- jumi-check: success -->",
+      resultMarkdown: "💡 simpler: second\n<!-- jumi-check: success; 1 suggestion -->",
       api: makeApi({
         findStickyIssueComment: async () => ({ id: 44 }),
         updateIssueComment: async () => {
@@ -2128,7 +2128,7 @@ describe("publishReviewResult", () => {
     expect(second).toEqual({ status: "posted" });
     expect(reviews).toHaveLength(2);
     expect(reviews[1]).toMatchObject({
-      body: reviewWriteup("second", "<!-- jumi-check: success -->"),
+      body: reviewWriteup("💡 simpler: second", "<!-- jumi-check: success; 1 suggestion -->"),
     });
   });
 
@@ -2146,9 +2146,7 @@ describe("publishReviewResult", () => {
       }),
     });
     const body = reviews[0]?.body ?? "";
-    expect(body).toBe(
-      reviewWriteup("Looks good\n\n_Jumi · claude · claude-opus-5 (high)_", "<!-- jumi-check: success -->")
-    );
+    expect(body).toBe(reviewWriteup("_Jumi · claude · claude-opus-5 (high)_", "<!-- jumi-check: success -->"));
     expect(body).not.toContain("OpenCode");
     expect(lastNonEmptyLine(body)).toBe("<!-- jumi-check: success -->");
   });
@@ -2278,7 +2276,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("plain prose without a location", "<!-- jumi-check: failure; 1 blocking -->"),
+        body: reviewWriteup("", "<!-- jumi-check: failure; 1 blocking -->"),
         comments: [
           {
             path: "src/foo.ts",
@@ -2936,7 +2934,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "APPROVED",
-        body: reviewWriteup("Looks good", "<!-- jumi-check: success -->"),
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
       },
     ]);
   });
@@ -3031,7 +3029,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "COMMENT",
-        body: reviewWriteup("Looks good", "<!-- jumi-check: success -->"),
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
       },
     ]);
   });
@@ -3055,12 +3053,12 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "APPROVED",
-        body: reviewWriteup("Looks good", "<!-- jumi-check: success -->"),
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
       },
       {
         commit_id: "headsha",
         event: "COMMENT",
-        body: reviewWriteup("Looks good", "<!-- jumi-check: success -->"),
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
       },
     ]);
     expect(logs.some((line) => line.includes("falling back to COMMENT"))).toBe(true);
@@ -3205,7 +3203,89 @@ describe("publishReviewResult", () => {
     expect(result).toEqual({ status: "posted", commentId: 44 });
     expect(reviews).toHaveLength(1);
     expect(lastNonEmptyLine(sticky)).toBe("<!-- jumi-check: success -->");
-    expect(sticky).toContain("Looks good");
+    expect(sticky).not.toContain("Looks good");
+  });
+
+  test("an essay plus a success trailer publishes as the trailer only", async () => {
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "## What I checked",
+        "",
+        "I traced `publishReviewResult` and the diff adds a helper that filters the body.",
+        "",
+        "No blocking findings on this SHA.",
+        "<!-- jumi-check: success -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "APPROVED",
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
+      },
+    ]);
+  });
+
+  test("a finding line plus a tour publishes the finding and the trailer, not the tour", async () => {
+    const tour = [
+      "## Tour",
+      "The PR moves the filter into the publish path; I verified each caller.",
+      "There may be a bug in the retry loop, but I did not confirm it.",
+    ];
+    const finding = "src/foo.ts:12: 🔴 bug: null deref. Guard it.";
+    const trailer = "<!-- jumi-check: failure; 1 blocking -->";
+    const resultMarkdown = [...tour, "", finding, trailer].join("\n");
+
+    const reviews: unknown[] = [];
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown,
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "REQUEST_CHANGES",
+        body: reviewWriteup("", trailer),
+        comments: [
+          {
+            path: "src/foo.ts",
+            new_position: 12,
+            body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ],
+      },
+    ]);
+
+    let sticky = "";
+    await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown,
+      api: makeApi({
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          sticky = body;
+          return makeComment({ id: 44, body });
+        },
+        createPullReview: async () => {
+          throw new Error("pull reviews unavailable");
+        },
+      }),
+    });
+    expect(sticky).toBe(reviewWriteup(finding, trailer));
+    for (const line of tour) expect(sticky).not.toContain(line);
   });
 
   test("success with no locatable findings still posts APPROVED", async () => {
@@ -3224,7 +3304,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "APPROVED",
-        body: reviewWriteup("Looks good", "<!-- jumi-check: success -->"),
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
       },
     ]);
   });
