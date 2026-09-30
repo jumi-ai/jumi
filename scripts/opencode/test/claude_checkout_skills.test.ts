@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_SETTING_SOURCES, claudeArgv, runClaude } from "../src/claude.ts";
 import {
   CLAUDE_CHECKOUT_SKILLS_MAX_FILES,
@@ -14,6 +15,7 @@ import { setClaudeTracingPluginDirForTests } from "../src/claude_tracing.ts";
 
 const originalPath = process.env.PATH;
 const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
+const pluginDir = join(dirname(fileURLToPath(import.meta.url)), "../../../claude-plugins/claude-code-tracing");
 const dirs: string[] = [];
 
 afterEach(async () => {
@@ -152,11 +154,11 @@ describe("claude skill tool", () => {
   test("allows the Skill tool and loads checkout skills without the project setting source", () => {
     expect(CLAUDE_ALLOWED_TOOLS.split(",")).toContain("Skill");
     expect(CLAUDE_SETTING_SOURCES).toBe("user");
-    setClaudeTracingPluginDirForTests("/app/claude-plugins/claude-code-tracing");
+    setClaudeTracingPluginDirForTests(pluginDir);
     process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
     const args = claudeArgv({ model: "opus", workdir: "/work" }, "/work/.jumi-tmp/x/checkout-skills");
     const pluginDirs = args.flatMap((arg, i) => (arg === "--plugin-dir" ? [args[i + 1]] : []));
-    expect(pluginDirs).toEqual(["/app/claude-plugins/claude-code-tracing", "/work/.jumi-tmp/x/checkout-skills"]);
+    expect(pluginDirs).toEqual([pluginDir, "/work/.jumi-tmp/x/checkout-skills"]);
     expect(args[args.indexOf("--setting-sources") + 1]).toBe("user");
     delete process.env.PHOENIX_OTLP_ENDPOINT;
     expect(claudeArgv({ model: "opus", workdir: "/work" })).not.toContain("--plugin-dir");
