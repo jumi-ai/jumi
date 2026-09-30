@@ -136,11 +136,19 @@ function errorText(err: unknown): string {
 /**
  * Collaborator permission `none` (or a 404) is not a no for a GitHub App: GitHub
  * reports no collaborator permission for Apps that push branches onto the repo,
- * Renovate among them. The App acts on this repository, so its installation
+ * Renovate among them. Sender-gated callers use this only after the webhook
+ * event itself proved the App acts on this repository, so its installation
  * covers it; `contents: write` on that installation is push.
+ *
+ * Limitation: `GET /apps/{slug}` reports the permissions the App requests,
+ * not what a given repo installation was granted. A repo-scoped granted check
+ * for another App is not available here: `GET /repos/{owner}/{repo}/installation`
+ * needs a JWT and returns the authenticated (own) App's installation, not the
+ * sender's. Fork heads therefore never use this fallback (see
+ * `pullAuthorCanPush`).
  */
 async function appCanPush(api: Partial<PermissionApi>, login: string): Promise<boolean> {
-  const slug = appSlugFromLogin(login);
+  const slug = appSlugFromLogin(login)?.toLowerCase();
   if (!slug || typeof api.getAppPermissions !== "function") return false;
   try {
     const permissions = await api.getAppPermissions(slug);
