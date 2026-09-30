@@ -190,8 +190,13 @@ export async function canPush(
 
 /**
  * A pull's author can push to the base repository. A head branch that already
- * lives on the base repository is proof. A fork head is not, so fall back to
- * the author's own push access.
+ * lives on the base repository is proof. A fork head is not: only the
+ * collaborator lookup counts there. The App manifest fallback (`canPush`) is
+ * deliberately not used for fork heads, because `GET /apps/{slug}` reports the
+ * permissions the app requests, not a repo-scoped installation — anyone can
+ * mint an app requesting `contents: write` and open a fork PR as `<app>[bot]`.
+ * Sender-gated checks keep the fallback: the webhook event itself proves the
+ * app acts on this repository.
  */
 export async function pullAuthorCanPush(
   api: Partial<PermissionApi> | undefined,
@@ -201,7 +206,14 @@ export async function pullAuthorCanPush(
 ): Promise<boolean> {
   const headRepo = pr.head?.repo?.full_name;
   if (typeof headRepo === "string" && headRepo.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return true;
-  return canPush(api, owner, repo, pr.user?.login ?? undefined);
+  const login = pr.user?.login;
+  if (typeof login !== "string" || !login.trim()) return false;
+  if (!api || typeof api.getCollaboratorPermission !== "function") return false;
+  try {
+    return hasWriteAccessFromPermission(await api.getCollaboratorPermission(owner, repo, login.trim()));
+  } catch {
+    return false;
+  }
 }
 
 /**

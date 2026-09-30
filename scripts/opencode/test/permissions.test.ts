@@ -150,6 +150,19 @@ describe("pullAuthorCanPush", () => {
       false
     );
   });
+
+  test("a fork head from an App is not proof even when its manifest requests contents write", async () => {
+    const api = {
+      getCollaboratorPermission: async () => {
+        throw new Error("GitHub API 404: not a user");
+      },
+      getAppPermissions: async () => ({ contents: "write" }),
+    };
+    const fork = { user: { login: "renovate[bot]" }, head: { repo: { full_name: "renovate/r" } } };
+    expect(await pullAuthorCanPush(api, "o", "r", fork)).toBe(false);
+    // Sender gating keeps the App fallback: the event proves the app acts on this repo.
+    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
+  });
 });
 
 describe("resolvePermissions", () => {
