@@ -27,7 +27,7 @@ import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts"
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
-import type { GiteaIssuePayload, GithubAppRef, IssueJob, ReviewJob } from "./types.ts";
+import type { GiteaIssuePayload, IssueJob, ReviewJob } from "./types.ts";
 import {
   assertRepositoryPolicy,
   parsePullRequestPayload,
@@ -177,26 +177,6 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
   if (!sender) return false;
   if (sender.type && sender.type.toLowerCase() === "bot") return true;
   return /\[bot\]$/i.test(sender.login ?? "");
-}
-
-/**
- * Push hint for a GitHub App sender. GitHub reports no collaborator
- * permission for an App, and the factory cannot read another App's
- * installation. The signed payload does carry the App's record on a comment
- * it created (`performed_via_github_app`), with the permissions the App
- * holds: `contents: write` is push. It counts only when that App is the
- * sender (`<slug>[bot]`), so any login without such a record stays on the
- * collaborator lookup. An issue an App filed carries `null` there, so issue
- * events have no such hint.
- */
-export function githubAppSenderPushHint(
-  senderLogin: string | undefined,
-  app: GithubAppRef | null | undefined
-): boolean {
-  if (typeof senderLogin !== "string" || typeof app?.slug !== "string" || !app.slug) return false;
-  if (senderLogin.toLowerCase() !== `${app.slug}[bot]`.toLowerCase()) return false;
-  const contents = app.permissions?.contents;
-  return typeof contents === "string" && contents.toLowerCase() === "write";
 }
 
 export function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
@@ -660,13 +640,7 @@ export async function handleGithubWebhookEvent(
               policy,
               eventName,
               undefined,
-              deps.worker.api,
-              githubAppSenderPushHint(
-                githubSender?.login,
-                isObject(parsed) && isObject(parsed.comment)
-                  ? (parsed.comment.performed_via_github_app as GithubAppRef | null | undefined)
-                  : undefined
-              )
+              deps.worker.api
             );
       if (decision.type === "skip") {
         const fullName =
@@ -709,7 +683,7 @@ export async function handleGithubWebhookEvent(
 
     const payload = parseIssuesPayload(rawBody);
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
-    // No App hint here: GitHub sends `performed_via_github_app: null` on an issue an App filed.
+    // No payload hint on GitHub, for people or Apps: nothing in it reports the sender's grant on this repository.
     const decision = await requireSenderPush(
       shouldEnqueueGithubIssue(payload, policy),
       deps.worker.api,

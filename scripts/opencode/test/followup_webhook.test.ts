@@ -12,7 +12,7 @@ import {
   shouldEnqueuePullRejectedFollowUp,
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
-import { githubAppSenderPushHint, hasJumiLabel } from "../src/github_webhook.ts";
+import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -1306,18 +1306,5 @@ describe("follow-up write gating", () => {
     expect(await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, none)).toEqual(
       { type: "skip", reason: "sender lacks write access" }
     );
-  });
-
-  test("a GitHub App hint needs the sender's own App record with contents write", () => {
-    const filer = { slug: "filer", permissions: { contents: "write", issues: "write" } };
-    expect(githubAppSenderPushHint("filer[bot]", filer)).toBe(true);
-    expect(githubAppSenderPushHint("Filer[bot]", filer)).toBe(true);
-    // Another App acting on what the filer created.
-    expect(githubAppSenderPushHint("labeler[bot]", filer)).toBe(false);
-    expect(githubAppSenderPushHint("filer", filer)).toBe(false);
-    expect(githubAppSenderPushHint("filer[bot]", { slug: "filer", permissions: { contents: "read" } })).toBe(false);
-    expect(githubAppSenderPushHint("filer[bot]", { slug: "filer" })).toBe(false);
-    expect(githubAppSenderPushHint("filer[bot]", null)).toBe(false);
-    expect(githubAppSenderPushHint(undefined, filer)).toBe(false);
   });
 });

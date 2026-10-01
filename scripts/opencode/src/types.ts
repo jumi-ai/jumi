@@ -33,17 +33,10 @@ export interface GiteaRepo {
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────
 
-/** GitHub only: the App that created a comment, with the permissions that App holds. */
-export interface GithubAppRef {
-  slug?: string;
-  permissions?: Record<string, string>;
-}
-
 export interface GiteaComment {
   id: number;
   body: string;
   user: GiteaUser;
-  performed_via_github_app?: GithubAppRef | null;
   created_at: string;
   updated_at: string;
 }

@@ -752,8 +752,7 @@ describe("POST /webhooks/github", () => {
             listOpenPulls: async () => [],
             getIssue: async () => githubIssue(),
             getPR: async () => fetched,
-            // GitHub reports no collaborator permission for an App, so only the payload's
-            // record of the sender's own App can admit one.
+            // GitHub reports no collaborator permission for an App.
             getCollaboratorPermission: async () => ({ permission: "none" }),
           },
         },
@@ -770,7 +769,7 @@ describe("POST /webhooks/github", () => {
           body: "please fix the tests",
           user: makeUser({ login }),
           performed_via_github_app: app ?? null,
-        }),
+        } as Parameters<typeof makeComment>[0]),
         issue: githubIssue({
           number: 127,
           title: "Fix the thing",
@@ -800,17 +799,10 @@ describe("POST /webhooks/github", () => {
       expect(store.rows).toHaveLength(0);
     });
 
-    test("a comment made through the sender's App with contents write wakes work", async () => {
-      const store = new MemoryReviewJobStore();
-      const response = await gated(store)(
-        await signedGithubRequest(commentBy("filer[bot]", "Bot", filerApp), { event: "issue_comment" })
-      );
-      expect(response.status).toBe(202);
-      expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
-    });
-
-    test("an App comment with no App record, or another App's, does not wake work", async () => {
-      for (const payload of [commentBy("filer[bot]", "Bot"), commentBy("labeler[bot]", "Bot", filerApp)]) {
+    // The App record on a comment lists what the App requests, not what its
+    // installation here was granted, so it admits no one.
+    test("an App comment does not wake work, whatever permissions its App record declares", async () => {
+      for (const payload of [commentBy("filer[bot]", "Bot"), commentBy("filer[bot]", "Bot", filerApp)]) {
         const store = new MemoryReviewJobStore();
         const response = await gated(store)(await signedGithubRequest(payload, { event: "issue_comment" }));
         expect(response.status).toBe(202);

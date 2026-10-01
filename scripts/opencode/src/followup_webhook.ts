@@ -340,9 +340,10 @@ export function shouldEnqueuePullRejectedFollowUp(
  * Filter an event's own wake by its sender. Fail-closed: unless the sender can
  * push, the enqueue becomes a skip. Push is the check the forge itself uses:
  * `senderPushHint` (a grant the signed webhook payload reports for the sender
- * itself, see `giteaIssueSenderPushHint`, `giteaPullSenderPushHint`, and
- * `githubAppSenderPushHint`), else `canPush` (collaborator lookup with its
- * effective `push` grant). Skips and cancels pass through, so
+ * itself, see `giteaIssueSenderPushHint` and `giteaPullSenderPushHint`), else
+ * `canPush` (collaborator lookup with its effective `push` grant). GitHub
+ * payloads carry no such grant, so GitHub senders, Apps included, always take
+ * the lookup. Skips and cancels pass through, so
  * pickup rules and the bot/ignore-login skips stay as they are: push is
  * necessary, not sufficient. Scope checks run first so out-of-scope events
  * never cost a forge round-trip and keep their scope skip reason.

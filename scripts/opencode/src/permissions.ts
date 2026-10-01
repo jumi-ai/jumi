@@ -134,9 +134,10 @@ function errorText(err: unknown): string {
 /**
  * The collaborator lookup is the only check scoped to the login asked about,
  * for people and GitHub Apps alike. There is deliberately no App fallback:
- * `GET /apps/{slug}` reports what an App requests and only when the factory
- * can read that record, and `GET /repos/{owner}/{repo}/installation` reports
- * the factory App's own grant, which would admit every `[bot]` login.
+ * `GET /apps/{slug}` and a webhook's `performed_via_github_app` report what an
+ * App requests, not what its installation on this repository was granted, and
+ * `GET /repos/{owner}/{repo}/installation` reports the factory App's own
+ * grant, which would admit every `[bot]` login.
  */
 async function pushAccess(
   api: Partial<PermissionApi> | undefined,
