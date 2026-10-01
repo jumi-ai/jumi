@@ -75,17 +75,14 @@ describe("canPush", () => {
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
   });
 
-  test("an App is held to its own collaborator lookup, whatever the factory App may write", async () => {
+  test("an App the forge reports none or a 404 for cannot push, whatever the factory App may write", async () => {
     const api = {
       getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
         if (username === "private-app[bot]") throw new Error("GitHub API 404: not a user");
-        return username === "filer[bot]"
-          ? { permission: "none", user: { permissions: { push: true } } }
-          : { permission: "none" };
+        return { permission: "none" };
       },
     };
-    expect(await canPush(api, "o", "r", "filer[bot]")).toBe(true);
-    expect(await canPush(api, "o", "r", "labeler[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "filer[bot]")).toBe(false);
     expect(await canPush(api, "o", "r", "github-actions[bot]")).toBe(false);
     expect(await canPush(api, "o", "r", "private-app[bot]")).toBe(false);
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
@@ -136,15 +133,15 @@ describe("pullAuthorCanPush", () => {
 });
 
 describe("resolvePermissions", () => {
-  test("a bot the forge reports none for stays none; one with an effective push grant is a writer", async () => {
+  test("a bot the forge reports none for stays none; a user with an effective team push grant is a writer", async () => {
     const api = {
       getCollaboratorPermission: async (_o: string, _r: string, username: string) =>
-        username === "filer[bot]"
+        username === "teammate"
           ? { permission: "none", user: { permissions: { push: true } } }
           : { permission: "none" },
     };
-    const resolved = await resolvePermissions(api, "o", "r", ["filer[bot]", "tapio[bot]", "mallory"]);
-    expect(resolved.writes.get("filer[bot]")).toBe(true);
+    const resolved = await resolvePermissions(api, "o", "r", ["teammate", "tapio[bot]", "mallory"]);
+    expect(resolved.writes.get("teammate")).toBe(true);
     expect(resolved.writes.get("tapio[bot]")).toBe(false);
     expect(resolved.detail.get("tapio[bot]")).toBe("none");
     expect(resolved.writes.get("mallory")).toBe(false);

@@ -23,18 +23,27 @@ export interface GiteaRepo {
   /**
    * Gitea webhook payloads only. Code-unit access (`push` is code write, which
    * reflects the team unit map even when the flat collaborator permission is
-   * `none`) of the sender on comment, assignee, and review-request events, and
-   * of the issue or pull poster on the rest. See `repositoryPushHint`.
+   * `none`). On the payload's top-level repository it describes the sender on
+   * comment, assignee, and review-request events, and the issue or pull poster
+   * on the rest; on `pull_request.base.repo` it describes the acting user. See
+   * `repositoryPushHint` and `giteaPullSenderPushHint`.
    */
   permissions?: { admin?: boolean; push?: boolean; pull?: boolean };
 }
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────
 
+/** GitHub only: the App that created an issue or comment, with the permissions that App holds. */
+export interface GithubAppRef {
+  slug?: string;
+  permissions?: Record<string, string>;
+}
+
 export interface GiteaComment {
   id: number;
   body: string;
   user: GiteaUser;
+  performed_via_github_app?: GithubAppRef | null;
   created_at: string;
   updated_at: string;
 }
@@ -187,6 +196,7 @@ export interface GiteaIssue {
   created_at: string;
   /** Webhook payloads embed a full repo; REST issue search only sends RepositoryMeta. */
   repository?: GiteaRepo | GiteaRepositoryMeta;
+  performed_via_github_app?: GithubAppRef | null;
 }
 
 export interface GiteaRepositoryMeta {

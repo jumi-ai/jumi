@@ -376,17 +376,27 @@ describe("createWorkerFetchHandler", () => {
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
   });
 
-  test("an opened payload's push hint is the issue author's, so the sender still needs push", async () => {
-    const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
-      queue,
-      api: pushApi({ getCollaboratorPermission: async () => ({ permission: "none" }) }),
-    });
+  test("an opened payload's push hint is the issue author's, so it counts only for that author", async () => {
     const repository = makeRepo({ permissions: { push: true, pull: true, admin: false } });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "opened", repository })));
-    expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
-    expect(queue.jobs).toHaveLength(0);
+    const issue = makeIssue({ number: 12, user: makeUser({ login: "teammate" }) });
+    const api = pushApi({ getCollaboratorPermission: async () => ({ permission: "none" }) });
+
+    const other = makeQueue();
+    const skipped = await createWorkerFetchHandler(makeWorkerConfig(), { queue: other, api })(
+      await signedRequest(makeIssuePayload({ action: "opened", repository, issue }))
+    );
+    expect(skipped.status).toBe(202);
+    expect(await responseJson(skipped)).toEqual({ skipped: "sender lacks write access" });
+    expect(other.jobs).toHaveLength(0);
+
+    const own = makeQueue();
+    const queued = await createWorkerFetchHandler(makeWorkerConfig(), { queue: own, api })(
+      await signedRequest(
+        makeIssuePayload({ action: "opened", repository, issue, sender: makeUser({ login: "teammate" }) })
+      )
+    );
+    expect(queued.status).toBe(202);
+    expect(await responseJson(queued)).toEqual({ key: "kirmanak/demo#12", queued: true });
   });
 
   test("enqueues assigned issue events", async () => {

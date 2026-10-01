@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   followUpSkipReason,
+  giteaIssueSenderPushHint,
+  giteaPullSenderPushHint,
   isSenderScopedAction,
   repositoryPushHint,
   shouldEnqueueIssueCommentFollowUp,
@@ -10,7 +12,7 @@ import {
   shouldEnqueuePullRejectedFollowUp,
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
-import { hasJumiLabel } from "../src/github_webhook.ts";
+import { githubAppSenderPushHint, hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
@@ -18,6 +20,7 @@ import {
   encodeJson,
   makeIssue,
   makeIssueCommentPayload,
+  makeIssuePayload,
   makePayload,
   makePR,
   makeRepo,
@@ -1189,46 +1192,102 @@ describe("follow-up write gating", () => {
     });
   });
 
-  test("repository push hint admits a sender whose flat collaborator permission is none", async () => {
-    const noneApi = {
-      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
-    };
-    const payload = makeIssueCommentPayload({
-      repository: makeRepo({ permissions: { push: true, pull: true, admin: false } }),
-    });
-    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
-      payload,
-      policy,
-      "issue_comment",
-      undefined,
-      noneApi
-    );
-    expect(decision.type).toBe("enqueue");
+  const noneApi = {
+    getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
+  };
+  const pushRepo = makeRepo({ permissions: { push: true, pull: true, admin: false } });
+
+  test("a sender push hint admits a sender whose flat collaborator permission is none", async () => {
+    const payload = makeIssueCommentPayload();
+    expect(
+      (await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi, true))
+        .type
+    ).toBe("enqueue");
+    expect(
+      await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi, false)
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
   });
 
-  test("repository push hint missing still skips a sender who cannot push", async () => {
-    const noneApi = {
-      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
-    };
-    const payload = makeIssueCommentPayload({
-      repository: makeRepo({ permissions: { push: false, pull: true, admin: false } }),
-    });
+  test("the payload's own repository permissions are never read by the shared gate", async () => {
+    const payload = makeIssueCommentPayload({ repository: pushRepo });
     expect(
       await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi)
     ).toEqual({ type: "skip", reason: "sender lacks write access" });
   });
 
-  test("a review payload's push hint is the pull author's, so a reviewer who cannot push stays out", async () => {
-    const noneApi = {
-      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
-    };
-    const payload = {
-      ...reviewCommentPayload(),
-      repository: makeRepo({ permissions: { push: true, pull: true, admin: false } }),
-    };
+  test("a review payload's repository hint is the pull author's, so a reviewer who cannot push stays out", async () => {
+    const payload = { ...reviewCommentPayload(), repository: pushRepo };
+    expect(giteaPullSenderPushHint(payload)).toBe(false);
     expect(
-      await shouldEnqueuePullRejectedFollowUpWithTrust(payload, policy, "pull_request_rejected", undefined, noneApi)
+      await shouldEnqueuePullRejectedFollowUpWithTrust(
+        payload,
+        policy,
+        "pull_request_rejected",
+        undefined,
+        noneApi,
+        giteaPullSenderPushHint(payload)
+      )
     ).toEqual({ type: "skip", reason: "sender lacks write access" });
+  });
+
+  test("a review payload's base repository hint is the reviewer's, so a team code-writer is admitted", async () => {
+    const review = reviewCommentPayload();
+    const payload = {
+      ...review,
+      pull_request: { ...review.pull_request, base: { ...review.pull_request.base, repo: pushRepo } },
+    };
+    expect(giteaPullSenderPushHint(payload)).toBe(true);
+    expect(
+      (
+        await shouldEnqueuePullRejectedFollowUpWithTrust(
+          payload,
+          policy,
+          "pull_request_rejected",
+          undefined,
+          noneApi,
+          giteaPullSenderPushHint(payload)
+        )
+      ).type
+    ).toBe("enqueue");
+  });
+
+  test("a pull hint needs the base repository to be this one, and ignores the poster rule", () => {
+    const review = reviewCommentPayload();
+    const other = makeRepo({ name: "other", permissions: { push: true, pull: true, admin: false } });
+    expect(
+      giteaPullSenderPushHint({
+        ...review,
+        pull_request: { ...review.pull_request, base: { ...review.pull_request.base, repo: other } },
+      })
+    ).toBe(false);
+    // Pull label events carry a fixed owner grant on the top-level repository.
+    const labeled = makePayload({
+      action: "labeled",
+      repository: pushRepo,
+      pull_request: makePR({ user: makeUser({ login: "mallory" }) }),
+      sender: makeUser({ login: "mallory" }),
+    });
+    expect(giteaPullSenderPushHint(labeled)).toBe(false);
+    expect(giteaPullSenderPushHint({ ...labeled, action: "assigned" })).toBe(true);
+  });
+
+  test("an issue hint counts on a poster-scoped event only when the sender is the poster", () => {
+    const issue = makeIssue({ user: makeUser({ login: "Alice" }) });
+    const sender = makeUser({ login: "alice" });
+    for (const action of ["opened", "reopened", "labeled"]) {
+      expect(giteaIssueSenderPushHint(makeIssuePayload({ action, issue, repository: pushRepo, sender }))).toBe(true);
+      expect(
+        giteaIssueSenderPushHint(
+          makeIssuePayload({ action, issue, repository: pushRepo, sender: makeUser({ login: "mallory" }) })
+        )
+      ).toBe(false);
+      expect(giteaIssueSenderPushHint(makeIssuePayload({ action, issue, sender }))).toBe(false);
+    }
+    expect(
+      giteaIssueSenderPushHint(
+        makeIssuePayload({ action: "assigned", issue, repository: pushRepo, sender: makeUser({ login: "mallory" }) })
+      )
+    ).toBe(true);
   });
 
   test("the push hint counts only on events the forge scopes to the sender", () => {
@@ -1241,17 +1300,24 @@ describe("follow-up write gating", () => {
     expect(repositoryPushHint(makeRepo(), true)).toBe(false);
   });
 
-  test("an App sender is held to the collaborator lookup like anyone else", async () => {
+  test("an App sender with no collaborator permission and no payload hint stays out", async () => {
     const payload = makeIssueCommentPayload({ sender: makeUser({ login: "filer[bot]" }) });
     const none = { getCollaboratorPermission: async () => ({ permission: "none" }) };
     expect(await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, none)).toEqual(
       { type: "skip", reason: "sender lacks write access" }
     );
-    const push = {
-      getCollaboratorPermission: async () => ({ permission: "none", user: { permissions: { push: true } } }),
-    };
-    expect(
-      (await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, push)).type
-    ).toBe("enqueue");
+  });
+
+  test("a GitHub App hint needs the sender's own App record with contents write", () => {
+    const filer = { slug: "filer", permissions: { contents: "write", issues: "write" } };
+    expect(githubAppSenderPushHint("filer[bot]", filer)).toBe(true);
+    expect(githubAppSenderPushHint("Filer[bot]", filer)).toBe(true);
+    // Another App acting on what the filer created.
+    expect(githubAppSenderPushHint("labeler[bot]", filer)).toBe(false);
+    expect(githubAppSenderPushHint("filer", filer)).toBe(false);
+    expect(githubAppSenderPushHint("filer[bot]", { slug: "filer", permissions: { contents: "read" } })).toBe(false);
+    expect(githubAppSenderPushHint("filer[bot]", { slug: "filer" })).toBe(false);
+    expect(githubAppSenderPushHint("filer[bot]", null)).toBe(false);
+    expect(githubAppSenderPushHint(undefined, filer)).toBe(false);
   });
 });

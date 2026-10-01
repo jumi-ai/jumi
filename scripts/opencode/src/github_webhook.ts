@@ -27,7 +27,7 @@ import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts"
 import type { EnqueueResult } from "./queue.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
-import type { GiteaIssuePayload, IssueJob, ReviewJob } from "./types.ts";
+import type { GiteaIssuePayload, GithubAppRef, IssueJob, ReviewJob } from "./types.ts";
 import {
   assertRepositoryPolicy,
   parsePullRequestPayload,
@@ -177,6 +177,25 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
   if (!sender) return false;
   if (sender.type && sender.type.toLowerCase() === "bot") return true;
   return /\[bot\]$/i.test(sender.login ?? "");
+}
+
+/**
+ * Push hint for a GitHub App sender. GitHub reports no collaborator
+ * permission for an App, and the factory cannot read another App's
+ * installation. The signed payload does carry the App's record on what it
+ * created (`performed_via_github_app` on an issue or comment), with the
+ * permissions the App holds: `contents: write` is push. It counts only when
+ * that App is the sender (`<slug>[bot]`), so an App acting on someone else's
+ * issue, and any login without such a record, stays on the collaborator lookup.
+ */
+export function githubAppSenderPushHint(
+  senderLogin: string | undefined,
+  app: GithubAppRef | null | undefined
+): boolean {
+  if (typeof senderLogin !== "string" || typeof app?.slug !== "string" || !app.slug) return false;
+  if (senderLogin.toLowerCase() !== `${app.slug}[bot]`.toLowerCase()) return false;
+  const contents = app.permissions?.contents;
+  return typeof contents === "string" && contents.toLowerCase() === "write";
 }
 
 export function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
@@ -640,7 +659,13 @@ export async function handleGithubWebhookEvent(
               policy,
               eventName,
               undefined,
-              deps.worker.api
+              deps.worker.api,
+              githubAppSenderPushHint(
+                githubSender?.login,
+                isObject(parsed) && isObject(parsed.comment)
+                  ? (parsed.comment.performed_via_github_app as GithubAppRef | null | undefined)
+                  : undefined
+              )
             );
       if (decision.type === "skip") {
         const fullName =
@@ -686,7 +711,8 @@ export async function handleGithubWebhookEvent(
     const decision = await requireSenderPush(
       shouldEnqueueGithubIssue(payload, policy),
       deps.worker.api,
-      payload.sender?.login
+      payload.sender?.login,
+      githubAppSenderPushHint(payload.sender?.login, payload.issue.performed_via_github_app)
     );
 
     if (decision.type === "cancel") {

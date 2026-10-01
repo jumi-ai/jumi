@@ -5,7 +5,8 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
-  isSenderScopedAction,
+  giteaIssueSenderPushHint,
+  giteaPullSenderPushHint,
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   repositoryPushHint,
@@ -301,7 +302,7 @@ export async function handleWorkerWebhookEvent(
         await shouldEnqueuePullAssign(payload, policy, deps.api, logger),
         deps.api,
         payload.sender?.login,
-        repositoryPushHint(payload.repository, isSenderScopedAction(payload.action))
+        giteaPullSenderPushHint(payload)
       );
       if (decision.type === "skip") {
         const [owner, repo] = payload.repository.full_name.split("/");
@@ -499,21 +500,29 @@ export async function handleWorkerWebhookEvent(
       } catch {
         rawPayload = undefined;
       }
-      const decision = isPullRequestPayloadFollowUp(event, eventType)
-        ? await shouldEnqueuePullRejectedFollowUpWithTrust(
-            parsePullRejectedPayload(rawBody),
-            policy,
-            eventName,
-            undefined,
-            deps.api
-          )
-        : await shouldEnqueueIssueCommentFollowUpWithTrust(
-            parseIssueCommentPayload(rawBody),
-            policy,
-            eventName,
-            undefined,
-            deps.api
-          );
+      let decision: Awaited<ReturnType<typeof shouldEnqueueIssueCommentFollowUpWithTrust>>;
+      if (isPullRequestPayloadFollowUp(event, eventType)) {
+        const review = parsePullRejectedPayload(rawBody);
+        decision = await shouldEnqueuePullRejectedFollowUpWithTrust(
+          review,
+          policy,
+          eventName,
+          undefined,
+          deps.api,
+          giteaPullSenderPushHint(review)
+        );
+      } else {
+        const comment = parseIssueCommentPayload(rawBody);
+        // Only `created` enqueues, and the forge builds that payload's permissions from the commenter.
+        decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
+          comment,
+          policy,
+          eventName,
+          undefined,
+          deps.api,
+          repositoryPushHint(comment.repository, true)
+        );
+      }
       if (decision.type === "skip") {
         const fullName = rawPayload?.repository?.full_name;
         const [owner, repo] = (fullName ?? "").split("/");
@@ -544,7 +553,7 @@ export async function handleWorkerWebhookEvent(
       shouldEnqueueIssue(payload, policy),
       deps.api,
       payload.sender?.login,
-      repositoryPushHint(payload.repository, isSenderScopedAction(payload.action))
+      giteaIssueSenderPushHint(payload)
     );
 
     if (decision.type === "cancel") {

@@ -8,7 +8,15 @@ import {
   isWipOrDraft,
 } from "./gitea_issues.ts";
 import { canPush, type PermissionApi } from "./permissions.ts";
-import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
+import type {
+  GiteaIssue,
+  GiteaIssueCommentPayload,
+  GiteaIssuePayload,
+  GiteaPR,
+  GiteaPRPayload,
+  GiteaRepo,
+  IssueJob,
+} from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -331,9 +339,9 @@ export function shouldEnqueuePullRejectedFollowUp(
 /**
  * Filter an event's own wake by its sender. Fail-closed: unless the sender can
  * push, the enqueue becomes a skip. Push is the check the forge itself uses:
- * `senderPushHint` (the webhook repository object's `permissions.push`, only
- * on events where the forge computes it for the sender, see
- * `repositoryPushHint`), else `canPush` (collaborator lookup with its
+ * `senderPushHint` (a grant the signed webhook payload reports for the sender
+ * itself, see `giteaIssueSenderPushHint`, `giteaPullSenderPushHint`, and
+ * `githubAppSenderPushHint`), else `canPush` (collaborator lookup with its
  * effective `push` grant). Skips and cancels pass through, so
  * pickup rules and the bot/ignore-login skips stay as they are: push is
  * necessary, not sufficient. Scope checks run first so out-of-scope events
@@ -361,8 +369,9 @@ const SENDER_SCOPED_ACTIONS = new Set(["assigned", "unassigned", "review_request
  * write reports push even when the flat collaborator permission is `none`),
  * but for the sender only on a new comment, an assignee change, and a review
  * request. Label, state, open, and review events report the issue or pull
- * poster's permissions instead, so those must not use the hint. GitHub sends
- * no `repository.permissions`.
+ * poster's permissions instead, so those count only when the poster is the
+ * sender. GitHub webhooks do not report the sender's grant here, so GitHub
+ * callers never pass this hint.
  */
 export function repositoryPushHint(
   repository: { permissions?: { push?: boolean } } | undefined,
@@ -376,33 +385,63 @@ export function isSenderScopedAction(action: string | undefined): boolean {
   return typeof action === "string" && SENDER_SCOPED_ACTIONS.has(action);
 }
 
-/** Push-gated wake for issue/PR comments. */
+function sameLogin(a: string | undefined, b: string | undefined): boolean {
+  return typeof a === "string" && typeof b === "string" && a !== "" && a.toLowerCase() === b.toLowerCase();
+}
+
+/** Gitea issue event: the repository hint, when the forge computed it for the sender. */
+export function giteaIssueSenderPushHint(payload: GiteaIssuePayload): boolean {
+  const login = payload.sender?.login;
+  return repositoryPushHint(
+    payload.repository,
+    isSenderScopedAction(payload.action) || sameLogin(login, payload.issue.user?.login)
+  );
+}
+
+/**
+ * Gitea pull event. `pull_request.base.repo.permissions` is computed for the
+ * acting user on every pull event (the reviewer on a review, the doer on a
+ * label, state, or assignee change). The top-level `repository.permissions`
+ * counts only on sender-scoped actions: on pull label and synchronize events
+ * the forge fills it with a fixed owner grant, so the poster rule that holds
+ * for issues does not hold here.
+ */
+export function giteaPullSenderPushHint(payload: GiteaPRPayload): boolean {
+  const base = payload.pull_request.base?.repo;
+  if (base?.permissions?.push === true && base.full_name.toLowerCase() === payload.repository.full_name.toLowerCase()) {
+    return true;
+  }
+  return repositoryPushHint(payload.repository, isSenderScopedAction(payload.action));
+}
+
+/**
+ * Push-gated wake for issue/PR comments. `senderPushHint` is the caller's
+ * forge-specific payload hint; on Gitea the comment payload's repository
+ * permissions are the commenter's.
+ */
 export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   payload: GiteaIssueCommentPayload,
   policy: FollowUpWebhookPolicy,
   eventName: string,
   closingIssue?: GiteaIssue,
-  api?: Partial<PermissionApi>
+  api?: Partial<PermissionApi>,
+  senderPushHint?: boolean
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  // Only `created` enqueues, and the forge builds that payload's permissions from the commenter.
-  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository, true));
+  return requireSenderPush(scope, api, payload.sender?.login, senderPushHint);
 }
 
-/**
- * Push-gated wake for request-changes / review rejections. Same bar as
- * comments, but no payload hint: a review payload reports the pull author's
- * permissions, not the reviewer's.
- */
+/** Push-gated wake for request-changes / review rejections. Same bar as comments. */
 export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   payload: GiteaPRPayload,
   policy: FollowUpWebhookPolicy,
   eventName: string,
   closingIssue?: GiteaIssue,
-  api?: Partial<PermissionApi>
+  api?: Partial<PermissionApi>,
+  senderPushHint?: boolean
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login);
+  return requireSenderPush(scope, api, payload.sender?.login, senderPushHint);
 }
 
 export async function shouldEnqueuePullAssign(
