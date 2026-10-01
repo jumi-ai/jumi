@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   followUpSkipReason,
-  giteaIssueSenderPushHint,
-  giteaPullSenderPushHint,
-  isSenderScopedAction,
-  repositoryPushHint,
   shouldEnqueueIssueCommentFollowUp,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
@@ -20,7 +16,6 @@ import {
   encodeJson,
   makeIssue,
   makeIssueCommentPayload,
-  makeIssuePayload,
   makePayload,
   makePR,
   makeRepo,
@@ -1177,6 +1172,125 @@ describe("follow-up write gating", () => {
     expect(decision).toEqual({ type: "skip", reason: "sender ignored" });
   });
 
+  describe("trusted sender list", () => {
+    const noneApi = {
+      getCollaboratorPermission: async () => ({ permission: "none" }),
+    };
+    const listed = { ...policy, trustedSenderLogins: ["Alice", "filer[bot]"] };
+
+    test("a listed commenter and reviewer wake work when the forge says none", async () => {
+      expect(
+        (
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload({ sender: makeUser({ login: "alice" }) }),
+            listed,
+            "issue_comment",
+            undefined,
+            noneApi
+          )
+        ).type
+      ).toBe("enqueue");
+      expect(
+        (
+          await shouldEnqueuePullRejectedFollowUpWithTrust(
+            { ...reviewCommentPayload(), sender: makeUser({ login: "filer[bot]" }) },
+            listed,
+            "pull_request_rejected",
+            undefined,
+            noneApi
+          )
+        ).type
+      ).toBe("enqueue");
+    });
+
+    test("an unlisted sender with write is skipped, and a prefix of a listed login does not match", async () => {
+      for (const login of ["mallory", "alic", "labeler[bot]", "filer"]) {
+        expect(
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload({ sender: makeUser({ login }) }),
+            listed,
+            "issue_comment",
+            undefined,
+            writeApi
+          )
+        ).toEqual({ type: "skip", reason: "sender not on trusted list" });
+        expect(
+          await shouldEnqueuePullRejectedFollowUpWithTrust(
+            { ...reviewCommentPayload(), sender: makeUser({ login }) },
+            listed,
+            "pull_request_rejected",
+            undefined,
+            writeApi
+          )
+        ).toEqual({ type: "skip", reason: "sender not on trusted list" });
+      }
+    });
+
+    test("an empty list keeps the forge check", async () => {
+      const empty = { ...policy, trustedSenderLogins: [] };
+      expect(
+        (
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload(),
+            empty,
+            "issue_comment",
+            undefined,
+            writeApi
+          )
+        ).type
+      ).toBe("enqueue");
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload(),
+          empty,
+          "issue_comment",
+          undefined,
+          readApi
+        )
+      ).toEqual({ type: "skip", reason: "sender lacks write access" });
+    });
+
+    test("the factory bot and ignored logins stay skipped when they are on the list", async () => {
+      const both = { ...policy, followupIgnoreLogins: ["tapio"], trustedSenderLogins: ["jumi", "tapio"] };
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload({ sender: makeUser({ login: "jumi" }) }),
+          both,
+          "issue_comment",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender is bot" });
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload({ sender: makeUser({ login: "Tapio" }) }),
+          both,
+          "issue_comment",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender ignored" });
+      expect(
+        await shouldEnqueuePullRejectedFollowUpWithTrust(
+          { ...reviewCommentPayload(), sender: makeUser({ login: "jumi" }) },
+          both,
+          "pull_request_rejected",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender is bot" });
+      expect(
+        await shouldEnqueuePullRejectedFollowUpWithTrust(
+          { ...reviewCommentPayload(), sender: makeUser({ login: "tapio" }) },
+          both,
+          "pull_request_rejected",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender ignored" });
+    });
+  });
+
   test("pull rejection wakes for write and skips for read", async () => {
     const payload = reviewCommentPayload();
     expect(
@@ -1190,121 +1304,5 @@ describe("follow-up write gating", () => {
       type: "skip",
       reason: "sender lacks write access",
     });
-  });
-
-  const noneApi = {
-    getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
-  };
-  const pushRepo = makeRepo({ permissions: { push: true, pull: true, admin: false } });
-
-  test("a sender push hint admits a sender whose flat collaborator permission is none", async () => {
-    const payload = makeIssueCommentPayload();
-    expect(
-      (await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi, true))
-        .type
-    ).toBe("enqueue");
-    expect(
-      await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi, false)
-    ).toEqual({ type: "skip", reason: "sender lacks write access" });
-  });
-
-  test("the payload's own repository permissions are never read by the shared gate", async () => {
-    const payload = makeIssueCommentPayload({ repository: pushRepo });
-    expect(
-      await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi)
-    ).toEqual({ type: "skip", reason: "sender lacks write access" });
-  });
-
-  test("a review payload's repository hint is the pull author's, so a reviewer who cannot push stays out", async () => {
-    const payload = { ...reviewCommentPayload(), repository: pushRepo };
-    expect(giteaPullSenderPushHint(payload)).toBe(false);
-    expect(
-      await shouldEnqueuePullRejectedFollowUpWithTrust(
-        payload,
-        policy,
-        "pull_request_rejected",
-        undefined,
-        noneApi,
-        giteaPullSenderPushHint(payload)
-      )
-    ).toEqual({ type: "skip", reason: "sender lacks write access" });
-  });
-
-  test("a review payload's base repository hint is the reviewer's, so a team code-writer is admitted", async () => {
-    const review = reviewCommentPayload();
-    const payload = {
-      ...review,
-      pull_request: { ...review.pull_request, base: { ...review.pull_request.base, repo: pushRepo } },
-    };
-    expect(giteaPullSenderPushHint(payload)).toBe(true);
-    expect(
-      (
-        await shouldEnqueuePullRejectedFollowUpWithTrust(
-          payload,
-          policy,
-          "pull_request_rejected",
-          undefined,
-          noneApi,
-          giteaPullSenderPushHint(payload)
-        )
-      ).type
-    ).toBe("enqueue");
-  });
-
-  test("a pull hint needs the base repository to be this one, and ignores the poster rule", () => {
-    const review = reviewCommentPayload();
-    const other = makeRepo({ name: "other", permissions: { push: true, pull: true, admin: false } });
-    expect(
-      giteaPullSenderPushHint({
-        ...review,
-        pull_request: { ...review.pull_request, base: { ...review.pull_request.base, repo: other } },
-      })
-    ).toBe(false);
-    // Pull label events carry a fixed owner grant on the top-level repository.
-    const labeled = makePayload({
-      action: "labeled",
-      repository: pushRepo,
-      pull_request: makePR({ user: makeUser({ login: "mallory" }) }),
-      sender: makeUser({ login: "mallory" }),
-    });
-    expect(giteaPullSenderPushHint(labeled)).toBe(false);
-    expect(giteaPullSenderPushHint({ ...labeled, action: "assigned" })).toBe(true);
-  });
-
-  test("an issue hint counts on a poster-scoped event only when the sender is the poster", () => {
-    const issue = makeIssue({ user: makeUser({ login: "Alice" }) });
-    const sender = makeUser({ login: "alice" });
-    for (const action of ["opened", "reopened", "labeled"]) {
-      expect(giteaIssueSenderPushHint(makeIssuePayload({ action, issue, repository: pushRepo, sender }))).toBe(true);
-      expect(
-        giteaIssueSenderPushHint(
-          makeIssuePayload({ action, issue, repository: pushRepo, sender: makeUser({ login: "mallory" }) })
-        )
-      ).toBe(false);
-      expect(giteaIssueSenderPushHint(makeIssuePayload({ action, issue, sender }))).toBe(false);
-    }
-    expect(
-      giteaIssueSenderPushHint(
-        makeIssuePayload({ action: "assigned", issue, repository: pushRepo, sender: makeUser({ login: "mallory" }) })
-      )
-    ).toBe(true);
-  });
-
-  test("the push hint counts only on events the forge scopes to the sender", () => {
-    const repository = makeRepo({ permissions: { push: true, pull: true, admin: false } });
-    expect(repositoryPushHint(repository, isSenderScopedAction("assigned"))).toBe(true);
-    expect(repositoryPushHint(repository, isSenderScopedAction("review_requested"))).toBe(true);
-    for (const action of ["opened", "reopened", "labeled", "label_updated", "edited", "closed", undefined]) {
-      expect(repositoryPushHint(repository, isSenderScopedAction(action))).toBe(false);
-    }
-    expect(repositoryPushHint(makeRepo(), true)).toBe(false);
-  });
-
-  test("an App sender with no collaborator permission and no payload hint stays out", async () => {
-    const payload = makeIssueCommentPayload({ sender: makeUser({ login: "filer[bot]" }) });
-    const none = { getCollaboratorPermission: async () => ({ permission: "none" }) };
-    expect(await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, none)).toEqual(
-      { type: "skip", reason: "sender lacks write access" }
-    );
   });
 });

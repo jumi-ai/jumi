@@ -189,11 +189,6 @@ export interface Tracker {
 export interface CollaboratorPermission {
   permission: string;
   role_name?: string;
-  /**
-   * The user's effective grant on the repository. `push` reflects team grants
-   * even when the legacy flat `permission` is `read`/`none`.
-   */
-  user?: { permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean } };
 }
 
 /** Forge: clone + PR + sticky + status (git host identity). */
@@ -202,6 +197,8 @@ export interface Forge {
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
+  /** GitHub only: permissions an App's installations hold, e.g. `{ contents: "write" }`. */
+  getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
   createPullRequest(
     owner: string,
     repo: string,
@@ -263,6 +260,7 @@ export type ReviewApi = Pick<
   | "listActionJobs"
   | "getActionJobLogs"
   | "getCollaboratorPermission"
+  | "getAppPermissions"
 > &
   Pick<Tracker, "getIssue">;
 
@@ -282,6 +280,7 @@ export type IssueApi = Tracker &
     | "listActionJobs"
     | "getActionJobLogs"
     | "getCollaboratorPermission"
+    | "getAppPermissions"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {

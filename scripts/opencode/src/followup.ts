@@ -447,7 +447,8 @@ export async function collectFollowUpItems(
   botUsername: string,
   headSha: string,
   ignoreLogins: readonly string[] = [],
-  findingOpts: ReviewFindingMatchOpts = {}
+  findingOpts: ReviewFindingMatchOpts = {},
+  trustedSenderLogins: readonly string[] = []
 ): Promise<FollowUpItems> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
@@ -470,11 +471,17 @@ export async function collectFollowUpItems(
       (isRequestChangesReview(review) || isCommentReview(review)) &&
       isInScopeHumanComment({ body: review.body ?? review.content ?? "", user: review.user }, botUsername, ignoreLogins)
   );
-  const trusted = await trustedPushLogins(api, owner, repo, [
-    ...candidateComments.map((comment) => comment.user?.login),
-    ...candidateInlines.map((comment) => comment.user?.login),
-    ...candidateReviews.map((review) => review.user?.login),
-  ]);
+  const trusted = await trustedPushLogins(
+    api,
+    owner,
+    repo,
+    [
+      ...candidateComments.map((comment) => comment.user?.login),
+      ...candidateInlines.map((comment) => comment.user?.login),
+      ...candidateReviews.map((review) => review.user?.login),
+    ],
+    trustedSenderLogins
+  );
   const isTrusted = (login: string | undefined): boolean =>
     typeof login === "string" && trusted.has(login.toLowerCase());
   const isBot = (login: string | undefined): boolean => loginEquals(login, botUsername);
@@ -576,6 +583,7 @@ export async function needsFollowUp(opts: {
   home: string;
   maxFollowupRounds?: number;
   followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
   skipLatches?: SkipLatchStore;
 }): Promise<boolean> {
   const state = await readFollowUpLatch(skipLatchesFor(opts), {
@@ -591,7 +599,9 @@ export async function needsFollowUp(opts: {
     opts.pr.number,
     opts.botUsername,
     opts.pr.head.sha,
-    opts.followupIgnoreLogins
+    opts.followupIgnoreLogins,
+    {},
+    opts.trustedSenderLogins
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
@@ -823,7 +833,8 @@ export async function implementFollowUp(
     opts.botUsername,
     pr.head.sha,
     opts.followupIgnoreLogins,
-    findingOpts
+    findingOpts,
+    opts.trustedSenderLogins
   );
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
@@ -1114,7 +1125,8 @@ export async function implementFollowUp(
           opts.botUsername,
           pr.head.sha,
           opts.followupIgnoreLogins,
-          findingOpts
+          findingOpts,
+          opts.trustedSenderLogins
         );
         const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
         const feedback = buildFeedbackMarkdown({

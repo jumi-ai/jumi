@@ -190,8 +190,8 @@ describe("shouldEnqueueGithubIssue", () => {
 });
 
 describe("POST /webhooks/github", () => {
-  function githubConfig() {
-    return makeConfig({ githubWebhookSecret: "webhook-secret" });
+  function githubConfig(overrides: Parameters<typeof makeConfig>[0] = {}) {
+    return makeConfig({ githubWebhookSecret: "webhook-secret", ...overrides });
   }
 
   function mailbox(store = new MemoryReviewJobStore()) {
@@ -743,8 +743,8 @@ describe("POST /webhooks/github", () => {
       },
     });
 
-    function gated(store: MemoryReviewJobStore) {
-      return createFetchHandler(githubConfig(), {
+    function gated(store: MemoryReviewJobStore, trustedSenderLogins: string[] = []) {
+      return createFetchHandler(githubConfig({ trustedSenderLogins }), {
         queue: store,
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
@@ -752,24 +752,19 @@ describe("POST /webhooks/github", () => {
             listOpenPulls: async () => [],
             getIssue: async () => githubIssue(),
             getPR: async () => fetched,
-            // GitHub reports no collaborator permission for an App.
+            // GitHub reports no collaborator permission for Apps, and none for outsiders.
             getCollaboratorPermission: async () => ({ permission: "none" }),
+            getAppPermissions: async (slug): Promise<Record<string, string>> =>
+              slug === "filer" ? { contents: "write", issues: "write" } : {},
           },
         },
       });
     }
 
-    const filerApp = { slug: "filer", permissions: { contents: "write", issues: "write" } };
-
-    function commentBy(login: string, type: string, app?: typeof filerApp) {
+    function commentBy(login: string, type: string) {
       return {
         action: "created",
-        comment: makeComment({
-          id: 55,
-          body: "please fix the tests",
-          user: makeUser({ login }),
-          performed_via_github_app: app ?? null,
-        } as Parameters<typeof makeComment>[0]),
+        comment: makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login }) }),
         issue: githubIssue({
           number: 127,
           title: "Fix the thing",
@@ -799,16 +794,13 @@ describe("POST /webhooks/github", () => {
       expect(store.rows).toHaveLength(0);
     });
 
-    // The App record on a comment lists what the App requests, not what its
-    // installation here was granted, so it admits no one.
-    test("an App comment does not wake work, whatever permissions its App record declares", async () => {
-      for (const payload of [commentBy("filer[bot]", "Bot"), commentBy("filer[bot]", "Bot", filerApp)]) {
-        const store = new MemoryReviewJobStore();
-        const response = await gated(store)(await signedGithubRequest(payload, { event: "issue_comment" }));
-        expect(response.status).toBe(202);
-        expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
-        expect(store.rows).toHaveLength(0);
-      }
+    test("a comment from an App that can push wakes work", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(commentBy("filer[bot]", "Bot"), { event: "issue_comment" })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
     });
 
     test("an issue labeled by someone who cannot push is not a job", async () => {
@@ -823,38 +815,94 @@ describe("POST /webhooks/github", () => {
       expect(store.rows).toHaveLength(0);
     });
 
-    // GitHub sends `performed_via_github_app: null` on an issue an App filed with its
-    // installation token, so the payload has nothing to admit that App by.
-    const filedByApp = (app: typeof filerApp | null = null) =>
-      githubIssue({
-        user: makeUser({ login: "filer[bot]", type: "Bot" }),
-        performed_via_github_app: app,
-      } as Parameters<typeof githubIssue>[0]);
-
-    test("an issue labeled by the App that filed it is not a job", async () => {
-      for (const issue of [filedByApp(), filedByApp(filerApp)]) {
-        const store = new MemoryReviewJobStore();
-        const response = await gated(store)(
-          await signedGithubRequest(labeledPayload({ issue, sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
-            event: "issues",
-          })
-        );
-        expect(response.status).toBe(202);
-        expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
-        expect(store.rows).toHaveLength(0);
-      }
+    test("an issue labeled by an App that can push is a job", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
     });
 
-    test("an issue labeled by an App that did not file it is not a job", async () => {
+    test("with a trusted list, a listed App is admitted though the forge and its app record grant nothing", async () => {
+      const list = ["alice", "Labeler[bot]"];
+      const labeled = await gated(
+        new MemoryReviewJobStore(),
+        list
+      )(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "labeler[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(await responseJson(labeled)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+      const commented = await gated(
+        new MemoryReviewJobStore(),
+        list
+      )(await signedGithubRequest(commentBy("labeler[bot]", "Bot"), { event: "issue_comment" }));
+      expect(await responseJson(commented)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+    });
+
+    test("with a trusted list, an unlisted App whose record says contents write is skipped", async () => {
+      const store = new MemoryReviewJobStore();
+      const list = ["alice", "labeler[bot]"];
+      const labeled = await gated(
+        store,
+        list
+      )(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(await responseJson(labeled)).toEqual({ skipped: "sender not on trusted list" });
+      const commented = await gated(
+        store,
+        list
+      )(await signedGithubRequest(commentBy("filer[bot]", "Bot"), { event: "issue_comment" }));
+      expect(await responseJson(commented)).toEqual({ skipped: "sender not on trusted list" });
+      expect(store.rows).toHaveLength(0);
+    });
+
+    test("the factory bot's own edits stay skipped when its login is on the list", async () => {
+      const store = new MemoryReviewJobStore();
+      const list = ["kirmanak-jumi[bot]"];
+      const botUsername = "kirmanak-jumi[bot]";
+      const handler = createFetchHandler(githubConfig({ botUsername, trustedSenderLogins: list }), {
+        queue: store,
+        worker: {
+          queue: { enqueue: (job) => store.enqueueIssue(job) },
+          api: {
+            listOpenPulls: async () => [],
+            getIssue: async () => githubIssue(),
+            getPR: async () => fetched,
+            getCollaboratorPermission: async () => ({ permission: "write" }),
+          },
+        },
+      });
+      const labeled = await handler(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: botUsername, type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(await responseJson(labeled)).toEqual({ skipped: "sender is bot" });
+      const commented = await handler(
+        await signedGithubRequest(commentBy(botUsername, "Bot"), { event: "issue_comment" })
+      );
+      expect(await responseJson(commented)).toEqual({ skipped: "sender is bot" });
+      expect(store.rows).toHaveLength(0);
+    });
+
+    test("an App that can push still needs today's pickup: another label stays out", async () => {
       const store = new MemoryReviewJobStore();
       const response = await gated(store)(
         await signedGithubRequest(
-          labeledPayload({ issue: filedByApp(), sender: makeUser({ login: "labeler[bot]", type: "Bot" }) }),
+          labeledPayload({ label: { name: "bug" }, sender: makeUser({ login: "filer[bot]", type: "Bot" }) }),
           { event: "issues" }
         )
       );
       expect(response.status).toBe(202);
-      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(await responseJson(response)).toEqual({ skipped: "labeled other label" });
       expect(store.rows).toHaveLength(0);
     });
   });

@@ -348,6 +348,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             allowedRepos: config.allowedRepos,
             botUsername: config.botUsername,
             followupIgnoreLogins: config.followupIgnoreLogins,
+            trustedSenderLogins: config.trustedSenderLogins,
           },
           { ...deps.worker, logger: deps.worker.logger ?? logger }
         );
@@ -776,6 +777,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
+    getAppPermissions: api.getAppPermissions ? (slug) => api.getAppPermissions!(slug) : undefined,
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)

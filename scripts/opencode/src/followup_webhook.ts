@@ -7,25 +7,19 @@ import {
   isJumiPrIdentity,
   isWipOrDraft,
 } from "./gitea_issues.ts";
-import { canPush, type PermissionApi } from "./permissions.ts";
-import type {
-  GiteaIssue,
-  GiteaIssueCommentPayload,
-  GiteaIssuePayload,
-  GiteaPR,
-  GiteaPRPayload,
-  GiteaRepo,
-  IssueJob,
-} from "./types.ts";
+import { hasTrustedSenders, type PermissionApi, senderCanSteer } from "./permissions.ts";
+import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
 export type FollowUpWebhookPolicy = WebhookPolicy &
   PickupPolicy & {
     followupIgnoreLogins?: readonly string[];
+    trustedSenderLogins?: readonly string[];
   };
 
 export const SENDER_CANNOT_PUSH = "sender lacks write access";
+export const SENDER_NOT_TRUSTED = "sender not on trusted list";
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -337,99 +331,36 @@ export function shouldEnqueuePullRejectedFollowUp(
 }
 
 /**
- * Filter an event's own wake by its sender. Fail-closed: unless the sender can
- * push, the enqueue becomes a skip. Push is the check the forge itself uses:
- * `senderPushHint` (a grant the signed webhook payload reports for the sender
- * itself, see `giteaIssueSenderPushHint` and `giteaPullSenderPushHint`), else
- * `canPush` (collaborator lookup with its effective `push` grant). GitHub
- * payloads carry no such grant, so GitHub senders, Apps included, always take
- * the lookup. Skips and cancels pass through, so
- * pickup rules and the bot/ignore-login skips stay as they are: push is
- * necessary, not sufficient. Scope checks run first so out-of-scope events
- * never cost a forge round-trip and keep their scope skip reason.
+ * Filter an event's own wake by its sender. Fail-closed: unless the sender may
+ * steer (`senderCanSteer`: on the operator's trusted list when one is set,
+ * otherwise the forge push check), the enqueue becomes a skip. Skips and
+ * cancels pass through, so pickup rules and the bot/ignore-login skips stay as
+ * they are: trust is necessary, not sufficient. Scope checks run first so
+ * out-of-scope events never cost a forge round-trip and keep their scope skip
+ * reason.
  */
 export async function requireSenderPush<D extends { type: string }>(
   decision: D,
   api: Partial<PermissionApi> | undefined,
   sender: string | undefined,
-  senderPushHint?: boolean
+  trustedSenderLogins?: readonly string[]
 ): Promise<D | { type: "skip"; reason: string }> {
   if (decision.type !== "enqueue") return decision;
-  if (senderPushHint === true) return decision;
   const { owner, repo } = (decision as unknown as { job: { owner: string; repo: string } }).job;
-  if (await canPush(api, owner, repo, sender)) return decision;
-  return { type: "skip", reason: SENDER_CANNOT_PUSH };
+  if (await senderCanSteer(api, owner, repo, sender, trustedSenderLogins)) return decision;
+  return { type: "skip", reason: hasTrustedSenders(trustedSenderLogins) ? SENDER_NOT_TRUSTED : SENDER_CANNOT_PUSH };
 }
 
-/** Issue and pull actions whose Gitea payload carries the doer's repository permissions. */
-const SENDER_SCOPED_ACTIONS = new Set(["assigned", "unassigned", "review_requested", "review_request_removed"]);
-
-/**
- * Push hint from the webhook repository object. Gitea fills
- * `repository.permissions` from the code unit (so a team member with code
- * write reports push even when the flat collaborator permission is `none`),
- * but for the sender only on a new comment, an assignee change, and a review
- * request. Label, state, open, and review events report the issue or pull
- * poster's permissions instead, so those count only when the poster is the
- * sender. GitHub webhooks do not report the sender's grant here, so GitHub
- * callers never pass this hint.
- */
-export function repositoryPushHint(
-  repository: { permissions?: { push?: boolean } } | undefined,
-  senderScoped: boolean
-): boolean {
-  return senderScoped && repository?.permissions?.push === true;
-}
-
-/** Whether an issue or pull event with this action reports the sender's repository permissions. */
-export function isSenderScopedAction(action: string | undefined): boolean {
-  return typeof action === "string" && SENDER_SCOPED_ACTIONS.has(action);
-}
-
-function sameLogin(a: string | undefined, b: string | undefined): boolean {
-  return typeof a === "string" && typeof b === "string" && a !== "" && a.toLowerCase() === b.toLowerCase();
-}
-
-/** Gitea issue event: the repository hint, when the forge computed it for the sender. */
-export function giteaIssueSenderPushHint(payload: GiteaIssuePayload): boolean {
-  const login = payload.sender?.login;
-  return repositoryPushHint(
-    payload.repository,
-    isSenderScopedAction(payload.action) || sameLogin(login, payload.issue.user?.login)
-  );
-}
-
-/**
- * Gitea pull event. `pull_request.base.repo.permissions` is computed for the
- * acting user on every pull event (the reviewer on a review, the doer on a
- * label, state, or assignee change). The top-level `repository.permissions`
- * counts only on sender-scoped actions: on pull label and synchronize events
- * the forge fills it with a fixed owner grant, so the poster rule that holds
- * for issues does not hold here.
- */
-export function giteaPullSenderPushHint(payload: GiteaPRPayload): boolean {
-  const base = payload.pull_request.base?.repo;
-  if (base?.permissions?.push === true && base.full_name.toLowerCase() === payload.repository.full_name.toLowerCase()) {
-    return true;
-  }
-  return repositoryPushHint(payload.repository, isSenderScopedAction(payload.action));
-}
-
-/**
- * Push-gated wake for issue/PR comments. `senderPushHint` is the caller's
- * forge-specific payload hint; on Gitea the comment payload's repository
- * permissions are the commenter's.
- */
+/** Push-gated wake for issue/PR comments. */
 export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   payload: GiteaIssueCommentPayload,
   policy: FollowUpWebhookPolicy,
   eventName: string,
   closingIssue?: GiteaIssue,
-  api?: Partial<PermissionApi>,
-  senderPushHint?: boolean
+  api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login, senderPushHint);
+  return requireSenderPush(scope, api, payload.sender?.login, policy.trustedSenderLogins);
 }
 
 /** Push-gated wake for request-changes / review rejections. Same bar as comments. */
@@ -438,11 +369,10 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   policy: FollowUpWebhookPolicy,
   eventName: string,
   closingIssue?: GiteaIssue,
-  api?: Partial<PermissionApi>,
-  senderPushHint?: boolean
+  api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login, senderPushHint);
+  return requireSenderPush(scope, api, payload.sender?.login, policy.trustedSenderLogins);
 }
 
 export async function shouldEnqueuePullAssign(

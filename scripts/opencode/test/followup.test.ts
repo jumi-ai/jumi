@@ -3713,6 +3713,25 @@ describe("needsFollowUp", () => {
     expect(items.comments.map((comment) => comment.id)).toEqual([55]);
   });
 
+  test("with a trusted sender list, only listed logins steer and the forge is not asked", async () => {
+    let lookups = 0;
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+        makeComment({ id: 56, body: "writer but unlisted", user: makeUser({ login: "mallory" }) }),
+      ],
+      getCollaboratorPermission: async (_owner, _repo, username) => {
+        lookups += 1;
+        return username === "mallory" ? { permission: "write", role_name: "write" } : { permission: "none" };
+      },
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha, [], {}, [
+      "Alice",
+    ]);
+    expect(items.comments.map((comment) => comment.id)).toEqual([55]);
+    expect(lookups).toBe(0);
+  });
+
   test("trusted wake does not pull outsider reviews or inlines", async () => {
     const api = makeApi({
       listIssueComments: async () => [],

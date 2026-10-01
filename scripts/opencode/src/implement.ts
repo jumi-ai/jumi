@@ -130,6 +130,7 @@ export interface ImplementOptions extends PickupPolicy {
   giteaUrl: string;
   giteaToken: string;
   followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
   model: string;
   variant?: string;
   fallbackModel?: string;

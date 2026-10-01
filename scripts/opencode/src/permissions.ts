@@ -4,6 +4,8 @@ export type { CollaboratorPermission };
 
 export type PermissionApi = {
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
+  /** GitHub only: the permissions an App's installations hold, e.g. `{ contents: "write" }`. */
+  getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
 };
 
 /**
@@ -23,16 +25,9 @@ export function hasWritePermission(permission: string | undefined, roleName?: st
   return false;
 }
 
-/**
- * Besides the legacy flat `permission` / `role_name`, a
- * `user.permissions.push === true` from the collaborator lookup is push: it
- * is the user's effective grant, including team grants, even when the flat
- * mode is `read`/`none`.
- */
 export function hasWriteAccessFromPermission(info: CollaboratorPermission | undefined): boolean {
   if (!info) return false;
-  if (hasWritePermission(info.permission, info.role_name)) return true;
-  return info.user?.permissions?.push === true;
+  return hasWritePermission(info.permission, info.role_name);
 }
 
 export function normalizePermission(permission: string | undefined | null): string {
@@ -119,11 +114,18 @@ export async function resolvePermissions(
   };
 }
 
+/** `renovate[bot]` → `renovate`. GitHub Apps act as `<slug>[bot]`; plain users return undefined. */
+export function appSlugFromLogin(login: string | undefined | null): string | undefined {
+  if (typeof login !== "string") return undefined;
+  const match = /^(.+)\[bot\]$/i.exec(login.trim());
+  return match?.[1] || undefined;
+}
+
 interface PushAccess {
-  /** Raw forge permission, lowercased. */
+  /** Raw forge permission, lowercased; `"write"` for an App whose installation can push. */
   permission: string;
   push: boolean;
-  /** Collaborator lookup failure. */
+  /** Collaborator lookup failure that the App check did not overrule. */
   error?: string;
 }
 
@@ -132,13 +134,30 @@ function errorText(err: unknown): string {
 }
 
 /**
- * The collaborator lookup is the only check scoped to the login asked about,
- * for people and GitHub Apps alike. There is deliberately no App fallback:
- * `GET /apps/{slug}` and a webhook's `performed_via_github_app` report what an
- * App requests, not what its installation on this repository was granted, and
- * `GET /repos/{owner}/{repo}/installation` reports the factory App's own
- * grant, which would admit every `[bot]` login.
+ * Collaborator permission `none` (or a 404) is not a no for a GitHub App: GitHub
+ * reports no collaborator permission for Apps that push branches onto the repo,
+ * Renovate among them. Sender-gated callers use this only after the webhook
+ * event itself proved the App acts on this repository, so its installation
+ * covers it; `contents: write` on that installation is push.
+ *
+ * Limitation: `GET /apps/{slug}` reports the permissions the App requests,
+ * not what a given repo installation was granted. A repo-scoped granted check
+ * for another App is not available here: `GET /repos/{owner}/{repo}/installation`
+ * needs a JWT and returns the authenticated (own) App's installation, not the
+ * sender's. Fork heads therefore never use this fallback (see
+ * `pullAuthorCanPush`).
  */
+async function appCanPush(api: Partial<PermissionApi>, login: string): Promise<boolean> {
+  const slug = appSlugFromLogin(login)?.toLowerCase();
+  if (!slug || typeof api.getAppPermissions !== "function") return false;
+  try {
+    const permissions = await api.getAppPermissions(slug);
+    return (permissions?.contents ?? "").toLowerCase() === "write";
+  } catch {
+    return false;
+  }
+}
+
 async function pushAccess(
   api: Partial<PermissionApi> | undefined,
   owner: string,
@@ -148,19 +167,24 @@ async function pushAccess(
   if (!api || typeof api.getCollaboratorPermission !== "function") {
     return { permission: "none", push: false, error: "collaborator permission API unavailable" };
   }
+  let permission = "none";
+  let error: string | undefined;
   try {
     const result = await api.getCollaboratorPermission(owner, repo, login);
-    const permission = normalizePermission(permissionFromResult(result));
-    return { permission, push: hasWriteAccessFromPermission(result) };
+    permission = normalizePermission(permissionFromResult(result));
+    if (hasWriteAccessFromPermission(result)) return { permission, push: true };
   } catch (err) {
-    return { permission: "none", push: false, error: errorText(err) };
+    error = errorText(err);
   }
+  if (await appCanPush(api, login)) return { permission: "write", push: true };
+  return { permission, push: false, ...(error !== undefined ? { error } : {}) };
 }
 
 /**
- * Fail-closed push check, the same for people and Apps: write, admin, or
- * owner (or a maintain/push role, or an effective `push: true` grant). Any
- * lookup failure, missing method, or unknown permission is false.
+ * Fail-closed push check. A person needs write, admin, or owner (or a
+ * maintain/push role). A GitHub App whose installation can write contents
+ * counts even when the collaborator lookup says none. Any other lookup
+ * failure, missing method, or unknown permission is false.
  */
 export async function canPush(
   api: Partial<PermissionApi> | undefined,
@@ -172,10 +196,45 @@ export async function canPush(
   return (await pushAccess(api, owner, repo, login.trim())).push;
 }
 
+/** Whole-login match against a configured list: case-insensitive, surrounding space ignored. */
+export function isListedLogin(login: string | undefined | null, logins: readonly string[] | undefined): boolean {
+  const key = loginKey(login);
+  if (!key) return false;
+  return (logins ?? []).some((item) => loginKey(item) === key);
+}
+
+/** The operator's trusted sender list is in force once it names at least one login. */
+export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undefined): boolean {
+  return (trustedSenderLogins ?? []).some((item) => loginKey(item) !== undefined);
+}
+
+/**
+ * Who may steer Jumi. When the operator set `TRUSTED_SENDER_LOGINS`, the list
+ * is the whole answer: a listed login is admitted and nobody else is, with no
+ * forge lookup either way. With the list unset or empty, the forge check
+ * (`canPush`) decides, so a new image does not lock the operator out before
+ * GitOps sets the list.
+ */
+export async function senderCanSteer(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  login: string | undefined,
+  trustedSenderLogins?: readonly string[]
+): Promise<boolean> {
+  if (hasTrustedSenders(trustedSenderLogins)) return isListedLogin(login, trustedSenderLogins);
+  return canPush(api, owner, repo, login);
+}
+
 /**
  * A pull's author can push to the base repository. A head branch that already
  * lives on the base repository is proof. A fork head is not: only the
- * collaborator lookup counts there, never a webhook payload hint.
+ * collaborator lookup counts there. The App manifest fallback (`canPush`) is
+ * deliberately not used for fork heads, because `GET /apps/{slug}` reports the
+ * permissions the app requests, not a repo-scoped installation — anyone can
+ * mint an app requesting `contents: write` and open a fork PR as `<app>[bot]`.
+ * Sender-gated checks keep the fallback: the webhook event itself proves the
+ * app acts on this repository.
  */
 export async function pullAuthorCanPush(
   api: Partial<PermissionApi> | undefined,
@@ -196,14 +255,15 @@ export async function pullAuthorCanPush(
 }
 
 /**
- * Batch push check with per-round caching. Fail-closed: logins that cannot
- * be confirmed to push are absent from the returned set.
+ * Batch steer check (`senderCanSteer`) with per-round caching. Fail-closed:
+ * logins that cannot be confirmed are absent from the returned set.
  */
 export async function trustedPushLogins(
   api: Partial<PermissionApi> | undefined,
   owner: string,
   repo: string,
-  logins: readonly (string | undefined)[]
+  logins: readonly (string | undefined)[],
+  trustedSenderLogins?: readonly string[]
 ): Promise<Set<string>> {
   const trusted = new Set<string>();
   const seen = new Set<string>();
@@ -215,7 +275,7 @@ export async function trustedPushLogins(
     seen.add(key);
     pending.push(
       (async () => {
-        if (await canPush(api, owner, repo, raw)) trusted.add(key);
+        if (await senderCanSteer(api, owner, repo, raw, trustedSenderLogins)) trusted.add(key);
       })()
     );
   }

@@ -5,11 +5,8 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
-  giteaIssueSenderPushHint,
-  giteaPullSenderPushHint,
   parseIssueCommentPayload,
   parsePullRejectedPayload,
-  repositoryPushHint,
   requireSenderPush,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
@@ -34,6 +31,7 @@ import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, typ
 export type WorkerWebhookPolicy = WebhookPolicy & {
   botUsername: string;
   followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
 };
 
 export interface WorkerWebhookQueue {
@@ -41,7 +39,12 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission">> & {
+  Partial<
+    Pick<
+      IssueApi,
+      "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission" | "getAppPermissions"
+    >
+  > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -302,7 +305,7 @@ export async function handleWorkerWebhookEvent(
         await shouldEnqueuePullAssign(payload, policy, deps.api, logger),
         deps.api,
         payload.sender?.login,
-        giteaPullSenderPushHint(payload)
+        policy.trustedSenderLogins
       );
       if (decision.type === "skip") {
         const [owner, repo] = payload.repository.full_name.split("/");
@@ -500,29 +503,21 @@ export async function handleWorkerWebhookEvent(
       } catch {
         rawPayload = undefined;
       }
-      let decision: Awaited<ReturnType<typeof shouldEnqueueIssueCommentFollowUpWithTrust>>;
-      if (isPullRequestPayloadFollowUp(event, eventType)) {
-        const review = parsePullRejectedPayload(rawBody);
-        decision = await shouldEnqueuePullRejectedFollowUpWithTrust(
-          review,
-          policy,
-          eventName,
-          undefined,
-          deps.api,
-          giteaPullSenderPushHint(review)
-        );
-      } else {
-        const comment = parseIssueCommentPayload(rawBody);
-        // Only `created` enqueues, and the forge builds that payload's permissions from the commenter.
-        decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
-          comment,
-          policy,
-          eventName,
-          undefined,
-          deps.api,
-          repositoryPushHint(comment.repository, true)
-        );
-      }
+      const decision = isPullRequestPayloadFollowUp(event, eventType)
+        ? await shouldEnqueuePullRejectedFollowUpWithTrust(
+            parsePullRejectedPayload(rawBody),
+            policy,
+            eventName,
+            undefined,
+            deps.api
+          )
+        : await shouldEnqueueIssueCommentFollowUpWithTrust(
+            parseIssueCommentPayload(rawBody),
+            policy,
+            eventName,
+            undefined,
+            deps.api
+          );
       if (decision.type === "skip") {
         const fullName = rawPayload?.repository?.full_name;
         const [owner, repo] = (fullName ?? "").split("/");
@@ -553,7 +548,7 @@ export async function handleWorkerWebhookEvent(
       shouldEnqueueIssue(payload, policy),
       deps.api,
       payload.sender?.login,
-      giteaIssueSenderPushHint(payload)
+      policy.trustedSenderLogins
     );
 
     if (decision.type === "cancel") {

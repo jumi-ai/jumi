@@ -38,6 +38,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 - `JUMI_SECRETS_FILE`
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
+- `TRUSTED_SENDER_LOGINS`
 - `OPENCODE_MODEL`
 - `OPENCODE_VARIANT`
 - `OPENCODE_FALLBACK_MODEL`
@@ -113,6 +114,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 - `JUMI_SECRETS_FILE`
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
+- `TRUSTED_SENDER_LOGINS`
 - `OPENCODE_MODEL`
 - `OPENCODE_VARIANT`
 - `OPENCODE_FALLBACK_MODEL`

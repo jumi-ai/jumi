@@ -709,18 +709,15 @@ export class GithubAPI {
   }
 
   async getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> {
-    const info = await this.get<{
-      permission: string;
-      role_name?: string;
-      user?: {
-        permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean };
-      };
-    }>(`/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`);
-    return {
-      permission: info.permission,
-      ...(info.role_name !== undefined ? { role_name: info.role_name } : {}),
-      ...(info.user?.permissions !== undefined ? { user: { permissions: info.user.permissions } } : {}),
-    };
+    const info = await this.get<{ permission: string; role_name?: string }>(
+      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
+    );
+    return { permission: info.permission, role_name: info.role_name };
+  }
+
+  async getAppPermissions(slug: string): Promise<Record<string, string> | undefined> {
+    const app = await this.get<{ permissions?: Record<string, string> }>(`/apps/${encodeURIComponent(slug)}`);
+    return app.permissions;
   }
 
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {

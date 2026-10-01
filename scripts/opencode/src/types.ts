@@ -20,15 +20,6 @@ export interface GiteaRepo {
   html_url: string;
   clone_url: string;
   default_branch: string;
-  /**
-   * Gitea webhook payloads only. Code-unit access (`push` is code write, which
-   * reflects the team unit map even when the flat collaborator permission is
-   * `none`). On the payload's top-level repository it describes the sender on
-   * comment, assignee, and review-request events, and the issue or pull poster
-   * on the rest; on `pull_request.base.repo` it describes the acting user. See
-   * `repositoryPushHint` and `giteaPullSenderPushHint`.
-   */
-  permissions?: { admin?: boolean; push?: boolean; pull?: boolean };
 }
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────
