@@ -48,6 +48,10 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("Prefer built-in read/list/glob/grep");
     expect(prompt).toContain("Do not dump large patches into context");
     expect(prompt).toContain("JUMI_REVIEW.md");
+    expect(prompt).toContain("<review-rubric>");
+    expect(prompt).toContain("🔴 bug: — broken behavior, will cause incident. Trailer failure.");
+    expect(prompt).toContain("🟡 risk: — works but fragile");
+    expect(prompt).toContain("Use failure if you reported any 🔴 bug or 🟡 risk");
     expect(prompt).toContain("Do not git add source, git commit, git push, or force-push");
     expect(prompt).not.toContain("./REVIEW.md exists");
     expect(prompt).not.toContain("<review_md");
