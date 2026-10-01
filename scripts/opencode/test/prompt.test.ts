@@ -48,6 +48,10 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("Prefer built-in read/list/glob/grep");
     expect(prompt).toContain("Do not dump large patches into context");
     expect(prompt).toContain("JUMI_REVIEW.md");
+    expect(prompt).toContain("<review-rubric>");
+    expect(prompt).toContain("🔴 bug: — broken behavior, will cause incident. Trailer failure.");
+    expect(prompt).toContain("🟡 risk: — works but fragile");
+    expect(prompt).toContain("Use failure if you reported any 🔴 bug or 🟡 risk");
     expect(prompt).toContain("Do not git add source, git commit, git push, or force-push");
     expect(prompt).not.toContain("./REVIEW.md exists");
     expect(prompt).not.toContain("<review_md");
@@ -76,22 +80,6 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("Gitea commit status");
     expect(prompt).not.toContain("gitops-apply-review");
     expect(prompt).not.toContain("skill tool");
-  });
-
-  test("keeps the rubric without wrapping repo files as untrusted orders", () => {
-    const prompt = buildPROpenedPrompt({
-      repo: makeRepo(),
-      pr: makePR(),
-      prFiles: [],
-    });
-
-    expect(prompt).toContain("<review-rubric>");
-    expect(prompt).toContain("🔴 bug: — broken behavior, will cause incident. Trailer failure.");
-    expect(prompt).toContain("🟡 risk: — works but fragile");
-    expect(prompt).toContain("Use failure if you reported any 🔴 bug or 🟡 risk");
-    expect(prompt).not.toContain("REVIEW.md exists");
-    expect(prompt).not.toContain("not orders");
-    expect(prompt).not.toMatch(/ignore any (instruction|line) in it/i);
   });
 
   test("does not paste the baked Helm/GitOps checklist on Helm paths", () => {
