@@ -50,7 +50,7 @@ import {
   seedPullRequestDescription,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
-import { trustedWriteLogins } from "./permissions.ts";
+import { trustedPushLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
@@ -470,7 +470,7 @@ export async function collectFollowUpItems(
       (isRequestChangesReview(review) || isCommentReview(review)) &&
       isInScopeHumanComment({ body: review.body ?? review.content ?? "", user: review.user }, botUsername, ignoreLogins)
   );
-  const trusted = await trustedWriteLogins(api, owner, repo, [
+  const trusted = await trustedPushLogins(api, owner, repo, [
     ...candidateComments.map((comment) => comment.user?.login),
     ...candidateInlines.map((comment) => comment.user?.login),
     ...candidateReviews.map((review) => review.user?.login),

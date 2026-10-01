@@ -16,6 +16,7 @@ import {
   makeRepo,
   makeUser,
   makeWorkerConfig,
+  pushApi,
   responseJson,
   signBody,
 } from "./fixtures.ts";
@@ -137,7 +138,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("enqueues follow-up when a foreign PR is assigned to the bot", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const repository = makePayload().repository;
     const response = await handler(
       await signedRequest(
@@ -342,7 +343,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("enqueues Gitea issue_assign deliveries (Event=issues, Event-Type=issue_assign)", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const response = await handler(
       await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues", eventType: "issue_assign" })
     );
@@ -351,9 +352,21 @@ describe("createWorkerFetchHandler", () => {
     expect(queue.jobs).toHaveLength(1);
   });
 
+  test("skips an issue assigned by someone who cannot push", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: pushApi({ getCollaboratorPermission: async () => ({ permission: "read" }) }),
+    });
+    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+    expect(queue.jobs).toHaveLength(0);
+  });
+
   test("enqueues assigned issue events", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const response = await handler(await signedRequest(makeIssuePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
@@ -992,6 +1005,7 @@ describe("createWorkerFetchHandler", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
       api: {
+        ...pushApi(),
         listOpenPulls: async () => [],
         listIssueBlocks: async () => [makeLinkedIssue({ number: 206 })],
         getIssue: async (_owner, _repo, index) =>
@@ -1020,7 +1034,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("first-run assign still 202s on the in-memory queue without a store", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
@@ -1031,6 +1045,7 @@ describe("createWorkerFetchHandler", () => {
     const store = new MemoryReviewJobStore();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue: { enqueue: (job) => store.enqueueIssue(job) },
+      api: pushApi(),
     });
     const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(202);
@@ -1041,6 +1056,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("fails closed with 503 when the ledger is unavailable", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      api: pushApi(),
       queue: {
         enqueue() {
           throw new QueueUnavailableError("down");

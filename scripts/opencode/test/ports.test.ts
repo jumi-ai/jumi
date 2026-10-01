@@ -356,7 +356,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect(forge.comments).toHaveLength(0);
       expect(forge.reviews).toHaveLength(1);
       expect((forge.reviews[0] as { body: string }).body).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
-      expect((forge.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((forge.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((forge.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
       expect(lastNonEmptyLine((forge.reviews[0] as { body: string }).body)).toBe("<!-- jumi-check: success -->");
       expect(forge.statuses.map((status) => ({ state: status.state, context: status.context }))).toEqual([
