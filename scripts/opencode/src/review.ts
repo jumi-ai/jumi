@@ -34,6 +34,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
@@ -1051,11 +1052,26 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   };
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
-    const [repoInfo, prFiles, prCommentResult] = await Promise.all([
+    const [repoInfo, prFiles, prCommentResult, prReviews, prInlines] = await Promise.all([
       forgeApi.getRepo(opts.owner, opts.repo),
       forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
       loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
+      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] => {
+        log(`previous reviews unavailable: ${errorMessage(err)}`);
+        return [];
+      }),
+      forgeApi.listPullReviewComments(opts.owner, opts.repo, pr.number).catch((err: unknown): InlineComment[] => {
+        log(`previous inlines unavailable: ${errorMessage(err)}`);
+        return [];
+      }),
     ]);
+    const previousReview = findPreviousReview({
+      comments: prCommentResult.comments,
+      reviews: prReviews,
+      inlines: prInlines,
+      botUsername: opts.botUsername,
+      marker: markerFor(opts.owner, opts.repo, pr.number),
+    });
 
     const ids = extractClosingIssueNumbers(pr);
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
@@ -1084,7 +1100,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
     const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const { files, notes: fileNotes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
-    notes.push(...fileNotes);
     const includedPatchBytes = files.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const reviewLabel = `${repoFullName}#${pr.number}`;
 
@@ -1099,13 +1114,74 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       included_patch_bytes: includedPatchBytes,
       included_patch_bytes_h: formatBytes(includedPatchBytes),
       max_patch_bytes: maxPatchBytes,
-      notes: notes.length,
+      notes: notes.length + fileNotes.length,
     });
 
-    const fitted = fitReviewThread(thread, maxThreadBytes);
+    const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
+    const gitAuth = await resolveGitAuth(opts);
+    failureSecrets.push(gitAuth.token);
+    await prepareWorkspace({
+      workdir: opts.workspace,
+      repo: repoInfo,
+      pr,
+      giteaUrl: opts.giteaUrl,
+      username: gitAuth.username,
+      token: gitAuth.token,
+      embedTokenInUrl: gitAuth.embedTokenInUrl,
+      authorName: gitAuth.authorName,
+      authorEmail: gitAuth.authorEmail,
+      logger: log,
+    });
+
+    const git = opts.gitRunner ?? runGit;
+    const gitCmdEnv: Record<string, string | undefined> = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      LANG: process.env.LANG,
+      LC_ALL: process.env.LC_ALL,
+      GIT_TERMINAL_PROMPT: "0",
+    };
+
+    let delta: ReviewDelta | undefined;
+    let scopeNotes = fileNotes;
+    if (previousReview) {
+      const loaded = await loadReviewDelta({
+        previous: previousReview,
+        headSha: reviewedHeadSha,
+        pullFiles: prFiles,
+        maxFiles,
+        git,
+        cwd: opts.workspace,
+        env: gitCmdEnv,
+        log,
+      });
+      if (loaded) {
+        const { files: deltaFiles, notes: deltaNotes } = prepareFiles(loaded.files, maxFiles, maxPatchBytes);
+        delta = { ...loaded, files: deltaFiles };
+        scopeNotes =
+          prFiles.length > maxFiles
+            ? [`Only the first ${maxFiles} of ${prFiles.length} changed files are listed.`, ...deltaNotes]
+            : deltaNotes;
+      }
+    }
+    // A later review gets the finding lines, not the previous essay. Drop it
+    // before fitting so it does not use up the thread budget.
+    const fitted = fitReviewThread(
+      delta
+        ? {
+            ...thread,
+            comments: thread.comments.filter(
+              (comment) =>
+                !isJumiReviewComment({ body: comment.body, user: { login: comment.author } }, opts.botUsername)
+            ),
+          }
+        : thread,
+      maxThreadBytes
+    );
     if (fitted.truncated) {
       notes.push(`Thread context truncated to maxThreadBytes (dropped ${fitted.droppedCommentBodies} comment bodies).`);
     }
+    notes.push(...scopeNotes);
     const allFittedComments = [
       ...fitted.thread.comments,
       ...fitted.thread.linkedIssues.flatMap((issue) => issue.comments),
@@ -1126,21 +1202,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       permission_lookups: permissionLookups,
       permission_failures: permissionFailures,
     });
-
-    const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
-    const gitAuth = await resolveGitAuth(opts);
-    failureSecrets.push(gitAuth.token);
-    await prepareWorkspace({
-      workdir: opts.workspace,
-      repo: repoInfo,
-      pr,
-      giteaUrl: opts.giteaUrl,
-      username: gitAuth.username,
-      token: gitAuth.token,
-      embedTokenInUrl: gitAuth.embedTokenInUrl,
-      authorName: gitAuth.authorName,
-      authorEmail: gitAuth.authorEmail,
-      logger: log,
+    logDiagnostic(log, "review_delta", {
+      review: reviewLabel,
+      later: Boolean(delta),
+      previous_sha: previousReview?.sha ?? null,
+      previous_findings: delta?.findings.length ?? null,
+      commits: delta?.commits.length ?? null,
+      delta_files: delta?.files.length ?? null,
     });
 
     // The workspace is the PR head checkout, so this is the head's REVIEW.md; no base-branch fallback.
@@ -1162,9 +1230,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
-      prFiles: files,
+      prFiles: delta ? prFiles.slice(0, maxFiles) : files,
       reviewNotes: notes,
       thread: fitted.thread,
+      delta,
       reviewMd,
     });
 
@@ -1175,14 +1244,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       model: opts.model,
     });
 
-    const git = opts.gitRunner ?? runGit;
-    const gitCmdEnv: Record<string, string | undefined> = {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-      LANG: process.env.LANG,
-      LC_ALL: process.env.LC_ALL,
-      GIT_TERMINAL_PROMPT: "0",
-    };
     let taskTracked = false;
     try {
       taskTracked =

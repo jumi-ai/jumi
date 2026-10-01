@@ -8,7 +8,12 @@ import {
   flagObjection,
   judgeEffortLevel,
   judgeNegativeRun,
+  judgeSkills,
+  judgeUnstagedSkill,
   nonsenseValue,
+  PROBE_CHECKOUT_SKILL,
+  PROBE_CHECKOUT_SKILL_COMMAND,
+  PROBE_FLEET_SKILL,
   pinnedFlagValues,
   withFlagValue,
 } from "../src/claude_flag_probe.ts";
@@ -222,5 +227,54 @@ describe("image verification paths", () => {
     // ship `claude`, so both have to prove the flags, not just the first.
     const checks = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
     expect(checks.split("bun src/claude_flag_probe.ts").length - 1).toBe(2);
+  });
+});
+
+describe("judgeSkills", () => {
+  const loaded = { type: "user", tool_use_result: { success: true, commandName: PROBE_CHECKOUT_SKILL_COMMAND } };
+  const run = (skills: string[], events: unknown[] = [loaded]) => ({
+    code: 0,
+    stdout: `${[{ type: "system", subtype: "init", skills }, ...events].map((event) => JSON.stringify(event)).join("\n")}\n`,
+    stderr: "",
+    timedOut: false,
+  });
+  const ok = (results: { ok: boolean }[]) => results.map((result) => result.ok);
+  const quiet = { settings: false, skill: false, shell: [] };
+
+  test("passes only with both skill sources, the skill loaded, and no checkout hook", () => {
+    const both = run([PROBE_FLEET_SKILL, PROBE_CHECKOUT_SKILL_COMMAND]);
+    expect(ok(judgeSkills(both, quiet))).toEqual([true, true, true, true, true, true]);
+    // Each command source has its own marker, so a failure names the one that ran.
+    expect(ok(judgeSkills(both, { ...quiet, settings: true }))).toEqual([true, true, true, false, true, true]);
+    expect(ok(judgeSkills(both, { ...quiet, skill: true }))).toEqual([true, true, true, true, false, true]);
+    expect(ok(judgeSkills(both, { ...quiet, shell: ["fence"] }))).toEqual([true, true, true, true, true, false]);
+    // A checkout skill read straight from `.claude/skills` would mean the
+    // project source is on, and with it the checkout's hooks.
+    expect(ok(judgeSkills(run([PROBE_FLEET_SKILL, PROBE_CHECKOUT_SKILL]), quiet))).toEqual([
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(ok(judgeSkills(run([], []), quiet))).toEqual([false, false, false, true, true, true]);
+  });
+
+  test("a skill that was listed but never loaded does not count as hook-free", () => {
+    const listed = run([PROBE_FLEET_SKILL, PROBE_CHECKOUT_SKILL_COMMAND], []);
+    expect(ok(judgeSkills(listed, quiet))).toEqual([true, true, false, true, true, true]);
+    const failed = { type: "user", tool_use_result: { success: false, commandName: PROBE_CHECKOUT_SKILL_COMMAND } };
+    expect(ok(judgeSkills(run([PROBE_FLEET_SKILL, PROBE_CHECKOUT_SKILL_COMMAND], [failed]), quiet))[2]).toBe(false);
+  });
+
+  test("the unstaged control needs the skill loaded, its hook fired, and both shell forms run", () => {
+    const control = run([PROBE_CHECKOUT_SKILL_COMMAND]);
+    const forms = ["inline", "fence"];
+    expect(ok(judgeUnstagedSkill(control, true, forms))).toEqual([true, true]);
+    expect(ok(judgeUnstagedSkill(control, false, forms))).toEqual([false, true]);
+    expect(ok(judgeUnstagedSkill(control, true, ["inline"]))).toEqual([true, false]);
+    expect(ok(judgeUnstagedSkill(run([PROBE_CHECKOUT_SKILL_COMMAND], []), true, forms))).toEqual([false, false]);
+    expect(ok(judgeUnstagedSkill({ ...control, timedOut: true }, true, forms))).toEqual([false, false]);
   });
 });

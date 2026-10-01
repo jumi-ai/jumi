@@ -32,7 +32,18 @@
  *     tests exec `hooks/*.sh` directly, so between them a release that stopped
  *     loading inline manifest hooks (or `--setting-sources user` starting to
  *     suppress them) would leave every homelab Claude run untraced with nothing
- *     anywhere saying so.
+ *     anywhere saying so;
+ *   - skills load without checkout hooks: a fleet skill under `~/.claude/skills`
+ *     and a checkout `.claude/skills` skill staged by
+ *     `stageClaudeCheckoutSkills` are both in the init event's skill list. The
+ *     stub then has the model load the checkout skill, and neither checkout
+ *     hook runs: not the `SessionStart` hook in `.claude/settings.json`, and not
+ *     the `Stop` hook in the skill's own frontmatter. Nor does the inline
+ *     shell in the skill's body (`` !`cmd` `` and a ```! fence). A skill's
+ *     frontmatter hooks only run once the skill is loaded, and `SessionStart`
+ *     is not one of the events the binary runs from there, so the control is a
+ *     second run with the same skill unstaged, where that `Stop` hook and both
+ *     shell forms must fire.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -41,10 +52,11 @@
  *
  * Exit 0 when every case matches its expectation, 1 otherwise.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
+import { CLAUDE_CHECKOUT_SKILLS_PLUGIN, stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
@@ -73,6 +85,22 @@ const PROBE_JOB_ID = "jumi-claude-flag-probe-job";
  * `timeout 600` the image verification wraps the probe in.
  */
 const RUN_TIMEOUT_MS = 60_000;
+/** Skill the probe puts in `~/.claude/skills`, the fleet/user location. */
+export const PROBE_FLEET_SKILL = "jumi-probe-fleet-skill";
+/** Skill the probe puts in the checkout's `.claude/skills`. */
+export const PROBE_CHECKOUT_SKILL = "jumi-probe-checkout-skill";
+/** File the checkout's `.claude/settings.json` hook would create if it ran. */
+const PROBE_SETTINGS_HOOK_MARKER = "jumi-probe-checkout-settings-hook-ran";
+/** File the checkout skill's frontmatter hook would create if it ran. */
+const PROBE_SKILL_HOOK_MARKER = "jumi-probe-checkout-skill-hook-ran";
+/** File the same frontmatter hook must create when the skill is not staged. */
+const PROBE_UNSTAGED_HOOK_MARKER = "jumi-probe-unstaged-skill-hook-ran";
+/** Files the inline shell in the checkout skill's body would create if it ran. */
+const PROBE_SKILL_SHELL_MARKER = "jumi-probe-checkout-skill-shell-ran";
+/** Files that same inline shell must create when the skill is not staged. */
+const PROBE_UNSTAGED_SHELL_MARKER = "jumi-probe-unstaged-skill-shell-ran";
+/** One file per inline shell form the binary runs from a skill body. */
+const PROBE_SHELL_FORMS = ["inline", "fence"] as const;
 
 /**
  * Production flags whose *value* the installed binary validates. Everything
@@ -157,6 +185,8 @@ export function flagObjection(
 interface StubState {
   /** Paths the binary asked the stub endpoint for, for the failure report. */
   readonly paths: string[];
+  /** Skill the stub's model loads before it answers, when set. */
+  loadSkill?: string;
 }
 
 function sse(events: readonly { event: string; data: unknown }[]): string {
@@ -164,15 +194,16 @@ function sse(events: readonly { event: string; data: unknown }[]): string {
 }
 
 /**
- * Just enough of `POST /v1/messages` for one streamed text turn. Usage numbers
- * are non-zero on purpose: the probe asserts the parent can still account
- * tokens from this flag combination.
+ * Just enough of `POST /v1/messages` for one streamed text turn, preceded by
+ * one `Skill` tool call when `state.loadSkill` is set. Usage numbers are
+ * non-zero on purpose: the probe asserts the parent can still account tokens
+ * from this flag combination.
  */
 function startStubAnthropic(state: StubState) {
   return Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch(req) {
+    async fetch(req) {
       const { pathname } = new URL(req.url);
       state.paths.push(`${req.method} ${pathname}`);
       if (!pathname.endsWith("/v1/messages")) return new Response("{}", { headers: { "content-type": "text/plain" } });
@@ -186,23 +217,27 @@ function startStubAnthropic(state: StubState) {
         stop_sequence: null,
         usage: { input_tokens: 11, output_tokens: 0 },
       };
+      // The skill is asked for once: the request that carries its tool result
+      // gets the text turn.
+      const body = state.loadSkill ? await req.text() : "";
+      const callSkill = state.loadSkill !== undefined && !body.includes('"tool_result"');
+      const block = callSkill
+        ? { type: "tool_use", id: "toolu_jumi_probe", name: "Skill", input: {} }
+        : { type: "text", text: "" };
+      const delta = callSkill
+        ? { type: "input_json_delta", partial_json: JSON.stringify({ skill: state.loadSkill }) }
+        : { type: "text_delta", text: PROBE_MARKER };
       return new Response(
         sse([
           { event: "message_start", data: { type: "message_start", message } },
-          {
-            event: "content_block_start",
-            data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-          },
-          {
-            event: "content_block_delta",
-            data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: PROBE_MARKER } },
-          },
+          { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: block } },
+          { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta } },
           { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
           {
             event: "message_delta",
             data: {
               type: "message_delta",
-              delta: { stop_reason: "end_turn", stop_sequence: null },
+              delta: { stop_reason: callSkill ? "tool_use" : "end_turn", stop_sequence: null },
               usage: { output_tokens: 7 },
             },
           },
@@ -272,6 +307,198 @@ export function judgeTracingPlugin(project: string, spans: readonly CapturedSpan
     };
   }
   return { name, ok: true, observed: `${mine.length} span(s) at ${wantPath}: ${mine.map((s) => s.name).join(", ")}` };
+}
+
+/** The inline shell forms whose marker file under `marker` exists. */
+async function shellFormsRan(marker: string): Promise<string[]> {
+  const ran: string[] = [];
+  for (const form of PROBE_SHELL_FORMS) if (await Bun.file(`${marker}-${form}`).exists()) ran.push(form);
+  return ran;
+}
+
+interface ProbeSkillCommands {
+  /** Created by the `Stop` hook in the frontmatter. */
+  readonly hookMarker: string;
+  /** Prefix of the files the two inline shell forms in the body create. */
+  readonly shellMarker: string;
+  /**
+   * Also put `---` and the inline form in the description. The binary ends
+   * frontmatter at the first `---` it meets, so a staged copy that wrote the
+   * description back as it came would hand the rest over as body, and run it.
+   */
+  readonly inDescription?: boolean;
+}
+
+/**
+ * `Stop`, not `SessionStart`: the binary runs a loaded skill's frontmatter
+ * `Stop` hook and never its `SessionStart` one.
+ */
+function probeSkill(name: string, commands?: ProbeSkillCommands): string {
+  const extra = commands?.inDescription ? ` --- !\`touch ${commands.shellMarker}-inline\`` : "";
+  const head = `---\nname: ${name}\ndescription: "Jumi claude flag probe skill${extra}"\n`;
+  if (!commands) return `${head}---\nProbe skill body.\n`;
+  const hooks = `hooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: "touch ${commands.hookMarker}"\n`;
+  const marker = commands.shellMarker;
+  return `${head}${hooks}---\nProbe skill body. !\`touch ${marker}-inline\`\n\n\`\`\`!\ntouch ${marker}-fence\n\`\`\`\n`;
+}
+
+interface SkillProbe {
+  /** Created by the `SessionStart` hook in the checkout's `.claude/settings.json`. */
+  readonly settingsMarker: string;
+  /** Created by the `Stop` hook in the checkout skill's frontmatter. */
+  readonly skillMarker: string;
+  /** Created by that same frontmatter hook in the unstaged copy. */
+  readonly unstagedMarker: string;
+  /** Prefix of the files the checkout skill's inline shell creates. */
+  readonly skillShellMarker: string;
+  /** The same prefix for the unstaged copy. */
+  readonly unstagedShellMarker: string;
+  /** The checkout skill as a plain plugin, frontmatter untouched. */
+  readonly unstagedPlugin: string;
+}
+
+/**
+ * A fleet skill in HOME, and a checkout that carries a skill *and* commands: a
+ * hook in `.claude/settings.json`, a hook in the skill's own frontmatter, and
+ * inline shell in the skill's body, each with its own marker. Beside them,
+ * outside the checkout, the same skill as a plugin `stageClaudeCheckoutSkills`
+ * never touched.
+ */
+async function seedSkillProbe(home: string, workdir: string): Promise<SkillProbe> {
+  const probe = {
+    settingsMarker: join(home, PROBE_SETTINGS_HOOK_MARKER),
+    skillMarker: join(home, PROBE_SKILL_HOOK_MARKER),
+    unstagedMarker: join(home, PROBE_UNSTAGED_HOOK_MARKER),
+    skillShellMarker: join(home, PROBE_SKILL_SHELL_MARKER),
+    unstagedShellMarker: join(home, PROBE_UNSTAGED_SHELL_MARKER),
+    unstagedPlugin: join(home, "unstaged-checkout-skills"),
+  };
+  await mkdir(join(home, ".claude", "skills", PROBE_FLEET_SKILL), { recursive: true });
+  await writeFile(join(home, ".claude", "skills", PROBE_FLEET_SKILL, "SKILL.md"), probeSkill(PROBE_FLEET_SKILL));
+  await mkdir(join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
+  await writeFile(
+    join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
+    probeSkill(PROBE_CHECKOUT_SKILL, {
+      hookMarker: probe.skillMarker,
+      shellMarker: probe.skillShellMarker,
+      inDescription: true,
+    })
+  );
+  await writeFile(
+    join(workdir, ".claude", "settings.json"),
+    JSON.stringify({
+      hooks: { SessionStart: [{ hooks: [{ type: "command", command: `touch ${probe.settingsMarker}` }] }] },
+    })
+  );
+  await mkdir(join(probe.unstagedPlugin, ".claude-plugin"), { recursive: true });
+  await writeFile(
+    join(probe.unstagedPlugin, ".claude-plugin", "plugin.json"),
+    JSON.stringify({ name: CLAUDE_CHECKOUT_SKILLS_PLUGIN, description: "Jumi claude flag probe control" })
+  );
+  await mkdir(join(probe.unstagedPlugin, "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
+  await writeFile(
+    join(probe.unstagedPlugin, "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
+    probeSkill(PROBE_CHECKOUT_SKILL, { hookMarker: probe.unstagedMarker, shellMarker: probe.unstagedShellMarker })
+  );
+  return probe;
+}
+
+/** The checkout skill, by the name the model loads it under. */
+export const PROBE_CHECKOUT_SKILL_COMMAND = `${CLAUDE_CHECKOUT_SKILLS_PLUGIN}:${PROBE_CHECKOUT_SKILL}`;
+
+/** The `Skill` tool reported it loaded the checkout skill. */
+function checkoutSkillLoaded(events: readonly Record<string, unknown>[]): boolean {
+  return events.some((event) => {
+    const result = event.tool_use_result as { success?: unknown; commandName?: unknown } | undefined;
+    return event.type === "user" && result?.success === true && result.commandName === PROBE_CHECKOUT_SKILL_COMMAND;
+  });
+}
+
+export interface CheckoutHooksRan {
+  /** The `SessionStart` hook in the checkout's `.claude/settings.json`. */
+  readonly settings: boolean;
+  /** The `Stop` hook in the checkout skill's frontmatter. */
+  readonly skill: boolean;
+  /** Inline shell forms in the checkout skill's body that ran. */
+  readonly shell: readonly string[];
+}
+
+/**
+ * Both skill sources reach the model, the checkout skill loads, and none of
+ * the checkout's commands runs. Judged on the production run.
+ */
+export function judgeSkills(run: RunResult, hooks: CheckoutHooksRan): CaseResult[] {
+  const events = jsonLines(run.stdout);
+  const init = events.find((event) => event.type === "system" && event.subtype === "init");
+  const skills = Array.isArray(init?.skills) ? init.skills.map((skill) => String(skill)) : [];
+  const checkout = PROBE_CHECKOUT_SKILL_COMMAND;
+  const loaded = checkoutSkillLoaded(events);
+  return [
+    {
+      name: "a fleet skill in ~/.claude/skills is discoverable",
+      ok: skills.includes(PROBE_FLEET_SKILL),
+      observed: skills.includes(PROBE_FLEET_SKILL) ? PROBE_FLEET_SKILL : `skills: ${skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "a checkout .claude/skills skill is discoverable through the staged plugin",
+      ok: skills.includes(checkout),
+      observed: skills.includes(checkout) ? checkout : `skills: ${skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "the Skill tool loads the staged checkout skill",
+      ok: loaded,
+      observed: loaded ? `${checkout} loaded` : "no successful Skill tool result for it",
+    },
+    {
+      name: "the checkout's .claude/settings.json hook does not run",
+      ok: !hooks.settings,
+      observed: hooks.settings ? `${PROBE_SETTINGS_HOOK_MARKER} was created` : "no hook marker",
+    },
+    {
+      name: "the loaded checkout skill's frontmatter hook does not run",
+      ok: !hooks.skill,
+      observed: hooks.skill ? `${PROBE_SKILL_HOOK_MARKER} was created` : "no hook marker",
+    },
+    {
+      name: "the loaded checkout skill's inline shell does not run",
+      ok: hooks.shell.length === 0,
+      observed: hooks.shell.length > 0 ? `ran: ${hooks.shell.join(", ")}` : "no shell marker",
+    },
+  ];
+}
+
+/**
+ * The control for the two checks above: the same skill, loaded from a plugin
+ * whose `SKILL.md` was not rewritten, runs its `Stop` hook and both inline
+ * shell forms. If this binary stopped running one of them, "does not run"
+ * above proves nothing about the staging. `shellRan` is the forms that ran.
+ */
+export function judgeUnstagedSkill(run: RunResult, hookRan: boolean, shellRan: readonly string[]): CaseResult[] {
+  const hook = "an unstaged skill's frontmatter hook does run (so staging it away means something)";
+  const shell = "an unstaged skill's inline shell does run (so staging it away means something)";
+  const both = (observed: string) => [hook, shell].map((name) => ({ name, ok: false, observed }));
+  if (run.timedOut) return both(`claude hung, killed after ${RUN_TIMEOUT_MS}ms`);
+  if (!checkoutSkillLoaded(jsonLines(run.stdout))) {
+    return both(`the skill did not load (exit ${run.code}), so its commands had no chance to run`);
+  }
+  const missing = PROBE_SHELL_FORMS.filter((form) => !shellRan.includes(form));
+  return [
+    {
+      name: hook,
+      ok: hookRan,
+      observed: hookRan
+        ? `${PROBE_UNSTAGED_HOOK_MARKER} was created`
+        : "no hook marker — this binary no longer runs the frontmatter Stop hook the probe plants",
+    },
+    {
+      name: shell,
+      ok: missing.length === 0,
+      observed:
+        missing.length === 0
+          ? `ran: ${shellRan.join(", ")}`
+          : `this binary no longer runs the ${missing.join(" and ")} shell the probe plants`,
+    },
+  ];
 }
 
 export interface RunResult {
@@ -473,7 +700,9 @@ async function main(): Promise<number> {
     // above — never at whatever an operator exported — is also what lets the
     // production run below be judged on a span that actually arrived.
     process.env.PHOENIX_OTLP_ENDPOINT = `http://127.0.0.1:${phoenix.port}`;
-    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
+    const skillProbe = await seedSkillProbe(home, workdir);
+    const checkoutSkills = await stageClaudeCheckoutSkills(workdir, join(home, "checkout-skills"), console.error);
+    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir }, checkoutSkills);
     const pinned = pinnedFlagValues(argv);
     // The same env `runClaude` merges into a production spawn, so the plugin is
     // configured here exactly as it is in the homelab.
@@ -502,11 +731,33 @@ async function main(): Promise<number> {
       });
     }
 
-    results.push(...judgeProductionRun(argv, await runClaudeArgv(argv, origin, home, workdir, tracing)));
+    // Only the production run and the unstaged control have the model load the
+    // checkout skill; every later run is the plain one-turn answer.
+    state.loadSkill = PROBE_CHECKOUT_SKILL_COMMAND;
+    const production = await runClaudeArgv(argv, origin, home, workdir, tracing);
+    results.push(...judgeProductionRun(argv, production));
+    results.push(
+      ...judgeSkills(production, {
+        settings: await Bun.file(skillProbe.settingsMarker).exists(),
+        skill: await Bun.file(skillProbe.skillMarker).exists(),
+        shell: await shellFormsRan(skillProbe.skillShellMarker),
+      })
+    );
     // Only the production run is traced; the effort and negative-control runs
     // below keep the plain env, so the spans collected are unambiguously that
     // one run's.
     if (traced) results.push(judgeTracingPlugin(tracing.ARIZE_PROJECT_NAME ?? "", spans));
+
+    const unstagedArgv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir }, skillProbe.unstagedPlugin);
+    const unstaged = await runClaudeArgv(unstagedArgv, origin, home, workdir);
+    results.push(
+      ...judgeUnstagedSkill(
+        unstaged,
+        await Bun.file(skillProbe.unstagedMarker).exists(),
+        await shellFormsRan(skillProbe.unstagedShellMarker)
+      )
+    );
+    state.loadSkill = undefined;
 
     // Every other level an operator may have put in `JUMI_RUNNERS_FILE`.
     for (const level of CLAUDE_EFFORT_LEVELS.filter((candidate) => candidate !== PROBE_EFFORT)) {
