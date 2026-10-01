@@ -166,7 +166,7 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
   "foreign-branch": "Re-evaluate if the branch becomes local",
   "no-closer": "Re-evaluate when a closing issue is linked",
   "implement-latch": "Re-evaluate after the owning job finishes",
-  "no-write-access": "Re-evaluate when the sender gains write access",
+  "no-write-access": "Re-evaluate when the sender gains write access or is on TRUSTED_SENDER_LOGINS",
   "not-labeled": "Re-evaluate when labeled for pickup",
 };
 
