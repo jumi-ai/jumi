@@ -153,6 +153,7 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
 
   // Sender without write access.
   if (text === "sender lacks write access") return "no-write-access";
+  if (text === "PR author cannot push to the base repository") return "no-write-access";
 
   // Not labeled / not assigned: the object is not picked up.
   if (text === "not labeled jumi") return "not-labeled";
