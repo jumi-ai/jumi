@@ -408,14 +408,34 @@ describe("runAgy", () => {
     });
   });
 
-  test("reviewer spawn stashes checkout .agents and .agent, then restores them", async () => {
-    const seen =
-      'if [ -e .agents ] || [ -e .agent ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
+  test("reviewer spawn keeps checkout skills and stashes checkout hooks, then restores them", async () => {
+    // What the child can see, one line per path: skills in every root stay,
+    // hooks.json, plugins (which bundle hooks), and non-directory roots go.
+    const probe = [
+      ".agents/skills/checkout-skill/SKILL.md",
+      "_agents/skills/underscore-skill/SKILL.md",
+      ".agents/hooks.json",
+      ".agents/plugins/p/hooks.json",
+      "_agents/hooks.json",
+      "_agent/hooks.json",
+      ".agent",
+    ]
+      .map((path) => `if [ -e ${path} ]; then echo "yes ${path}"; else echo "no ${path}"; fi >> "$ARGS_LOG.seen"`)
+      .join("\n");
     await withFakeBins(
-      { agy: fakeBin("agy", `${seen}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      { agy: fakeBin("agy", `${probe}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
       async ({ workdir, argsLog }) => {
-        await mkdir(join(workdir, ".agents", "skills"), { recursive: true });
+        const skill = "---\nname: checkout-skill\ndescription: d\n---\nbody\n";
+        await mkdir(join(workdir, ".agents", "skills", "checkout-skill"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "skills", "checkout-skill", "SKILL.md"), skill);
         await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        await mkdir(join(workdir, ".agents", "plugins", "p"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "plugins", "p", "hooks.json"), '{"hooks":[]}');
+        await mkdir(join(workdir, "_agents", "skills", "underscore-skill"), { recursive: true });
+        await writeFile(join(workdir, "_agents", "skills", "underscore-skill", "SKILL.md"), skill);
+        await writeFile(join(workdir, "_agents", "hooks.json"), '{"hooks":[]}');
+        await mkdir(join(workdir, "_agent"), { recursive: true });
+        await writeFile(join(workdir, "_agent", "hooks.json"), '{"hooks":[]}');
         await writeFile(join(workdir, ".agent"), "plugin");
         const result = await runAgy({
           prompt: "p",
@@ -426,9 +446,75 @@ describe("runAgy", () => {
           trace: { kind: "review", owner: "o", repo: "r" },
         });
         expect(result.status).toBe("ok");
-        expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("no\n");
+        expect((await readFile(`${argsLog}.seen`, "utf8")).trim().split("\n")).toEqual([
+          "yes .agents/skills/checkout-skill/SKILL.md",
+          "yes _agents/skills/underscore-skill/SKILL.md",
+          "no .agents/hooks.json",
+          "no .agents/plugins/p/hooks.json",
+          "no _agents/hooks.json",
+          "no _agent/hooks.json",
+          "no .agent",
+        ]);
         expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+        expect(await readFile(join(workdir, ".agents", "plugins", "p", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+        expect(await readFile(join(workdir, ".agents", "skills", "checkout-skill", "SKILL.md"), "utf8")).toBe(skill);
+        expect(await readFile(join(workdir, "_agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+        expect(await readFile(join(workdir, "_agents", "skills", "underscore-skill", "SKILL.md"), "utf8")).toBe(skill);
+        expect(await readFile(join(workdir, "_agent", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
         expect(await readFile(join(workdir, ".agent"), "utf8")).toBe("plugin");
+      }
+    );
+  });
+
+  test("reviewer restore drops whatever the child wrote into the skills-only root", async () => {
+    await withFakeBins(
+      {
+        agy: fakeBin(
+          "agy",
+          `echo '{"x":1}' > .agents/hooks.json\nmkdir -p .agents/skills/new && echo new > .agents/skills/new/SKILL.md\nprintf '%s\\n' '${SUCCESS_RESULT}'`
+        ),
+      },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents", "skills", "s"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "s");
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+        });
+        expect(result.status).toBe("ok");
+        // The checkout's own hooks.json is back; the one the child wrote is gone.
+        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
+        expect(await readFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "utf8")).toBe("s");
+      }
+    );
+  });
+
+  test("reviewer restore that cannot take the skills back says what it left behind", async () => {
+    await withFakeBins(
+      { agy: fakeBin("agy", `rm -rf .agents && echo child > .agents\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents", "skills", "s"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "s");
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        const logs: string[] = [];
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        // The child's node is left alone, and the lost hooks.json is not silent.
+        expect(await readFile(join(workdir, ".agents"), "utf8")).toBe("child\n");
+        expect(logs.filter((line) => line.startsWith("[agy] .agents not restored"))).toHaveLength(1);
       }
     );
   });
