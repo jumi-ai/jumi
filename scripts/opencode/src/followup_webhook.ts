@@ -7,7 +7,7 @@ import {
   isJumiPrIdentity,
   isWipOrDraft,
 } from "./gitea_issues.ts";
-import { hasWriteAccess, type PermissionApi } from "./permissions.ts";
+import { canPush, type PermissionApi } from "./permissions.ts";
 import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -16,6 +16,8 @@ export type FollowUpWebhookPolicy = WebhookPolicy &
   PickupPolicy & {
     followupIgnoreLogins?: readonly string[];
   };
+
+export const SENDER_CANNOT_PUSH = "sender lacks write access";
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -327,13 +329,25 @@ export function shouldEnqueuePullRejectedFollowUp(
 }
 
 /**
- * Write-gated wake for issue/PR comments. Fail-closed: without a positive
- * write (or maintain/admin/owner) collaborator permission for the sender,
- * skip. Keep the ignore-login overlay: write is necessary, not sufficient.
- * Scope checks run before the permission lookup so out-of-scope PRs
- * (forks, drafts, non-Jumi PRs) never cost a forge round-trip and keep
- * their scope skip reason.
+ * Filter an event's own wake by its sender. Fail-closed: unless the sender can
+ * push (`canPush`: write or stronger, or an App installation that writes
+ * contents), the enqueue becomes a skip. Skips and cancels pass through, so
+ * pickup rules and the bot/ignore-login skips stay as they are: push is
+ * necessary, not sufficient. Scope checks run first so out-of-scope events
+ * never cost a forge round-trip and keep their scope skip reason.
  */
+export async function requireSenderPush<D extends { type: string }>(
+  decision: D,
+  api: Partial<PermissionApi> | undefined,
+  sender: string | undefined
+): Promise<D | { type: "skip"; reason: string }> {
+  if (decision.type !== "enqueue") return decision;
+  const { owner, repo } = (decision as unknown as { job: { owner: string; repo: string } }).job;
+  if (await canPush(api, owner, repo, sender)) return decision;
+  return { type: "skip", reason: SENDER_CANNOT_PUSH };
+}
+
+/** Push-gated wake for issue/PR comments. */
 export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   payload: GiteaIssueCommentPayload,
   policy: FollowUpWebhookPolicy,
@@ -342,18 +356,10 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  if (scope.type === "skip") return scope;
-  if (!(await hasWriteAccess(api, scope.job.owner, scope.job.repo, payload.sender?.login))) {
-    return { type: "skip", reason: "sender lacks write access" };
-  }
-  return scope;
+  return requireSenderPush(scope, api, payload.sender?.login);
 }
 
-/**
- * Write-gated wake for request-changes / review rejections. Same bar as
- * comments: people and Apps need current write or stronger; unknown is skip.
- * Scope first, permission second — same reason as comments.
- */
+/** Push-gated wake for request-changes / review rejections. Same bar as comments. */
 export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   payload: GiteaPRPayload,
   policy: FollowUpWebhookPolicy,
@@ -362,11 +368,7 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  if (scope.type === "skip") return scope;
-  if (!(await hasWriteAccess(api, scope.job.owner, scope.job.repo, payload.sender?.login))) {
-    return { type: "skip", reason: "sender lacks write access" };
-  }
-  return scope;
+  return requireSenderPush(scope, api, payload.sender?.login);
 }
 
 export async function shouldEnqueuePullAssign(

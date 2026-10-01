@@ -14,12 +14,28 @@ import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_me
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT, QUOTA_WAIT_PREFIX } from "../src/quota.ts";
-import { INCOMPLETE_REVIEW_STUCK, MAX_INCOMPLETE_RETRIES, type ReviewApi } from "../src/review.ts";
+import {
+  INCOMPLETE_REVIEW_STUCK,
+  MAX_INCOMPLETE_RETRIES,
+  PR_AUTHOR_CANNOT_PUSH,
+  type ReviewApi,
+} from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
+import {
+  emptyCiMethods,
+  makeBranch,
+  makeComment,
+  makeConfig,
+  makeFile,
+  makeIssue,
+  makeJob,
+  makePR,
+  makeRepo,
+  makeUser,
+} from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
@@ -122,7 +138,7 @@ describe("processEngineTick", () => {
       expect(row?.state).toBe("succeeded");
       expect(row?.resultMarkdown).toContain("Looks good");
       expect(row?.resultMarkdown).not.toContain("I'll inspect");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
       expect(api.comments).toHaveLength(0);
       expect(api.statuses.map((status) => status.state)).toEqual(["pending", "success"]);
@@ -181,7 +197,7 @@ describe("processEngineTick", () => {
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
     expect(ran).toBe(0);
     expect(store.rows[0]?.state).toBe("succeeded");
-    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
+    expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     expect((api.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
     expect(api.comments).toHaveLength(0);
   });
@@ -302,7 +318,7 @@ describe("processEngineTick", () => {
     expect(reviewCalls).toBe(2);
     expect(store.rows[0]?.state).toBe("succeeded");
     expect(api.reviews).toHaveLength(1);
-    expect((api.reviews[0] as { body: string }).body).toContain("Persisted review");
+    expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
   });
 
   test("expired lease without a result is retried", async () => {
@@ -356,7 +372,7 @@ describe("processEngineTick", () => {
       expect(reviewCalls).toBe(2);
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(store.rows[0]?.leasedUntil).toBeNull();
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 
@@ -399,7 +415,7 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((api.reviews[0] as { body: string }).body).not.toContain("cannot save result");
     });
   });
@@ -798,6 +814,82 @@ describe("processEngineTick", () => {
     });
   });
 
+  test("reviews a Renovate pull whose head is on the base repo even when its lookup says none", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate[bot]" }) }),
+        getCollaboratorPermission: async () => ({ permission: "none" }),
+      });
+      let ran = 0;
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts) => {
+          ran++;
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(1);
+      expect(store.rows[0]?.state).toBe("succeeded");
+    });
+  });
+
+  test("ignores a fork pull whose author cannot push to the base repo", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const lookedUp: string[] = [];
+      const api = makeApi({
+        getPR: async () =>
+          makePR({
+            user: makeUser({ login: "mallory" }),
+            head: makeBranch({ sha: "headsha", repo: makeRepo({ owner: makeUser({ login: "mallory" }) }) }),
+          }),
+        getCollaboratorPermission: async (_owner, _repo, username) => {
+          lookedUp.push(username);
+          return { permission: "read" };
+        },
+      });
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        openCodeRunner: async () => {
+          throw new Error("runner should not be called");
+        },
+      });
+      expect(lookedUp).toEqual(["mallory"]);
+      expect(store.rows[0]?.state).toBe("skipped");
+      expect(store.rows[0]?.resultReason).toBe(PR_AUTHOR_CANNOT_PUSH);
+      expect(api.statuses).toEqual([]);
+      expect(api.comments).toEqual([]);
+      expect(api.reviews).toEqual([]);
+    });
+  });
+
+  test("reviews a fork pull whose author can push to the base repo", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = makeApi({
+        getPR: async () =>
+          makePR({ head: makeBranch({ sha: "headsha", repo: makeRepo({ owner: makeUser({ login: "alice" }) }) }) }),
+      });
+      let ran = 0;
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async (opts) => {
+          ran++;
+          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(1);
+      expect(store.rows[0]?.state).toBe("succeeded");
+    });
+  });
+
   test("closed or merged pull finishes in one lease when CI lookups would fail", async () => {
     await withWorkspace(async (workspace) => {
       const blocker = join(workspace, "not-a-dir");
@@ -1015,7 +1107,7 @@ describe("processEngineTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 
@@ -1121,7 +1213,7 @@ describe("processEngineTick", () => {
       });
       const published = await store.get(store.rows[0]!.id);
       expect(published?.state).toBe("succeeded");
-      expect((api.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((api.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
     });
   });
 
