@@ -25,6 +25,18 @@ function loginEquals(left: string | undefined, right: string): boolean {
   return typeof left === "string" && left.toLowerCase() === right.toLowerCase();
 }
 
+/**
+ * True only when Jumi closed the thread itself, which it does once a finding is
+ * gone. A thread anyone else resolved, or one with no known resolver, still
+ * counts: resolving it does not fix the code. GitHub's GraphQL names an App
+ * without the REST `[bot]` suffix, so compare without it.
+ */
+function isResolvedByBot(inline: InlineComment, botUsername: string): boolean {
+  const slug = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
+  const resolver = inline.resolver?.login;
+  return Boolean(resolver) && slug(resolver ?? "") === slug(botUsername);
+}
+
 function stripMarker(body: string, marker: string): string {
   return body.split(marker).join("").replace(/\s+/g, " ").trim();
 }
@@ -41,7 +53,8 @@ export function isJumiReviewComment(comment: { body?: string | null; user?: { lo
 /**
  * Pick the newest Jumi review on this pull. A sticky carries its findings in the
  * body. A pull review posts them as inline comments, and later reviews only add
- * new ones, so the open Jumi inlines are the current findings.
+ * new ones, so the Jumi inlines that Jumi has not resolved are the current
+ * findings.
  */
 export function findPreviousReview(opts: {
   comments: readonly Comment[];
@@ -73,7 +86,7 @@ export function findPreviousReview(opts: {
   if (latest.pull) {
     for (const inline of opts.inlines) {
       if (!loginEquals(inline.user?.login, opts.botUsername)) continue;
-      if (inline.resolved === true || inline.resolver != null) continue;
+      if (isResolvedByBot(inline, opts.botUsername)) continue;
       const body = inline.body ?? "";
       if (!inline.path || !body.includes(opts.marker)) continue;
       const text = stripMarker(body, opts.marker);
@@ -112,12 +125,14 @@ function statusFromPatch(patch: string): PullFile["status"] {
  * Build the delta for a later review, or undefined for a first review: the
  * previous SHA is missing, malformed, equal to the head, or not an ancestor.
  * Only files the pull still changes are kept, so a base merge does not pull in
- * unrelated patches.
+ * unrelated patches. Files past `maxFiles` are listed without a patch, since
+ * the caller drops them anyway.
  */
 export async function loadReviewDelta(opts: {
   previous: PreviousReview;
   headSha: string;
   pullFiles: readonly PullFile[];
+  maxFiles?: number;
   git: GitRunner;
   cwd: string;
   env: Record<string, string | undefined>;
@@ -145,17 +160,21 @@ export async function loadReviewDelta(opts: {
       await run(["diff", "--no-color", "--no-ext-diff", "--no-renames", "--numstat", "-z", sha, "HEAD"])
     ).filter((entry) => pullNames.has(entry.path));
     const files: PullFile[] = [];
-    for (const entry of touched) {
-      const patch = await run([
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "--no-renames",
-        sha,
-        "HEAD",
-        "--",
-        `:(literal)${entry.path}`,
-      ]);
+    const maxFiles = opts.maxFiles ?? touched.length;
+    for (const [index, entry] of touched.entries()) {
+      const patch =
+        index < maxFiles
+          ? await run([
+              "diff",
+              "--no-color",
+              "--no-ext-diff",
+              "--no-renames",
+              sha,
+              "HEAD",
+              "--",
+              `:(literal)${entry.path}`,
+            ])
+          : "";
       files.push({
         filename: entry.path,
         status: statusFromPatch(patch),

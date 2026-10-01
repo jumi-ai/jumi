@@ -1149,6 +1149,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         previous: previousReview,
         headSha: reviewedHeadSha,
         pullFiles: prFiles,
+        maxFiles,
         git,
         cwd: opts.workspace,
         env: gitCmdEnv,

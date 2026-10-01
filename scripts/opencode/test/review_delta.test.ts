@@ -257,13 +257,49 @@ describe("findPreviousReview", () => {
       ],
       inlines: [
         { ...makeComment({ id: 70, body: `🟡 risk: open one\n\n${MARKER}` }), path: "a.ts", new_position: 3 },
-        { ...makeComment({ id: 71, body: `🟡 risk: fixed one\n\n${MARKER}` }), path: "a.ts", resolved: true },
+        {
+          ...makeComment({ id: 71, body: `🟡 risk: fixed one\n\n${MARKER}` }),
+          path: "a.ts",
+          resolved: true,
+          resolver: makeUser({ login: "jumi" }),
+        },
         { ...makeComment({ id: 72, user: makeUser({ login: "alice" }), body: `human ${MARKER}` }), path: "a.ts" },
       ],
       botUsername: "jumi",
       marker: MARKER,
     });
     expect(previous).toEqual({ sha: "bbbbbbb", findings: ["a.ts:3: 🟡 risk: open one"] });
+  });
+
+  test("carries an inline that someone other than Jumi resolved", () => {
+    const inline = (id: number, text: string, extra: object) => ({
+      ...makeComment({ id, user: makeUser({ login: "jumi[bot]" }), body: `${text}\n\n${MARKER}` }),
+      path: "a.ts",
+      new_position: id,
+      resolved: true,
+      ...extra,
+    });
+    const previous = findPreviousReview({
+      comments: [],
+      reviews: [
+        {
+          id: 9,
+          user: makeUser({ login: "jumi[bot]" }),
+          body: stickyBody("bbbbbbb", "Risks.", "<!-- jumi-check: failure; 3 risks -->"),
+          commit_id: "bbbbbbb",
+          submitted_at: "2026-05-02T00:00:00Z",
+        },
+      ],
+      inlines: [
+        inline(1, "🟡 risk: author resolved", { resolver: makeUser({ login: "alice" }) }),
+        inline(2, "🟡 risk: resolver unknown", {}),
+        // GitHub's GraphQL login for an App has no `[bot]` suffix.
+        inline(3, "🟡 risk: jumi resolved", { resolver: makeUser({ login: "jumi" }) }),
+      ],
+      botUsername: "jumi[bot]",
+      marker: MARKER,
+    });
+    expect(previous?.findings).toEqual(["a.ts:1: 🟡 risk: author resolved", "a.ts:2: 🟡 risk: resolver unknown"]);
   });
 
   test("treats a failed review without finding lines as no previous review", () => {
@@ -352,6 +388,32 @@ describe("loadReviewDelta", () => {
       expect(delta?.files[0]).toMatchObject({ status: "modified", additions: 1, deletions: 1 });
       expect(delta?.commits).toHaveLength(1);
       expect(delta?.findings).toEqual([FINDING]);
+    });
+  });
+});
+
+describe("loadReviewDelta file cap", () => {
+  test("does not diff files past maxFiles but still lists them", async () => {
+    await withPullRepo(async ({ dir, reviewed, head }) => {
+      const calls: string[][] = [];
+      const inner = repoGit(head);
+      const delta = await loadReviewDelta({
+        previous: { sha: reviewed, findings: [] },
+        headSha: head,
+        pullFiles: [...PULL_FILES, makeFile({ filename: "c.ts" })],
+        maxFiles: 1,
+        git: (args, options) => {
+          calls.push(args);
+          return inner(args, options);
+        },
+        cwd: dir,
+        env: { PATH: process.env.PATH },
+      });
+      expect(delta?.files.map((file) => [file.filename, Boolean(file.patch)])).toEqual([
+        ["b.ts", true],
+        ["c.ts", false],
+      ]);
+      expect(calls.filter((args) => args[0] === "diff" && args.includes("--"))).toHaveLength(1);
     });
   });
 });

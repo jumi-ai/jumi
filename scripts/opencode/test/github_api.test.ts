@@ -186,6 +186,8 @@ describe("GithubAPI", () => {
     expect(toInlineComment({ ...base, position: 7 }).new_position).toBe(7);
     expect(toInlineComment(base).resolved).toBe(false);
     expect(toInlineComment(base, true).resolved).toBe(true);
+    expect(toInlineComment(base, true).resolver).toBeUndefined();
+    expect(toInlineComment(base, true, "alice").resolver).toEqual({ login: "alice" });
   });
 
   test("toPullFile maps GitHub removed to deleted", () => {
@@ -736,7 +738,12 @@ describe("GithubAPI", () => {
                 reviewThreads: {
                   pageInfo: { hasNextPage: false },
                   nodes: [
-                    { id: "PRRT_resolved", isResolved: true, comments: { nodes: [{ databaseId: 101 }] } },
+                    {
+                      id: "PRRT_resolved",
+                      isResolved: true,
+                      resolvedBy: { login: "alice" },
+                      comments: { nodes: [{ databaseId: 101 }] },
+                    },
                     { id: "PRRT_open", isResolved: false, comments: { nodes: [{ databaseId: 102 }] } },
                   ],
                 },
@@ -765,6 +772,7 @@ describe("GithubAPI", () => {
     expect(comments.map((comment) => comment.commit_id)).toEqual(["oldsha", "headsha"]);
     expect(comments.map((comment) => comment.pull_request_review_id)).toEqual([9, 10]);
     expect(comments.map((comment) => comment.resolved)).toEqual([true, false]);
+    expect(comments.map((comment) => comment.resolver?.login)).toEqual(["alice", undefined]);
     expect(urls[0]).toBe(`${GITHUB_API_URL}/repos/owner/repo/pulls/7/comments?per_page=50&page=1`);
     expect(urls[1]).toBe(`${GITHUB_API_URL}/graphql`);
   });
