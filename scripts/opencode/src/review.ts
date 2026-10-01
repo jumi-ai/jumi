@@ -1,6 +1,6 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
+import { CI_ABSENT_NOTE, CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
@@ -34,6 +34,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
+import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
@@ -55,7 +56,13 @@ import {
   upsertStuckText,
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
-import { findingFingerprint, parseReviewFindings, parseReviewOutput, stripFindingLines } from "./verdict.ts";
+import {
+  findingFingerprint,
+  keepReviewFindingLines,
+  parseReviewFindings,
+  parseReviewOutput,
+  stripFindingLines,
+} from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
@@ -124,6 +131,8 @@ export interface ReviewOptions {
   maxFiles?: number;
   maxPatchBytes?: number;
   maxThreadBytes?: number;
+  /** Byte budget for the head's REVIEW.md sections pasted into the prompt. */
+  maxReviewMdBytes?: number;
   maxOutputBytes?: number;
   engine?: Engine;
   openCodeRunner?: Engine;
@@ -670,6 +679,9 @@ async function gatePersonalJumiContractEnv(
   }
 }
 
+/** The pull's author cannot push to the base repository: the review ignores it. */
+export const PR_AUTHOR_CANNOT_PUSH = "PR author cannot push to the base repository";
+
 export function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
@@ -898,20 +910,16 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const singleFilePath = needsSingleFilePath(parsed.comment)
     ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, pr.number, log)
     : undefined;
+  // Publish finding lines and the trailer only; the child's tour is not published.
+  const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
   const writeup = buildCommentBody(
     marker,
     opts.expectedHeadSha,
-    stripFindingLines(parsed.comment, { singleFilePath }),
+    stripFindingLines(comment, { singleFilePath }),
     parsed.checkLine,
     opts.resultRunner
   );
-  const stickyBody = buildCommentBody(
-    marker,
-    opts.expectedHeadSha,
-    parsed.comment,
-    parsed.checkLine,
-    opts.resultRunner
-  );
+  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, parsed.checkLine, opts.resultRunner);
 
   let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
@@ -923,7 +931,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         prNumber: pr.number,
         headSha: opts.expectedHeadSha,
         marker,
-        comment: parsed.comment,
+        comment,
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
         event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),
@@ -1135,12 +1143,29 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       logger: log,
     });
 
+    // The workspace is the PR head checkout, so this is the head's REVIEW.md; no base-branch fallback.
+    // Match against every changed file, not only the ones that fit the patch budget.
+    const reviewMd = await loadReviewMdSections(
+      opts.workspace,
+      prFiles,
+      opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES
+    );
+    logDiagnostic(log, "review_md", {
+      review: reviewLabel,
+      injected: Boolean(reviewMd),
+      bytes: reviewMd?.bytes ?? 0,
+      truncated: reviewMd?.truncated ?? false,
+      path_sections: reviewMd?.pathSections ?? 0,
+      matched_path_sections: reviewMd?.matchedPathSections ?? 0,
+    });
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
       prFiles: files,
       reviewNotes: notes,
       thread: fitted.thread,
+      reviewMd,
     });
 
     logDiagnostic(log, "review_prompt", {

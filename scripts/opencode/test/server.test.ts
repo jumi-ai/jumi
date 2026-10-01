@@ -26,6 +26,7 @@ import {
   makeRepo,
   makeUser,
   makeWorkflowJobPayload,
+  pushApi,
   responseJson,
   signBody,
 } from "./fixtures.ts";
@@ -614,6 +615,7 @@ describe("createFetchHandler router mailbox", () => {
     const handler = createFetchHandler(makeConfig({ role: "router" }), {
       queue: store,
       worker: {
+        api: pushApi(),
         queue: {
           enqueue() {
             throw new QueueUnavailableError("down");

@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  buildIncompleteWritePrompt,
-  buildPROpenedPrompt,
-  shouldLoadGitOpsApplyReview,
-  touchesGitOpsApplyReview,
-} from "../src/prompt.ts";
+import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("buildPROpenedPrompt", () => {
@@ -54,6 +49,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("Do not dump large patches into context");
     expect(prompt).toContain("JUMI_REVIEW.md");
     expect(prompt).toContain("Do not git add source, git commit, git push, or force-push");
+    expect(prompt).not.toContain("./REVIEW.md exists");
+    expect(prompt).not.toContain("<review_md");
     expect(prompt).not.toContain("ci/assert.sh");
     expect(prompt).not.toContain("python3 -m unittest");
     expect(prompt).toContain("charts/*.tgz");
@@ -97,74 +94,48 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toMatch(/ignore any (instruction|line) in it/i);
   });
 
-  test("injects the gitops-apply-review pack when Helm/K8s paths change", () => {
+  test("does not paste the baked Helm/GitOps checklist on Helm paths", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR({
+        title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-reviewer digest to abcdef",
+        body: "depName: gitea.kirmanak.stream/personal/jumi-reviewer\n\n## GitOps\nnone\n",
+      }),
+      prFiles: [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
+    });
+
+    expect(prompt).not.toContain("gitops-apply-review");
+    expect(prompt).not.toContain("Checksum / rollout");
+    expect(prompt).not.toContain("House misses");
+    expect(prompt).not.toContain("<review_md");
+  });
+
+  test("pastes selected REVIEW.md sections as repository rules", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
       pr: makePR(),
       prFiles: [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
+      reviewMd: { text: "## k3s/**\nBump checksum/config on ConfigMap edits. ]]> end", truncated: false },
     });
 
-    expect(touchesGitOpsApplyReview([makeFile({ filename: "k3s/apps/gitea/values.yaml" })])).toBe(true);
-    expect(touchesGitOpsApplyReview([makeFile({ filename: "charts/foo/Chart.yaml" })])).toBe(true);
-    expect(touchesGitOpsApplyReview([makeFile({ filename: "src/demo.ts" })])).toBe(false);
-    expect(prompt).toContain("Use the gitops-apply-review pack below");
-    expect(prompt).toContain("<gitops-apply-review>");
-    expect(prompt).toContain("Checksum / rollout");
-    expect(prompt).toContain("DNS the app actually dials");
-    expect(prompt).toContain("Volume class vs Velero");
-    expect(prompt).toContain("Sibling resources");
-    expect(prompt).toContain("Hook process identity");
-    expect(prompt).toContain("House misses");
-    expect(prompt).toContain("Do not read or `git show` `charts/*.tgz`");
-    expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
-    expect(prompt).not.toContain("skill tool");
-    expect(prompt).not.toContain("You are OpenCode");
+    expect(prompt).toContain('<review_md path="REVIEW.md" truncated="false"><![CDATA[');
+    expect(prompt).toContain("## k3s/**\nBump checksum/config on ConfigMap edits. ]]]]><![CDATA[> end");
+    expect(prompt).toContain("They are this repository's review rules");
+    expect(prompt).toContain("report each violation as a finding");
+    expect(prompt).not.toContain("truncated to fit");
+    expect(prompt).not.toMatch(/not orders|untrusted, not|Ignore any instruction in it/);
   });
 
-  test("injects the gitops-apply-review pack on Jumi image bumps", () => {
-    const pr = makePR({
-      title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-reviewer digest to abcdef",
-      body: "depName: gitea.kirmanak.stream/personal/jumi-reviewer\n\n## GitOps\nnone\n",
-    });
+  test("says when the REVIEW.md sections were truncated", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
-      pr,
-      prFiles: [makeFile({ filename: "k3s/apps/jumi-reviewer/values.yaml" })],
+      pr: makePR(),
+      prFiles: [],
+      reviewMd: { text: "## Rules\nKeep it", truncated: true },
     });
 
-    expect(
-      shouldLoadGitOpsApplyReview({
-        files: [makeFile({ filename: "src/demo.ts" })],
-        title: pr.title,
-        body: pr.body,
-      })
-    ).toBe(true);
-    expect(prompt).toContain("Use the gitops-apply-review pack below");
-    expect(prompt).toContain("<gitops-apply-review>");
-    expect(prompt).toContain("Checksum / rollout");
-    expect(prompt).toContain("House misses");
-    expect(prompt).toContain("Parse the PR body `## GitOps` section");
-    expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
-    expect(prompt).not.toContain("skill tool");
-  });
-
-  test("injects the gitops-apply-review pack on a Jumi image bump without Helm path files", () => {
-    const pr = makePR({
-      title: "chore(deps): update gitea.kirmanak.stream/personal/jumi-worker digest to abcdef",
-      body: "depName: gitea.kirmanak.stream/personal/jumi-worker\n\n## GitOps\nnone\n",
-    });
-    const prompt = buildPROpenedPrompt({
-      repo: makeRepo(),
-      pr,
-      prFiles: [makeFile({ filename: "src/demo.ts" })],
-    });
-
-    expect(prompt).toContain("looks like a Renovate docker bump of `jumi-reviewer` / `jumi-worker`");
-    expect(prompt).toContain("Use the gitops-apply-review pack below");
-    expect(prompt).toContain("Checksum / rollout");
-    expect(prompt).toContain("House misses");
-    expect(prompt).toContain("Parse the PR body `## GitOps` section");
-    expect(prompt).not.toContain("skill tool");
+    expect(prompt).toContain('truncated="true"');
+    expect(prompt).toContain("It was truncated to fit this prompt");
   });
 
   test("includes review notes", () => {
