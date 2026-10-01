@@ -85,9 +85,17 @@ function unsafeDirName(name: string): boolean {
   return name.includes("!") || name.includes("`");
 }
 
-/** `disable-model-invocation`, as the frontmatter of a skill may spell true. */
+const TRUE_SPELLINGS = new Set(["1", "true", "yes", "on"]);
+
+/**
+ * `disable-model-invocation`, in every spelling the binary reads as true: a
+ * boolean, or a string or number that is `1`, `true`, `yes` or `on` once
+ * trimmed and lowercased.
+ */
 function modelInvocationDisabled(value: unknown): boolean {
-  return value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+  if (value === true) return true;
+  if (typeof value !== "string" && typeof value !== "number") return false;
+  return TRUE_SPELLINGS.has(String(value).trim().toLowerCase());
 }
 
 /**

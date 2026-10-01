@@ -127,13 +127,17 @@ describe("hooklessSkillMarkdown", () => {
   });
 
   test("skips a skill its author kept from the model", () => {
-    for (const value of ["true", "True", '"true"']) {
+    // Every spelling the binary reads as true.
+    for (const value of ["true", "True", '"true"', "yes", "YES", "on", "On", "1", '"1"', '" on "']) {
       expect(
         hooklessSkillMarkdown(`---\nname: s\ndisable-model-invocation: ${value}\n---\nbody\n`, "s")
       ).toBeUndefined();
     }
-    const allowed = hooklessSkillMarkdown("---\nname: s\ndisable-model-invocation: false\n---\nbody\n", "s");
-    expect(allowed).toBe('---\nname: "s"\n---\nbody\n');
+    for (const value of ["false", "no", "off", "0", "2", '""', "[true]"]) {
+      expect(hooklessSkillMarkdown(`---\nname: s\ndisable-model-invocation: ${value}\n---\nbody\n`, "s")).toBe(
+        '---\nname: "s"\n---\nbody\n'
+      );
+    }
   });
 
   test("a name or description cannot end the frontmatter early", () => {
@@ -214,7 +218,8 @@ describe("stageClaudeCheckoutSkills", () => {
       );
     }
     await writeFile(join(skills, "user-only", "SKILL.md"), "---\ndisable-model-invocation: true\n---\nbody\n");
-    // Below a skill too: a nested directory is a skill directory when it holds a SKILL.md.
+    // Below a skill too. The binary only reads `skills/<dir>/SKILL.md`, so a
+    // nested SKILL.md is never a skill; the skip there is defence only.
     await mkdir(join(skills, "checkout-skill", "x !"), { recursive: true });
     await writeFile(join(skills, "checkout-skill", "x !", "SKILL.md"), "body\n");
 
