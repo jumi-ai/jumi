@@ -224,7 +224,7 @@ A `type: claude` child leaves no session DB for that exporter, so its spans come
 The router (not the engine, not the worker) serves an operator board on port `3001`. The webhook listener never serves these paths. Reach it through the auth proxy in front of that port. A direct-to-pod route lets a caller self-assert identity headers. The webhook secret is not board auth.
 
 - `GET /` and `GET /board` are the page. `GET /api/board` is the same data as JSON.
-- `POST /api/board/kick` (alias `POST /board/kick`) is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, or queue an implement again after a no-changes latch. It does not push, does not create an empty commit, and does not rerun CI.
+- `POST /api/board/kick` (alias `POST /board/kick`) is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, queue an implement again after a no-changes latch, or clear a kickable sitting row (this one queues no job). It does not push, does not create an empty commit, and does not rerun CI.
 
 In-progress rows come from the job ledger. Sitting rows come from persisted refusals. The router stays a single replica.
 
