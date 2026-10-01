@@ -1,11 +1,9 @@
-import type { CollaboratorPermission, RepoInstallation } from "./ports.ts";
+import type { CollaboratorPermission } from "./ports.ts";
 
-export type { CollaboratorPermission, RepoInstallation };
+export type { CollaboratorPermission };
 
 export type PermissionApi = {
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
-  /** GitHub only: repo-scoped installation grant, e.g. `{ contents: "write" }`. */
-  getRepoInstallation?(owner: string, repo: string): Promise<RepoInstallation | undefined>;
 };
 
 /**
@@ -26,11 +24,10 @@ export function hasWritePermission(permission: string | undefined, roleName?: st
 }
 
 /**
- * One predicate on both forges: the check the forge itself uses to allow a
- * push. Besides the legacy flat `permission` / `role_name`, a
- * `user.permissions.push === true` from the collaborator lookup is push
- * (GitHub reports the sender's effective grant there, including team grants,
- * even when the flat mode is `read`/`none`).
+ * Besides the legacy flat `permission` / `role_name`, a
+ * `user.permissions.push === true` from the collaborator lookup is push: it
+ * is the user's effective grant, including team grants, even when the flat
+ * mode is `read`/`none`.
  */
 export function hasWriteAccessFromPermission(info: CollaboratorPermission | undefined): boolean {
   if (!info) return false;
@@ -122,23 +119,11 @@ export async function resolvePermissions(
   };
 }
 
-/** `renovate[bot]` → `renovate`. GitHub Apps act as `<slug>[bot]`; plain users return undefined. */
-export function appSlugFromLogin(login: string | undefined | null): string | undefined {
-  if (typeof login !== "string") return undefined;
-  const match = /^(.+)\[bot\]$/i.exec(login.trim());
-  return match?.[1] || undefined;
-}
-
-/** Whether this login may be a GitHub App (and only then may the repo installation grant apply). */
-function isAppLogin(login: string): boolean {
-  return appSlugFromLogin(login) !== undefined;
-}
-
 interface PushAccess {
-  /** Raw forge permission, lowercased; `"write"` for an App whose installation can push. */
+  /** Raw forge permission, lowercased. */
   permission: string;
   push: boolean;
-  /** Collaborator lookup failure that the installation check did not overrule. */
+  /** Collaborator lookup failure. */
   error?: string;
 }
 
@@ -147,34 +132,12 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Collaborator permission `none` (or a 404) is not a no for a GitHub App:
- * GitHub reports no collaborator permission for Apps, and the repository
- * object's permission flags come back all false for an App token. The
- * repo-scoped installation grant is the check the forge itself uses:
- * `contents: write` on this repository's installation is push.
- *
- * Sender-gated callers use this only after the webhook event itself proved
- * the App acts on this repository, so the installation covers it. There is
- * deliberately no `GET /apps/{slug}` fallback: that record reports the
- * permissions the App requests, not what this repository installation was
- * granted, and failing to read another App's record is not proof the sender
- * cannot push. Fork heads never use this fallback (see `pullAuthorCanPush`).
+ * The collaborator lookup is the only check scoped to the login asked about,
+ * for people and GitHub Apps alike. There is deliberately no App fallback:
+ * `GET /apps/{slug}` reports what an App requests and only when the factory
+ * can read that record, and `GET /repos/{owner}/{repo}/installation` reports
+ * the factory App's own grant, which would admit every `[bot]` login.
  */
-async function installationCanPush(
-  api: Partial<PermissionApi>,
-  owner: string,
-  repo: string,
-  login: string
-): Promise<boolean> {
-  if (!isAppLogin(login) || typeof api.getRepoInstallation !== "function") return false;
-  try {
-    const installation = await api.getRepoInstallation(owner, repo);
-    return (installation?.permissions?.contents ?? "").toLowerCase() === "write";
-  } catch {
-    return false;
-  }
-}
-
 async function pushAccess(
   api: Partial<PermissionApi> | undefined,
   owner: string,
@@ -184,30 +147,19 @@ async function pushAccess(
   if (!api || typeof api.getCollaboratorPermission !== "function") {
     return { permission: "none", push: false, error: "collaborator permission API unavailable" };
   }
-  let permission = "none";
-  let error: string | undefined;
   try {
     const result = await api.getCollaboratorPermission(owner, repo, login);
-    permission = normalizePermission(permissionFromResult(result));
-    if (hasWriteAccessFromPermission(result)) return { permission, push: true };
+    const permission = normalizePermission(permissionFromResult(result));
+    return { permission, push: hasWriteAccessFromPermission(result) };
   } catch (err) {
-    error = errorText(err);
+    return { permission: "none", push: false, error: errorText(err) };
   }
-  // A successful `none`/`read` stays a skip when the actor cannot push; an
-  // App whose installation writes contents is admitted even though the
-  // collaborator lookup says `none`. A failed lookup stays a skip only after
-  // this push grant was actually consulted.
-  if (await installationCanPush(api, owner, repo, login)) return { permission: "write", push: true };
-  return { permission, push: false, ...(error !== undefined ? { error } : {}) };
 }
 
 /**
- * Fail-closed push check. A person needs write, admin, or owner (or a
- * maintain/push role, or an effective `push: true` grant). A GitHub App
- * whose installation on this repository can write contents counts even when
- * the collaborator lookup says none. Any other lookup failure, missing
- * method, or unknown permission is false — after the installation grant has
- * been consulted.
+ * Fail-closed push check, the same for people and Apps: write, admin, or
+ * owner (or a maintain/push role, or an effective `push: true` grant). Any
+ * lookup failure, missing method, or unknown permission is false.
  */
 export async function canPush(
   api: Partial<PermissionApi> | undefined,
@@ -222,12 +174,7 @@ export async function canPush(
 /**
  * A pull's author can push to the base repository. A head branch that already
  * lives on the base repository is proof. A fork head is not: only the
- * collaborator lookup counts there. The installation grant (`canPush`) is
- * deliberately not used for fork heads, because the repo installation
- * belongs to the factory App, not the fork author — a fork author must not
- * get in via an App manifest or installation.
- * Sender-gated checks keep the installation fallback: the webhook event
- * itself proves the app acts on this repository.
+ * collaborator lookup counts there, never a webhook payload hint.
  */
 export async function pullAuthorCanPush(
   api: Partial<PermissionApi> | undefined,

@@ -752,10 +752,12 @@ describe("POST /webhooks/github", () => {
             listOpenPulls: async () => [],
             getIssue: async () => githubIssue(),
             getPR: async () => fetched,
-            // GitHub reports no collaborator permission for Apps, and none for outsiders.
-            // The repo installation grant (contents write) is the push check for Apps.
-            getCollaboratorPermission: async () => ({ permission: "none" }),
-            getRepoInstallation: async () => ({ permissions: { contents: "write", issues: "write" } }),
+            // Only the lookup scoped to the sender counts: the flat permission is none for
+            // an App, so its effective push grant decides.
+            getCollaboratorPermission: async (_owner, _repo, username) =>
+              username === "filer[bot]"
+                ? { permission: "none", user: { permissions: { push: true } } }
+                : { permission: "none" },
           },
         },
       });
@@ -824,6 +826,18 @@ describe("POST /webhooks/github", () => {
       );
       expect(response.status).toBe(202);
       expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    });
+
+    test("an issue labeled by an App that cannot push is not a job", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "labeler[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(store.rows).toHaveLength(0);
     });
 
     test("an App that can push still needs today's pickup: another label stays out", async () => {

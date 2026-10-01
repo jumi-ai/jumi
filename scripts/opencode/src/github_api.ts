@@ -723,21 +723,6 @@ export class GithubAPI {
     };
   }
 
-  /**
-   * Repo-scoped installation grant for the authenticated (factory) App.
-   * `permissions.contents == "write"` is push. Used only for `[bot]` senders,
-   * after the webhook event itself proved an App acts on this repository.
-   */
-  async getRepoInstallation(
-    owner: string,
-    repo: string
-  ): Promise<{ permissions?: Record<string, string> } | undefined> {
-    const installation = await this.get<{ permissions?: Record<string, string> }>(
-      `/repos/${this.repoPath(owner, repo)}/installation`
-    );
-    return { permissions: installation.permissions };
-  }
-
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {
     return toPull(await this.get<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
   }

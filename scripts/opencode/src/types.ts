@@ -21,9 +21,10 @@ export interface GiteaRepo {
   clone_url: string;
   default_branch: string;
   /**
-   * Sender-scoped push grant, as computed by the forge for the webhook sender
-   * (Gitea: `UnitAccessMode(code) >= write`, which reflects the team unit map
-   * even when the flat collaborator permission is `none`).
+   * Gitea webhook payloads only. Code-unit access (`push` is code write, which
+   * reflects the team unit map even when the flat collaborator permission is
+   * `none`) of the sender on comment, assignee, and review-request events, and
+   * of the issue or pull poster on the rest. See `repositoryPushHint`.
    */
   permissions?: { admin?: boolean; push?: boolean; pull?: boolean };
 }

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  appSlugFromLogin,
   canPush,
   hasWriteAccessFromPermission,
   hasWritePermission,
@@ -76,23 +75,19 @@ describe("canPush", () => {
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
   });
 
-  test("an App whose installation writes contents can push even when its lookup says none", async () => {
+  test("an App is held to its own collaborator lookup, whatever the factory App may write", async () => {
     const api = {
-      getCollaboratorPermission: async () => ({ permission: "none" }),
-      getRepoInstallation: async () => ({ permissions: { contents: "write", pull_requests: "write" } }),
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
+        if (username === "private-app[bot]") throw new Error("GitHub API 404: not a user");
+        return username === "filer[bot]"
+          ? { permission: "none", user: { permissions: { push: true } } }
+          : { permission: "none" };
+      },
     };
-    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
     expect(await canPush(api, "o", "r", "filer[bot]")).toBe(true);
-    // A successful none stays a skip when the actor cannot push (human, no installation grant).
-    expect(await canPush(api, "o", "r", "mallory")).toBe(false);
-  });
-
-  test("an App whose installation does not write contents stays out", async () => {
-    const api = {
-      getCollaboratorPermission: async () => ({ permission: "none" }),
-      getRepoInstallation: async () => ({ permissions: { contents: "read", issues: "write" } }),
-    };
-    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "labeler[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "github-actions[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "private-app[bot]")).toBe(false);
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
   });
 
@@ -105,47 +100,6 @@ describe("canPush", () => {
       getCollaboratorPermission: async () => ({ permission: "none", user: { permissions: { push: false } } }),
     };
     expect(await canPush(denied, "o", "r", "mallory")).toBe(false);
-  });
-
-  test("an App lookup that 404s still falls back to the installation; failures there stay out", async () => {
-    const notAUser = async () => {
-      throw new Error("GitHub API 404: not a user");
-    };
-    expect(
-      await canPush(
-        {
-          getCollaboratorPermission: notAUser,
-          getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
-        },
-        "o",
-        "r",
-        "renovate[bot]"
-      )
-    ).toBe(true);
-    expect(
-      await canPush(
-        {
-          getCollaboratorPermission: notAUser,
-          getRepoInstallation: async () => {
-            throw new Error("GitHub API 404");
-          },
-        },
-        "o",
-        "r",
-        "private-app[bot]"
-      )
-    ).toBe(false);
-    expect(await canPush({ getCollaboratorPermission: notAUser }, "o", "r", "renovate[bot]")).toBe(false);
-  });
-});
-
-describe("appSlugFromLogin", () => {
-  test("strips the [bot] suffix and ignores plain users", () => {
-    expect(appSlugFromLogin("renovate[bot]")).toBe("renovate");
-    expect(appSlugFromLogin("Kirmanak-Jumi[BOT]")).toBe("Kirmanak-Jumi");
-    expect(appSlugFromLogin("alice")).toBeUndefined();
-    expect(appSlugFromLogin("[bot]")).toBeUndefined();
-    expect(appSlugFromLogin(undefined)).toBeUndefined();
   });
 });
 
@@ -170,35 +124,44 @@ describe("pullAuthorCanPush", () => {
     );
   });
 
-  test("a fork head from an App is not proof even when the installation writes contents", async () => {
+  test("a fork head from an App is not proof", async () => {
     const api = {
       getCollaboratorPermission: async () => {
         throw new Error("GitHub API 404: not a user");
       },
-      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
     };
     const fork = { user: { login: "renovate[bot]" }, head: { repo: { full_name: "renovate/r" } } };
     expect(await pullAuthorCanPush(api, "o", "r", fork)).toBe(false);
-    // Sender gating keeps the installation fallback: the event proves the app acts on this repo.
-    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
   });
 });
 
 describe("resolvePermissions", () => {
-  test("an App that can push is a writer; a user whose lookup says none is not", async () => {
+  test("a bot the forge reports none for stays none; one with an effective push grant is a writer", async () => {
     const api = {
-      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
-        if (username.endsWith("[bot]")) throw new Error("GitHub API 404");
-        return { permission: "none" };
-      },
-      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) =>
+        username === "filer[bot]"
+          ? { permission: "none", user: { permissions: { push: true } } }
+          : { permission: "none" },
     };
-    const resolved = await resolvePermissions(api, "o", "r", ["renovate[bot]", "mallory"]);
-    expect(resolved.writes.get("renovate[bot]")).toBe(true);
-    expect(resolved.detail.get("renovate[bot]")).toBe("write");
+    const resolved = await resolvePermissions(api, "o", "r", ["filer[bot]", "tapio[bot]", "mallory"]);
+    expect(resolved.writes.get("filer[bot]")).toBe(true);
+    expect(resolved.writes.get("tapio[bot]")).toBe(false);
+    expect(resolved.detail.get("tapio[bot]")).toBe("none");
     expect(resolved.writes.get("mallory")).toBe(false);
     expect(resolved.detail.get("mallory")).toBe("none");
     expect(resolved.failures).toBe(0);
+  });
+
+  test("a failed lookup is counted and stays none", async () => {
+    const api = {
+      getCollaboratorPermission: async () => {
+        throw new Error("GitHub API 404");
+      },
+    };
+    const resolved = await resolvePermissions(api, "o", "r", ["renovate[bot]"]);
+    expect(resolved.writes.get("renovate[bot]")).toBe(false);
+    expect(resolved.detail.get("renovate[bot]")).toBe("none");
+    expect(resolved.failures).toBe(1);
   });
 });
 

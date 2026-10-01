@@ -776,7 +776,6 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
-    getRepoInstallation: api.getRepoInstallation ? (owner, repo) => api.getRepoInstallation!(owner, repo) : undefined,
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)

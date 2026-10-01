@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   followUpSkipReason,
+  isSenderScopedAction,
+  repositoryPushHint,
   shouldEnqueueIssueCommentFollowUp,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
@@ -1216,13 +1218,40 @@ describe("follow-up write gating", () => {
     ).toEqual({ type: "skip", reason: "sender lacks write access" });
   });
 
-  test("an App installation with contents write admits the sender without reading another app record", async () => {
-    const api = {
-      getCollaboratorPermission: async () => ({ permission: "none" }),
-      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
+  test("a review payload's push hint is the pull author's, so a reviewer who cannot push stays out", async () => {
+    const noneApi = {
+      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
     };
+    const payload = {
+      ...reviewCommentPayload(),
+      repository: makeRepo({ permissions: { push: true, pull: true, admin: false } }),
+    };
+    expect(
+      await shouldEnqueuePullRejectedFollowUpWithTrust(payload, policy, "pull_request_rejected", undefined, noneApi)
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
+  });
+
+  test("the push hint counts only on events the forge scopes to the sender", () => {
+    const repository = makeRepo({ permissions: { push: true, pull: true, admin: false } });
+    expect(repositoryPushHint(repository, isSenderScopedAction("assigned"))).toBe(true);
+    expect(repositoryPushHint(repository, isSenderScopedAction("review_requested"))).toBe(true);
+    for (const action of ["opened", "reopened", "labeled", "label_updated", "edited", "closed", undefined]) {
+      expect(repositoryPushHint(repository, isSenderScopedAction(action))).toBe(false);
+    }
+    expect(repositoryPushHint(makeRepo(), true)).toBe(false);
+  });
+
+  test("an App sender is held to the collaborator lookup like anyone else", async () => {
     const payload = makeIssueCommentPayload({ sender: makeUser({ login: "filer[bot]" }) });
-    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, api);
-    expect(decision.type).toBe("enqueue");
+    const none = { getCollaboratorPermission: async () => ({ permission: "none" }) };
+    expect(await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, none)).toEqual(
+      { type: "skip", reason: "sender lacks write access" }
+    );
+    const push = {
+      getCollaboratorPermission: async () => ({ permission: "none", user: { permissions: { push: true } } }),
+    };
+    expect(
+      (await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, push)).type
+    ).toBe("enqueue");
   });
 });

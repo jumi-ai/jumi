@@ -5,6 +5,7 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
+  isSenderScopedAction,
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   repositoryPushHint,
@@ -39,12 +40,7 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<
-    Pick<
-      IssueApi,
-      "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission" | "getRepoInstallation"
-    >
-  > & {
+  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -305,7 +301,7 @@ export async function handleWorkerWebhookEvent(
         await shouldEnqueuePullAssign(payload, policy, deps.api, logger),
         deps.api,
         payload.sender?.login,
-        repositoryPushHint(payload.repository)
+        repositoryPushHint(payload.repository, isSenderScopedAction(payload.action))
       );
       if (decision.type === "skip") {
         const [owner, repo] = payload.repository.full_name.split("/");
@@ -548,7 +544,7 @@ export async function handleWorkerWebhookEvent(
       shouldEnqueueIssue(payload, policy),
       deps.api,
       payload.sender?.login,
-      repositoryPushHint(payload.repository)
+      repositoryPushHint(payload.repository, isSenderScopedAction(payload.action))
     );
 
     if (decision.type === "cancel") {

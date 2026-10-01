@@ -331,11 +331,10 @@ export function shouldEnqueuePullRejectedFollowUp(
 /**
  * Filter an event's own wake by its sender. Fail-closed: unless the sender can
  * push, the enqueue becomes a skip. Push is the check the forge itself uses:
- * the webhook repository object's `permissions.push` (sender-scoped,
- * unit-aware: a Gitea team member with code write reports push even when the
- * flat collaborator permission is `none`), else `canPush` (collaborator
- * lookup with its effective `push` grant, or a GitHub App installation with
- * `contents: write`). Skips and cancels pass through, so
+ * `senderPushHint` (the webhook repository object's `permissions.push`, only
+ * on events where the forge computes it for the sender, see
+ * `repositoryPushHint`), else `canPush` (collaborator lookup with its
+ * effective `push` grant). Skips and cancels pass through, so
  * pickup rules and the bot/ignore-login skips stay as they are: push is
  * necessary, not sufficient. Scope checks run first so out-of-scope events
  * never cost a forge round-trip and keep their scope skip reason.
@@ -353,9 +352,28 @@ export async function requireSenderPush<D extends { type: string }>(
   return { type: "skip", reason: SENDER_CANNOT_PUSH };
 }
 
-/** Sender-scoped push hint from the webhook repository object (forge-computed for the sender). */
-export function repositoryPushHint(repository: { permissions?: { push?: boolean } } | undefined): boolean {
-  return repository?.permissions?.push === true;
+/** Issue and pull actions whose Gitea payload carries the doer's repository permissions. */
+const SENDER_SCOPED_ACTIONS = new Set(["assigned", "unassigned", "review_requested", "review_request_removed"]);
+
+/**
+ * Push hint from the webhook repository object. Gitea fills
+ * `repository.permissions` from the code unit (so a team member with code
+ * write reports push even when the flat collaborator permission is `none`),
+ * but for the sender only on a new comment, an assignee change, and a review
+ * request. Label, state, open, and review events report the issue or pull
+ * poster's permissions instead, so those must not use the hint. GitHub sends
+ * no `repository.permissions`.
+ */
+export function repositoryPushHint(
+  repository: { permissions?: { push?: boolean } } | undefined,
+  senderScoped: boolean
+): boolean {
+  return senderScoped && repository?.permissions?.push === true;
+}
+
+/** Whether an issue or pull event with this action reports the sender's repository permissions. */
+export function isSenderScopedAction(action: string | undefined): boolean {
+  return typeof action === "string" && SENDER_SCOPED_ACTIONS.has(action);
 }
 
 /** Push-gated wake for issue/PR comments. */
@@ -367,10 +385,15 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository));
+  // Only `created` enqueues, and the forge builds that payload's permissions from the commenter.
+  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository, true));
 }
 
-/** Push-gated wake for request-changes / review rejections. Same bar as comments. */
+/**
+ * Push-gated wake for request-changes / review rejections. Same bar as
+ * comments, but no payload hint: a review payload reports the pull author's
+ * permissions, not the reviewer's.
+ */
 export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   payload: GiteaPRPayload,
   policy: FollowUpWebhookPolicy,
@@ -379,7 +402,7 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository));
+  return requireSenderPush(scope, api, payload.sender?.login);
 }
 
 export async function shouldEnqueuePullAssign(
