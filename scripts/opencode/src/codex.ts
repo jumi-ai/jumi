@@ -94,15 +94,27 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * argument. `--json`, `--skip-git-repo-check`, `--ignore-rules`,
  * `--ignore-user-config`, and `-c` are `global = true` and therefore valid
  * on either side; the globals stay before `resume` with `--color` while the
- * `-c` overrides travel after the thread id. Every `-c` override is
- * per-invocation config reloaded from scratch on each `exec resume`, not
+ * `-c` overrides travel after the thread id. `--model` is made global by
+ * upstream `mark_exec_global_args()` and is repeated too: `exec resume` takes
+ * the model from this invocation's config, not from the stored thread, so
+ * without it an extra turn would run on the binary's default model. Every
+ * `-c` override is per-invocation config reloaded from scratch on each `exec resume`, not
  * per-thread state, so the full turn-1 hardening list is repeated here —
  * otherwise turn 2+ would silently re-enable hooks, web-search,
  * experimental context management, and project `.rules` loading that turn 1
  * disabled.
  */
-function codexResumePreArgs(): string[] {
-  return ["--json", "--color", "never", "--skip-git-repo-check", "--ignore-rules", "--ignore-user-config"];
+function codexResumePreArgs(model: string): string[] {
+  return [
+    "--json",
+    "--color",
+    "never",
+    "--skip-git-repo-check",
+    "--ignore-rules",
+    "--ignore-user-config",
+    "--model",
+    model,
+  ];
 }
 
 function codexResumeArgs(effort: string): string[] {
@@ -112,7 +124,7 @@ function codexResumeArgs(effort: string): string[] {
 export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
   const effort = opts.effort || CODEX_DEFAULT_EFFORT;
   if (opts.continueSession && threadId)
-    return ["codex", "exec", ...codexResumePreArgs(), "resume", threadId, ...codexResumeArgs(effort), "-"];
+    return ["codex", "exec", ...codexResumePreArgs(opts.model), "resume", threadId, ...codexResumeArgs(effort), "-"];
   const flags = codexConfigArgs(opts.model, effort);
   return ["codex", "exec", ...flags, "-"];
 }
@@ -379,13 +391,15 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (stderr) log(`[codex stderr] ${stderr}`);
-    const message = providerDown ? signal : engineExitMessage(exitCode, combined);
+    // The message feeds the chain's hop classifier, so it is built from
+    // `signal` only: agent message text stays in `stdout`.
+    const message = providerDown ? signal : engineExitMessage(exitCode, signal);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,
       stdout,
       message,
-      infra: providerDown ? false : looksLikeInfraStderr(combined),
+      infra: providerDown ? false : looksLikeInfraStderr(signal),
       durationMs,
     });
   } catch (err) {

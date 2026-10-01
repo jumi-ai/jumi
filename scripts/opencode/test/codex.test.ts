@@ -150,8 +150,10 @@ describe("codexArgv", () => {
     expect(resumed).not.toContain("-s");
     expect(resumed).not.toContain("--ask-for-approval");
     expect(resumed).not.toContain("--disable");
-    // The session already carries the model.
-    expect(resumed).not.toContain("--model");
+    // `exec resume` takes the model from this invocation, not the stored
+    // thread, so it is repeated before `resume` (`--model` is global on exec).
+    expect(resumed[resumed.indexOf("--model") + 1]).toBe("gpt-6-sol");
+    expect(resumed.indexOf("--model")).toBeLessThan(resumeIdx);
     expect(resumed.at(-1)).toBe("-");
   });
 });
@@ -175,6 +177,26 @@ describe("CodexStreamParser", () => {
     expect(parser.usage("fallback")?.get("gpt-6-sol")).toEqual(total);
     expect(parser.threadTotal()).toEqual(total);
     expect(parser.text()).toBe("not-json");
+  });
+
+  test("cache-write tokens feed their own bucket and leave input", () => {
+    const parser = new CodexStreamParser();
+    parser.push(
+      new TextEncoder().encode(
+        turn(
+          { input_tokens: 100, cached_input_tokens: 40, cache_write_input_tokens: 50, output_tokens: 10 },
+          "gpt-6-sol"
+        )
+      )
+    );
+    parser.end();
+    expect(parser.usage("fallback")?.get("gpt-6-sol")).toEqual({
+      input: 10,
+      cached_input: 40,
+      output: 10,
+      cache_write: 50,
+      reasoning: 0,
+    });
   });
 
   test("a resumed thread records only growth past its saved total", () => {
@@ -641,6 +663,35 @@ describe("codex dispatch and chain", () => {
         });
         expect(result.status).toBe("exit");
         expect(result.runner?.type).toBe("codex");
+        expect((await argLines(argsLog)).map((line) => line.split(" ")[0])).toEqual(["codex"]);
+      }
+    );
+  });
+
+  test("agent message text on a failed run does not hop", async () => {
+    const agentMessage = JSON.stringify({
+      type: "item.completed",
+      item: { id: "m1", type: "agent_message", text: "the API returned 429 rate limit and 503 service unavailable" },
+    });
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${agentMessage}'\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.runner?.type).toBe("codex");
+        expect(result.message).not.toContain("429");
+        expect(result.stdout).toContain("429 rate limit");
         expect((await argLines(argsLog)).map((line) => line.split(" ")[0])).toEqual(["codex"]);
       }
     );

@@ -154,7 +154,7 @@ verify_reviewer_runtime() {
     echo "codex exec resume --help failed in reviewer image" >&2
     exit 1
   fi
-  for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --config; do
+  for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
     if ! printf '%s\n' "${codex_resume_help}" | grep -F -- "${flag}" >/dev/null; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "codex exec resume --help is missing ${flag} the codex resume turn spawns with" >&2
