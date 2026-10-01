@@ -81,8 +81,8 @@ export function findPreviousReview(opts: {
       findings.push(inline.new_position ? `${inline.path}:${inline.new_position}: ${text}` : `${inline.path}: ${text}`);
     }
   }
-  // A failed review with no finding lines (unfinished, or a finding without a
-  // path) has nothing to carry forward, so the next run is a first review.
+  // A failed review with no finding lines (unfinished) has nothing to carry
+  // forward, so the next run is a first review.
   if (findings.length === 0 && lastCheckTrailer(latest.body)?.state === "failure") return undefined;
   return { sha: latest.sha, findings: dedupe(findings) };
 }

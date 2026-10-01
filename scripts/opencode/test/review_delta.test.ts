@@ -269,15 +269,38 @@ describe("findPreviousReview", () => {
   test("treats a failed review without finding lines as no previous review", () => {
     expect(
       findPreviousReview({
-        comments: [
-          makeComment({ body: stickyBody("aaaaaaa", "🔴 bug: no path here", "<!-- jumi-check: failure -->") }),
-        ],
+        comments: [makeComment({ body: stickyBody("aaaaaaa", "Could not finish.", "<!-- jumi-check: failure -->") })],
         reviews: [],
         inlines: [],
         botUsername: "jumi",
         marker: MARKER,
       })
     ).toBeUndefined();
+  });
+
+  test("carries every published finding line, not only the strict path:line form", () => {
+    const lines = [
+      "src/a.ts:12-14: 🟡 risk: range location",
+      "`src/b.ts:3`: 🔴 bug: backticked location",
+      "🔴 bug: no path here",
+      "src/c.ts:5: 💡 simpler: ok",
+    ];
+    const previous = findPreviousReview({
+      comments: [
+        makeComment({
+          body: stickyBody(
+            "aaaaaaa",
+            lines.map((line) => `- ${line}`).join("\n"),
+            "<!-- jumi-check: failure; 2 blocking -->"
+          ),
+        }),
+      ],
+      reviews: [],
+      inlines: [],
+      botUsername: "jumi",
+      marker: MARKER,
+    });
+    expect(previous).toEqual({ sha: "aaaaaaa", findings: lines });
   });
 
   test("ignores another pull's sticky", () => {

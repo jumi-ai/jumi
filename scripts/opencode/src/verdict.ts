@@ -118,7 +118,11 @@ export function parseReviewFindings(text: string, opts?: { singleFilePath?: stri
   return findings;
 }
 
-/** Finding lines as written (`file:line:` or `L<line>:`), list prefix stripped. */
+/**
+ * Finding lines as written, list prefix stripped: `file:line:`, `L<line>:`, and
+ * every severity-marker line `keepReviewFindingLines` publishes (a range, a
+ * backticked location, or no path).
+ */
 export function reviewFindingLines(text: string): string[] {
   const lines: string[] = [];
   for (const original of text.split(/\r?\n/)) {
@@ -128,7 +132,7 @@ export function reviewFindingLines(text: string): string[] {
       lines.push(line);
       continue;
     }
-    if (findingFromLine(line)) lines.push(line);
+    if (findingFromLine(line) || isFindingMarkerLine(line)) lines.push(line);
   }
   return lines;
 }
