@@ -104,6 +104,38 @@ describe("hooklessSkillMarkdown", () => {
     expect(hooklessSkillMarkdown(plain, "d")).toBe(`---\nname: "d"\n---\n${plain}`);
   });
 
+  test("an argument placeholder cannot join a ! to a backtick", () => {
+    const body = [
+      "a !$ARGUMENTS`touch /tmp/pwned`",
+      "b !$ARGUMENTS[0]touch /tmp/pwned`",
+      "c !$1`touch /tmp/pwned`",
+      "```$ARGUMENTS!\ntouch /tmp/pwned\n```",
+      "$ARGUMENTS[0]!\ntouch /tmp/pwned\n```",
+      "$2!\ntouch /tmp/pwned\n```",
+      "",
+    ].join("\n");
+    const out = hooklessSkillMarkdown(body, "d") ?? "";
+    // What is left once the arguments are empty, and once they are backticks.
+    for (const args of ["", "`", "```"]) {
+      const filled = out.replace(/\$ARGUMENTS(\[\d+\])?|\$\d+/g, args);
+      expect(/```!\s*\n?[\s\S]*?\n?```/.test(filled)).toBe(false);
+      expect(/(?<=^|\s)!`[^`]+`/m.test(filled)).toBe(false);
+    }
+    // Arguments away from a `!` are untouched.
+    const plain = "Review $ARGUMENTS, then $1. Done!\n";
+    expect(hooklessSkillMarkdown(plain, "d")).toBe(`---\nname: "d"\n---\n${plain}`);
+  });
+
+  test("skips a skill its author kept from the model", () => {
+    for (const value of ["true", "True", '"true"']) {
+      expect(
+        hooklessSkillMarkdown(`---\nname: s\ndisable-model-invocation: ${value}\n---\nbody\n`, "s")
+      ).toBeUndefined();
+    }
+    const allowed = hooklessSkillMarkdown("---\nname: s\ndisable-model-invocation: false\n---\nbody\n", "s");
+    expect(allowed).toBe('---\nname: "s"\n---\nbody\n');
+  });
+
   test("a name or description cannot end the frontmatter early", () => {
     // The binary's own frontmatter pattern: the first `---` anywhere closes it.
     const binaryFrontmatter = /^---\s*\n([\s\S]*?)---\s*\n?/;
@@ -166,6 +198,33 @@ describe("stageClaudeCheckoutSkills", () => {
     expect(await stageClaudeCheckoutSkills(workdir, dest)).toBe(dest);
     expect((await readdir(join(dest, "skills"))).sort()).toEqual(["shared-skill"]);
     expect(await readFile(join(dest, "skills", "shared-skill", "SKILL.md"), "utf8")).toContain("shared");
+  });
+
+  test("skips a directory whose name would put inline shell into the loaded skill", async () => {
+    const workdir = await tempDir("claude-skills-work-");
+    const dest = join(await tempDir("claude-skills-dest-"), "checkout-skills");
+    await seedCheckout(workdir);
+    const skills = join(workdir, ".claude", "skills");
+    const names = ["a !`touch pwned`", "b```!", "c```", "d !", "user-only"];
+    for (const name of names) {
+      await mkdir(join(skills, name), { recursive: true });
+      await writeFile(
+        join(skills, name, "SKILL.md"),
+        `---\ndescription: d\n---\n\${CLAUDE_SKILL_DIR}\`touch pwned\`\n`
+      );
+    }
+    await writeFile(join(skills, "user-only", "SKILL.md"), "---\ndisable-model-invocation: true\n---\nbody\n");
+    // Below a skill too: a nested directory is a skill directory when it holds a SKILL.md.
+    await mkdir(join(skills, "checkout-skill", "x !"), { recursive: true });
+    await writeFile(join(skills, "checkout-skill", "x !", "SKILL.md"), "body\n");
+
+    const logs: string[] = [];
+    expect(await stageClaudeCheckoutSkills(workdir, dest, (m) => logs.push(m))).toBe(dest);
+    expect((await readdir(join(dest, "skills"))).sort()).toEqual(["checkout-skill", "user-only"]);
+    expect(await readdir(join(dest, "skills", "user-only"))).toEqual([]);
+    expect((await readdir(join(dest, "skills", "checkout-skill"))).sort()).toEqual(["SKILL.md", "references"]);
+    expect(logs.length).toBe(5);
+    expect(logs[0]).toContain("skipped a directory");
   });
 
   test("stages nothing when the checkout has no skills, or too many files", async () => {

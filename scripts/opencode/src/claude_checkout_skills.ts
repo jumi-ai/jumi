@@ -17,6 +17,11 @@ import { basename, join, sep } from "node:path";
  *   - `name` and `description` are written so they cannot end that block early;
  *   - every `SKILL.md` body has its inline shell markers broken, because the
  *     binary runs `` !`cmd` `` and a ```! fence when the skill is loaded;
+ *   - a directory whose name holds `!` or a backtick is not staged, because the
+ *     binary puts the skill's path into that same text before it looks for
+ *     inline shell;
+ *   - a skill marked `disable-model-invocation` is not staged: its author kept
+ *     it from the model, and the model is the only one here to load it;
  *   - symlinks that leave the checkout are skipped, and the copy is bounded.
  *
  * The model sees these skills as `checkout:<name>`. Fleet skills under
@@ -35,6 +40,7 @@ interface StageState {
   bytes: number;
   skills: number;
   seen: Set<string>;
+  log: (message: string) => void;
 }
 
 const FRONTMATTER_RE = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/;
@@ -60,9 +66,28 @@ function yamlString(value: string): string {
  * The binary runs `` !`cmd` `` and a ```! fence in a skill body through the
  * shell before the model sees the text. Both need the `!` to touch a backtick,
  * so a space between them leaves the command as plain text the model can read.
+ *
+ * The binary fills in the skill's arguments before it looks for either form,
+ * and `$ARGUMENTS` can come out empty or as a backtick the model passed. So an
+ * argument placeholder next to the `!` counts as a backtick here.
  */
 function inertShell(body: string): string {
-  return body.replaceAll("```!", "``` !").replaceAll("!`", "! `");
+  return body.replace(/(```|\$ARGUMENTS(?:\[\d+\])?|\$\d+)!/g, "$1 !").replace(/!(?=`|\$ARGUMENTS|\$\d)/g, "! ");
+}
+
+/**
+ * The binary opens a loaded skill's text with its directory path, and puts the
+ * path in again for `\${CLAUDE_SKILL_DIR}`, before it looks for inline shell. A
+ * `!` or a backtick in a directory name would reach that text without passing
+ * `inertShell`.
+ */
+function unsafeDirName(name: string): boolean {
+  return name.includes("!") || name.includes("`");
+}
+
+/** `disable-model-invocation`, as the frontmatter of a skill may spell true. */
+function modelInvocationDisabled(value: unknown): boolean {
+  return value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
 }
 
 /**
@@ -70,7 +95,7 @@ function inertShell(body: string): string {
  * and no inline shell left in the body. The new block is always first in the
  * file, so whatever the original frontmatter said (hooks, allowed-tools, model,
  * …) is either dropped or left as inert body text. Undefined when the
- * frontmatter is not YAML.
+ * frontmatter is not YAML, or when it sets `disable-model-invocation`.
  */
 export function hooklessSkillMarkdown(text: string, fallbackName: string): string | undefined {
   const source = text.startsWith("\uFEFF") ? text.slice(1) : text;
@@ -87,6 +112,7 @@ export function hooklessSkillMarkdown(text: string, fallbackName: string): strin
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) fields = parsed as Record<string, unknown>;
     body = source.slice(match[0].length);
   }
+  if (modelInvocationDisabled(fields["disable-model-invocation"])) return undefined;
   const name = typeof fields.name === "string" && fields.name.trim() ? fields.name.trim() : fallbackName;
   const description = typeof fields.description === "string" ? fields.description.trim() : "";
   const head = [`name: ${yamlString(name)}`];
@@ -113,6 +139,10 @@ async function stageTree(state: StageState, src: string, dest: string, depth: nu
     const to = join(dest, entry);
     if (info.isDirectory()) {
       if (depth >= MAX_DEPTH || state.seen.has(real)) continue;
+      if (unsafeDirName(entry)) {
+        state.log(`[claude] checkout skills: skipped a directory with "!" or a backtick in its name`);
+        continue;
+      }
       state.seen.add(real);
       await stageTree(state, real, to, depth + 1);
       continue;
@@ -158,7 +188,7 @@ export async function stageClaudeCheckoutSkills(
     const root = await realpath(workdir);
     const real = await realpath(src);
     if (!inside(root, real) || !(await stat(real)).isDirectory()) return undefined;
-    const state: StageState = { root, files: 0, bytes: 0, skills: 0, seen: new Set([real]) };
+    const state: StageState = { root, files: 0, bytes: 0, skills: 0, seen: new Set([real]), log };
     await stageTree(state, real, join(dest, "skills"), 0);
     if (state.skills === 0) return undefined;
     await mkdir(join(dest, ".claude-plugin"), { recursive: true });
