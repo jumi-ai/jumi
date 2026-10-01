@@ -120,7 +120,10 @@ describe("codexArgv", () => {
       // Codex matches these as case-insensitive globs with `*` and `?`.
       const covers = (pattern: string, name: string) =>
         new RegExp(
-          `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`,
+          `^${pattern
+            .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+            .replace(/\*/g, ".*")
+            .replace(/\?/g, ".")}$`,
           "i"
         ).test(name);
       for (const name of ["GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_KEY_2", "GIT_AUTH_TOKEN"]) {
@@ -381,7 +384,10 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
 
   test("redacts and caps JSONL error text in a failed run's message", async () => {
     process.env.OPENAI_API_KEY = "already-set";
-    const error = JSON.stringify({ type: "error", message: `\u001b[31mboom already-set\u001b[0m ${"x".repeat(70_000)}` });
+    const error = JSON.stringify({
+      type: "error",
+      message: `\u001b[31mboom already-set\u001b[0m ${"x".repeat(70_000)}`,
+    });
     await withFakeBins(
       { codex: fakeBin("codex", `printf '%s\\n' '${error}'\nexit 1`) },
       async ({ workdir, home, argsLog }) => {
