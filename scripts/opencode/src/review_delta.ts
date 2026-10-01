@@ -26,15 +26,24 @@ function loginEquals(left: string | undefined, right: string): boolean {
 }
 
 /**
- * True only when Jumi closed the thread itself, which it does once a finding is
- * gone. A thread anyone else resolved, or one with no known resolver, still
- * counts: resolving it does not fix the code. GitHub's GraphQL names an App
- * without the REST `[bot]` suffix, so compare without it.
+ * True when Jumi closed the thread itself, which it does once a finding is
+ * gone. A thread someone else resolved still counts: resolving it does not fix
+ * the code. GitHub's GraphQL types `resolvedBy` as a User, so a thread an App
+ * resolved may come back with no resolver; a resolved thread with no named
+ * resolver is therefore taken as Jumi's. Where GraphQL does name the App, it
+ * has no REST `[bot]` suffix, so compare without it.
  */
 function isResolvedByBot(inline: InlineComment, botUsername: string): boolean {
   const slug = (login: string) => login.toLowerCase().replace(/\[bot\]$/, "");
   const resolver = inline.resolver?.login;
-  return Boolean(resolver) && slug(resolver ?? "") === slug(botUsername);
+  if (!resolver) return inline.resolved === true;
+  return slug(resolver) === slug(botUsername);
+}
+
+/** Forge timestamps can carry a UTC offset, so compare instants, not strings. */
+function timeOf(at: string): number {
+  const time = Date.parse(at);
+  return Number.isNaN(time) ? 0 : time;
 }
 
 function stripMarker(body: string, marker: string): string {
@@ -79,7 +88,7 @@ export function findPreviousReview(opts: {
     if (!sha) continue;
     candidates.push({ sha, at: review.submitted_at ?? review.updated_at ?? review.created_at ?? "", body, pull: true });
   }
-  const latest = candidates.sort((a, b) => a.at.localeCompare(b.at)).at(-1);
+  const latest = candidates.sort((a, b) => timeOf(a.at) - timeOf(b.at)).at(-1);
   if (!latest) return undefined;
 
   const findings = reviewFindingLines(latest.body);

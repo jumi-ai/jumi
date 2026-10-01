@@ -745,6 +745,8 @@ describe("GithubAPI", () => {
                       comments: { nodes: [{ databaseId: 101 }] },
                     },
                     { id: "PRRT_open", isResolved: false, comments: { nodes: [{ databaseId: 102 }] } },
+                    // An App resolver is not a User, so GitHub may answer null.
+                    { id: "PRRT_app", isResolved: true, resolvedBy: null, comments: { nodes: [{ databaseId: 103 }] } },
                   ],
                 },
               },
@@ -763,16 +765,17 @@ describe("GithubAPI", () => {
           commit_id: "headsha",
           pull_request_review_id: 10,
         },
+        { id: 103, body: "c", path: "src/baz.ts", line: 5, commit_id: "headsha", pull_request_review_id: 10 },
       ]);
     }) as unknown as typeof fetch;
 
     const comments = await api().listPullReviewComments("owner", "repo", 7);
-    expect(comments.map((comment) => comment.id)).toEqual([101, 102]);
-    expect(comments.map((comment) => comment.new_position)).toEqual([12, 40]);
-    expect(comments.map((comment) => comment.commit_id)).toEqual(["oldsha", "headsha"]);
-    expect(comments.map((comment) => comment.pull_request_review_id)).toEqual([9, 10]);
-    expect(comments.map((comment) => comment.resolved)).toEqual([true, false]);
-    expect(comments.map((comment) => comment.resolver?.login)).toEqual(["alice", undefined]);
+    expect(comments.map((comment) => comment.id)).toEqual([101, 102, 103]);
+    expect(comments.map((comment) => comment.new_position)).toEqual([12, 40, 5]);
+    expect(comments.map((comment) => comment.commit_id)).toEqual(["oldsha", "headsha", "headsha"]);
+    expect(comments.map((comment) => comment.pull_request_review_id)).toEqual([9, 10, 10]);
+    expect(comments.map((comment) => comment.resolved)).toEqual([true, false, true]);
+    expect(comments.map((comment) => comment.resolver?.login)).toEqual(["alice", undefined, undefined]);
     expect(urls[0]).toBe(`${GITHUB_API_URL}/repos/owner/repo/pulls/7/comments?per_page=50&page=1`);
     expect(urls[1]).toBe(`${GITHUB_API_URL}/graphql`);
   });

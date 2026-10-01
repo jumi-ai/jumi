@@ -292,14 +292,38 @@ describe("findPreviousReview", () => {
       ],
       inlines: [
         inline(1, "🟡 risk: author resolved", { resolver: makeUser({ login: "alice" }) }),
+        // GitHub's `resolvedBy` is a User, so an App resolver may come back as null.
         inline(2, "🟡 risk: resolver unknown", {}),
         // GitHub's GraphQL login for an App has no `[bot]` suffix.
         inline(3, "🟡 risk: jumi resolved", { resolver: makeUser({ login: "jumi" }) }),
+        inline(4, "🟡 risk: still open", { resolved: false }),
       ],
       botUsername: "jumi[bot]",
       marker: MARKER,
     });
-    expect(previous?.findings).toEqual(["a.ts:1: 🟡 risk: author resolved", "a.ts:2: 🟡 risk: resolver unknown"]);
+    expect(previous?.findings).toEqual(["a.ts:1: 🟡 risk: author resolved", "a.ts:4: 🟡 risk: still open"]);
+  });
+
+  test("orders reviews by instant, not by timestamp string", () => {
+    const previous = findPreviousReview({
+      comments: [
+        makeComment({
+          id: 50,
+          body: stickyBody("aaaaaaa", "- a.ts:1: 🔴 bug: older", "<!-- jumi-check: failure -->"),
+          updated_at: "2026-10-25T02:30:00+02:00",
+        }),
+        makeComment({
+          id: 51,
+          body: stickyBody("bbbbbbb", "- a.ts:2: 🔴 bug: newer", "<!-- jumi-check: failure -->"),
+          updated_at: "2026-10-25T02:10:00+01:00",
+        }),
+      ],
+      reviews: [],
+      inlines: [],
+      botUsername: "jumi",
+      marker: MARKER,
+    });
+    expect(previous).toEqual({ sha: "bbbbbbb", findings: ["a.ts:2: 🔴 bug: newer"] });
   });
 
   test("treats a failed review without finding lines as no previous review", () => {
