@@ -59,17 +59,22 @@ function modelLabel(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-/** Codex `input_tokens` includes the cached and cache-write ones; the `input` bucket does not. */
+/**
+ * Codex `input_tokens` includes the cached and cache-write ones, and
+ * `output_tokens` includes the reasoning ones; the `input` and `output`
+ * buckets do not.
+ */
 function usageFrom(value: unknown): CodexTokens | undefined {
   if (!isObject(value)) return undefined;
   const cached = count(value.cached_input_tokens);
   const cacheWrite = count(value.cache_write_input_tokens);
+  const reasoning = count(value.reasoning_output_tokens);
   const tokens: CodexTokens = {
     input: Math.max(0, count(value.input_tokens) - cached - cacheWrite),
     cached_input: cached,
-    output: count(value.output_tokens),
+    output: Math.max(0, count(value.output_tokens) - reasoning),
     cache_write: cacheWrite,
-    reasoning: count(value.reasoning_output_tokens),
+    reasoning,
   };
   if (TOKEN_TYPES.every((tokenType) => tokens[tokenType] === 0)) return undefined;
   return tokens;

@@ -397,19 +397,19 @@ function writeSlot(slot: ShrinkSlot, text: string): void {
   else slot.span.attributes[slot.key] = text;
 }
 
-function encodeWithinLimit(resource: OtlpResource, spans: OtlpSpan[]): Uint8Array | undefined {
-  let body = encodeTracesRequest(resource, spans);
+function encodeWithinLimit(resource: OtlpResource, spans: OtlpSpan[], scopeName?: string): Uint8Array | undefined {
+  let body = encodeTracesRequest(resource, spans, scopeName);
   if (body.byteLength <= maxOtlpBytes) return body;
 
   for (const slot of shrinkSlots(spans)) {
     const text = slotText(slot);
     if (text.length > attrCeilingChars) writeSlot(slot, text.slice(0, attrCeilingChars));
   }
-  body = encodeTracesRequest(resource, spans);
+  body = encodeTracesRequest(resource, spans, scopeName);
   if (body.byteLength <= maxOtlpBytes) return body;
 
   while (true) {
-    body = encodeTracesRequest(resource, spans);
+    body = encodeTracesRequest(resource, spans, scopeName);
     if (body.byteLength <= maxOtlpBytes) return body;
     const overflow = body.byteLength - maxOtlpBytes;
     let best: ShrinkSlot | undefined;
@@ -616,14 +616,15 @@ export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceC
 
 /**
  * Parent-built OTLP spans for a runner that leaves no session sqlite.
- * Fail-open: no endpoint, a public Phoenix hostname, a body over the cap, or a
- * POST that throws or returns non-2xx records an error and never throws.
+ * Fail-open: no endpoint, a public Phoenix hostname, a body still over the cap
+ * after its attributes are shrunk, or a POST that throws or returns non-2xx
+ * records an error and never throws.
  */
 export async function exportOtlpSpans(spans: OtlpSpan[], trace?: TraceContext): Promise<void> {
   if (spans.length === 0) return;
   try {
     const agent = agentInstance();
-    const body = encodeTracesRequest(
+    const body = encodeWithinLimit(
       {
         attributes: {
           "service.name": agent,
@@ -634,7 +635,7 @@ export async function exportOtlpSpans(spans: OtlpSpan[], trace?: TraceContext): 
       spans,
       "jumi-codex"
     );
-    if (body.byteLength > maxOtlpBytes) {
+    if (!body) {
       noteError();
       return;
     }

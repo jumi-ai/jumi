@@ -8,7 +8,7 @@ import { CodexStreamParser } from "../src/codex_usage.ts";
 import { resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { codexThreadPath, withEngineChain } from "../src/fallback.ts";
-import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
+import { exportOtlpSpans, setTraceFetchForTests, setTraceLimitsForTests, traceExportErrors } from "../src/phoenix.ts";
 import { CODEX_DEFAULT_EFFORT, formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -168,12 +168,13 @@ describe("CodexStreamParser", () => {
     );
     parser.push(
       new TextEncoder().encode(
-        `${turn({ input_tokens: 13, cached_input_tokens: 5, output_tokens: 7, reasoning_output_tokens: 8 }, "gpt-6-sol")}`
+        `${turn({ input_tokens: 13, cached_input_tokens: 5, output_tokens: 7, reasoning_output_tokens: 3 }, "gpt-6-sol")}`
       )
     );
     parser.end();
-    // `input_tokens` includes the cached ones, so `input` is 13 - 5.
-    const total = { input: 8, cached_input: 5, output: 7, cache_write: 0, reasoning: 8 };
+    // `input_tokens` includes the cached ones, so `input` is 13 - 5, and
+    // `output_tokens` includes the reasoning ones, so `output` is 7 - 3.
+    const total = { input: 8, cached_input: 5, output: 4, cache_write: 0, reasoning: 3 };
     expect(parser.usage("fallback")?.get("gpt-6-sol")).toEqual(total);
     expect(parser.threadTotal()).toEqual(total);
     expect(parser.text()).toBe("not-json");
@@ -233,6 +234,54 @@ describe("buildCodexSpans", () => {
     );
     expect(llm).toHaveLength(1);
     expect(llm[0]?.statusMessage).toBe("stream died");
+  });
+
+  test("the LLM span counts every input token as prompt and reasoning as completion", () => {
+    const parser = new CodexStreamParser();
+    parser.push(
+      new TextEncoder().encode(
+        turn(
+          {
+            input_tokens: 100,
+            cached_input_tokens: 40,
+            cache_write_input_tokens: 50,
+            output_tokens: 10,
+            reasoning_output_tokens: 6,
+          },
+          "gpt-6-sol"
+        )
+      )
+    );
+    parser.end();
+    const llm = buildCodexSpans(parser.traceEvents(), undefined, "gpt-6-sol").find(
+      (span) => span.attributes["openinference.span.kind"] === "LLM"
+    );
+    expect(llm?.attributes["llm.token_count.prompt"]).toBe(100);
+    expect(llm?.attributes["llm.token_count.completion"]).toBe(10);
+  });
+
+  test("an oversized trace is shrunk and still posted", async () => {
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
+    let posted = 0;
+    setTraceFetchForTests((_url, init) => {
+      posted = (init?.body as ArrayBuffer).byteLength;
+      return Promise.resolve(new Response(""));
+    });
+    setTraceLimitsForTests({ maxBytes: 2_000 });
+    try {
+      const parser = new CodexStreamParser();
+      const item = { type: "command_execution", command: "ls", aggregated_output: "x".repeat(8_000) };
+      parser.push(new TextEncoder().encode(`${JSON.stringify({ type: "item.completed", item })}\n`));
+      parser.end();
+      const before = traceExportErrors();
+      await exportOtlpSpans(buildCodexSpans(parser.traceEvents(), undefined, "gpt-6-sol"));
+      expect(posted).toBeGreaterThan(0);
+      expect(posted).toBeLessThanOrEqual(2_000);
+      expect(traceExportErrors()).toBe(before);
+    } finally {
+      setTraceLimitsForTests();
+      setTraceFetchForTests(undefined);
+    }
   });
 });
 
@@ -422,7 +471,7 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
       {
         codex: fakeBin(
           "codex",
-          `printf '%s\\n' '${turn({ input_tokens: 11, cached_input_tokens: 2, output_tokens: 3, reasoning_output_tokens: 4 }, "gpt-6-sol")}'
+          `printf '%s\\n' '${turn({ input_tokens: 11, cached_input_tokens: 2, output_tokens: 5, reasoning_output_tokens: 4 }, "gpt-6-sol")}'
 printf '%s\\n' '${turn({ input_tokens: 16, cached_input_tokens: 2, output_tokens: 9, reasoning_output_tokens: 5 }, "gpt-6-sol")}'
 exec sleep 30`
         ),
@@ -442,7 +491,7 @@ exec sleep 30`
         const text = renderTokenMetrics();
         expect(text).toContain(tokenLine("gpt-6-sol", "input", 14));
         expect(text).toContain(tokenLine("gpt-6-sol", "cached_input", 2));
-        expect(text).toContain(tokenLine("gpt-6-sol", "output", 9));
+        expect(text).toContain(tokenLine("gpt-6-sol", "output", 4));
         expect(text).toContain(tokenLine("gpt-6-sol", "reasoning", 5));
         expect(text).toContain('source="codex"');
         expect(text).not.toContain('token_type="cost"');

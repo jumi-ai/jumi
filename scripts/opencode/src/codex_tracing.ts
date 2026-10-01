@@ -118,8 +118,12 @@ export function buildCodexSpans(
       "llm.model_name": turnModel || model || "unknown",
     };
     if (turnUsage) {
-      if (turnUsage.input) attrs["llm.token_count.prompt"] = turnUsage.input;
-      if (turnUsage.output) attrs["llm.token_count.completion"] = turnUsage.output;
+      // The buckets are disjoint: the prompt is every input one, the
+      // completion includes reasoning.
+      const prompt = turnUsage.input + turnUsage.cached_input + turnUsage.cache_write;
+      const completion = turnUsage.output + turnUsage.reasoning;
+      if (prompt) attrs["llm.token_count.prompt"] = prompt;
+      if (completion) attrs["llm.token_count.completion"] = completion;
     }
     if (output) {
       attrs["output.value"] = output;
