@@ -1186,4 +1186,37 @@ describe("follow-up write gating", () => {
       reason: "sender lacks write access",
     });
   });
+
+  test("repository push hint admits a sender whose flat collaborator permission is none", async () => {
+    const noneApi = {
+      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
+    };
+    const payload = makeIssueCommentPayload({
+      repository: makeRepo({ permissions: { push: true, pull: true, admin: false } }),
+    });
+    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi);
+    expect(decision.type).toBe("enqueue");
+  });
+
+  test("repository push hint missing still skips a sender who cannot push", async () => {
+    const noneApi = {
+      getCollaboratorPermission: async () => ({ permission: "none", role_name: "none" }),
+    };
+    const payload = makeIssueCommentPayload({
+      repository: makeRepo({ permissions: { push: false, pull: true, admin: false } }),
+    });
+    expect(
+      await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi)
+    ).toEqual({ type: "skip", reason: "sender lacks write access" });
+  });
+
+  test("an App installation with contents write admits the sender without reading another app record", async () => {
+    const api = {
+      getCollaboratorPermission: async () => ({ permission: "none" }),
+      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
+    };
+    const payload = makeIssueCommentPayload({ sender: makeUser({ login: "filer[bot]" }) });
+    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, api);
+    expect(decision.type).toBe("enqueue");
+  });
 });

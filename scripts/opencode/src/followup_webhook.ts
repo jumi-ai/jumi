@@ -330,8 +330,12 @@ export function shouldEnqueuePullRejectedFollowUp(
 
 /**
  * Filter an event's own wake by its sender. Fail-closed: unless the sender can
- * push (`canPush`: write or stronger, or an App installation that writes
- * contents), the enqueue becomes a skip. Skips and cancels pass through, so
+ * push, the enqueue becomes a skip. Push is the check the forge itself uses:
+ * the webhook repository object's `permissions.push` (sender-scoped,
+ * unit-aware: a Gitea team member with code write reports push even when the
+ * flat collaborator permission is `none`), else `canPush` (collaborator
+ * lookup with its effective `push` grant, or a GitHub App installation with
+ * `contents: write`). Skips and cancels pass through, so
  * pickup rules and the bot/ignore-login skips stay as they are: push is
  * necessary, not sufficient. Scope checks run first so out-of-scope events
  * never cost a forge round-trip and keep their scope skip reason.
@@ -339,12 +343,19 @@ export function shouldEnqueuePullRejectedFollowUp(
 export async function requireSenderPush<D extends { type: string }>(
   decision: D,
   api: Partial<PermissionApi> | undefined,
-  sender: string | undefined
+  sender: string | undefined,
+  senderPushHint?: boolean
 ): Promise<D | { type: "skip"; reason: string }> {
   if (decision.type !== "enqueue") return decision;
+  if (senderPushHint === true) return decision;
   const { owner, repo } = (decision as unknown as { job: { owner: string; repo: string } }).job;
   if (await canPush(api, owner, repo, sender)) return decision;
   return { type: "skip", reason: SENDER_CANNOT_PUSH };
+}
+
+/** Sender-scoped push hint from the webhook repository object (forge-computed for the sender). */
+export function repositoryPushHint(repository: { permissions?: { push?: boolean } } | undefined): boolean {
+  return repository?.permissions?.push === true;
 }
 
 /** Push-gated wake for issue/PR comments. */
@@ -356,7 +367,7 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login);
+  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository));
 }
 
 /** Push-gated wake for request-changes / review rejections. Same bar as comments. */
@@ -368,7 +379,7 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login);
+  return requireSenderPush(scope, api, payload.sender?.login, repositoryPushHint(payload.repository));
 }
 
 export async function shouldEnqueuePullAssign(

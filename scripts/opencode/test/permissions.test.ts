@@ -77,18 +77,34 @@ describe("canPush", () => {
   });
 
   test("an App whose installation writes contents can push even when its lookup says none", async () => {
-    const slugs: string[] = [];
     const api = {
       getCollaboratorPermission: async () => ({ permission: "none" }),
-      getAppPermissions: async (slug: string): Promise<Record<string, string>> => {
-        slugs.push(slug);
-        return slug === "renovate" ? { contents: "write", pull_requests: "write" } : { issues: "write" };
-      },
+      getRepoInstallation: async () => ({ permissions: { contents: "write", pull_requests: "write" } }),
     };
     expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
-    expect(await canPush(api, "o", "r", "labeler[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "filer[bot]")).toBe(true);
+    // A successful none stays a skip when the actor cannot push (human, no installation grant).
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
-    expect(slugs).toEqual(["renovate", "labeler"]);
+  });
+
+  test("an App whose installation does not write contents stays out", async () => {
+    const api = {
+      getCollaboratorPermission: async () => ({ permission: "none" }),
+      getRepoInstallation: async () => ({ permissions: { contents: "read", issues: "write" } }),
+    };
+    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "mallory")).toBe(false);
+  });
+
+  test("an effective push grant counts even when the flat permission is none", async () => {
+    const api = {
+      getCollaboratorPermission: async () => ({ permission: "none", user: { permissions: { push: true } } }),
+    };
+    expect(await canPush(api, "o", "r", "alice")).toBe(true);
+    const denied = {
+      getCollaboratorPermission: async () => ({ permission: "none", user: { permissions: { push: false } } }),
+    };
+    expect(await canPush(denied, "o", "r", "mallory")).toBe(false);
   });
 
   test("an App lookup that 404s still falls back to the installation; failures there stay out", async () => {
@@ -97,7 +113,7 @@ describe("canPush", () => {
     };
     expect(
       await canPush(
-        { getCollaboratorPermission: notAUser, getAppPermissions: async () => ({ contents: "write" }) },
+        { getCollaboratorPermission: notAUser, getRepoInstallation: async () => ({ permissions: { contents: "write" } }) },
         "o",
         "r",
         "renovate[bot]"
@@ -107,7 +123,7 @@ describe("canPush", () => {
       await canPush(
         {
           getCollaboratorPermission: notAUser,
-          getAppPermissions: async () => {
+          getRepoInstallation: async () => {
             throw new Error("GitHub API 404");
           },
         },
@@ -151,16 +167,16 @@ describe("pullAuthorCanPush", () => {
     );
   });
 
-  test("a fork head from an App is not proof even when its manifest requests contents write", async () => {
+  test("a fork head from an App is not proof even when the installation writes contents", async () => {
     const api = {
       getCollaboratorPermission: async () => {
         throw new Error("GitHub API 404: not a user");
       },
-      getAppPermissions: async () => ({ contents: "write" }),
+      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
     };
     const fork = { user: { login: "renovate[bot]" }, head: { repo: { full_name: "renovate/r" } } };
     expect(await pullAuthorCanPush(api, "o", "r", fork)).toBe(false);
-    // Sender gating keeps the App fallback: the event proves the app acts on this repo.
+    // Sender gating keeps the installation fallback: the event proves the app acts on this repo.
     expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
   });
 });
@@ -172,7 +188,7 @@ describe("resolvePermissions", () => {
         if (username.endsWith("[bot]")) throw new Error("GitHub API 404");
         return { permission: "none" };
       },
-      getAppPermissions: async () => ({ contents: "write" }),
+      getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
     };
     const resolved = await resolvePermissions(api, "o", "r", ["renovate[bot]", "mallory"]);
     expect(resolved.writes.get("renovate[bot]")).toBe(true);

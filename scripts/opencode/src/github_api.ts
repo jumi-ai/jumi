@@ -709,15 +709,28 @@ export class GithubAPI {
   }
 
   async getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> {
-    const info = await this.get<{ permission: string; role_name?: string }>(
-      `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
-    );
-    return { permission: info.permission, role_name: info.role_name };
+    const info = await this.get<{
+      permission: string;
+      role_name?: string;
+      user?: { permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean } };
+    }>(`/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`);
+    return {
+      permission: info.permission,
+      ...(info.role_name !== undefined ? { role_name: info.role_name } : {}),
+      ...(info.user?.permissions !== undefined ? { user: { permissions: info.user.permissions } } : {}),
+    };
   }
 
-  async getAppPermissions(slug: string): Promise<Record<string, string> | undefined> {
-    const app = await this.get<{ permissions?: Record<string, string> }>(`/apps/${encodeURIComponent(slug)}`);
-    return app.permissions;
+  /**
+   * Repo-scoped installation grant for the authenticated (factory) App.
+   * `permissions.contents == "write"` is push. Used only for `[bot]` senders,
+   * after the webhook event itself proved an App acts on this repository.
+   */
+  async getRepoInstallation(owner: string, repo: string): Promise<{ permissions?: Record<string, string> } | undefined> {
+    const installation = await this.get<{ permissions?: Record<string, string> }>(
+      `/repos/${this.repoPath(owner, repo)}/installation`
+    );
+    return { permissions: installation.permissions };
   }
 
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {

@@ -8,6 +8,7 @@ import {
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
+  repositoryPushHint,
   requireSenderPush,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullLabel,
@@ -471,7 +472,8 @@ export async function handleGithubWebhookEvent(
         const decision = await requireSenderPush(
           await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger),
           deps.worker.api,
-          payload.sender?.login
+          payload.sender?.login,
+          repositoryPushHint(payload.repository)
         );
         if (decision.type === "skip") {
           const [owner, repo] = payload.repository.full_name.split("/");
@@ -686,7 +688,8 @@ export async function handleGithubWebhookEvent(
     const decision = await requireSenderPush(
       shouldEnqueueGithubIssue(payload, policy),
       deps.worker.api,
-      payload.sender?.login
+      payload.sender?.login,
+      repositoryPushHint(payload.repository)
     );
 
     if (decision.type === "cancel") {

@@ -753,9 +753,9 @@ describe("POST /webhooks/github", () => {
             getIssue: async () => githubIssue(),
             getPR: async () => fetched,
             // GitHub reports no collaborator permission for Apps, and none for outsiders.
+            // The repo installation grant (contents write) is the push check for Apps.
             getCollaboratorPermission: async () => ({ permission: "none" }),
-            getAppPermissions: async (slug): Promise<Record<string, string>> =>
-              slug === "filer" ? { contents: "write", issues: "write" } : {},
+            getRepoInstallation: async () => ({ permissions: { contents: "write", issues: "write" } }),
           },
         },
       });
