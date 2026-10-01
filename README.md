@@ -137,6 +137,8 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 
 The engine clones the repository and checks out the pull-request head on `jumi/pr-<number>`. The base SHA is `jumi/target`. The child inspects that checkout plus forge metadata and the file patches. It does not apply the pull request (`helm upgrade` and `kubectl apply` stay denied). The parent posts the sticky from `JUMI_REVIEW.md`, not from stdout.
 
+A later review is one where the newest Jumi review on the pull names a reviewed commit that is an ancestor of the current head. Its prompt carries the previous finding lines (or a line saying there were none), the commits since that commit, and the patches of pull files those commits touched. It lists the whole pull's changed files without patches and leaves out the previous review essay; the checkout of the head still has the older files. A Jumi inline finding is carried unless Jumi resolved its thread itself; a thread someone else resolved is still carried. A resolved thread with no named resolver counts as Jumi's, because GitHub may not name an App resolver. A missing or non-ancestor reviewed commit gets a first review with the full pull patches, and so does a failed previous review with no finding lines (for example, one that could not finish).
+
 It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `JUMI_REVIEW.md` (`<!-- jumi-check: success -->` or `<!-- jumi-check: failure -->`), not from OpenCode stdout and not by grepping 🔴/🟡 in the prose:
 
 - `pending` while the review is running
@@ -257,6 +259,7 @@ Claude's production flags are verified against the **installed `claude` binary**
 During each review the service emits single-line structured logs prefixed with `[diag]`:
 
 - `event=review_files` — PR file/patch sizes after limits
+- `event=review_delta` — whether this is a later review, the previous reviewed SHA, finding/commit/file counts
 - `event=review_prompt` — final prompt byte size
 - `event=opencode_start` — model, prompt size, parent RSS, cgroup, **per-review** OpenCode DB path/size
 - `event=opencode_sample` — every ~5s while OpenCode runs: **child PID RSS**, peaks, cgroup

@@ -213,7 +213,7 @@ export function isInScopeHumanComment(
 const REVIEW_MARKER = "<!-- jumi-review:";
 const REVIEWED_COMMIT_RE = /^Reviewed commit:\s*`([0-9a-fA-F]+)`\s*$/i;
 
-function lastCheckTrailer(body: string): { state: "success" | "failure"; reason: string } | undefined {
+export function lastCheckTrailer(body: string): { state: "success" | "failure"; reason: string } | undefined {
   const lines = body.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
