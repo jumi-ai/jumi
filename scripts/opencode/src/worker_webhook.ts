@@ -7,6 +7,7 @@ import {
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
+  requireSenderPush,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullAssign,
   shouldEnqueuePullRejectedFollowUpWithTrust,
@@ -37,7 +38,12 @@ export interface WorkerWebhookQueue {
 }
 
 export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<Pick<IssueApi, "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission">> & {
+  Partial<
+    Pick<
+      IssueApi,
+      "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission" | "getAppPermissions"
+    >
+  > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -294,7 +300,11 @@ export async function handleWorkerWebhookEvent(
           return wakeFailedResponse(err, logger);
         }
       }
-      const decision = await shouldEnqueuePullAssign(payload, policy, deps.api, logger);
+      const decision = await requireSenderPush(
+        await shouldEnqueuePullAssign(payload, policy, deps.api, logger),
+        deps.api,
+        payload.sender?.login
+      );
       if (decision.type === "skip") {
         const [owner, repo] = payload.repository.full_name.split("/");
         if (owner && repo) {
@@ -531,7 +541,8 @@ export async function handleWorkerWebhookEvent(
     }
 
     const payload = parseIssuesPayload(rawBody);
-    const decision = shouldEnqueueIssue(payload, policy);
+    // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
+    const decision = await requireSenderPush(shouldEnqueueIssue(payload, policy), deps.api, payload.sender?.login);
 
     if (decision.type === "cancel") {
       const result = deps.cancel

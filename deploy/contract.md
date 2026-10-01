@@ -60,6 +60,8 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_INCOMPLETE_RETRIES`
 - `PHOENIX_OTLP_ENDPOINT`
+- `BOARD_PEER_URL`
+- `BOARD_PEER_TOKEN`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`

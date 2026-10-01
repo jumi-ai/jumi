@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   findingFingerprint,
+  keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
   stripFindingLines,
@@ -146,5 +147,77 @@ describe("parseReviewFindings", () => {
     expect(findingFingerprint("src/foo.ts", "🔴 bug: first.")).not.toBe(
       findingFingerprint("src/bar.ts", "🔴 bug: first.")
     );
+  });
+});
+
+describe("keepReviewFindingLines", () => {
+  test("drops a verification essay entirely", () => {
+    const essay = [
+      "## What I checked",
+      "",
+      "I read `src/review.ts` and traced `publishReviewResult` end to end.",
+      "The diff adds a helper and wires it into the publish path.",
+      "",
+      "No blocking findings. No 🔴 or 🟡 issues on this SHA.",
+    ].join("\n");
+    expect(keepReviewFindingLines(essay)).toBe("");
+  });
+
+  test("keeps file:line and marker lines, drops the tour around them", () => {
+    const text = [
+      "## Summary",
+      "This PR restates the diff in prose.",
+      "",
+      "- src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+      "- src/foo.ts:40: 💡 simpler: drop the helper.",
+      "",
+      "Verified the rest; nothing else stands out.",
+      "",
+      "❓ q: is the timeout intentional?",
+      "🟡 risk: the retry swallows the error.",
+    ].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(
+      [
+        "- src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+        "- src/foo.ts:40: 💡 simpler: drop the helper.",
+        "",
+        "❓ q: is the timeout intentional?",
+        "🟡 risk: the retry swallows the error.",
+      ].join("\n")
+    );
+  });
+
+  test("keeps an L-line only on a single-file review or when it carries a marker", () => {
+    expect(keepReviewFindingLines("L12: guard the null.", { singleFilePath: "src/demo.ts" })).toBe(
+      "L12: guard the null."
+    );
+    expect(keepReviewFindingLines("L12: guard the null.")).toBe("");
+    expect(keepReviewFindingLines("L12: 🔴 bug: null deref.")).toBe("L12: 🔴 bug: null deref.");
+  });
+
+  test("keeps a marker line whose location is backticked, bolded, or a range", () => {
+    for (const line of [
+      "`src/foo.ts:12`: 🔴 bug: null deref.",
+      "**src/foo.ts:12**: 🔴 bug: null deref.",
+      "src/foo.ts:12-14: 🔴 bug: null deref.",
+      "- `L12`: 🟡 risk: retry swallows the error.",
+    ]) {
+      expect(keepReviewFindingLines(`Tour first.\n\n${line}`)).toBe(line);
+    }
+  });
+
+  test("does not promote a narrated bug", () => {
+    expect(keepReviewFindingLines("I think there might be a bug in the retry loop around line 40.")).toBe("");
+  });
+
+  test("keeps exact parent-authored lines", () => {
+    const note = "This repository has no CI checks on this head.";
+    expect(keepReviewFindingLines(`${note}\n\nLooks good overall.`, { keep: [note] })).toBe(note);
+  });
+
+  test("keeps a parent-authored note the child wrote as a bullet or inside a sentence", () => {
+    const note = "This repository has no CI checks on this head.";
+    expect(keepReviewFindingLines(`- ${note}\n\nLooks good overall.`, { keep: [note] })).toBe(note);
+    expect(keepReviewFindingLines(`Note: ${note} I ran the tests locally.`, { keep: [note] })).toBe(note);
   });
 });

@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   BOARD_KICK_CATALOG_VERSION,
+  BOARD_PEER_TOKEN_ENV,
+  BOARD_PEER_URL_ENV,
   buildBoardGroups,
   createBoardFetchHandler,
+  PEER_BOARD_MAX_BYTES,
+  PEER_FORGE,
   renderBoardPage,
 } from "../src/board.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
@@ -180,6 +184,211 @@ describe("operator board read API", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     const body = (await response.json()) as Record<string, unknown>;
     expect(body).toEqual({ error: "queue unavailable" });
+  });
+
+  test("peer env constants stay in sync with loadConfig literals", async () => {
+    // loadConfig must keep string literals so the deploy-contract gate can
+    // statically resolve them; this pins the two sides together instead.
+    expect(BOARD_PEER_URL_ENV).toBe("BOARD_PEER_URL");
+    expect(BOARD_PEER_TOKEN_ENV).toBe("BOARD_PEER_TOKEN");
+  });
+
+  test("peer listener is bearer-only and ignores forwarded edge headers", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({
+      store,
+      forge: "github",
+      peerToken: "s3cret",
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const forged = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(forged.status).toBe(401);
+
+    const bearer = await handler(boardRequest("/api/board", { Authorization: "Bearer s3cret" }));
+    expect(bearer.status).toBe(200);
+    const body = (await bearer.json()) as Record<string, unknown>;
+    expect(body).toMatchObject({ forge: "github", peers: {} });
+  });
+
+  test("homelab never accepts the bearer without edge identity", async () => {
+    const store = await seedStore();
+    const handler = createBoardFetchHandler({
+      store,
+      peerToken: "s3cret",
+      peerUrl: "https://peer.internal/board",
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const bearerOnly = await handler(boardRequest("/api/board", { Authorization: "Bearer s3cret" }));
+    expect(bearerOnly.status).toBe(401);
+  });
+
+  test("unset peer hop is unavailable without a fetch", async () => {
+    const store = await seedStore();
+    let called = false;
+    const handler = createBoardFetchHandler({
+      store,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+      fetchFn: (async () => {
+        called = true;
+        throw new Error("must not fetch");
+      }) as unknown as typeof fetch,
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(called).toBe(false);
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+  });
+
+  test("spoofed peer forge stays under peers.github with pinned row forges", async () => {
+    const store = await seedStore();
+    const fetchFn = (async () =>
+      new Response(
+        JSON.stringify({
+          forge: "gitea",
+          in_progress: [{ reason: "review leased", owner: "o", repo: "r", number: 1, kind: "review", forge: "gitea" }],
+          needs_kick: [],
+          sitting: [],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.forge).toBe("gitea");
+    expect(Object.keys(body.peers as object)).toEqual([PEER_FORGE]);
+    const peer = (body.peers as Record<string, Record<string, unknown>>)[PEER_FORGE];
+    expect(peer).toMatchObject({ available: true, forge: PEER_FORGE });
+    const rows = peer.in_progress as Record<string, unknown>[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].forge).toBe(PEER_FORGE);
+    // Top-level lists stay local-only: the peer row is not merged there.
+    const local = body.in_progress as unknown[];
+    expect(local).toHaveLength(2);
+  });
+
+  test("unreachable peer falls back to unavailable without failing the board", async () => {
+    const store = await seedStore();
+    const fetchFn = (async () => {
+      throw new Error("peer down");
+    }) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+  });
+
+  test("chunked peer body without Content-Length is capped while streaming", async () => {
+    const store = await seedStore();
+    const chunkSize = 256 * 1024;
+    let pulled = 0;
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        controller.enqueue(new Uint8Array(chunkSize).fill(0x20));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    // A test double, not a real Response: no Content-Length, and text()
+    // throws so the cap must trip on the streamed bytes alone.
+    const fetchFn = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: stream,
+      text: async () => {
+        throw new Error("peer body must not be buffered with text()");
+      },
+    })) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peers = body.peers as Record<string, Record<string, unknown>>;
+    expect(peers[PEER_FORGE]).toMatchObject({ available: false, forge: PEER_FORGE });
+    expect(cancelled).toBe(true);
+    // Reading stops just past the cap instead of draining the endless body.
+    expect(pulled * chunkSize).toBeLessThanOrEqual(PEER_BOARD_MAX_BYTES + 2 * chunkSize);
+  });
+
+  test("chunked peer body under the cap still loads without Content-Length", async () => {
+    const store = await seedStore();
+    const payload = new TextEncoder().encode(
+      JSON.stringify({
+        in_progress: [{ reason: "review leased", owner: "o", repo: "r", number: 3, kind: "review" }],
+        needs_kick: [],
+        sitting: [],
+      })
+    );
+    const half = Math.floor(payload.length / 2);
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(payload.slice(0, half));
+        controller.enqueue(payload.slice(half));
+        controller.close();
+      },
+    });
+    const fetchFn = (async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "Content-Type": "application/json" }),
+      body: stream,
+      text: async () => {
+        throw new Error("peer body must not be buffered with text()");
+      },
+    })) as unknown as typeof fetch;
+    const handler = createBoardFetchHandler({
+      store,
+      peerUrl: "https://peer.internal/board",
+      peerToken: "s3cret",
+      fetchFn,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+
+    const response = await handler(boardRequest("/api/board", EDGE_HEADERS));
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    const peer = (body.peers as Record<string, Record<string, unknown>>)[PEER_FORGE];
+    expect(peer).toMatchObject({ available: true, forge: PEER_FORGE });
+    expect(peer.in_progress as unknown[]).toHaveLength(1);
   });
 
   test("page is served with the board on the same origin", async () => {

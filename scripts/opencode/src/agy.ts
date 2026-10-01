@@ -17,6 +17,7 @@ import { agyConversationPath } from "./fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
+import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
 
 /** stream-json keeps per-step usage even when the child is killed before `result`. */
@@ -34,6 +35,23 @@ const AGY_PROJECT_AGENT_NAMES = [".agents", ".agent"] as const;
 
 const AGY_STDERR_MAX_BYTES = 64_000;
 const AGY_AUTH_RE = /Please sign in|authentication required/i;
+
+/**
+ * Resetting-quota signal for the Antigravity runner, from that runner's own
+ * result and stderr the same way Claude classifies its usage limit.
+ *
+ * The live Antigravity quota envelope is not known yet, so resource-exhausted
+ * and 429-class results (429, rate limit, too many requests) are treated as
+ * resetting quota rather than a terminal failure. The `agy_error` diagnostic
+ * already records the exact envelope verbatim for the first live miss.
+ * Never a hard latch: an unknown 429 must wait, not park.
+ */
+const AGY_QUOTA_RE = /resource[_\s-]*exhausted|\b429\b|rate[\s_-]*limit|too many requests/i;
+
+export function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClass | undefined {
+  if (!text || !AGY_QUOTA_RE.test(text)) return undefined;
+  return "resetting";
+}
 
 function isEnoent(err: unknown): boolean {
   return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
@@ -338,8 +356,15 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     const envelope = parser.result();
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
+    const quota =
+      !timedOut && exitCode !== 143
+        ? inspectAgyQuotaLimit([combined, envelope?.error].filter(Boolean).join("\n"))
+        : undefined;
     const auth =
-      !timedOut && exitCode !== 143 && looksLikeAgyAuthDeath([stderr, envelope?.error].filter(Boolean).join("\n"));
+      !quota &&
+      !timedOut &&
+      exitCode !== 143 &&
+      looksLikeAgyAuthDeath([stderr, envelope?.error].filter(Boolean).join("\n"));
 
     if (opts.abortSignal?.aborted) throw cancelled();
 
@@ -379,6 +404,18 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
 
     const incomplete = exitCode === 0 ? agyIncompleteReason(parser) : undefined;
     if (exitCode === 0 && !incomplete) return observeEngineRun(opts, { status: "ok", exitCode: 0, stdout, durationMs });
+
+    if (quota) {
+      return observeEngineRun(opts, {
+        status: "stuck",
+        exitCode,
+        stdout,
+        message: QUOTA_MESSAGE,
+        infra: false,
+        durationMs,
+        quota,
+      });
+    }
 
     if (auth) {
       return observeEngineRun(opts, {

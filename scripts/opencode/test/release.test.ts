@@ -366,6 +366,8 @@ describe("deploy/contract.md", () => {
       "MAX_FOLLOWUP_ROUNDS",
       "MAX_INCOMPLETE_RETRIES",
       "PHOENIX_OTLP_ENDPOINT",
+      "BOARD_PEER_URL",
+      "BOARD_PEER_TOKEN",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
     expect(parsed.worker.gitOpsEnv).toEqual([

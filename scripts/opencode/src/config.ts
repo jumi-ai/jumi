@@ -46,6 +46,8 @@ export interface ServiceConfig {
   maxFollowupRounds: number;
   maxIncompleteRetries: number;
   phoenixOtlpEndpoint?: string;
+  boardPeerUrl?: string;
+  boardPeerToken?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -56,6 +58,7 @@ export const SECRET_ENV_KEYS = [
   "GITEA_WEBHOOK_AUTH_TOKEN",
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",
+  "BOARD_PEER_TOKEN",
 ] as const;
 export const SECRETS_FILE_ENV = "JUMI_SECRETS_FILE";
 export const ENV_SCRUBBED_FLAG = "JUMI_ENV_SCRUBBED";
@@ -241,5 +244,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxFollowupRounds: intEnv(resolved, MAX_FOLLOWUP_ROUNDS_ENV, 3),
     maxIncompleteRetries: intEnv(resolved, MAX_INCOMPLETE_RETRIES_ENV, 2),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
+    boardPeerUrl: optionalEnv(resolved, "BOARD_PEER_URL"),
+    boardPeerToken: optionalEnv(resolved, "BOARD_PEER_TOKEN"),
   };
 }

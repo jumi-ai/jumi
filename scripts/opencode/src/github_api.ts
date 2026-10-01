@@ -713,6 +713,11 @@ export class GithubAPI {
     return { permission: info.permission, role_name: info.role_name };
   }
 
+  async getAppPermissions(slug: string): Promise<Record<string, string> | undefined> {
+    const app = await this.get<{ permissions?: Record<string, string> }>(`/apps/${encodeURIComponent(slug)}`);
+    return app.permissions;
+  }
+
   async getPR(owner: string, repo: string, index: number): Promise<Pull> {
     return toPull(await this.get<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`));
   }
@@ -736,12 +741,20 @@ export class GithubAPI {
     );
   }
 
+  async reopenPullRequest(owner: string, repo: string, index: number): Promise<Pull> {
+    return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { state: "open" }));
+  }
+
   async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
     return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
   }
 
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GithubIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
+  }
+
+  async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
+    return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
   }
 
   async listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {

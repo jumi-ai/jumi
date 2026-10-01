@@ -73,6 +73,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
       });
     },
     closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+    reopenPullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "open" }),
     updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
     findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
@@ -156,6 +157,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       listOpenPulls: async () => [],
       createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
       closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
+      reopenPullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "open" }),
       updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
       findStickyIssueComment: async () => undefined,
       createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
@@ -354,7 +356,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect(forge.comments).toHaveLength(0);
       expect(forge.reviews).toHaveLength(1);
       expect((forge.reviews[0] as { body: string }).body).toContain("<!-- jumi-review:kirmanak/demo#7 -->");
-      expect((forge.reviews[0] as { body: string }).body).toContain("Looks good");
+      expect((forge.reviews[0] as { body: string }).body).toContain("<!-- jumi-check: success -->");
       expect((forge.reviews[0] as { body: string }).body).not.toContain("I'll inspect");
       expect(lastNonEmptyLine((forge.reviews[0] as { body: string }).body)).toBe("<!-- jumi-check: success -->");
       expect(forge.statuses.map((status) => ({ state: status.state, context: status.context }))).toEqual([

@@ -1,22 +1,24 @@
 import { hostname } from "node:os";
-import { BOARD_PORT, createBoardFetchHandler } from "./board.ts";
+import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
 import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
-import { createForge } from "./forge.ts";
+import { createForge, type Forge, type Tracker } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError } from "./quota.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
+  PR_AUTHOR_CANNOT_PUSH,
   publishReviewResult,
   reviewJobKey,
   reviewPullRequest,
@@ -117,6 +119,10 @@ export async function runReviewJob(
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
     return { status: "skipped", reason: early };
   }
+  if (!(await pullAuthorCanPush(api, job.owner, job.repo, pr))) {
+    logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${PR_AUTHOR_CANNOT_PUSH}`);
+    return { status: "skipped", reason: PR_AUTHOR_CANNOT_PUSH };
+  }
   let noCiNote: string | undefined;
   if (!extras.assumeNoCi) {
     const ciSkip = await skipReasonForOtherChecks(
@@ -160,6 +166,8 @@ export async function runReviewJob(
   try {
     const result = await reviewPullRequest({
       api,
+      tracker: api,
+      forge: api,
       owner: job.owner,
       repo: job.repo,
       prNumber: job.prNumber,
@@ -768,6 +776,7 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
+    getAppPermissions: api.getAppPermissions ? (slug) => api.getAppPermissions!(slug) : undefined,
     listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
     listIssueBlocks: extra.listIssueBlocks
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
@@ -839,6 +848,13 @@ async function serveAndWait(
 export async function startReviewer(config: ServiceConfig, deps: StartReviewerDeps = {}): Promise<StartedReviewer> {
   const logger = deps.logger ?? log;
   const api = deps.api ?? createForge(config);
+  // The board's close-then-reopen kick needs the full forge client. deps.api
+  // is a narrower ReviewApi test seam without close/reopenPullRequest, so it
+  // is never cast to the board forge: with the real client this binding keeps
+  // the Forge-typed source, so a future drop/rename of the pull methods
+  // breaks the assignment below at compile time instead of failing at kick
+  // time. An injected seam leaves the board without a forge (503).
+  const boardForge: BoardPullForge | undefined = deps.api === undefined ? (api as Tracker & Forge) : undefined;
 
   if (shouldSeedOpenCodeAuth(config.role)) {
     await adoptOrphanXaiSibling(config.home, logger).catch((err) =>
@@ -889,12 +905,22 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       // Operator board on its own port. Same process (no sidecar, no new
       // Deployment), same ledger, single replica with no leader election.
       // Polling GET only; the webhook host never serves the board paths.
+      // Homelab fans out to the peer board (one-way, bearer-only); the peer
+      // never calls back, so the GitHub factory cannot reach the homelab forge.
       let boardServer: ReturnType<typeof Bun.serve>;
       try {
         boardServer = Bun.serve({
           hostname: config.host,
           port: BOARD_PORT,
-          fetch: createBoardFetchHandler({ store, logger, forge: config.forge, forgeUrl: config.giteaUrl }),
+          fetch: createBoardFetchHandler({
+            store,
+            logger,
+            forge: config.forge,
+            forgeUrl: config.giteaUrl,
+            peerUrl: config.boardPeerUrl,
+            peerToken: config.boardPeerToken,
+            forgeApi: boardForge,
+          }),
         });
       } catch (err) {
         try {

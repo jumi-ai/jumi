@@ -197,12 +197,15 @@ export interface Forge {
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
+  /** GitHub only: permissions an App's installations hold, e.g. `{ contents: "write" }`. */
+  getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
   createPullRequest(
     owner: string,
     repo: string,
     pull: { title: string; body: string; head: string; base: string }
   ): Promise<Pull>;
   closePullRequest(owner: string, repo: string, index: number): Promise<Pull>;
+  reopenPullRequest(owner: string, repo: string, index: number): Promise<Pull>;
   updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull>;
   getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]>;
   listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]>;
@@ -257,6 +260,7 @@ export type ReviewApi = Pick<
   | "listActionJobs"
   | "getActionJobLogs"
   | "getCollaboratorPermission"
+  | "getAppPermissions"
 > &
   Pick<Tracker, "getIssue">;
 
@@ -276,6 +280,7 @@ export type IssueApi = Tracker &
     | "listActionJobs"
     | "getActionJobLogs"
     | "getCollaboratorPermission"
+    | "getAppPermissions"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {
