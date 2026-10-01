@@ -102,6 +102,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment and for assign pickup |
 | `FOLLOWUP_IGNORE_LOGINS` | unset | Optional comma-separated logins skipped for follow-up in addition to `BOT_USERNAME` |
+| `TRUSTED_SENDER_LOGINS` | unset | Optional comma-separated logins that may start implement and steer follow-up (label, assign, review, comment). When set, only these logins are admitted, whole login, case-insensitive, and the forge is not asked. Unset or empty keeps the forge push check. Router and worker both read it |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
 | `OPENCODE_FALLBACK_MODEL` | unset | Optional OpenCode model ID (`provider/model`) for one from-scratch hop when the primary child exits because the provider/model is unavailable. Unset, empty, or same-provider fallback does not hop: Zen/Free quota then delayed-requeues the same job instead of a human kill-switch |

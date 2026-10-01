@@ -30,6 +30,7 @@ export async function classifyCloserWork(opts: {
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
   followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
   skipLatches?: SkipLatchStore;
 }): Promise<CloserWorkMode | undefined> {
   const followUp = await needsFollowUp({
@@ -42,6 +43,7 @@ export async function classifyCloserWork(opts: {
     home: opts.home,
     maxFollowupRounds: opts.maxFollowupRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
+    trustedSenderLogins: opts.trustedSenderLogins,
     skipLatches: opts.skipLatches,
   });
   const ci = await needsCiFollowUp({
@@ -83,6 +85,7 @@ export async function runCloserWork(
     maxFollowupRounds: opts.maxFollowupRounds,
     maxConflictRounds: opts.maxConflictRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
+    trustedSenderLogins: opts.trustedSenderLogins,
     skipLatches: opts.skipLatches,
   });
   if (!mode) return { status: "skipped", reason: `open PR already closes #${opts.job.issueNumber}` };

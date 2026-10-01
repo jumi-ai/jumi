@@ -348,6 +348,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             allowedRepos: config.allowedRepos,
             botUsername: config.botUsername,
             followupIgnoreLogins: config.followupIgnoreLogins,
+            trustedSenderLogins: config.trustedSenderLogins,
           },
           { ...deps.worker, logger: deps.worker.logger ?? logger }
         );

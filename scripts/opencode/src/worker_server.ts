@@ -107,6 +107,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           allowedRepos: config.allowedRepos,
           botUsername: config.botUsername,
           followupIgnoreLogins: config.followupIgnoreLogins,
+          trustedSenderLogins: config.trustedSenderLogins,
         },
         { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits }
       );

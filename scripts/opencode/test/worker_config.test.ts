@@ -209,6 +209,15 @@ describe("loadWorkerConfig", () => {
     expect(() => loadWorkerConfig({ ...required, CONFLICT_TIMEOUT_MS: "-1" })).toThrow("Invalid positive integer");
   });
 
+  test("parses TRUSTED_SENDER_LOGINS CSV, trims each login, and treats empty as no list", () => {
+    expect(loadWorkerConfig(required).trustedSenderLogins).toEqual([]);
+    expect(loadWorkerConfig({ ...required, TRUSTED_SENDER_LOGINS: "" }).trustedSenderLogins).toEqual([]);
+    expect(loadWorkerConfig({ ...required, TRUSTED_SENDER_LOGINS: " , " }).trustedSenderLogins).toEqual([]);
+    expect(
+      loadWorkerConfig({ ...required, TRUSTED_SENDER_LOGINS: " alice , filer[bot], " }).trustedSenderLogins
+    ).toEqual(["alice", "filer[bot]"]);
+  });
+
   test("parses FOLLOWUP_IGNORE_LOGINS CSV and treats empty as no extra skips", () => {
     expect(loadWorkerConfig(required).followupIgnoreLogins).toEqual([]);
     expect(loadWorkerConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "" }).followupIgnoreLogins).toEqual([]);

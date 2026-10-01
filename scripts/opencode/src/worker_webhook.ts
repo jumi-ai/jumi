@@ -31,6 +31,7 @@ import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, typ
 export type WorkerWebhookPolicy = WebhookPolicy & {
   botUsername: string;
   followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
 };
 
 export interface WorkerWebhookQueue {
@@ -303,7 +304,8 @@ export async function handleWorkerWebhookEvent(
       const decision = await requireSenderPush(
         await shouldEnqueuePullAssign(payload, policy, deps.api, logger),
         deps.api,
-        payload.sender?.login
+        payload.sender?.login,
+        policy.trustedSenderLogins
       );
       if (decision.type === "skip") {
         const [owner, repo] = payload.repository.full_name.split("/");
@@ -542,7 +544,12 @@ export async function handleWorkerWebhookEvent(
 
     const payload = parseIssuesPayload(rawBody);
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
-    const decision = await requireSenderPush(shouldEnqueueIssue(payload, policy), deps.api, payload.sender?.login);
+    const decision = await requireSenderPush(
+      shouldEnqueueIssue(payload, policy),
+      deps.api,
+      payload.sender?.login,
+      policy.trustedSenderLogins
+    );
 
     if (decision.type === "cancel") {
       const result = deps.cancel

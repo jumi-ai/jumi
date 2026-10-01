@@ -259,6 +259,16 @@ describe("loadConfig", () => {
     expect(config.maxFiles).toBe(3);
   });
 
+  test("parses TRUSTED_SENDER_LOGINS CSV, trims each login, and treats empty as no list", () => {
+    expect(loadConfig(required).trustedSenderLogins).toEqual([]);
+    expect(loadConfig({ ...required, TRUSTED_SENDER_LOGINS: "" }).trustedSenderLogins).toEqual([]);
+    expect(loadConfig({ ...required, TRUSTED_SENDER_LOGINS: " , " }).trustedSenderLogins).toEqual([]);
+    expect(loadConfig({ ...required, TRUSTED_SENDER_LOGINS: " alice , filer[bot], " }).trustedSenderLogins).toEqual([
+      "alice",
+      "filer[bot]",
+    ]);
+  });
+
   test("parses FOLLOWUP_IGNORE_LOGINS CSV and treats empty as no extra skips", () => {
     expect(loadConfig(required).followupIgnoreLogins).toEqual([]);
     expect(loadConfig({ ...required, FOLLOWUP_IGNORE_LOGINS: "" }).followupIgnoreLogins).toEqual([]);

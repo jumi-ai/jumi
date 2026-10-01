@@ -6,6 +6,7 @@ import {
   hasWritePermission,
   pullAuthorCanPush,
   resolvePermissions,
+  senderCanSteer,
   trustedPushLogins,
 } from "../src/permissions.ts";
 
@@ -191,5 +192,75 @@ describe("trustedPushLogins", () => {
     };
     const trusted = await trustedPushLogins(api, "o", "r", ["Alice", "ALICE", "mallory", undefined, ""]);
     expect([...trusted].sort()).toEqual(["alice"]);
+  });
+});
+
+describe("senderCanSteer", () => {
+  function countingApi(permission: string, apps: Record<string, Record<string, string>> = {}) {
+    const calls: string[] = [];
+    return {
+      calls,
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
+        calls.push(`collaborator:${username}`);
+        return { permission };
+      },
+      getAppPermissions: async (slug: string) => {
+        calls.push(`app:${slug}`);
+        return apps[slug];
+      },
+    };
+  }
+
+  test("a listed login is admitted when the forge says none, without asking the forge", async () => {
+    const api = countingApi("none");
+    expect(await senderCanSteer(api, "o", "r", "alice", ["alice", "filer[bot]"])).toBe(true);
+    expect(await senderCanSteer(api, "o", "r", "filer[bot]", ["alice", "filer[bot]"])).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "alice", ["alice"])).toBe(true);
+    expect(api.calls).toEqual([]);
+  });
+
+  test("an unlisted login is skipped when the list is set, whatever the forge or an app record says", async () => {
+    const api = countingApi("admin", { labeler: { contents: "write" } });
+    expect(await senderCanSteer(api, "o", "r", "mallory", ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", "labeler[bot]", ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", undefined, ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", " ", ["alice"])).toBe(false);
+    expect(api.calls).toEqual([]);
+  });
+
+  test("the match is the whole login, case-insensitive, with surrounding space ignored", async () => {
+    const list = [" Alice ", "Filer[bot]"];
+    expect(await senderCanSteer(undefined, "o", "r", "ALICE", list)).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "filer[BOT]", list)).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "alic", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "alice2", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "filer", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "other-filer[bot]", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "filer-two[bot]", list)).toBe(false);
+  });
+
+  test("an unset, empty, or blank list keeps the forge check", async () => {
+    for (const list of [undefined, [], [" ", ""]]) {
+      expect(await senderCanSteer(countingApi("write"), "o", "r", "alice", list)).toBe(true);
+      expect(await senderCanSteer(countingApi("read"), "o", "r", "alice", list)).toBe(false);
+      expect(
+        await senderCanSteer(countingApi("none", { filer: { contents: "write" } }), "o", "r", "filer[bot]", list)
+      ).toBe(true);
+    }
+  });
+});
+
+describe("trustedPushLogins with a trusted sender list", () => {
+  test("keeps listed logins only and never asks the forge", async () => {
+    let lookups = 0;
+    const api = {
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
+        lookups += 1;
+        return username === "mallory" ? { permission: "write" } : { permission: "none" };
+      },
+    };
+    const trusted = await trustedPushLogins(api, "o", "r", ["Alice", "mallory", undefined], ["alice"]);
+    expect([...trusted]).toEqual(["alice"]);
+    expect(lookups).toBe(0);
   });
 });

@@ -196,6 +196,36 @@ export async function canPush(
   return (await pushAccess(api, owner, repo, login.trim())).push;
 }
 
+/** Whole-login match against a configured list: case-insensitive, surrounding space ignored. */
+export function isListedLogin(login: string | undefined | null, logins: readonly string[] | undefined): boolean {
+  const key = loginKey(login);
+  if (!key) return false;
+  return (logins ?? []).some((item) => loginKey(item) === key);
+}
+
+/** The operator's trusted sender list is in force once it names at least one login. */
+export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undefined): boolean {
+  return (trustedSenderLogins ?? []).some((item) => loginKey(item) !== undefined);
+}
+
+/**
+ * Who may steer Jumi. When the operator set `TRUSTED_SENDER_LOGINS`, the list
+ * is the whole answer: a listed login is admitted and nobody else is, with no
+ * forge lookup either way. With the list unset or empty, the forge check
+ * (`canPush`) decides, so a new image does not lock the operator out before
+ * GitOps sets the list.
+ */
+export async function senderCanSteer(
+  api: Partial<PermissionApi> | undefined,
+  owner: string,
+  repo: string,
+  login: string | undefined,
+  trustedSenderLogins?: readonly string[]
+): Promise<boolean> {
+  if (hasTrustedSenders(trustedSenderLogins)) return isListedLogin(login, trustedSenderLogins);
+  return canPush(api, owner, repo, login);
+}
+
 /**
  * A pull's author can push to the base repository. A head branch that already
  * lives on the base repository is proof. A fork head is not: only the
@@ -225,14 +255,15 @@ export async function pullAuthorCanPush(
 }
 
 /**
- * Batch push check with per-round caching. Fail-closed: logins that cannot
- * be confirmed to push are absent from the returned set.
+ * Batch steer check (`senderCanSteer`) with per-round caching. Fail-closed:
+ * logins that cannot be confirmed are absent from the returned set.
  */
 export async function trustedPushLogins(
   api: Partial<PermissionApi> | undefined,
   owner: string,
   repo: string,
-  logins: readonly (string | undefined)[]
+  logins: readonly (string | undefined)[],
+  trustedSenderLogins?: readonly string[]
 ): Promise<Set<string>> {
   const trusted = new Set<string>();
   const seen = new Set<string>();
@@ -244,7 +275,7 @@ export async function trustedPushLogins(
     seen.add(key);
     pending.push(
       (async () => {
-        if (await canPush(api, owner, repo, raw)) trusted.add(key);
+        if (await senderCanSteer(api, owner, repo, raw, trustedSenderLogins)) trusted.add(key);
       })()
     );
   }
