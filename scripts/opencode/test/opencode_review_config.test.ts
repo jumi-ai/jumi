@@ -266,6 +266,12 @@ describe("renovate bun pin", () => {
     // installing against a lockfile another bun generated.
     expect(dockerfile).toMatch(/^ARG BUN_VERSION$/m);
     expect(dockerfile).not.toMatch(/^ARG BUN_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG OPENCODE_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG OPENCODE_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG CLAUDE_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG CLAUDE_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG HELM_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG HELM_VERSION=/m);
   });
 
   test("lets Renovate bump constraints.bun so the pin above is not hand-maintained", () => {
