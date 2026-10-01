@@ -88,6 +88,22 @@ describe("hooklessSkillMarkdown", () => {
     expect(hooklessSkillMarkdown("---\n---\nb\n", "d")).toBe('---\nname: "d"\n---\nb\n');
   });
 
+  test("leaves no inline shell the binary would run when the skill loads", () => {
+    const body = "Now: !`touch /tmp/pwned`\n\n```!\ntouch /tmp/pwned\n```\n\n````!\ntouch /tmp/pwned\n````\n";
+    const out = hooklessSkillMarkdown(`---\nname: s\n---\n${body}`, "s") ?? "";
+    expect(out).toBe(
+      '---\nname: "s"\n---\nNow: ! `touch /tmp/pwned`\n\n``` !\ntouch /tmp/pwned\n```\n\n```` !\ntouch /tmp/pwned\n````\n'
+    );
+    // The two patterns the binary matches before it hands the body to the model.
+    expect(/```!\s*\n?[\s\S]*?\n?```/.test(out)).toBe(false);
+    expect(/(?<=^|\s)!`[^`]+`/m.test(out)).toBe(false);
+    // No frontmatter at all: the whole file is the body.
+    expect(hooklessSkillMarkdown("!`touch /tmp/pwned`\n", "d")).toBe('---\nname: "d"\n---\n! `touch /tmp/pwned`\n');
+    // Ordinary code spans and fences are untouched.
+    const plain = "Run `ls`, not `!x`.\n\n```sh\nls\n```\n";
+    expect(hooklessSkillMarkdown(plain, "d")).toBe(`---\nname: "d"\n---\n${plain}`);
+  });
+
   test("refuses frontmatter that is not YAML", () => {
     expect(hooklessSkillMarkdown("---\nname: [unclosed\n---\nbody\n", "d")).toBeUndefined();
   });

@@ -14,6 +14,8 @@ import { basename, join, sep } from "node:path";
  *   - the plugin root is ours, so it carries no `hooks/hooks.json`;
  *   - every `SKILL.md` is re-fronted with only `name` and `description`, because
  *     a skill's own frontmatter `hooks:` run once the skill is loaded;
+ *   - every `SKILL.md` body has its inline shell markers broken, because the
+ *     binary runs `` !`cmd` `` and a ```! fence when the skill is loaded;
  *   - symlinks that leave the checkout are skipped, and the copy is bounded.
  *
  * The model sees these skills as `checkout:<name>`. Fleet skills under
@@ -43,10 +45,20 @@ function yamlString(value: string): string {
 }
 
 /**
- * `SKILL.md` with its frontmatter replaced by `name` and `description` only.
- * The new block is always first in the file, so whatever the original
- * frontmatter said (hooks, allowed-tools, model, …) is either dropped or left
- * as inert body text. Undefined when the frontmatter is not YAML.
+ * The binary runs `` !`cmd` `` and a ```! fence in a skill body through the
+ * shell before the model sees the text. Both need the `!` to touch a backtick,
+ * so a space between them leaves the command as plain text the model can read.
+ */
+function inertShell(body: string): string {
+  return body.replaceAll("```!", "``` !").replaceAll("!`", "! `");
+}
+
+/**
+ * `SKILL.md` with its frontmatter replaced by `name` and `description` only,
+ * and no inline shell left in the body. The new block is always first in the
+ * file, so whatever the original frontmatter said (hooks, allowed-tools, model,
+ * …) is either dropped or left as inert body text. Undefined when the
+ * frontmatter is not YAML.
  */
 export function hooklessSkillMarkdown(text: string, fallbackName: string): string | undefined {
   const source = text.startsWith("\uFEFF") ? text.slice(1) : text;
@@ -67,7 +79,7 @@ export function hooklessSkillMarkdown(text: string, fallbackName: string): strin
   const description = typeof fields.description === "string" ? fields.description.trim() : "";
   const head = [`name: ${yamlString(name)}`];
   if (description) head.push(`description: ${yamlString(description)}`);
-  return `---\n${head.join("\n")}\n---\n${body}`;
+  return `---\n${head.join("\n")}\n---\n${inertShell(body)}`;
 }
 
 function inside(root: string, path: string): boolean {

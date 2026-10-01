@@ -71,8 +71,10 @@ interface StashedAgyRoot {
 
 /**
  * Move every checkout customization root out of the workdir, then put back
- * only its `skills/` in a fresh root. Skills carry no hooks in this CLI; hooks
- * live in the root's `hooks.json` and in plugins, which stay stashed.
+ * only its `skills/` in a fresh root. Skills carry no commands in this CLI: the
+ * model reads `SKILL.md` as a plain file, and on agy 1.2.7 neither frontmatter
+ * `hooks:` nor inline `` !`cmd` `` in a skill ran. Hooks live in the root's
+ * `hooks.json` and in plugins, which stay stashed.
  * Records into `moved` as it goes, so a throw part-way still restores.
  */
 async function stashAgyProjectAgents(workdir: string, stashRoot: string, moved: StashedAgyRoot[]): Promise<void> {
@@ -98,15 +100,25 @@ async function stashAgyProjectAgents(workdir: string, stashRoot: string, moved: 
   }
 }
 
-async function restoreAgyProjectAgents(workdir: string, stashRoot: string, moved: StashedAgyRoot[]): Promise<void> {
+async function restoreAgyProjectAgents(
+  workdir: string,
+  stashRoot: string,
+  moved: StashedAgyRoot[],
+  log: (message: string) => void
+): Promise<void> {
   for (const { name, skills } of moved) {
     if (skills) {
       try {
         await rename(join(workdir, name, AGY_SKILLS_DIR), join(stashRoot, name, AGY_SKILLS_DIR));
       } catch (err) {
         // Anything but "the child removed it" leaves the skills where they are
-        // rather than deleting them with the root below.
-        if (!isEnoent(err)) continue;
+        // rather than deleting them with the root below. The rest of the root
+        // then goes with the stash, so say so.
+        if (!isEnoent(err)) {
+          const reason = err instanceof Error ? err.message : String(err);
+          log(`[agy] ${name} not restored, only its ${AGY_SKILLS_DIR}/ is left in the checkout: ${reason}`);
+          continue;
+        }
       }
       // Only the root this spawn made; whatever the child wrote into it goes.
       await rm(join(workdir, name), { recursive: true, force: true }).catch(() => {});
@@ -497,7 +509,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
-    await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents);
+    await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents, log);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

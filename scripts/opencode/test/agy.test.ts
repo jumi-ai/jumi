@@ -494,6 +494,31 @@ describe("runAgy", () => {
     );
   });
 
+  test("reviewer restore that cannot take the skills back says what it left behind", async () => {
+    await withFakeBins(
+      { agy: fakeBin("agy", `rm -rf .agents && echo child > .agents\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      async ({ workdir, argsLog }) => {
+        await mkdir(join(workdir, ".agents", "skills", "s"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "s");
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
+        const logs: string[] = [];
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          trace: { kind: "review", owner: "o", repo: "r" },
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        // The child's node is left alone, and the lost hooks.json is not silent.
+        expect(await readFile(join(workdir, ".agents"), "utf8")).toBe("child\n");
+        expect(logs.filter((line) => line.startsWith("[agy] .agents not restored"))).toHaveLength(1);
+      }
+    );
+  });
+
   test("implementer spawn leaves checkout .agents in cwd", async () => {
     const seen = 'if [ -e .agents ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
     await withFakeBins(

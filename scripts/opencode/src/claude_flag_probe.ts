@@ -38,10 +38,12 @@
  *     `stageClaudeCheckoutSkills` are both in the init event's skill list. The
  *     stub then has the model load the checkout skill, and neither checkout
  *     hook runs: not the `SessionStart` hook in `.claude/settings.json`, and not
- *     the `Stop` hook in the skill's own frontmatter. A skill's frontmatter
- *     hooks only run once the skill is loaded, and `SessionStart` is not one of
- *     the events the binary runs from there, so the control is a second run
- *     with the same skill unstaged, where that `Stop` hook must fire.
+ *     the `Stop` hook in the skill's own frontmatter. Nor does the inline
+ *     shell in the skill's body (`` !`cmd` `` and a ```! fence). A skill's
+ *     frontmatter hooks only run once the skill is loaded, and `SessionStart`
+ *     is not one of the events the binary runs from there, so the control is a
+ *     second run with the same skill unstaged, where that `Stop` hook and both
+ *     shell forms must fire.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -93,6 +95,12 @@ const PROBE_SETTINGS_HOOK_MARKER = "jumi-probe-checkout-settings-hook-ran";
 const PROBE_SKILL_HOOK_MARKER = "jumi-probe-checkout-skill-hook-ran";
 /** File the same frontmatter hook must create when the skill is not staged. */
 const PROBE_UNSTAGED_HOOK_MARKER = "jumi-probe-unstaged-skill-hook-ran";
+/** Files the inline shell in the checkout skill's body would create if it ran. */
+const PROBE_SKILL_SHELL_MARKER = "jumi-probe-checkout-skill-shell-ran";
+/** Files that same inline shell must create when the skill is not staged. */
+const PROBE_UNSTAGED_SHELL_MARKER = "jumi-probe-unstaged-skill-shell-ran";
+/** One file per inline shell form the binary runs from a skill body. */
+const PROBE_SHELL_FORMS = ["inline", "fence"] as const;
 
 /**
  * Production flags whose *value* the installed binary validates. Everything
@@ -301,15 +309,30 @@ export function judgeTracingPlugin(project: string, spans: readonly CapturedSpan
   return { name, ok: true, observed: `${mine.length} span(s) at ${wantPath}: ${mine.map((s) => s.name).join(", ")}` };
 }
 
+/** The inline shell forms whose marker file under `marker` exists. */
+async function shellFormsRan(marker: string): Promise<string[]> {
+  const ran: string[] = [];
+  for (const form of PROBE_SHELL_FORMS) if (await Bun.file(`${marker}-${form}`).exists()) ran.push(form);
+  return ran;
+}
+
+interface ProbeSkillCommands {
+  /** Created by the `Stop` hook in the frontmatter. */
+  readonly hookMarker: string;
+  /** Prefix of the files the two inline shell forms in the body create. */
+  readonly shellMarker: string;
+}
+
 /**
  * `Stop`, not `SessionStart`: the binary runs a loaded skill's frontmatter
  * `Stop` hook and never its `SessionStart` one.
  */
-function probeSkill(name: string, hookMarker?: string): string {
-  const hooks = hookMarker
-    ? `hooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: "touch ${hookMarker}"\n`
-    : "";
-  return `---\nname: ${name}\ndescription: Jumi claude flag probe skill\n${hooks}---\nProbe skill body.\n`;
+function probeSkill(name: string, commands?: ProbeSkillCommands): string {
+  const head = `---\nname: ${name}\ndescription: Jumi claude flag probe skill\n`;
+  if (!commands) return `${head}---\nProbe skill body.\n`;
+  const hooks = `hooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: "touch ${commands.hookMarker}"\n`;
+  const marker = commands.shellMarker;
+  return `${head}${hooks}---\nProbe skill body. !\`touch ${marker}-inline\`\n\n\`\`\`!\ntouch ${marker}-fence\n\`\`\`\n`;
 }
 
 interface SkillProbe {
@@ -319,21 +342,28 @@ interface SkillProbe {
   readonly skillMarker: string;
   /** Created by that same frontmatter hook in the unstaged copy. */
   readonly unstagedMarker: string;
+  /** Prefix of the files the checkout skill's inline shell creates. */
+  readonly skillShellMarker: string;
+  /** The same prefix for the unstaged copy. */
+  readonly unstagedShellMarker: string;
   /** The checkout skill as a plain plugin, frontmatter untouched. */
   readonly unstagedPlugin: string;
 }
 
 /**
- * A fleet skill in HOME, and a checkout that carries a skill *and* hooks: one
- * in `.claude/settings.json` and one in the skill's own frontmatter, each with
- * its own marker. Beside them, outside the checkout, the same skill as a plugin
- * `stageClaudeCheckoutSkills` never touched.
+ * A fleet skill in HOME, and a checkout that carries a skill *and* commands: a
+ * hook in `.claude/settings.json`, a hook in the skill's own frontmatter, and
+ * inline shell in the skill's body, each with its own marker. Beside them,
+ * outside the checkout, the same skill as a plugin `stageClaudeCheckoutSkills`
+ * never touched.
  */
 async function seedSkillProbe(home: string, workdir: string): Promise<SkillProbe> {
   const probe = {
     settingsMarker: join(home, PROBE_SETTINGS_HOOK_MARKER),
     skillMarker: join(home, PROBE_SKILL_HOOK_MARKER),
     unstagedMarker: join(home, PROBE_UNSTAGED_HOOK_MARKER),
+    skillShellMarker: join(home, PROBE_SKILL_SHELL_MARKER),
+    unstagedShellMarker: join(home, PROBE_UNSTAGED_SHELL_MARKER),
     unstagedPlugin: join(home, "unstaged-checkout-skills"),
   };
   await mkdir(join(home, ".claude", "skills", PROBE_FLEET_SKILL), { recursive: true });
@@ -341,7 +371,7 @@ async function seedSkillProbe(home: string, workdir: string): Promise<SkillProbe
   await mkdir(join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
   await writeFile(
     join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
-    probeSkill(PROBE_CHECKOUT_SKILL, probe.skillMarker)
+    probeSkill(PROBE_CHECKOUT_SKILL, { hookMarker: probe.skillMarker, shellMarker: probe.skillShellMarker })
   );
   await writeFile(
     join(workdir, ".claude", "settings.json"),
@@ -357,7 +387,7 @@ async function seedSkillProbe(home: string, workdir: string): Promise<SkillProbe
   await mkdir(join(probe.unstagedPlugin, "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
   await writeFile(
     join(probe.unstagedPlugin, "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
-    probeSkill(PROBE_CHECKOUT_SKILL, probe.unstagedMarker)
+    probeSkill(PROBE_CHECKOUT_SKILL, { hookMarker: probe.unstagedMarker, shellMarker: probe.unstagedShellMarker })
   );
   return probe;
 }
@@ -378,11 +408,13 @@ export interface CheckoutHooksRan {
   readonly settings: boolean;
   /** The `Stop` hook in the checkout skill's frontmatter. */
   readonly skill: boolean;
+  /** Inline shell forms in the checkout skill's body that ran. */
+  readonly shell: readonly string[];
 }
 
 /**
- * Both skill sources reach the model, the checkout skill loads, and neither of
- * the checkout's hooks runs. Judged on the production run.
+ * Both skill sources reach the model, the checkout skill loads, and none of
+ * the checkout's commands runs. Judged on the production run.
  */
 export function judgeSkills(run: RunResult, hooks: CheckoutHooksRan): CaseResult[] {
   const events = jsonLines(run.stdout);
@@ -416,28 +448,46 @@ export function judgeSkills(run: RunResult, hooks: CheckoutHooksRan): CaseResult
       ok: !hooks.skill,
       observed: hooks.skill ? `${PROBE_SKILL_HOOK_MARKER} was created` : "no hook marker",
     },
+    {
+      name: "the loaded checkout skill's inline shell does not run",
+      ok: hooks.shell.length === 0,
+      observed: hooks.shell.length > 0 ? `ran: ${hooks.shell.join(", ")}` : "no shell marker",
+    },
   ];
 }
 
 /**
- * The control for the frontmatter check above: the same skill, loaded from a
- * plugin whose `SKILL.md` was not re-fronted, runs its `Stop` hook. If this
- * binary stopped running that hook, "does not run" above proves nothing about
- * the staging.
+ * The control for the two checks above: the same skill, loaded from a plugin
+ * whose `SKILL.md` was not rewritten, runs its `Stop` hook and both inline
+ * shell forms. If this binary stopped running one of them, "does not run"
+ * above proves nothing about the staging. `shellRan` is the forms that ran.
  */
-export function judgeUnstagedSkillHook(run: RunResult, hookRan: boolean): CaseResult {
-  const name = "an unstaged skill's frontmatter hook does run (so staging it away means something)";
-  if (run.timedOut) return { name, ok: false, observed: `claude hung, killed after ${RUN_TIMEOUT_MS}ms` };
+export function judgeUnstagedSkill(run: RunResult, hookRan: boolean, shellRan: readonly string[]): CaseResult[] {
+  const hook = "an unstaged skill's frontmatter hook does run (so staging it away means something)";
+  const shell = "an unstaged skill's inline shell does run (so staging it away means something)";
+  const both = (observed: string) => [hook, shell].map((name) => ({ name, ok: false, observed }));
+  if (run.timedOut) return both(`claude hung, killed after ${RUN_TIMEOUT_MS}ms`);
   if (!checkoutSkillLoaded(jsonLines(run.stdout))) {
-    return { name, ok: false, observed: `the skill did not load (exit ${run.code}), so its hook had no chance to run` };
+    return both(`the skill did not load (exit ${run.code}), so its commands had no chance to run`);
   }
-  return {
-    name,
-    ok: hookRan,
-    observed: hookRan
-      ? `${PROBE_UNSTAGED_HOOK_MARKER} was created`
-      : "no hook marker — this binary no longer runs the frontmatter Stop hook the probe plants",
-  };
+  const missing = PROBE_SHELL_FORMS.filter((form) => !shellRan.includes(form));
+  return [
+    {
+      name: hook,
+      ok: hookRan,
+      observed: hookRan
+        ? `${PROBE_UNSTAGED_HOOK_MARKER} was created`
+        : "no hook marker — this binary no longer runs the frontmatter Stop hook the probe plants",
+    },
+    {
+      name: shell,
+      ok: missing.length === 0,
+      observed:
+        missing.length === 0
+          ? `ran: ${shellRan.join(", ")}`
+          : `this binary no longer runs the ${missing.join(" and ")} shell the probe plants`,
+    },
+  ];
 }
 
 export interface RunResult {
@@ -679,6 +729,7 @@ async function main(): Promise<number> {
       ...judgeSkills(production, {
         settings: await Bun.file(skillProbe.settingsMarker).exists(),
         skill: await Bun.file(skillProbe.skillMarker).exists(),
+        shell: await shellFormsRan(skillProbe.skillShellMarker),
       })
     );
     // Only the production run is traced; the effort and negative-control runs
@@ -688,7 +739,13 @@ async function main(): Promise<number> {
 
     const unstagedArgv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir }, skillProbe.unstagedPlugin);
     const unstaged = await runClaudeArgv(unstagedArgv, origin, home, workdir);
-    results.push(judgeUnstagedSkillHook(unstaged, await Bun.file(skillProbe.unstagedMarker).exists()));
+    results.push(
+      ...judgeUnstagedSkill(
+        unstaged,
+        await Bun.file(skillProbe.unstagedMarker).exists(),
+        await shellFormsRan(skillProbe.unstagedShellMarker)
+      )
+    );
     state.loadSkill = undefined;
 
     // Every other level an operator may have put in `JUMI_RUNNERS_FILE`.
