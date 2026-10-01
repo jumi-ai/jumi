@@ -108,6 +108,7 @@ export function buildCodexSpans(
   let turnModel = model;
   const turnText: string[] = [];
   let turnUsage: CodexTraceEvent["usage"];
+  let turnError: string | undefined;
 
   const flushTurn = (atMs: number, failed?: string) => {
     const output = clip(turnText.join("\n"));
@@ -138,6 +139,7 @@ export function buildCodexSpans(
     });
     turnText.length = 0;
     turnUsage = undefined;
+    turnError = undefined;
   };
 
   for (const event of events) {
@@ -146,6 +148,7 @@ export function buildCodexSpans(
       turnStart = event.atMs;
       turnText.length = 0;
       turnUsage = undefined;
+      turnError = undefined;
       continue;
     }
     if (event.type === "turn.completed") {
@@ -153,8 +156,14 @@ export function buildCodexSpans(
       flushTurn(event.atMs);
       continue;
     }
-    if (event.type === "turn.failed" || event.type === "error") {
-      flushTurn(event.atMs, event.error);
+    // An `error` can precede the `turn.failed` of the same turn. Only the
+    // latter ends the turn, so the former just supplies the status message.
+    if (event.type === "error") {
+      turnError = event.error ?? turnError;
+      continue;
+    }
+    if (event.type === "turn.failed") {
+      flushTurn(event.atMs, event.error ?? turnError ?? "turn failed");
       continue;
     }
     const item = event.item;

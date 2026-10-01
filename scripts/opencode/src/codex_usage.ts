@@ -1,9 +1,12 @@
 /**
  * Parent-side parser for `codex exec --json` (JSON Lines).
  *
- * `turn.completed` carries `usage`. Every completed turn is accumulated so a
- * parent kill still records tokens seen so far. Lines that are not JSONL are
- * kept as plain text. Missing or unparseable usage is skip, never a throw.
+ * `turn.completed` carries `usage`, which is the thread's running total, not
+ * this turn's delta. Each completed turn records only the growth since the
+ * previous total (the persisted one on a resumed thread), so a parent kill
+ * still records tokens seen so far and an extra turn does not re-add earlier
+ * ones. Lines that are not JSONL are kept as plain text. Missing or
+ * unparseable usage is skip, never a throw.
  */
 
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
@@ -29,8 +32,10 @@ export interface CodexTraceEvent {
   threadId?: string;
   error?: string;
   item?: CodexItem;
-  usage?: Record<TokenType, number>;
+  usage?: CodexTokens;
 }
+
+export type CodexTokens = Record<TokenType, number>;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -40,11 +45,11 @@ function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-function emptyTokens(): Record<TokenType, number> {
-  return Object.fromEntries(TOKEN_TYPES.map((tokenType) => [tokenType, 0])) as Record<TokenType, number>;
+function emptyTokens(): CodexTokens {
+  return Object.fromEntries(TOKEN_TYPES.map((tokenType) => [tokenType, 0])) as CodexTokens;
 }
 
-function addTokens(usage: ModelTokenUsage, model: string, tokens: Record<TokenType, number>): void {
+function addTokens(usage: ModelTokenUsage, model: string, tokens: CodexTokens): void {
   const current = usage.get(model) ?? emptyTokens();
   for (const tokenType of TOKEN_TYPES) current[tokenType] += tokens[tokenType];
   usage.set(model, current);
@@ -54,16 +59,33 @@ function modelLabel(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function usageFrom(value: unknown): Record<TokenType, number> | undefined {
+/** Codex `input_tokens` includes the cached ones; the `input` bucket does not. */
+function usageFrom(value: unknown): CodexTokens | undefined {
   if (!isObject(value)) return undefined;
-  const tokens: Record<TokenType, number> = {
-    input: count(value.input_tokens),
+  const tokens: CodexTokens = {
+    input: Math.max(0, count(value.input_tokens) - count(value.cached_input_tokens)),
     cached_input: count(value.cached_input_tokens),
     output: count(value.output_tokens),
     cache_write: 0,
     reasoning: count(value.reasoning_output_tokens),
   };
   if (TOKEN_TYPES.every((tokenType) => tokens[tokenType] === 0)) return undefined;
+  return tokens;
+}
+
+/** Growth from `previous` to `total`. A total that went backwards is a fresh count. */
+function tokensSince(total: CodexTokens, previous: CodexTokens | undefined): CodexTokens {
+  if (!previous || TOKEN_TYPES.some((tokenType) => total[tokenType] < previous[tokenType])) return { ...total };
+  const delta = emptyTokens();
+  for (const tokenType of TOKEN_TYPES) delta[tokenType] = total[tokenType] - previous[tokenType];
+  return delta;
+}
+
+/** A persisted thread total, or undefined when it is not one. */
+export function codexTokensFrom(value: unknown): CodexTokens | undefined {
+  if (!isObject(value)) return undefined;
+  const tokens = emptyTokens();
+  for (const tokenType of TOKEN_TYPES) tokens[tokenType] = count(value[tokenType]);
   return tokens;
 }
 
@@ -100,6 +122,12 @@ export class CodexStreamParser {
   private sawUsage = false;
   private threadId: string | undefined;
   private seenModel: string | undefined;
+  private lastTotal: CodexTokens | undefined;
+
+  /** `resumedTotal` is the total the resumed thread had already reached. */
+  constructor(resumedTotal?: CodexTokens) {
+    this.lastTotal = resumedTotal;
+  }
 
   push(chunk: Uint8Array): void {
     this.buffer += this.decoder.decode(chunk, { stream: true });
@@ -132,6 +160,11 @@ export class CodexStreamParser {
 
   modelSeen(): string | undefined {
     return this.seenModel;
+  }
+
+  /** Latest thread total seen in this run, for the next resume. */
+  threadTotal(): CodexTokens | undefined {
+    return this.sawUsage ? this.lastTotal : undefined;
   }
 
   traceEvents(): readonly CodexTraceEvent[] {
@@ -197,8 +230,10 @@ export class CodexStreamParser {
     }
 
     if (event.type === "turn.completed") {
-      const tokens = usageFrom(event.usage);
-      if (tokens) {
+      const total = usageFrom(event.usage);
+      if (total) {
+        const tokens = tokensSince(total, this.lastTotal);
+        this.lastTotal = total;
         this.sawUsage = true;
         addTokens(this.usageByModel, model || this.seenModel || "", tokens);
         trace.usage = tokens;

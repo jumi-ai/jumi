@@ -11,6 +11,7 @@ export const OPENCODE_SESSION_DB = "opencode-session.db";
 export const AGY_CONVERSATION_FILE = "agy-conversation-id";
 /** Thread id of the last `codex` child in this worktree; resumed only by the same runner. */
 export const CODEX_THREAD_FILE = "codex-thread-id";
+export const CODEX_THREAD_USAGE_FILE = "codex-thread-usage";
 
 const PROVIDER_UNAVAILABLE_RE =
   /rate[\s_-]*limit|too many requests|resource[_\s-]*exhausted|out of quota|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:502|503|504)\b|bad gateway|gateway timeout|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model/i;
@@ -69,6 +70,10 @@ export function codexThreadPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", CODEX_THREAD_FILE);
 }
 
+export function codexThreadUsagePath(workdir: string): string {
+  return join(workdir, ".jumi-tmp", CODEX_THREAD_USAGE_FILE);
+}
+
 async function pathIsFile(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isFile();
@@ -89,6 +94,7 @@ export async function clearOpenCodeSession(workdir: string): Promise<void> {
   await rm(openCodeSessionDbPath(workdir), { force: true });
   await rm(agyConversationPath(workdir), { force: true });
   await rm(codexThreadPath(workdir), { force: true });
+  await rm(codexThreadUsagePath(workdir), { force: true });
   await rm(openCodeLogDirPath(workdir), { recursive: true, force: true });
 }
 

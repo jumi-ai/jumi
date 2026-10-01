@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
 import { exportCodexTrace } from "./codex_tracing.ts";
-import { CodexStreamParser } from "./codex_usage.ts";
+import { CodexStreamParser, type CodexTokens, codexTokensFrom } from "./codex_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import {
   type Engine,
@@ -13,7 +13,7 @@ import {
   redactEngineText,
 } from "./engine.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
-import { codexThreadPath, looksLikeProviderUnavailable } from "./fallback.ts";
+import { codexThreadPath, codexThreadUsagePath, looksLikeProviderUnavailable } from "./fallback.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
@@ -173,6 +173,18 @@ async function readThreadId(workdir: string): Promise<string | undefined> {
   }
 }
 
+/** The total `threadId` had reached when its last run ended, if one was saved. */
+async function readThreadTotal(workdir: string, threadId: string): Promise<CodexTokens | undefined> {
+  try {
+    const saved: unknown = JSON.parse(await readFile(codexThreadUsagePath(workdir), "utf8"));
+    if (typeof saved !== "object" || saved === null) return undefined;
+    const { threadId: savedThread, tokens } = saved as { threadId?: unknown; tokens?: unknown };
+    return savedThread === threadId ? codexTokensFrom(tokens) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function reviewArtifactMissing(workdir: string): Promise<boolean> {
   const path = join(workdir, REVIEW_ARTIFACT);
   try {
@@ -260,7 +272,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
           }, opts.timeoutMs)
         : undefined;
 
-    const parser = new CodexStreamParser();
+    const parser = new CodexStreamParser(threadId ? await readThreadTotal(opts.workdir, threadId) : undefined);
     let stderrResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
     let exitCode: number | null = null;
     let runError: unknown;
@@ -282,6 +294,12 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     await exportCodexTrace(parser.traceEvents(), opts.trace, model);
     const newThread = parser.threadIdValue();
     if (newThread) await writeFile(codexThreadPath(opts.workdir), `${newThread}\n`).catch(() => {});
+    const threadTotal = parser.threadTotal();
+    const usageThread = newThread ?? threadId;
+    if (threadTotal && usageThread) {
+      const saved = JSON.stringify({ threadId: usageThread, tokens: threadTotal });
+      await writeFile(codexThreadUsagePath(opts.workdir), `${saved}\n`).catch(() => {});
+    }
 
     const stdoutResult = limitText(parser.text(), "codex output", opts.maxOutputBytes);
     const stdout = redactEngineText(redactApiKeys(stripAnsi(stdoutResult.text).trim()), opts);
@@ -291,9 +309,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     const durationMs = Date.now() - startedAtMs;
     const quota = !timedOut ? looksLikeCodexUsageLimit(signal) : undefined;
     const auth = !quota && !timedOut && exitCode !== 143 && looksLikeCodexAuthDeath(signal);
-    const fiveXx = /\b5\d\d\b|internal server error/i.test(signal);
-    const providerDown =
-      !quota && !auth && !timedOut && exitCode !== 143 && (looksLikeProviderUnavailable(signal) || fiveXx);
+    const providerDown = !quota && !auth && !timedOut && exitCode !== 143 && looksLikeProviderUnavailable(signal);
 
     if (opts.abortSignal?.aborted) throw cancelled();
 
@@ -363,8 +379,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (stderr) log(`[codex stderr] ${stderr}`);
-    const providerMessage = looksLikeProviderUnavailable(signal) ? signal : `provider error: ${signal}`;
-    const message = providerDown ? providerMessage || combined : engineExitMessage(exitCode, combined);
+    const message = providerDown ? signal : engineExitMessage(exitCode, combined);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,

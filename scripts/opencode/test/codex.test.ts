@@ -3,6 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CODEX_APPROVAL, CODEX_SANDBOX, codexArgv, REVIEW_ARTIFACT, runCodex } from "../src/codex.ts";
+import { buildCodexSpans } from "../src/codex_tracing.ts";
 import { CodexStreamParser } from "../src/codex_usage.ts";
 import { resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
@@ -156,7 +157,7 @@ describe("codexArgv", () => {
 });
 
 describe("CodexStreamParser", () => {
-  test("accumulates every completed turn and ignores unparseable lines", () => {
+  test("treats usage as the running thread total and ignores unparseable lines", () => {
     const parser = new CodexStreamParser();
     parser.push(
       new TextEncoder().encode(
@@ -165,19 +166,51 @@ describe("CodexStreamParser", () => {
     );
     parser.push(
       new TextEncoder().encode(
-        `${turn({ input_tokens: 3, cached_input_tokens: 1, output_tokens: 5, reasoning_output_tokens: 7 }, "gpt-6-sol")}`
+        `${turn({ input_tokens: 13, cached_input_tokens: 5, output_tokens: 7, reasoning_output_tokens: 8 }, "gpt-6-sol")}`
       )
     );
     parser.end();
-    const usage = parser.usage("fallback");
-    expect(usage?.get("gpt-6-sol")).toEqual({
-      input: 13,
-      cached_input: 5,
-      output: 7,
-      cache_write: 0,
-      reasoning: 8,
-    });
+    // `input_tokens` includes the cached ones, so `input` is 13 - 5.
+    const total = { input: 8, cached_input: 5, output: 7, cache_write: 0, reasoning: 8 };
+    expect(parser.usage("fallback")?.get("gpt-6-sol")).toEqual(total);
+    expect(parser.threadTotal()).toEqual(total);
     expect(parser.text()).toBe("not-json");
+  });
+
+  test("a resumed thread records only growth past its saved total", () => {
+    const line = turn({ input_tokens: 13, cached_input_tokens: 5, output_tokens: 7 }, "gpt-6-sol");
+    const resumed = new CodexStreamParser({ input: 6, cached_input: 4, output: 2, cache_write: 0, reasoning: 0 });
+    resumed.push(new TextEncoder().encode(line));
+    resumed.end();
+    expect(resumed.usage("fallback")?.get("gpt-6-sol")).toEqual({
+      input: 2,
+      cached_input: 1,
+      output: 5,
+      cache_write: 0,
+      reasoning: 0,
+    });
+    // A total below the saved one means the thread did not restore it.
+    const reset = new CodexStreamParser({ input: 60, cached_input: 4, output: 2, cache_write: 0, reasoning: 0 });
+    reset.push(new TextEncoder().encode(line));
+    reset.end();
+    expect(reset.usage("fallback")?.get("gpt-6-sol")?.input).toBe(8);
+  });
+});
+
+describe("buildCodexSpans", () => {
+  test("a failed turn is one LLM span carrying the error text", () => {
+    const parser = new CodexStreamParser();
+    parser.push(
+      new TextEncoder().encode(
+        `${JSON.stringify({ type: "turn.started" })}\n${JSON.stringify({ type: "error", message: "stream died" })}\n${JSON.stringify({ type: "turn.failed", error: { message: "stream died" } })}\n`
+      )
+    );
+    parser.end();
+    const llm = buildCodexSpans(parser.traceEvents(), undefined, "gpt-6-sol").filter(
+      (span) => span.attributes["openinference.span.kind"] === "LLM"
+    );
+    expect(llm).toHaveLength(1);
+    expect(llm[0]?.statusMessage).toBe("stream died");
   });
 });
 
@@ -368,7 +401,7 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
         codex: fakeBin(
           "codex",
           `printf '%s\\n' '${turn({ input_tokens: 11, cached_input_tokens: 2, output_tokens: 3, reasoning_output_tokens: 4 }, "gpt-6-sol")}'
-printf '%s\\n' '${turn({ input_tokens: 5, output_tokens: 6, reasoning_output_tokens: 1 }, "gpt-6-sol")}'
+printf '%s\\n' '${turn({ input_tokens: 16, cached_input_tokens: 2, output_tokens: 9, reasoning_output_tokens: 5 }, "gpt-6-sol")}'
 exec sleep 30`
         ),
       },
@@ -385,7 +418,7 @@ exec sleep 30`
         });
         expect(result.status).toBe("timeout");
         const text = renderTokenMetrics();
-        expect(text).toContain(tokenLine("gpt-6-sol", "input", 16));
+        expect(text).toContain(tokenLine("gpt-6-sol", "input", 14));
         expect(text).toContain(tokenLine("gpt-6-sol", "cached_input", 2));
         expect(text).toContain(tokenLine("gpt-6-sol", "output", 9));
         expect(text).toContain(tokenLine("gpt-6-sol", "reasoning", 5));
@@ -436,6 +469,37 @@ exec sleep 30`
         expect(lines[1]).toContain("resume thread-9");
         expect(lines[1]).not.toContain("--last");
         expect(await readFile(codexThreadPath(workdir), "utf8")).toContain("thread-9");
+      }
+    );
+  });
+
+  test("an extra turn does not re-add the resumed thread's earlier tokens", async () => {
+    await withFakeBins(
+      {
+        codex: fakeBin(
+          "codex",
+          `printf '%s\\n' '${THREAD}'
+case "$*" in
+  *resume*) printf '%s\\n' '${turn({ input_tokens: 30, output_tokens: 7 }, "gpt-6-sol")}' ;;
+  *) printf '%s\\n' '${turn({ input_tokens: 10, output_tokens: 3 }, "gpt-6-sol")}' ;;
+esac`
+        ),
+      },
+      async ({ workdir, home, argsLog }) => {
+        const base = {
+          type: "codex" as const,
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        };
+        expect((await runCodex(base)).status).toBe("ok");
+        expect((await runCodex({ ...base, continueSession: true })).status).toBe("ok");
+        const text = renderTokenMetrics();
+        expect(text).toContain(tokenLine("gpt-6-sol", "input", 30));
+        expect(text).toContain(tokenLine("gpt-6-sol", "output", 7));
       }
     );
   });
@@ -555,6 +619,29 @@ describe("codex dispatch and chain", () => {
         });
         expect(result.status).toBe("ok");
         expect(result.runner).toEqual(runnerStamp(claude));
+      }
+    );
+  });
+
+  test("a stray 5xx-looking number on a failed run does not hop", async () => {
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf 'wrote 512 bytes, failed at line 530\\n' >&2\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.runner?.type).toBe("codex");
+        expect((await argLines(argsLog)).map((line) => line.split(" ")[0])).toEqual(["codex"]);
       }
     );
   });
