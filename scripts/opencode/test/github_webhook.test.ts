@@ -27,6 +27,7 @@ import {
   makeUser,
   makeWorkerConfig,
   makeWorkflowJobPayload,
+  pushApi,
   responseJson,
   signBody,
 } from "./fixtures.ts";
@@ -215,6 +216,7 @@ describe("POST /webhooks/github", () => {
         }),
       ],
       getRepo: async () => githubRepo,
+      getCollaboratorPermission: async () => ({ permission: "write" }),
     };
     return {
       store,
@@ -301,6 +303,7 @@ describe("POST /webhooks/github", () => {
       queue,
       worker: {
         queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api: pushApi(),
       },
     });
     const response = await withReview(await signedGithubRequest(labeledForeignPrPayload(), { event: "pull_request" }));
@@ -724,6 +727,119 @@ describe("POST /webhooks/github", () => {
     expect(store.rows[0]?.kind).toBe("follow-up");
   });
 
+  describe("sender push gate", () => {
+    const fetched = makePR({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      user: makeUser({ login: "kirmanak-jumi[bot]" }),
+      html_url: "https://github.com/kirmanak/demo/pull/127",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+
+    function gated(store: MemoryReviewJobStore) {
+      return createFetchHandler(githubConfig(), {
+        queue: store,
+        worker: {
+          queue: { enqueue: (job) => store.enqueueIssue(job) },
+          api: {
+            listOpenPulls: async () => [],
+            getIssue: async () => githubIssue(),
+            getPR: async () => fetched,
+            // GitHub reports no collaborator permission for Apps, and none for outsiders.
+            getCollaboratorPermission: async () => ({ permission: "none" }),
+            getAppPermissions: async (slug): Promise<Record<string, string>> =>
+              slug === "filer" ? { contents: "write", issues: "write" } : {},
+          },
+        },
+      });
+    }
+
+    function commentBy(login: string, type: string) {
+      return {
+        action: "created",
+        comment: makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login }) }),
+        issue: githubIssue({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          html_url: "https://github.com/kirmanak/demo/pull/127",
+          user: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }),
+          assignee: null,
+          assignees: [],
+          labels: [],
+          pull_request: {
+            url: "https://api.github.com/repos/kirmanak/demo/pulls/127",
+            html_url: "https://github.com/kirmanak/demo/pull/127",
+          },
+        }),
+        repository: githubRepo,
+        sender: makeUser({ login, type }),
+      };
+    }
+
+    test("a comment from someone who cannot push does not wake work", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(commentBy("mallory", "User"), { event: "issue_comment" })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(store.rows).toHaveLength(0);
+    });
+
+    test("a comment from an App that can push wakes work", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(commentBy("filer[bot]", "Bot"), { event: "issue_comment" })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+    });
+
+    test("an issue labeled by someone who cannot push is not a job", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "mallory", type: "User" }) }), {
+          event: "issues",
+        })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(store.rows).toHaveLength(0);
+    });
+
+    test("an issue labeled by an App that can push is a job", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    });
+
+    test("an App that can push still needs today's pickup: another label stays out", async () => {
+      const store = new MemoryReviewJobStore();
+      const response = await gated(store)(
+        await signedGithubRequest(
+          labeledPayload({ label: { name: "bug" }, sender: makeUser({ login: "filer[bot]", type: "Bot" }) }),
+          { event: "issues" }
+        )
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ skipped: "labeled other label" });
+      expect(store.rows).toHaveLength(0);
+    });
+  });
+
   test("GitHub issue_comment PR lookup failure is 503", async () => {
     const handler = createFetchHandler(githubConfig(), {
       queue: makeReviewQueue(),
@@ -1046,7 +1162,10 @@ describe("POST /webhooks/github", () => {
 describe("worker POST /webhooks/github", () => {
   test("labeled issue enqueues implement; ping is 200; bad hmac is 401", async () => {
     const queue = makeIssueQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), {
+      queue,
+      api: pushApi(),
+    });
     const labeled = await handler(
       await signedGithubRequest(labeledPayload(), { event: "issues", url: "https://worker.test/webhooks/github" })
     );
@@ -1074,7 +1193,10 @@ describe("worker POST /webhooks/github", () => {
 
   test("labeled foreign PR enqueues follow-up on the worker mailbox", async () => {
     const queue = makeIssueQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), { queue });
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ githubWebhookSecret: "webhook-secret" }), {
+      queue,
+      api: pushApi(),
+    });
     const response = await handler(
       await signedGithubRequest(
         makePayload({

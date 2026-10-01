@@ -379,3 +379,13 @@ export function stripGitConfigArgs(args: string[]): string[] {
   while (result[0] === "-c") result.splice(0, 2);
   return result;
 }
+
+/** Worker webhook API whose permission lookup says every sender can push. */
+export function pushApi<T extends object>(overrides?: T) {
+  return {
+    listOpenPulls: async () => [],
+    getIssue: async () => makeIssue(),
+    getCollaboratorPermission: async () => ({ permission: "write" }),
+    ...overrides,
+  };
+}

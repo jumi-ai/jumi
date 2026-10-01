@@ -8,6 +8,7 @@ import {
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
+  requireSenderPush,
   shouldEnqueueIssueCommentFollowUpWithTrust,
   shouldEnqueuePullLabel,
   shouldEnqueuePullRejectedFollowUpWithTrust,
@@ -467,7 +468,11 @@ export async function handleGithubWebhookEvent(
     if (deps.worker && (action === "labeled" || action === "unlabeled")) {
       try {
         const payload = parsePullRequestPayload(rawBody);
-        const decision = await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger);
+        const decision = await requireSenderPush(
+          await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger),
+          deps.worker.api,
+          payload.sender?.login
+        );
         if (decision.type === "skip") {
           const [owner, repo] = payload.repository.full_name.split("/");
           if (owner && repo) {
@@ -677,7 +682,12 @@ export async function handleGithubWebhookEvent(
     if (event !== "issues") return skipped(`unsupported event ${event ?? "unknown"}`, logger);
 
     const payload = parseIssuesPayload(rawBody);
-    const decision = shouldEnqueueGithubIssue(payload, policy);
+    // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
+    const decision = await requireSenderPush(
+      shouldEnqueueGithubIssue(payload, policy),
+      deps.worker.api,
+      payload.sender?.login
+    );
 
     if (decision.type === "cancel") {
       const result = deps.worker.cancel
