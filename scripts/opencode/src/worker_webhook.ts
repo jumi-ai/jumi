@@ -544,7 +544,12 @@ export async function handleWorkerWebhookEvent(
 
     const payload = parseIssuesPayload(rawBody);
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
-    const decision = await requireSenderPush(shouldEnqueueIssue(payload, policy), deps.api, payload.sender?.login, repositoryPushHint(payload.repository));
+    const decision = await requireSenderPush(
+      shouldEnqueueIssue(payload, policy),
+      deps.api,
+      payload.sender?.login,
+      repositoryPushHint(payload.repository)
+    );
 
     if (decision.type === "cancel") {
       const result = deps.cancel

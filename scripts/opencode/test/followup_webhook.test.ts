@@ -1194,7 +1194,13 @@ describe("follow-up write gating", () => {
     const payload = makeIssueCommentPayload({
       repository: makeRepo({ permissions: { push: true, pull: true, admin: false } }),
     });
-    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(payload, policy, "issue_comment", undefined, noneApi);
+    const decision = await shouldEnqueueIssueCommentFollowUpWithTrust(
+      payload,
+      policy,
+      "issue_comment",
+      undefined,
+      noneApi
+    );
     expect(decision.type).toBe("enqueue");
   });
 

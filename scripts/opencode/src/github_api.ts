@@ -712,7 +712,9 @@ export class GithubAPI {
     const info = await this.get<{
       permission: string;
       role_name?: string;
-      user?: { permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean } };
+      user?: {
+        permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean };
+      };
     }>(`/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`);
     return {
       permission: info.permission,
@@ -726,7 +728,10 @@ export class GithubAPI {
    * `permissions.contents == "write"` is push. Used only for `[bot]` senders,
    * after the webhook event itself proved an App acts on this repository.
    */
-  async getRepoInstallation(owner: string, repo: string): Promise<{ permissions?: Record<string, string> } | undefined> {
+  async getRepoInstallation(
+    owner: string,
+    repo: string
+  ): Promise<{ permissions?: Record<string, string> } | undefined> {
     const installation = await this.get<{ permissions?: Record<string, string> }>(
       `/repos/${this.repoPath(owner, repo)}/installation`
     );

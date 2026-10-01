@@ -113,7 +113,10 @@ describe("canPush", () => {
     };
     expect(
       await canPush(
-        { getCollaboratorPermission: notAUser, getRepoInstallation: async () => ({ permissions: { contents: "write" } }) },
+        {
+          getCollaboratorPermission: notAUser,
+          getRepoInstallation: async () => ({ permissions: { contents: "write" } }),
+        },
         "o",
         "r",
         "renovate[bot]"

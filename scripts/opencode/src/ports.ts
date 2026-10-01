@@ -290,8 +290,8 @@ export type IssueApi = Tracker &
     | "listCheckRuns"
     | "listActionJobs"
     | "getActionJobLogs"
-  | "getCollaboratorPermission"
-  | "getRepoInstallation"
+    | "getCollaboratorPermission"
+    | "getRepoInstallation"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {

@@ -328,7 +328,9 @@ export class GiteaAPI {
     const info = await this.get<{
       permission: string;
       role_name?: string;
-      user?: { permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean } };
+      user?: {
+        permissions?: { pull?: boolean; triage?: boolean; push?: boolean; maintain?: boolean; admin?: boolean };
+      };
     }>(`/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`);
     return {
       permission: info.permission,
