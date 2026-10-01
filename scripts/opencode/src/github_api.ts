@@ -179,6 +179,7 @@ type GithubWorkflowRun = {
 type ReviewThreadNode = {
   id?: string;
   isResolved?: boolean;
+  resolvedBy?: { login?: string } | null;
   comments?: { nodes?: { databaseId?: number }[] };
 };
 
@@ -434,7 +435,7 @@ export function toPullReview(review: GithubReview): PullReview {
   };
 }
 
-export function toInlineComment(comment: GithubReviewComment, resolved = false): InlineComment {
+export function toInlineComment(comment: GithubReviewComment, resolved = false, resolver?: string): InlineComment {
   return {
     ...toComment(comment),
     path: comment.path,
@@ -443,6 +444,7 @@ export function toInlineComment(comment: GithubReviewComment, resolved = false):
     pull_request_review_id: comment.pull_request_review_id,
     html_url: comment.html_url,
     resolved,
+    ...(resolved && resolver ? { resolver: { login: resolver } } : {}),
   };
 }
 
@@ -870,14 +872,15 @@ export class GithubAPI {
       `/repos/${this.repoPath(owner, repo)}/pulls/${index}/comments`
     );
     if (comments.length === 0) return [];
-    const resolvedIds = new Set<number>();
+    // Resolved comment id → who resolved the thread ("" when GitHub does not say).
+    const resolvedBy = new Map<number, string>();
     for (const thread of await this.listReviewThreads(owner, repo, index)) {
       if (thread.isResolved !== true) continue;
       for (const node of thread.comments?.nodes ?? []) {
-        if (typeof node.databaseId === "number") resolvedIds.add(node.databaseId);
+        if (typeof node.databaseId === "number") resolvedBy.set(node.databaseId, thread.resolvedBy?.login ?? "");
       }
     }
-    return comments.map((comment) => toInlineComment(comment, resolvedIds.has(comment.id)));
+    return comments.map((comment) => toInlineComment(comment, resolvedBy.has(comment.id), resolvedBy.get(comment.id)));
   }
 
   async listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]> {
@@ -1082,6 +1085,7 @@ export class GithubAPI {
                 nodes {
                   id
                   isResolved
+                  resolvedBy { login }
                   comments(first: 100) { nodes { databaseId } }
                 }
               }
