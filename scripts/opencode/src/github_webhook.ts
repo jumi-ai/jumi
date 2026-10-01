@@ -182,11 +182,12 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
 /**
  * Push hint for a GitHub App sender. GitHub reports no collaborator
  * permission for an App, and the factory cannot read another App's
- * installation. The signed payload does carry the App's record on what it
- * created (`performed_via_github_app` on an issue or comment), with the
- * permissions the App holds: `contents: write` is push. It counts only when
- * that App is the sender (`<slug>[bot]`), so an App acting on someone else's
- * issue, and any login without such a record, stays on the collaborator lookup.
+ * installation. The signed payload does carry the App's record on a comment
+ * it created (`performed_via_github_app`), with the permissions the App
+ * holds: `contents: write` is push. It counts only when that App is the
+ * sender (`<slug>[bot]`), so any login without such a record stays on the
+ * collaborator lookup. An issue an App filed carries `null` there, so issue
+ * events have no such hint.
  */
 export function githubAppSenderPushHint(
   senderLogin: string | undefined,
@@ -708,11 +709,11 @@ export async function handleGithubWebhookEvent(
 
     const payload = parseIssuesPayload(rawBody);
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
+    // No App hint here: GitHub sends `performed_via_github_app: null` on an issue an App filed.
     const decision = await requireSenderPush(
       shouldEnqueueGithubIssue(payload, policy),
       deps.worker.api,
-      payload.sender?.login,
-      githubAppSenderPushHint(payload.sender?.login, payload.issue.performed_via_github_app)
+      payload.sender?.login
     );
 
     if (decision.type === "cancel") {

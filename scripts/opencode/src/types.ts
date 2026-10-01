@@ -33,7 +33,7 @@ export interface GiteaRepo {
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────
 
-/** GitHub only: the App that created an issue or comment, with the permissions that App holds. */
+/** GitHub only: the App that created a comment, with the permissions that App holds. */
 export interface GithubAppRef {
   slug?: string;
   permissions?: Record<string, string>;
@@ -196,7 +196,6 @@ export interface GiteaIssue {
   created_at: string;
   /** Webhook payloads embed a full repo; REST issue search only sends RepositoryMeta. */
   repository?: GiteaRepo | GiteaRepositoryMeta;
-  performed_via_github_app?: GithubAppRef | null;
 }
 
 export interface GiteaRepositoryMeta {
