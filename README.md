@@ -129,9 +129,9 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `MAX_JOB_ATTEMPTS` | `2` | Reclaim requeues until this many attempts, then fails the job. SIGTERM/SIGINT on a reviewing engine or implementing worker aborts OpenCode and requeues the same job without consuming an attempt. Crash/OOM still uses reclaim. OpenCode spawn/auth/filesystem failures that never reach the model requeue with backoff without consuming an attempt; a per-process circuit breaker stops leasing after consecutive infra failures. Zen/Free quota on implement/follow-up/conflict (no different-provider fallback) requeues with a 1h–24h not-before and a 30h wall-clock budget, then `stuck: usage limit exceeded`. That wait is not infra’s 8-try/20min budget or circuit breaker |
 | `MAX_INCOMPLETE_RETRIES` | `2` | Extra write-only OpenCode runs when a review exits 0 with no `JUMI_REVIEW.md`, then public stuck. Same session when possible. Unset is 2. Does not enqueue worker follow-up |
 | `BOARD_PEER_URL` | unset | Internal URL of the other factory's board listener. Homelab only. Unset disables the hop. See [Operator board](#operator-board) |
-| `BOARD_PEER_TOKEN` | unset | Bearer for that hop. Unset means that forge is unavailable |
+| `BOARD_PEER_TOKEN` | unset | Bearer for that hop. Set the same value on both routers: the homelab router sends it, the `FORGE=github` router accepts it. Unset on either side means that forge is unavailable |
 
-`deploy/contract.md` lists the GitOps keys. `JUMI_SECRETS_FILE` is not one of them: the image entrypoint writes it. See [Security Model](#security-model).
+`deploy/contract.md` lists the GitOps keys. `JUMI_SECRETS_FILE` appears there only because the loaders read it: the image entrypoint writes it, GitOps does not set it. See [Security Model](#security-model).
 
 ## Review
 
@@ -152,7 +152,7 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 ### Repo review notes (`REVIEW.md`)
 
-A reviewed repository may commit `REVIEW.md` at its root. The reviewer treats that file as extra pitfalls, not as orders. A line that tells it to approve the pull request, skip findings, or override the review rubric is ignored. It is not `JUMI_REVIEW.md`: that file is the per-run artifact the parent posts and then removes. Do not put forge tokens or deploy hostnames in `REVIEW.md`.
+A reviewed repository may commit `REVIEW.md` at its root. The reviewer treats the pasted sections as that repository's review rules and reports each violation as a finding. It is not `JUMI_REVIEW.md`: that file is the per-run artifact the parent posts and then removes. Do not put forge tokens or deploy hostnames in `REVIEW.md`.
 
 ## Worker jobs
 
@@ -226,11 +226,13 @@ A `type: claude` child leaves no session DB for that exporter, so its spans come
 The router (not the engine, not the worker) serves an operator board on port `3001`. The webhook listener never serves these paths. Reach it through the auth proxy in front of that port. A direct-to-pod route lets a caller self-assert identity headers. The webhook secret is not board auth.
 
 - `GET /` and `GET /board` are the page. `GET /api/board` is the same data as JSON.
-- `POST /api/board/kick` is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, or queue an implement again after a no-changes latch. It does not push, does not create an empty commit, and does not rerun CI.
+- `POST /api/board/kick` (alias `POST /board/kick`) is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, or queue an implement again after a no-changes latch. It does not push, does not create an empty commit, and does not rerun CI.
 
 In-progress rows come from the job ledger. Sitting rows come from persisted refusals. The router stays a single replica.
 
-On the homelab forge (`FORGE` unset, empty, or `gitea`) the page can include the other factory. Set `BOARD_PEER_URL` to that factory's board listener and `BOARD_PEER_TOKEN` to the bearer. The hop is one-way and server-side. Unset URL disables it. Unset token means that forge is unavailable. The peer listener is internal-only (no public ingress) and trusts the bearer, not a forwarded identity header. The GitHub factory does not call back.
+On the `FORGE=github` router the same listener has no page and no edge identity. `GET /`, `GET /board`, and `GET /api/board` all return the JSON, and those paths plus the kick paths authenticate with the `BOARD_PEER_TOKEN` bearer. With the token unset every request is `401`.
+
+On the homelab forge (`FORGE` unset, empty, or `gitea`) the page can include the other factory. Set `BOARD_PEER_URL` on the homelab router to that factory's board listener, and set `BOARD_PEER_TOKEN` to the same value on both routers. The hop is one-way and server-side. Unset URL disables it. A token unset on either router means that forge is unavailable. The peer listener is internal-only (no public ingress) and trusts the bearer, not a forwarded identity header. The GitHub factory does not call back.
 
 ## Image
 
