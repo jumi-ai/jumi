@@ -1586,12 +1586,18 @@ describe("reviewPullRequest", () => {
     });
   });
 
-  test("parent-injects the gitops-apply-review pack for Helm/values PRs and posts a Jumi review heading", async () => {
+  test("parent-injects a matching REVIEW.md path section from the head and posts a Jumi review heading", async () => {
     await withWorkspace(async (workspace) => {
       let prompt = "";
       let sticky = "";
       await reviewPullRequest({
         ...reviewOptions(workspace),
+        workspacePreparer: async (opts) => {
+          await writeFile(
+            join(opts.workdir, "REVIEW.md"),
+            "## Security\n\nNever log tokens.\n\n## k3s/**, **/values.yaml\n\nBump checksum/config when a ConfigMap changes.\n\n## *.ts\n\nPrefer Bun APIs.\n"
+          );
+        },
         api: makeApi({
           getPRFiles: async () => [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
           createIssueComment: async (_owner, _repo, _index, body) => {
@@ -1611,15 +1617,66 @@ describe("reviewPullRequest", () => {
       });
 
       expect(prompt).toContain("You are Jumi's reviewer");
-      expect(prompt).toContain("Use the gitops-apply-review pack below");
-      expect(prompt).toContain("Checksum / rollout");
-      expect(prompt).toContain("House misses");
-      expect(prompt).not.toContain("You are OpenCode");
-      expect(prompt).not.toContain("integrated into a Gitea");
+      expect(prompt).toContain('<review_md path="REVIEW.md" truncated="false">');
+      expect(prompt).toContain("Bump checksum/config when a ConfigMap changes.");
+      expect(prompt).toContain("Never log tokens.");
+      expect(prompt).not.toContain("Prefer Bun APIs.");
+      expect(prompt).not.toContain("gitops-apply-review");
+      expect(prompt).not.toContain("Checksum / rollout");
+      expect(prompt).not.toContain("House misses");
       expect(prompt).not.toContain("skill tool");
-      expect(prompt).not.toContain("Load the `gitops-apply-review` skill now");
       expect(sticky).toContain("### Jumi review");
       expect(sticky).not.toContain("### Jumi OpenCode review");
+    });
+  });
+
+  test("leaves out a REVIEW.md path section no changed file matches", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        workspacePreparer: async (opts) => {
+          await writeFile(join(opts.workdir, "REVIEW.md"), "## k3s/**\n\nBump checksum/config.\n");
+        },
+        api: makeApi({ getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })] }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Fine.\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain("You are Jumi's reviewer");
+      expect(prompt).not.toContain("Bump checksum/config.");
+      expect(prompt).not.toContain("<review_md");
+    });
+  });
+
+  test("reviews a Helm-path PR without REVIEW.md and no substitute checklist", async () => {
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      const status: string[] = [];
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          getPRFiles: async () => [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
+          createCommitStatus: async (_owner, _repo, _sha, s) => {
+            status.push(s.state);
+            return s;
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Fine.\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(prompt).toContain("You are Jumi's reviewer");
+      expect(prompt).not.toContain("<review_md");
+      expect(prompt).not.toContain("gitops-apply-review");
+      expect(prompt).not.toContain("Checksum / rollout");
+      expect(status.at(-1)).toBe("success");
     });
   });
 
