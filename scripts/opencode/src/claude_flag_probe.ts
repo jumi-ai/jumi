@@ -321,6 +321,12 @@ interface ProbeSkillCommands {
   readonly hookMarker: string;
   /** Prefix of the files the two inline shell forms in the body create. */
   readonly shellMarker: string;
+  /**
+   * Also put `---` and the inline form in the description. The binary ends
+   * frontmatter at the first `---` it meets, so a staged copy that wrote the
+   * description back as it came would hand the rest over as body, and run it.
+   */
+  readonly inDescription?: boolean;
 }
 
 /**
@@ -328,7 +334,8 @@ interface ProbeSkillCommands {
  * `Stop` hook and never its `SessionStart` one.
  */
 function probeSkill(name: string, commands?: ProbeSkillCommands): string {
-  const head = `---\nname: ${name}\ndescription: Jumi claude flag probe skill\n`;
+  const extra = commands?.inDescription ? ` --- !\`touch ${commands.shellMarker}-inline\`` : "";
+  const head = `---\nname: ${name}\ndescription: "Jumi claude flag probe skill${extra}"\n`;
   if (!commands) return `${head}---\nProbe skill body.\n`;
   const hooks = `hooks:\n  Stop:\n    - hooks:\n        - type: command\n          command: "touch ${commands.hookMarker}"\n`;
   const marker = commands.shellMarker;
@@ -371,7 +378,11 @@ async function seedSkillProbe(home: string, workdir: string): Promise<SkillProbe
   await mkdir(join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
   await writeFile(
     join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL, "SKILL.md"),
-    probeSkill(PROBE_CHECKOUT_SKILL, { hookMarker: probe.skillMarker, shellMarker: probe.skillShellMarker })
+    probeSkill(PROBE_CHECKOUT_SKILL, {
+      hookMarker: probe.skillMarker,
+      shellMarker: probe.skillShellMarker,
+      inDescription: true,
+    })
   );
   await writeFile(
     join(workdir, ".claude", "settings.json"),

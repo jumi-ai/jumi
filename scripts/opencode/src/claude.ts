@@ -175,7 +175,7 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string
 
 /**
  * `checkoutSkillsPlugin` is the hook-free plugin `stageClaudeCheckoutSkills`
- * wrote for this spawn, when the checkout has skills.
+ * wrote for this review spawn, when the checkout has skills.
  */
 export function claudeArgv(opts: EngineRunOptions, checkoutSkillsPlugin?: string): string[] {
   const args = [
@@ -239,7 +239,12 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   }
 
   try {
-    const checkoutSkills = await stageClaudeCheckoutSkills(opts.workdir, join(tmpDir, "checkout-skills"), log);
+    // Reviewers only, like the Antigravity skills stash: a worker spawn sees no
+    // checkout skills, as before.
+    const checkoutSkills =
+      opts.trace?.kind === "review"
+        ? await stageClaudeCheckoutSkills(opts.workdir, join(tmpDir, "checkout-skills"), log)
+        : undefined;
     const args = claudeArgv(opts, checkoutSkills);
     const proc = (() => {
       try {

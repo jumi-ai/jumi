@@ -14,6 +14,7 @@ import { basename, join, sep } from "node:path";
  *   - the plugin root is ours, so it carries no `hooks/hooks.json`;
  *   - every `SKILL.md` is re-fronted with only `name` and `description`, because
  *     a skill's own frontmatter `hooks:` run once the skill is loaded;
+ *   - `name` and `description` are written so they cannot end that block early;
  *   - every `SKILL.md` body has its inline shell markers broken, because the
  *     binary runs `` !`cmd` `` and a ```! fence when the skill is loaded;
  *   - symlinks that leave the checkout are skipped, and the copy is bounded.
@@ -38,10 +39,21 @@ interface StageState {
 
 const FRONTMATTER_RE = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/;
 
+/**
+ * The binary ends frontmatter at the first `---` anywhere after the opening
+ * line, not only at one on its own line. A `name` or `description` holding
+ * `---` would cut our block short and leave its tail, hooks or inline shell
+ * included, to be read as the body. So no value here ever spells two dashes in
+ * a row, or a backtick.
+ */
 function yamlString(value: string): string {
   // JSON strings are YAML double-quoted scalars; escape the two line
   // separators JSON leaves raw so YAML cannot read them as a break.
-  return JSON.stringify(value).replaceAll("\u2028", "\\u2028").replaceAll("\u2029", "\\u2029");
+  return JSON.stringify(value)
+    .replaceAll("\u2028", "\\u2028")
+    .replaceAll("\u2029", "\\u2029")
+    .replaceAll("--", "-\\x2d")
+    .replaceAll("`", "\\x60");
 }
 
 /**
