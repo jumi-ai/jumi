@@ -264,7 +264,7 @@ describe("buildCodexSpans", () => {
     process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
     let posted = 0;
     setTraceFetchForTests((_url, init) => {
-      posted = (init?.body as ArrayBuffer).byteLength;
+      posted = (init?.body as ArrayBuffer | undefined)?.byteLength ?? 0;
       return Promise.resolve(new Response(""));
     });
     setTraceLimitsForTests({ maxBytes: 2_000 });

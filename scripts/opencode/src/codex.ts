@@ -351,6 +351,8 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
 
     if (exitCode === 0) {
       if (stderr) log(`[codex stderr] ${stderr}`);
+      // Fails closed like agy's empty SUCCESS: a non-ok result, so the parent
+      // fails the job instead of running its write-only retry turn.
       if (opts.trace?.kind === "review" && (await reviewArtifactMissing(opts.workdir))) {
         return observeEngineRun(opts, {
           status: "exit",
