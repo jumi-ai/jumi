@@ -49,7 +49,7 @@ The org hook hits the **router** mailbox. Worker pods do not need a public webho
 
 OpenCode is Engine impl #0: run to completion in a workspace. Stdout is logs, not the deliverable. The parent writes `JUMI_TASK.md` / `JUMI_FEEDBACK.md` / `JUMI_CI.md` / `JUMI_CONFLICT.md` and reads `JUMI_PR.md` / `JUMI_REVIEW.md`. The child is started with a sanitized env and does **not** receive `GITEA_BOT_TOKEN` or webhook secrets.
 
-The parent stamps every PR description, review writeup, and worker diary comment with the runner that actually produced it (after any hop), as one visible line such as `_Jumi · opencode · xai/grok-4.6 (high)_` or `_Jumi · claude · claude-opus-5 (high)_` (an `agy` runner stamps `_Jumi · agy · <model> (<effort>)_`). On reviews the stamp sits above the `jumi-check` trailer, which stays last. Later follow-up rounds stamp their own diary comment.
+The parent stamps every PR description, review writeup, and worker diary comment with the runner that actually produced it (after any hop), as one visible line such as `_Jumi · opencode · xai/grok-4.6 (high)_` or `_Jumi · claude · claude-opus-5 (high)_` (an `agy` runner stamps `_Jumi · agy · <model> (<effort>)_`). On reviews the stamp sits above the `jumi-check` trailer, which stays last. A published review carries only the child's finding lines (`<file>:<line>:`, `L<line>:` on a single-file PR, or a 🔴/🟡/💡/❓ marker) plus the trailer; the rest of `JUMI_REVIEW.md` (tour, what-was-checked, "no findings" prose) is dropped at publish time, and inline comments come only from the kept finding lines. Later follow-up rounds stamp their own diary comment.
 
 ## Point Gitea + Postgres + OpenCode at it
 
