@@ -60,8 +60,14 @@ function codexHardeningArgs(effort: string): string[] {
     // `-c approval_policy` is the documented route for the same value.
     "-c",
     `approval_policy="${CODEX_APPROVAL}"`,
+    // The default excludes drop every `*KEY*`, `*SECRET*`, `*TOKEN*` name from
+    // the agent's shell commands, which takes `GIT_CONFIG_KEY_*` and
+    // `GIT_AUTH_TOKEN` with it and breaks every `git` call. Hide only the API
+    // keys by exact name.
     "-c",
-    "shell_environment_policy.ignore_default_excludes=false",
+    "shell_environment_policy.ignore_default_excludes=true",
+    "-c",
+    `shell_environment_policy.exclude=${JSON.stringify(API_KEY_ENV)}`,
     "-c",
     'model_provider="openai"',
   ];
@@ -316,7 +322,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     const stdoutResult = limitText(parser.text(), "codex output", opts.maxOutputBytes);
     const stdout = redactEngineText(redactApiKeys(stripAnsi(stdoutResult.text).trim()), opts);
     const stderr = redactEngineText(redactApiKeys(stripAnsi(stderrResult.text).trim()), opts);
-    const signal = [stderr, parser.errors()].filter(Boolean).join("\n");
+    const errorsResult = limitText(parser.errors(), "codex errors", CODEX_STDERR_MAX_BYTES);
+    const errors = redactEngineText(redactApiKeys(stripAnsi(errorsResult.text).trim()), opts);
+    const signal = [stderr, errors].filter(Boolean).join("\n");
     const combined = [stderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
     const quota = !timedOut ? looksLikeCodexUsageLimit(signal) : undefined;

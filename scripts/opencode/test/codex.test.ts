@@ -107,6 +107,28 @@ describe("codexArgv", () => {
     expect(args.at(-1)).toBe("-");
   });
 
+  test("hides only the API keys from shell commands, not the worker's git env", () => {
+    const opts = { model: "gpt-6-sol", workdir: "/w", continueSession: true };
+    for (const args of [codexArgv(opts), codexArgv(opts, "thread-9")]) {
+      // The default excludes (`*KEY*`, `*SECRET*`, `*TOKEN*`) must stay off.
+      expect(args).toContain("shell_environment_policy.ignore_default_excludes=true");
+      const prefix = "shell_environment_policy.exclude=";
+      const exclude = args.filter((arg) => arg.startsWith(prefix));
+      expect(exclude).toHaveLength(1);
+      const patterns = JSON.parse(exclude[0]?.slice(prefix.length) ?? "[]") as string[];
+      expect(patterns).toEqual(["OPENAI_API_KEY", "CODEX_API_KEY"]);
+      // Codex matches these as case-insensitive globs with `*` and `?`.
+      const covers = (pattern: string, name: string) =>
+        new RegExp(
+          `^${pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`,
+          "i"
+        ).test(name);
+      for (const name of ["GIT_CONFIG_KEY_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_KEY_2", "GIT_AUTH_TOKEN"]) {
+        expect(patterns.some((pattern) => covers(pattern, name))).toBe(false);
+      }
+    }
+  });
+
   test("resumes only an explicit thread id, never --last", () => {
     const fresh = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true });
     expect(fresh).not.toContain("resume");
@@ -351,7 +373,32 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
         expect(result.stdout).toContain("KEY=[redacted]");
         expect(result.stdout).not.toContain("already-set");
         const [line] = await argLines(argsLog);
-        expect(line).toContain("shell_environment_policy.ignore_default_excludes=false");
+        expect(line).toContain("shell_environment_policy.ignore_default_excludes=true");
+        expect(line).toContain('shell_environment_policy.exclude=["OPENAI_API_KEY","CODEX_API_KEY"]');
+      }
+    );
+  });
+
+  test("redacts and caps JSONL error text in a failed run's message", async () => {
+    process.env.OPENAI_API_KEY = "already-set";
+    const error = JSON.stringify({ type: "error", message: `\u001b[31mboom already-set\u001b[0m ${"x".repeat(70_000)}` });
+    await withFakeBins(
+      { codex: fakeBin("codex", `printf '%s\\n' '${error}'\nexit 1`) },
+      async ({ workdir, home, argsLog }) => {
+        const result = await runCodex({
+          type: "codex",
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.message).toContain("boom [redacted]");
+        expect(result.message).not.toContain("already-set");
+        expect(result.message).not.toContain("\u001b");
+        expect(result.message?.length).toBeLessThan(66_000);
       }
     );
   });
