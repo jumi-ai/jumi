@@ -134,18 +134,16 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Collaborator permission `none` (or a 404) is not a no for a GitHub App: GitHub
- * reports no collaborator permission for Apps that push branches onto the repo,
- * Renovate among them. Sender-gated callers use this only after the webhook
- * event itself proved the App acts on this repository, so its installation
- * covers it; `contents: write` on that installation is push.
+ * Reviewer context only (`resolvePermissions`): GitHub reports no collaborator
+ * permission for Apps that push branches onto the repo, Renovate among them,
+ * so an App whose manifest requests `contents: write` is labelled a writer
+ * there.
  *
- * Limitation: `GET /apps/{slug}` reports the permissions the App requests,
- * not what a given repo installation was granted. A repo-scoped granted check
- * for another App is not available here: `GET /repos/{owner}/{repo}/installation`
- * needs a JWT and returns the authenticated (own) App's installation, not the
- * sender's. Fork heads therefore never use this fallback (see
- * `pullAuthorCanPush`).
+ * Not a gate: `GET /apps/{slug}` reports the permissions the App requests,
+ * not what a given repo installation was granted, and a repo-scoped check for
+ * another App is not available here. The sender gate (`canPush`) and fork
+ * heads (`pullAuthorCanPush`) never use it; the trusted sender list is how an
+ * operator admits such an App.
  */
 async function appCanPush(api: Partial<PermissionApi>, login: string): Promise<boolean> {
   const slug = appSlugFromLogin(login)?.toLowerCase();
@@ -181,10 +179,10 @@ async function pushAccess(
 }
 
 /**
- * Fail-closed push check. A person needs write, admin, or owner (or a
- * maintain/push role). A GitHub App whose installation can write contents
- * counts even when the collaborator lookup says none. Any other lookup
- * failure, missing method, or unknown permission is false.
+ * Fail-closed push check from the collaborator lookup alone: write, admin, or
+ * owner, or a maintain/push role. `none`, `read`, `triage`, a 404, a missing
+ * record, a failed lookup, or a missing method is false. No App manifest, team,
+ * or unit map is consulted: a grant the lookup does not show is not obvious.
  */
 export async function canPush(
   api: Partial<PermissionApi> | undefined,
@@ -193,7 +191,12 @@ export async function canPush(
   login: string | undefined
 ): Promise<boolean> {
   if (typeof login !== "string" || !login.trim()) return false;
-  return (await pushAccess(api, owner, repo, login.trim())).push;
+  if (!api || typeof api.getCollaboratorPermission !== "function") return false;
+  try {
+    return hasWriteAccessFromPermission(await api.getCollaboratorPermission(owner, repo, login.trim()));
+  } catch {
+    return false;
+  }
 }
 
 /** Whole-login match against a configured list: case-insensitive, surrounding space ignored. */
@@ -211,9 +214,10 @@ export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undef
 /**
  * Who may steer Jumi. When the operator set `TRUSTED_SENDER_LOGINS`, the list
  * is the whole answer: a listed login is admitted and nobody else is, with no
- * forge lookup either way. With the list unset or empty, the forge check
- * (`canPush`) decides, so a new image does not lock the operator out before
- * GitOps sets the list.
+ * forge lookup either way. With the list unset, empty, or only blank tokens,
+ * only a sender the collaborator lookup obviously calls a writer (`canPush`)
+ * is admitted, so a new image does not lock out an owner before GitOps sets
+ * the list, and an App manifest is never trusted by default.
  */
 export async function senderCanSteer(
   api: Partial<PermissionApi> | undefined,
@@ -229,12 +233,10 @@ export async function senderCanSteer(
 /**
  * A pull's author can push to the base repository. A head branch that already
  * lives on the base repository is proof. A fork head is not: only the
- * collaborator lookup counts there. The App manifest fallback (`canPush`) is
- * deliberately not used for fork heads, because `GET /apps/{slug}` reports the
- * permissions the app requests, not a repo-scoped installation — anyone can
- * mint an app requesting `contents: write` and open a fork PR as `<app>[bot]`.
- * Sender-gated checks keep the fallback: the webhook event itself proves the
- * app acts on this repository.
+ * collaborator lookup (`canPush`) counts there. An App manifest is never
+ * consulted, because `GET /apps/{slug}` reports the permissions the app
+ * requests, not a repo-scoped installation — anyone can mint an app requesting
+ * `contents: write` and open a fork PR as `<app>[bot]`.
  */
 export async function pullAuthorCanPush(
   api: Partial<PermissionApi> | undefined,
@@ -244,14 +246,7 @@ export async function pullAuthorCanPush(
 ): Promise<boolean> {
   const headRepo = pr.head?.repo?.full_name;
   if (typeof headRepo === "string" && headRepo.toLowerCase() === `${owner}/${repo}`.toLowerCase()) return true;
-  const login = pr.user?.login;
-  if (typeof login !== "string" || !login.trim()) return false;
-  if (!api || typeof api.getCollaboratorPermission !== "function") return false;
-  try {
-    return hasWriteAccessFromPermission(await api.getCollaboratorPermission(owner, repo, login.trim()));
-  } catch {
-    return false;
-  }
+  return canPush(api, owner, repo, pr.user?.login);
 }
 
 /**
