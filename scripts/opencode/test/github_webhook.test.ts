@@ -794,13 +794,14 @@ describe("POST /webhooks/github", () => {
       expect(store.rows).toHaveLength(0);
     });
 
-    test("a comment from an App that can push wakes work", async () => {
+    test("with no list, a comment from an App whose record says contents write does not wake work", async () => {
       const store = new MemoryReviewJobStore();
       const response = await gated(store)(
         await signedGithubRequest(commentBy("filer[bot]", "Bot"), { event: "issue_comment" })
       );
       expect(response.status).toBe(202);
-      expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
+      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(store.rows).toHaveLength(0);
     });
 
     test("an issue labeled by someone who cannot push is not a job", async () => {
@@ -815,7 +816,7 @@ describe("POST /webhooks/github", () => {
       expect(store.rows).toHaveLength(0);
     });
 
-    test("an issue labeled by an App that can push is a job", async () => {
+    test("with no list, an issue labeled by an App whose record says contents write is not a job", async () => {
       const store = new MemoryReviewJobStore();
       const response = await gated(store)(
         await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
@@ -823,7 +824,17 @@ describe("POST /webhooks/github", () => {
         })
       );
       expect(response.status).toBe(202);
-      expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+      expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
+      expect(store.rows).toHaveLength(0);
+    });
+
+    test("with a trusted list, the App with a contents-write record is admitted only when listed", async () => {
+      const admitted = await gated(new MemoryReviewJobStore(), ["filer[bot]"])(
+        await signedGithubRequest(labeledPayload({ sender: makeUser({ login: "filer[bot]", type: "Bot" }) }), {
+          event: "issues",
+        })
+      );
+      expect(await responseJson(admitted)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
     });
 
     test("with a trusted list, a listed App is admitted though the forge and its app record grant nothing", async () => {
