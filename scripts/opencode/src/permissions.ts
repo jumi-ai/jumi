@@ -52,7 +52,10 @@ function permissionFromResult(result: CollaboratorPermission | undefined | null)
 export interface ResolvePermissionsResult {
   /** Raw forge permission per lowercased login, fail-closed `"none"` on any lookup failure. */
   detail: Map<string, string>;
-  /** Can push, per login, using the same bar as follow-up (`canPush`). */
+  /**
+   * Can push, per login: the collaborator lookup, or for an App, a manifest
+   * requesting `contents: write`. Reviewer context only, not the `canPush` gate.
+   */
   writes: Map<string, boolean>;
   /** Distinct logins queried. */
   lookups: number;
