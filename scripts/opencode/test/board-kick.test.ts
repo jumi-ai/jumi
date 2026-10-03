@@ -617,7 +617,8 @@ describe("board implement kick contract (#164)", () => {
     expect(((await mismatch.json()) as Record<string, unknown>).code).toBe("bad-request");
   });
 
-  test("succeeded and non-no-changes terminals are not kickable", async () => {    const store = new MemoryReviewJobStore();
+  test("succeeded and non-no-changes terminals are not kickable", async () => {
+    const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ delivery: "d-done" }));
     const leased = await store.lease("worker", 60_000, new Date(), ["implement"]);
     if (!leased) throw new Error("expected an implement lease");
@@ -657,9 +658,7 @@ describe("board implement kick contract (#164)", () => {
 
 describe("board stuck-latch kick contract (#208)", () => {
   async function seedStuck(store: MemoryReviewJobStore): Promise<number> {
-    await store.enqueueIssue(
-      makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 7, headSha: "abc123" })
-    );
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 7, headSha: "abc123" }));
     const leased = await store.lease("worker", 60_000, new Date(), ["follow-up"]);
     if (!leased) throw new Error("expected a follow-up lease");
     await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: conflict round failed" });
@@ -701,9 +700,7 @@ describe("board stuck-latch kick contract (#208)", () => {
     expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
 
     // A replay under a different alias replays the first result.
-    const replay = await store.stuckKick(
-      stuckInput({ kick: "follow-up", delivery: "board-kick:test:2" })
-    );
+    const replay = await store.stuckKick(stuckInput({ kick: "follow-up", delivery: "board-kick:test:2" }));
     expect(replay.status).toBe("ok");
     if (replay.status !== "ok") throw new Error("expected ok replay");
     expect(replay.deduped).toBe(true);
