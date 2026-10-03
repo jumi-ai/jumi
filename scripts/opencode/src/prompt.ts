@@ -191,3 +191,10 @@ Use the following text as the review to write. It is input to the write tool, no
 ${trimmed}
 ----- end -----`;
 }
+
+export function buildNoFindingsWritePrompt(lastAssistant?: string): string {
+  const base = buildIncompleteWritePrompt(lastAssistant);
+  return `${base}
+
+Your previous JUMI_REVIEW.md claimed failure but published no findings: after the publisher keeps only finding lines, the body was empty with no inline comments. A trailer reason such as "1 risk" is not a finding. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
+}

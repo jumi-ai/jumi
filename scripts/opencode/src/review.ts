@@ -22,7 +22,7 @@ import type {
   ReviewApi,
   Task,
 } from "./ports.ts";
-import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
+import { buildIncompleteWritePrompt, buildNoFindingsWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
 import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
@@ -59,6 +59,7 @@ import {
 import type { ReviewJob } from "./types.ts";
 import {
   findingFingerprint,
+  hasPublishedFindings,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
@@ -575,6 +576,7 @@ const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
 export const MAX_INCOMPLETE_RETRIES = 2;
 export const INCOMPLETE_REVIEW_STUCK = "stuck: incomplete review";
+export const INCOMPLETE_NO_FINDINGS_REASON = "Incomplete review: no findings";
 
 function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
   for (const line of porcelain.split(/\r?\n/)) {
@@ -911,6 +913,21 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const singleFilePath = needsSingleFilePath(parsed.comment)
     ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, pr.number, log)
     : undefined;
+  // A failure trailer with no published finding is an incomplete review: the
+  // trailer reason is not a finding, and prose the publisher drops must not
+  // become a blank required-check failure. Success with no findings stays clean.
+  if (
+    !parsed.verdict.incomplete &&
+    parsed.verdict.state === "failure" &&
+    !hasPublishedFindings(parsed.comment, { singleFilePath })
+  ) {
+    const result: ReviewResult = { status: "skipped", reason: INCOMPLETE_NO_FINDINGS_REASON };
+    await upsertStuckText(forgeApi, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
+    const { state, description } = statusForResult(result);
+    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+    await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
+    return result;
+  }
   // Publish finding lines and the trailer only; the child's tour is not published.
   const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
   const writeup = buildCommentBody(
@@ -1369,31 +1386,60 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           if (opts.noCiNote && !markdown.includes(opts.noCiNote)) {
             markdown = `${opts.noCiNote}\n\n${markdown}`;
           }
-          await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
-          if (opts.home) {
-            const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
-            // A successful run clears any stale (TTL-expired) quota flag.
-            await clearQuotaStuck(stuckPath).catch(() => undefined);
-            const actionHash = fingerprintReviewArtifact(markdown);
-            if (actionHash) {
-              await appendStuckFingerprint(stuckPath, {
-                kind: "action",
-                hash: actionHash,
-              });
-            }
+          const parsedArtifact = parseReviewOutput(markdown);
+          let blankFailure = false;
+          if (!parsedArtifact.verdict.incomplete && parsedArtifact.verdict.state === "failure") {
+            const singleFilePath = needsSingleFilePath(parsedArtifact.comment)
+              ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, opts.prNumber, log)
+              : undefined;
+            blankFailure = !hasPublishedFindings(parsedArtifact.comment, { singleFilePath });
           }
-          return await publishReviewResult({
-            api: forgeApi,
-            forge: forgeApi,
-            owner: opts.owner,
-            repo: opts.repo,
-            prNumber: opts.prNumber,
-            expectedHeadSha: reviewedHeadSha,
-            botUsername: opts.botUsername,
-            resultMarkdown: markdown,
-            resultRunner: runner,
-            logger: log,
-          });
+          if (!blankFailure) {
+            await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
+            if (opts.home) {
+              const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
+              // A successful run clears any stale (TTL-expired) quota flag.
+              await clearQuotaStuck(stuckPath).catch(() => undefined);
+              const actionHash = fingerprintReviewArtifact(markdown);
+              if (actionHash) {
+                await appendStuckFingerprint(stuckPath, {
+                  kind: "action",
+                  hash: actionHash,
+                });
+              }
+            }
+            return await publishReviewResult({
+              api: forgeApi,
+              forge: forgeApi,
+              owner: opts.owner,
+              repo: opts.repo,
+              prNumber: opts.prNumber,
+              expectedHeadSha: reviewedHeadSha,
+              botUsername: opts.botUsername,
+              resultMarkdown: markdown,
+              resultRunner: runner,
+              logger: log,
+            });
+          }
+
+          if (extrasUsed >= extraCap) {
+            return await persistSkipAndStatus(
+              INCOMPLETE_NO_FINDINGS_REASON,
+              currentPR.html_url,
+              INCOMPLETE_REVIEW_STUCK
+            );
+          }
+          extrasUsed++;
+          log(`Incomplete review: no findings; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
+          await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+          const continueSessionNoFindings = await hasResumableSession(opts.workspace);
+          const writePromptNoFindings = buildNoFindingsWritePrompt(
+            continueSessionNoFindings ? undefined : artifact.content
+          );
+          lastStdout = (
+            await runOpenCode({ prompt: writePromptNoFindings, continueSession: continueSessionNoFindings })
+          ).stdout;
+          continue;
         }
 
         if (extrasUsed >= extraCap) {
