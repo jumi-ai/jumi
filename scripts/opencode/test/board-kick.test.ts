@@ -209,8 +209,8 @@ describe("board kick contract (#162)", () => {
 
   test("forwarded https origin is accepted on the sit-clear path (#207)", async () => {
     const store = new MemoryReviewJobStore();
-    await store.sits.remember("kirmanak", "demo", 21, "ci-not-completed");
-    await store.sits.remember("kirmanak", "demo", 22, "ci-not-completed");
+    await store.sits.remember("kirmanak", "demo", 21, "not-labeled");
+    await store.sits.remember("kirmanak", "demo", 22, "not-labeled");
     const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
     const forwarded = { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "board.example.test" };
 

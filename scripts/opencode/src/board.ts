@@ -155,8 +155,10 @@ export interface BoardKick {
 }
 
 export interface BoardItem {
-  /** Headline reason: ledger kind+state for in-progress, sit code for sits. */
+  /** Internal code: ledger kind+state for in-progress, sit code for sits. Never the card headline. */
   reason: string;
+  /** Server-supplied one-sentence headline. The page renders this; reason may stay in the inspector only. */
+  message?: string;
   owner: string;
   repo: string;
   /** Pull or issue number (shared number space). */
@@ -196,23 +198,45 @@ export interface BoardPeerStatus {
   error?: string;
 }
 
-/** Sits with no button: already done, nothing to ship, or already queued. */
-const NO_KICK_SITS = new Set<string>(["terminal-result", "no-changes", "repo-mutex"]);
+/**
+ * Sits with no button: waits the operator cannot finish from this page
+ * (draft/not-ready, CI), plus already done, nothing to ship, or already queued.
+ */
+const NO_KICK_SITS = new Set<string>(["terminal-result", "no-changes", "repo-mutex", "ci-not-completed", "draft-wip"]);
 
+/** One sentence per sit reason, supplied by the server. The page renders this as the headline. */
+const SIT_MESSAGES: Record<string, string> = {
+  "ci-not-completed": "Waiting for CI to finish before review can start.",
+  "draft-wip": "Pull is draft or not ready and is waiting to be marked ready.",
+  "foreign-branch": "Pull comes from a foreign branch and cannot be picked up here.",
+  "no-closer": "No closing issue is linked to this pull.",
+  "implement-latch": "Stuck latch is holding follow-up for the open closer.",
+  "no-changes": "Finished with nothing to ship.",
+  "terminal-result": "Finished with a terminal result.",
+  "repo-mutex": "Already working on this pull in another job.",
+  "no-write-access": "Sender lacks write access for this pull.",
+  "not-labeled": "Pull is not labeled for pickup.",
+};
+
+export function sitMessage(reason: RouterSitReason): string {
+  return SIT_MESSAGES[reason] ?? "Sitting on purpose.";
+}
+
+/**
+ * A click that only removes the board row must say it only removes the row.
+ * Only the stuck latch queues follow-up; every other kickable sit is a
+ * row-only clear, so its effect names just that.
+ */
 const SIT_KICK_EFFECTS: Record<string, string> = {
-  "ci-not-completed": "Re-check once CI finishes",
-  "draft-wip": "Re-evaluate when marked ready",
-  "foreign-branch": "Re-evaluate if the branch becomes local",
-  "no-closer": "Re-evaluate when a closing issue is linked",
+  "foreign-branch": "Remove this board row only",
+  "no-closer": "Remove this board row only",
   "implement-latch": "Clear the stuck latch and queue follow-up on the open closer",
-  "no-write-access": "Re-evaluate when the sender gains write access or is on TRUSTED_SENDER_LOGINS",
-  "not-labeled": "Re-evaluate when labeled for pickup",
+  "no-write-access": "Remove this board row only",
+  "not-labeled": "Remove this board row only",
 };
 
 /** Kick id the page must send for each kickable sit. Owner-only payloads never confirm these. */
 const SIT_KICK_IDS: Record<string, string> = {
-  "ci-not-completed": "sit-clear",
-  "draft-wip": "sit-clear",
   "foreign-branch": "sit-clear",
   "no-closer": "sit-clear",
   "implement-latch": "stuck",
@@ -222,7 +246,7 @@ const SIT_KICK_IDS: Record<string, string> = {
 
 function kickForSit(reason: RouterSitReason): BoardKick | undefined {
   if (NO_KICK_SITS.has(reason)) return undefined;
-  const effect = SIT_KICK_EFFECTS[reason] ?? "Re-evaluate on the next webhook";
+  const effect = SIT_KICK_EFFECTS[reason] ?? "Remove this board row only";
   const kick = SIT_KICK_IDS[reason] ?? "sit-clear";
   return { effect, kick };
 }
@@ -256,9 +280,26 @@ function primaryNumber(row: ReviewJobRecord): number {
   return row.prNumber;
 }
 
+function inflightMessage(kind: string, state: string): string {
+  const key = `${kind} ${state}`;
+  const messages: Record<string, string> = {
+    "review queued": "Review is queued and waiting for a worker.",
+    "review leased": "Review is running.",
+    "implement queued": "Implement is queued and waiting for a worker.",
+    "implement leased": "Implement is running.",
+    "follow-up queued": "Follow-up is queued and waiting for a worker.",
+    "follow-up leased": "Follow-up is running.",
+    "conflict queued": "Conflict merge is queued and waiting for a worker.",
+    "conflict leased": "Conflict merge is running.",
+  };
+  return messages[key] ?? `${kind} is ${state}.`;
+}
+
 function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
+  const reason = `${row.kind} ${row.state}`;
   const item: BoardItem = {
-    reason: `${row.kind} ${row.state}`,
+    reason,
+    message: inflightMessage(row.kind, row.state),
     owner: row.owner,
     repo: row.repo,
     number: primaryNumber(row),
@@ -276,6 +317,7 @@ function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
 function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kickable: boolean } {
   const item: BoardItem = {
     reason: sit.reason,
+    message: sitMessage(sit.reason),
     owner: sit.owner,
     repo: sit.repo,
     number: sit.number,
@@ -296,9 +338,16 @@ export interface BoardStore {
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
   const [inflight, sits] = await Promise.all([store.listInflight(200), store.sits.list()]);
   const in_progress = inflight.map((row) => inflightItem(row, forge));
+  // A sit that duplicates a job already in progress is not a second problem:
+  // hide it here. Recording and clearing are unchanged; this is read-time only.
+  const inflightKeys = new Set(
+    in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
+  );
   const needs_kick: BoardItem[] = [];
   const sitting: BoardItem[] = [];
   for (const sit of sits) {
+    const key = `${sit.owner.toLowerCase()}/${sit.repo.toLowerCase()}#${sit.number}`;
+    if (inflightKeys.has(key)) continue;
     const { item, kickable } = sitItem(sit, forge);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
@@ -318,6 +367,9 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
     typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
   if (!owner || !repo || !reason || !kind || number === undefined) return undefined;
   const item: BoardItem = { reason, owner, repo, number, kind };
+  if (typeof rec.message === "string" && rec.message.trim() !== "") {
+    item.message = rec.message.trim().slice(0, 500);
+  }
   const forge = typeof rec.forge === "string" && rec.forge.trim() !== "" ? rec.forge.trim() : fallbackForge;
   if (forge) item.forge = forge;
   if (typeof rec.commit === "string" && rec.commit.trim() !== "") item.commit = rec.commit.trim();
@@ -512,8 +564,9 @@ function withForgeGroups(groups: BoardGroups, forge: string): BoardGroups {
  * never calls the forge. Forge URLs below are link hrefs only.
  *
  * Layout contract:
- * - Phone: two lists (In progress, Sitting). Reason is the headline. A Kick
- *   button renders only when the payload carries `kick`. Sitting on purpose
+ * - Phone: two lists (In progress, Sitting). Message is the headline; reason
+ *   stays as code in the inspector only. A button naming the real side effect
+ *   renders only when the payload carries `kick`. Sitting on purpose
  *   is a status line, never a disabled button.
  * - Confirm names the server-provided side effect (`kick.effect`) before it
  *   commits. Narrow viewports confirm in a bottom sheet; wide viewports
@@ -601,7 +654,7 @@ button.secondary { opacity: 0.85; }
 </main>
 <div id="sheet-wrap" hidden>
 <div id="sheet-backdrop"></div>
-<div id="sheet" role="dialog" aria-modal="true" aria-label="Confirm kick"></div>
+<div id="sheet" role="dialog" aria-modal="true" aria-label="Confirm action"></div>
 </div>
 <script>
 const PAGE_CATALOG = ${JSON.stringify(catalog)};
@@ -684,6 +737,12 @@ async function load() {
   }
   render();
 }
+function headlineOf(item) { return (typeof item.message === "string" && item.message.trim() !== "" ? item.message : item.reason); }
+function kickLabelOf(item) {
+  const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
+  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") return "Clear latch and queue follow-up";
+  return "Remove row";
+}
 function rowItem(item, opts) {
   const li = document.createElement("li");
   li.className = "row" + (state.selected === keyOf(item) ? " selected" : "");
@@ -691,7 +750,7 @@ function rowItem(item, opts) {
   head.className = "row-head";
   const h = document.createElement("p");
   h.className = "reason";
-  h.textContent = item.reason;
+  h.textContent = headlineOf(item);
   head.appendChild(h);
   li.appendChild(head);
   const sub = document.createElement("div");
@@ -706,14 +765,14 @@ function rowItem(item, opts) {
     actions.className = "row-actions";
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = "Kick";
+    btn.textContent = kickLabelOf(item);
     btn.addEventListener("click", (ev) => { ev.stopPropagation(); state.selected = keyOf(item); render(); openConfirm(item); });
     actions.appendChild(btn);
     li.appendChild(actions);
   } else if (opts.section === "sitting" && !hasKick) {
     const line = document.createElement("div");
     line.className = "status-line";
-    line.textContent = "Sitting on purpose · " + item.reason;
+    line.textContent = "Sitting on purpose";
     li.appendChild(line);
   }
   li.addEventListener("click", () => { state.selected = keyOf(item); render(); if (!narrow()) { const el = $("inspector").querySelector("button.primary"); } });
@@ -767,7 +826,7 @@ function confirmBlock(item, data, confirmIdPrefix) {
     primary.type = "button";
     primary.className = "primary";
     primary.id = confirmIdPrefix + "-confirm";
-    primary.textContent = "Confirm kick";
+    primary.textContent = kickLabelOf(item);
     const msg = document.createElement("div");
     msg.className = "sub";
     msg.id = confirmIdPrefix + "-msg";
@@ -827,11 +886,11 @@ function renderInspector() {
   const item = selectedItem();
   if (!item || !data) { box.textContent = "Select a row to see detail."; return; }
   const title = document.createElement("h2");
-  title.textContent = item.reason;
+  title.textContent = headlineOf(item);
   box.appendChild(title);
   const sub = document.createElement("div");
   sub.className = "sub";
-  let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind + " · " + forgeOf(item, data);
+  let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind + " · " + forgeOf(item, data) + " · " + item.reason;
   if (item.commit) subText += " · " + item.commit;
   if (typeof item.decidedAt === "number") subText += " · decided " + new Date(item.decidedAt).toLocaleString();
   sub.textContent = subText;
@@ -854,7 +913,7 @@ function openConfirm(item) {
   sheet.textContent = "";
   const data = state.data;
   const title = document.createElement("h2");
-  title.textContent = item.reason;
+  title.textContent = headlineOf(item);
   sheet.appendChild(title);
   const sub = document.createElement("div");
   sub.className = "sub";
