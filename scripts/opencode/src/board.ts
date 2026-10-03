@@ -117,7 +117,7 @@ export function boardPublicOrigin(request: Request): string {
   const url = new URL(request.url);
   const proto = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
   const host = (request.headers.get("x-forwarded-host") ?? "").split(",")[0].trim();
-  const scheme = proto || url.protocol.replace(":", "").toLowerCase();
+  const scheme = proto === "http" || proto === "https" ? proto : url.protocol.replace(":", "").toLowerCase();
   const hostPart = host || url.host;
   try {
     return new URL(`${scheme}://${hostPart}`).origin;

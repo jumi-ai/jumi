@@ -154,6 +154,95 @@ describe("board kick contract (#162)", () => {
     expect(crossOrigin.status).toBe(403);
   });
 
+  test("forwarded https origin behind the ingress is accepted (#207)", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedFailed(store);
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const item = { owner: "kirmanak", repo: "demo", number: 7, commit: "abc123", kick: "boom" };
+    const forwarded = { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "board.example.test" };
+
+    // The board sees an internal cleartext hop; the browser origin is the public HTTPS one.
+    const ok = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-ok" }),
+      })
+    );
+    expect(ok.status).toBe(200);
+
+    const foreign = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://evil.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-foreign" }),
+      })
+    );
+    expect(foreign.status).toBe(403);
+
+    // Non-http(s) forwarded proto fails closed on the public origin.
+    const badScheme = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          "X-Forwarded-Proto": "gopher",
+          "X-Forwarded-Host": "board.example.test",
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-bad-scheme" }),
+      })
+    );
+    expect(badScheme.status).toBe(403);
+  });
+
+  test("forwarded https origin is accepted on the sit-clear path (#207)", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.sits.remember("kirmanak", "demo", 21, "ci-not-completed");
+    await store.sits.remember("kirmanak", "demo", 22, "ci-not-completed");
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const forwarded = { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "board.example.test" };
+
+    const ok = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ owner: "kirmanak", repo: "demo", number: 21 }),
+      })
+    );
+    expect(ok.status).toBe(200);
+
+    const foreign = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://evil.test",
+        }),
+        body: JSON.stringify({ owner: "kirmanak", repo: "demo", number: 22 }),
+      })
+    );
+    expect(foreign.status).toBe(403);
+  });
+
   test("non-kickable reasons stay status lines with a 422", async () => {
     for (const reason of ["provider auth death", "draft or WIP pull request"]) {
       const store = new MemoryReviewJobStore();
