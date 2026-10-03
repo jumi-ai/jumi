@@ -261,7 +261,8 @@ describe("createWorkerFetchHandler", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "closing issue already assigned" });
     expect(queue.jobs).toHaveLength(0);
-    expect(await sits.get("kirmanak", "demo", 127)).toMatchObject({ reason: "implement-latch" });
+    // Sits on purpose with no board button.
+    expect(await sits.get("kirmanak", "demo", 127)).toMatchObject({ reason: "repo-mutex" });
   });
 
   test("skips PR-assign when getIssue of the closer fails", async () => {
