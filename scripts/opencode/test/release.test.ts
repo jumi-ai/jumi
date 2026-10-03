@@ -975,12 +975,12 @@ describe("image labels and no double-build", () => {
     expect(reviewer).toContain("if: $" + "{{ env.VERSION != '' }}");
     expect(worker).toContain("if: $" + "{{ env.VERSION != '' }}");
     expect(worker).toContain("target: worker");
-    expect(worker).toContain("ghcr.io/kirmanak/jumi-worker");
+    expect(worker).toContain("ghcr.io/jumi-ai/jumi-worker");
     expect(worker).toContain("branches: [main]");
     expect(worker).not.toContain("type=sha");
     expect(worker).not.toContain(":${{ github.sha");
     expect(reviewer).toContain("target: runtime");
-    expect(reviewer).toContain("ghcr.io/kirmanak/jumi-reviewer");
+    expect(reviewer).toContain("ghcr.io/jumi-ai/jumi-reviewer");
     expect(reviewer).toContain("branches: [main]");
     expect(reviewer).not.toContain("type=sha");
     expect(reviewer).not.toContain(":${{ github.sha");

@@ -11,13 +11,13 @@ concurrency:
 
 jobs:
   image:
-    if: github.repository == 'kirmanak/jumi'
+    if: github.repository == 'jumi-ai/jumi'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/kirmanak/jumi-reviewer
+      IMAGE: ghcr.io/jumi-ai/jumi-reviewer
       REGISTRY: ghcr.io
 
     steps:
@@ -72,8 +72,8 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ghcr.io/kirmanak/jumi-reviewer:latest
-            ghcr.io/kirmanak/jumi-reviewer:${{ env.VERSION }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.VERSION }}
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
@@ -82,7 +82,7 @@ jobs:
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
-            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.source=https://github.com/jumi-ai/jumi
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -101,8 +101,8 @@ jobs:
           fi
           echo "Verified image user: ${actual_user}"
           source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${IMAGE}:${VERSION}")"
-          if [ "${source_label}" != "https://github.com/kirmanak/jumi" ]; then
-            echo "Expected source https://github.com/kirmanak/jumi, got ${source_label:-<empty>}" >&2
+          if [ "${source_label}" != "https://github.com/jumi-ai/jumi" ]; then
+            echo "Expected source https://github.com/jumi-ai/jumi, got ${source_label:-<empty>}" >&2
             exit 1
           fi
           revision_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${IMAGE}:${VERSION}")"
