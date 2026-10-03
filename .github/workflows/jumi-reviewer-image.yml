@@ -133,11 +133,11 @@ jobs:
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
           codex_exec_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec --help)"
           for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
-            printf '%s\n' "$codex_exec_help" | grep -F -- "$flag" >/dev/null
+            printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec resume --help)"
           for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
-            printf '%s\n' "$codex_resume_help" | grep -F -- "$flag" >/dev/null
+            printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"

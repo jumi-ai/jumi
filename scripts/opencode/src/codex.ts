@@ -31,6 +31,13 @@ const CODEX_AUTH_RE =
 const CODEX_USAGE_LIMIT_RE =
   /usage[_\s-]*limit|rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|out of quota|hit your (?:usage|free|session) limit/i;
 
+// `mcp_servers` is deliberately absent here, not an oversight: project-local
+// `.codex/config.toml` MCP entries only load for trusted projects, and this
+// deployment never writes a trust entry for the per-job workdir (the spawn
+// also passes `--ignore-user-config`, so even a retained HOME trust entry is
+// not read). A `-c` override could not clear a merged `mcp_servers` table
+// anyway, so trust gating — not a `-c` pin — is what keeps a checkout-supplied
+// MCP command from executing.
 function codexHardeningArgs(effort: string): string[] {
   return [
     "-c",
