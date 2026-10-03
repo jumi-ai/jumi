@@ -277,12 +277,12 @@ export function stuckIdempotencyMismatch(
   input: { owner: string; repo: string; issueNumber: number; kick: string },
   prior: KickLogRecord
 ): boolean {
-  return (
-    prior.owner !== input.owner ||
-    prior.repo !== input.repo ||
-    prior.number !== input.issueNumber ||
-    prior.kick !== input.kick
-  );
+  if (prior.owner !== input.owner || prior.repo !== input.repo || prior.number !== input.issueNumber) return true;
+  if (prior.kick === input.kick) return false;
+  // Aliases address the same operation: a replay under a different alias
+  // replays the first result instead of failing as a different kick.
+  const stuck = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
+  return !(stuck.has(prior.kick.trim()) && stuck.has(input.kick.trim()));
 }
 
 /** Implement kicks share the review_kicks key space; identity is issue-based, commit is always empty. */
@@ -3236,20 +3236,10 @@ export class PgReviewJobStore implements ReviewJobStore {
         // Clear the issue skip latch and insert the follow-up job in one
         // transaction; the sit row goes away because this enqueue landed.
         // Never opens a pull request, never unassigns, never labels.
-        const cleared = asRows<{ generation: unknown }>(
-          await tx.unsafe(
-            `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
-             VALUES ($1, $2, $3, 1, NULL, NOW())
-             ON CONFLICT (owner, repo, issue_number)
-             DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL,
-               followup = '{}'::jsonb, conflict = '{}'::jsonb, ci = '{}'::jsonb, stuck = '{}'::jsonb,
-               updated_at = NOW()
-             RETURNING generation`,
-            [input.owner, input.repo, input.issueNumber]
-          )
-        );
-        const generation = cleared[0] ? num(cleared[0].generation) : 0;
-        const payload = { ...terminal.payload, generation };
+        // The latch is only mutated after the insert succeeds: a job_key
+        // conflict must leave the latch (and the sit) untouched.
+        const nextGeneration = (latchRows[0] ? num(latchRows[0].generation) : 0) + 1;
+        const payload = { ...terminal.payload, generation: nextGeneration };
         const inserted = asRows<ReviewJobRow>(
           await tx.unsafe(
             `INSERT INTO review_jobs (job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt)
@@ -3282,6 +3272,15 @@ export class PgReviewJobStore implements ReviewJobStore {
         }
         const job = inserted[0] ? mapRow(inserted[0]) : undefined;
         if (!job) throw new Error("failed to queue stuck kick");
+        await tx.unsafe(
+          `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
+           VALUES ($1, $2, $3, $4, NULL, NOW())
+           ON CONFLICT (owner, repo, issue_number)
+           DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL,
+             followup = '{}'::jsonb, conflict = '{}'::jsonb, ci = '{}'::jsonb, stuck = '{}'::jsonb,
+             updated_at = NOW()`,
+          [input.owner, input.repo, input.issueNumber, nextGeneration]
+        );
         await this.clearSitTx(tx, input.owner, input.repo, input.issueNumber);
         const logged = await this.insertImplementKickLog(tx, input, "ok", terminal.id, job.id);
         return {
