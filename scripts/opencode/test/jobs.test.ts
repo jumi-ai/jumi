@@ -296,7 +296,10 @@ describe("review failure handover to worker lease", () => {
         },
         workspacePreparer: async () => undefined,
         openCodeRunner: async (opts) => {
-          await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Please fix tests\n<!-- jumi-check: failure -->");
+          await writeFile(
+            join(opts.workdir, "JUMI_REVIEW.md"),
+            "src/demo.ts:1: 🔴 bug: please fix tests.\n<!-- jumi-check: failure -->"
+          );
           return { status: "ok" };
         },
       });

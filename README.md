@@ -144,7 +144,7 @@ It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `
 
 - `pending` while the review is running
 - `success` / `failure` from that trailer (❓ may still be `success`)
-- `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md` continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check and posts `stuck: incomplete review`; stdout/chat is never the artifact
+- `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md`, or a `failure` trailer with no published finding lines (a trailer reason is not a finding; dropped prose is not promoted), continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check as `Incomplete review: no findings` and posts `stuck: incomplete review`; stdout/chat is never the artifact. A `success` trailer with no findings stays a clean review
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
 The engine inspects live non-jumi commit statuses / check-runs (and in-progress Actions jobs) before that pending status. Pending or red CI is a cheap skip with no model and no `jumi/opencode-review` status — not success for “waiting” or “CI failed”. Title-gated skips (`WIP:`) still post no status. Plan summaries stay the existing PR-thread comments (Tapio sticky) once the review actually starts.
