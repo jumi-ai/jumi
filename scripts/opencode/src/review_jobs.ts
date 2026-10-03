@@ -1,6 +1,6 @@
 import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
 import { isInfraRetryMarker } from "./infra.ts";
-import { disabledKickWhy, isKickableTerminalState, terminalReasonOf } from "./kick.ts";
+import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
@@ -281,8 +281,7 @@ export function stuckIdempotencyMismatch(
   if (prior.kick === input.kick) return false;
   // Aliases address the same operation: a replay under a different alias
   // replays the first result instead of failing as a different kick.
-  const stuck = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
-  return !(stuck.has(prior.kick.trim()) && stuck.has(input.kick.trim()));
+  return !(STUCK_KICK_ALIASES.has(prior.kick.trim()) && STUCK_KICK_ALIASES.has(input.kick.trim()));
 }
 
 /** Implement kicks share the review_kicks key space; identity is issue-based, commit is always empty. */
@@ -1395,7 +1394,6 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   async stuckKick(input: StuckKickInput): Promise<StuckKickOutcome> {
-    const STUCK_KICKS = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
     return this.locked(async () => {
       const now = Date.now();
       if (input.idempotencyKey) {
@@ -1487,7 +1485,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      if (!STUCK_KICKS.has(input.kick.trim())) {
+      if (!STUCK_KICK_ALIASES.has(input.kick.trim())) {
         const entry = record(null, null, "stale-kick");
         return {
           status: "rejected",
@@ -3054,7 +3052,6 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async stuckKick(input: StuckKickInput): Promise<StuckKickOutcome> {
-    const STUCK_KICKS = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
     const toMismatch = (prior: KickLogRecord) => ({
       status: "rejected" as const,
       code: "bad-request" as const,
@@ -3137,7 +3134,7 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as StuckKickOutcome;
         }
-        if (!STUCK_KICKS.has(input.kick.trim())) {
+        if (!STUCK_KICK_ALIASES.has(input.kick.trim())) {
           const logged = await this.insertImplementKickLog(tx, input, "stale-kick", null, null);
           return {
             status: "rejected",

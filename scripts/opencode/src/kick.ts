@@ -53,7 +53,7 @@ export function isImplementKickId(kick: string | null | undefined): boolean {
 export const STUCK_KICK_ID = "stuck";
 
 /** Accepted aliases for the stuck-latch kick. The board sends STUCK_KICK_ID. */
-const STUCK_KICK_ALIASES = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
+export const STUCK_KICK_ALIASES: ReadonlySet<string> = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
 
 export function isStuckKickId(kick: string | null | undefined): boolean {
   return typeof kick === "string" && STUCK_KICK_ALIASES.has(kick.trim());
