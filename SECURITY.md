@@ -2,7 +2,7 @@
 
 ## Supported Versions
 
-Only the latest [GitHub Release](https://github.com/kirmanak/jumi/releases/latest) is supported for security fixes.
+Only the latest [GitHub Release](https://github.com/jumi-ai/jumi/releases/latest) is supported for security fixes.
 
 | Version | Supported |
 | ------- | --------- |
@@ -15,7 +15,7 @@ If you are running an older tag, please upgrade to the latest Release before rep
 
 Please report vulnerabilities privately using GitHub private vulnerability reporting:
 
-https://github.com/kirmanak/jumi/security/advisories/new
+https://github.com/jumi-ai/jumi/security/advisories/new
 
 Please include as much detail as you can: a description of the issue, the affected version, steps to reproduce, and the potential impact.
 
