@@ -2,9 +2,11 @@ import {
   isImplementKickId,
   isKickPath,
   isReopenKickId,
+  isStuckKickId,
   parseImplementKickBody,
   parseKickBody,
   parseReopenKickBody,
+  parseStuckKickBody,
   rawKickIdOf,
 } from "./kick.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
@@ -13,6 +15,7 @@ import {
   isQueueUnavailable,
   isUniqueViolation,
   reopenIdempotencyMismatch,
+  stuckIdempotencyMismatch,
 } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
@@ -147,6 +150,8 @@ function idempotencyKeyOf(request: Request): string {
 export interface BoardKick {
   /** Server-provided effect text for this kick. */
   effect: string;
+  /** Kick id the page must send back. Absent on legacy payloads. */
+  kick: string;
 }
 
 export interface BoardItem {
@@ -199,15 +204,27 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
   "draft-wip": "Re-evaluate when marked ready",
   "foreign-branch": "Re-evaluate if the branch becomes local",
   "no-closer": "Re-evaluate when a closing issue is linked",
-  "implement-latch": "Re-evaluate after the owning job finishes",
+  "implement-latch": "Clear the stuck latch and queue follow-up on the open closer",
   "no-write-access": "Re-evaluate when the sender gains write access or is on TRUSTED_SENDER_LOGINS",
   "not-labeled": "Re-evaluate when labeled for pickup",
+};
+
+/** Kick id the page must send for each kickable sit. Owner-only payloads never confirm these. */
+const SIT_KICK_IDS: Record<string, string> = {
+  "ci-not-completed": "sit-clear",
+  "draft-wip": "sit-clear",
+  "foreign-branch": "sit-clear",
+  "no-closer": "sit-clear",
+  "implement-latch": "stuck",
+  "no-write-access": "sit-clear",
+  "not-labeled": "sit-clear",
 };
 
 function kickForSit(reason: RouterSitReason): BoardKick | undefined {
   if (NO_KICK_SITS.has(reason)) return undefined;
   const effect = SIT_KICK_EFFECTS[reason] ?? "Re-evaluate on the next webhook";
-  return { effect };
+  const kick = SIT_KICK_IDS[reason] ?? "sit-clear";
+  return { effect, kick };
 }
 
 export { kickForSit };
@@ -228,7 +245,7 @@ function boardCatalogHash(input: string): string {
  * kicks until it is refreshed. An old page can never outlive a new catalog.
  */
 export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
-  JSON.stringify({ effects: SIT_KICK_EFFECTS, none: [...NO_KICK_SITS].sort() })
+  JSON.stringify({ effects: SIT_KICK_EFFECTS, ids: SIT_KICK_IDS, none: [...NO_KICK_SITS].sort() })
 );
 
 function primaryNumber(row: ReviewJobRecord): number {
@@ -306,9 +323,10 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
   if (typeof rec.commit === "string" && rec.commit.trim() !== "") item.commit = rec.commit.trim();
   if (typeof rec.headSha === "string" && rec.headSha.trim() !== "") item.headSha = rec.headSha.trim();
   if (typeof rec.decidedAt === "number" && Number.isFinite(rec.decidedAt)) item.decidedAt = rec.decidedAt;
-  const kick = rec.kick as { effect?: unknown } | undefined;
+  const kick = rec.kick as { effect?: unknown; kick?: unknown } | undefined;
   if (kick && typeof kick === "object" && typeof kick.effect === "string" && kick.effect.trim() !== "") {
-    item.kick = { effect: kick.effect };
+    const id = typeof kick.kick === "string" && kick.kick.trim() !== "" ? kick.kick.trim() : "sit-clear";
+    item.kick = { effect: kick.effect, kick: id };
   }
   return item;
 }
@@ -738,6 +756,8 @@ function selectedItem() {
 function confirmBlock(item, data, confirmIdPrefix) {
   const wrap = document.createElement("div");
   const hasKick = Boolean(item.kick && typeof item.kick.effect === "string") && isLocalRow(item, data);
+  const kickId = item.kick && typeof item.kick.kick === "string" && item.kick.kick.trim() !== "" ? item.kick.kick.trim() : "";
+  const idempotencyKey = (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.floor(Math.random() * 1e9));
   if (hasKick && state.catalogOk) {
     const note = document.createElement("p");
     note.className = "consequence";
@@ -758,11 +778,14 @@ function confirmBlock(item, data, confirmIdPrefix) {
       }
       msg.textContent = "Working…";
       try {
+        const payload = { owner: item.owner, repo: item.repo, number: item.number };
+        if (kickId) payload.kick = kickId;
+        payload.idempotencyKey = idempotencyKey;
         const res = await fetch("/api/board/kick", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ owner: item.owner, repo: item.repo, number: item.number })
+          headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload)
         });
         if (res.ok) {
           closeConfirm();
@@ -1053,6 +1076,9 @@ async function handleKick(
   }
   if (isImplementKickId(rawKickIdOf(body))) {
     return handleImplementKick(request, body, store, logger, forgeApi, actor);
+  }
+  if (isStuckKickId(rawKickIdOf(body))) {
+    return handleStuckKick(request, body, store, logger, actor);
   }
   const parsed = parseKickBody(body, idempotencyKeyOf(request));
   if ("error" in parsed) return json(400, { error: parsed.error });
@@ -1618,14 +1644,11 @@ function isSitClearPayload(body: unknown): boolean {
   ) {
     return false;
   }
-  if (
-    nonEmptyString(rec.kick) ||
-    nonEmptyString(rec.kickId) ||
-    nonEmptyString(rec.kick_id) ||
-    nonEmptyString(rec.id) ||
-    nonEmptyString(rec.reason)
-  ) {
-    return false;
+  // The page always sends a kick id; "sit-clear" is the id for plain
+  // sit clears. Anything else is a typed kick.
+  for (const field of ["kick", "kickId", "kick_id", "id", "reason"] as const) {
+    const value = rec[field];
+    if (typeof value === "string" && value.trim() !== "" && value.trim() !== "sit-clear") return false;
   }
   return true;
 }
@@ -1655,6 +1678,12 @@ async function handleSitClear(
     return json(503, { error: "queue unavailable" });
   }
   if (!sit) return json(404, { error: "sit not found" });
+  // A stuck latch is never confirmed by an owner-only payload: the page
+  // sends the stuck kick id so one click clears the latch and queues
+  // follow-up on the open closer in a single transaction.
+  if (sit.reason === "implement-latch") {
+    return json(400, { error: "missing kick" });
+  }
   const kick = kickForSit(sit.reason);
   if (!kick) return json(409, { error: "no kick for this row" });
   try {
@@ -1668,4 +1697,177 @@ async function handleSitClear(
   if (kickActor) logger(`board kick ${owner}/${repo}#${number} ${sit.reason} by ${kickActor}`);
   else logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
   return json(200, { ok: true, owner, repo, number, effect: kick.effect });
+}
+
+/**
+ * Stuck-latch kick for an open closer.
+ *
+ * Same route and same edge-identity/idempotency rules as the other kicks,
+ * but a different kick id (`stuck`, aliases `follow-up`/`followup`/
+ * `stuck-latch`). It clears the issue skip latch and inserts a follow-up
+ * job for the open closer in one transaction; the sit row goes away
+ * because that enqueue landed, never via a bare sit delete. It never opens
+ * a second pull, never unassigns, and never adds a pickup label: the
+ * inserted job is the wake. The implement retry path is untouched.
+ */
+async function handleStuckKick(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  actor: string
+): Promise<Response> {
+  const parsed = parseStuckKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const item = { owner: parsed.owner, repo: parsed.repo, issueNumber: parsed.number, kick: parsed.kick };
+
+  if (parsed.idempotencyKey) {
+    let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>>;
+    try {
+      prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+    } catch (err) {
+      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (prior) {
+      if (stuckIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayStuckPrior(store, prior);
+    }
+  }
+
+  const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  let outcome: Awaited<ReturnType<ReviewJobStore["stuckKick"]>>;
+  try {
+    outcome = await store.stuckKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      issueNumber: parsed.number,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      delivery,
+    });
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (parsed.idempotencyKey && isUniqueViolation(err)) {
+      let prior: KickLogRecord | undefined;
+      try {
+        prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+      } catch {
+        return json(503, { error: "queue unavailable" });
+      }
+      if (!prior) return json(503, { error: "queue unavailable" });
+      if (stuckIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayStuckPrior(store, prior);
+    }
+    logger(`stuck kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+
+  if (outcome.status === "ok") {
+    logger(
+      `stuck kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+    );
+    return json(200, {
+      ok: true,
+      jobId: outcome.job.id,
+      newJobId: outcome.job.id,
+      key: outcome.job.jobKey,
+      terminalJobId: outcome.terminalId,
+      deduped: outcome.deduped,
+    });
+  }
+
+  logger(
+    `stuck kick ${outcome.code} actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)}: ${outcome.why}`
+  );
+  const status =
+    outcome.code === "not-found"
+      ? 404
+      : outcome.code === "stale-kick" || outcome.code === "conflict"
+        ? 409
+        : outcome.code === "not-kickable"
+          ? 422
+          : 400;
+  return json(status, {
+    error: outcome.why,
+    code: outcome.code,
+    terminalJobId: outcome.terminalId,
+    newJobId: outcome.newJobId,
+    ...(outcome.deduped ? { deduped: true } : {}),
+  });
+}
+
+async function replayStuckPrior(store: ReviewJobStore, prior: KickLogRecord): Promise<Response> {
+  if (prior.result === "ok") {
+    if (prior.newJobId != null) {
+      try {
+        const job = await store.get(prior.newJobId);
+        if (job) {
+          return json(200, {
+            ok: true,
+            jobId: prior.newJobId,
+            newJobId: prior.newJobId,
+            key: job.jobKey,
+            terminalJobId: prior.terminalJobId,
+            deduped: true,
+          });
+        }
+      } catch {
+        // Fall through to the key-less shape rather than failing a replay
+        // for a ledger row that already committed.
+      }
+    }
+    return json(200, {
+      ok: true,
+      jobId: prior.newJobId,
+      newJobId: prior.newJobId,
+      terminalJobId: prior.terminalJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "not-found") {
+    return json(404, {
+      error: "already decided: not-found",
+      code: "not-found",
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "stale-kick" || prior.result === "conflict") {
+    const code = prior.result === "conflict" ? "conflict" : "stale-kick";
+    const status = 409;
+    return json(status, {
+      error: `already decided: ${prior.result}`,
+      code,
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  return json(422, {
+    error: `already decided: ${prior.result}`,
+    code: "not-kickable",
+    terminalJobId: prior.terminalJobId,
+    newJobId: prior.newJobId,
+    deduped: true,
+  });
 }

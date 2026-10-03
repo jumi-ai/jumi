@@ -40,6 +40,25 @@ export function isImplementKickId(kick: string | null | undefined): boolean {
   return typeof kick === "string" && kick.trim() === IMPLEMENT_KICK_ID;
 }
 
+/**
+ * Stuck-latch follow-up kick ("clear the latch, queue follow-up on the open closer").
+ *
+ * A stuck conflict-round (or other stuck) latch on an issue with an already
+ * open closer is woken by clearing the issue skip latch and inserting a
+ * follow-up job for that closer in one transaction. It never opens a pull
+ * request, never unassigns, and never adds a pickup label; the inserted job
+ * is the wake. Distinct from the implement retry, which only retries a
+ * no-changes implement and refuses a succeeded implement.
+ */
+export const STUCK_KICK_ID = "stuck";
+
+/** Accepted aliases for the stuck-latch kick. The board sends STUCK_KICK_ID. */
+const STUCK_KICK_ALIASES = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
+
+export function isStuckKickId(kick: string | null | undefined): boolean {
+  return typeof kick === "string" && STUCK_KICK_ALIASES.has(kick.trim());
+}
+
 export function isKickPath(pathname: string): boolean {
   const normalized = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
   return KICK_PATHS.has(normalized);
@@ -293,5 +312,44 @@ export function parseImplementKickBody(
   if (number == null || !Number.isFinite(number) || number <= 0) return { error: "missing number" };
   if (!kick) return { error: "missing kick" };
   if (!isImplementKickId(kick)) return { error: "not an implement kick" };
+  return { owner, repo, number, kick, idempotencyKey };
+}
+
+export interface StuckKickRequest {
+  owner: string;
+  repo: string;
+  number: number;
+  kick: string;
+  /** Idempotency key from header or body. Empty means no dedupe. */
+  idempotencyKey: string;
+}
+
+/**
+ * Parse a stuck-latch kick body. The actor is never read here: it always
+ * comes from the edge identity. Commit is ignored: the wake requeues a
+ * follow-up by issue identity against the open closer and never opens a
+ * second pull request.
+ */
+export function parseStuckKickBody(body: unknown, headerIdempotencyKey: string): StuckKickRequest | { error: string } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "expected a JSON object" };
+  }
+  const rec = body as Record<string, unknown>;
+  const owner = strField(rec.owner).trim();
+  const repo = strField(rec.repo).trim();
+  const number = numField(rec.number) ?? numField(rec.prNumber) ?? numField(rec.pr_number) ?? numField(rec.issueNumber);
+  const kick = rawKickIdOf(rec);
+  const idempotencyKey = (
+    headerIdempotencyKey ||
+    strField(rec.idempotencyKey) ||
+    strField(rec.idempotency_key) ||
+    strField(rec["idempotency-key"])
+  ).trim();
+
+  if (!owner) return { error: "missing owner" };
+  if (!repo) return { error: "missing repo" };
+  if (number == null || !Number.isFinite(number) || number <= 0) return { error: "missing number" };
+  if (!kick) return { error: "missing kick" };
+  if (!isStuckKickId(kick)) return { error: "not a stuck kick" };
   return { owner, repo, number, kick, idempotencyKey };
 }

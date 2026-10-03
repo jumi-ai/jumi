@@ -83,7 +83,7 @@ describe("operator board read API", () => {
     for (const item of inProgress) expect(item).not.toHaveProperty("kick");
     // Kickable sit carries a server-provided effect; terminal sit carries none.
     expect(needsKick[0]).toMatchObject({ reason: "ci-not-completed", kick: { effect: expect.any(String) } });
-    expect(Object.keys(needsKick[0].kick as object)).toEqual(["effect"]);
+    expect(Object.keys(needsKick[0].kick as object).sort()).toEqual(["effect", "kick"]);
     expect(sitting[0]).toMatchObject({ reason: "no-changes" });
     expect(sitting[0]).not.toHaveProperty("kick");
 
