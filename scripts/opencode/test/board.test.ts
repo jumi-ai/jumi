@@ -33,7 +33,7 @@ async function seedStore(): Promise<MemoryReviewJobStore> {
   await store.enqueueIssue(makeIssueJob({ delivery: "d-2", issueNumber: 12 }));
   // Sits use numbers that do not collide with the enqueued rows above,
   // since enqueue clears the sit for its own number.
-  await store.sits.remember("kirmanak", "demo", 21, "ci-not-completed");
+  await store.sits.remember("kirmanak", "demo", 21, "not-labeled");
   await store.sits.remember("kirmanak", "demo", 22, "no-changes");
   return store;
 }
@@ -81,10 +81,22 @@ describe("operator board read API", () => {
 
     // Ledger rows carry no kick button.
     for (const item of inProgress) expect(item).not.toHaveProperty("kick");
+    // Every row carries a server-supplied sentence headline distinct from the code.
+    // Checked before toMatchObject: bun's asymmetric matchers replace the
+    // matched property on the received object.
+    for (const item of [...inProgress, ...needsKick, ...sitting]) {
+      expect(typeof item.message).toBe("string");
+      expect((item.message as string).trim().length).toBeGreaterThan(0);
+      expect(item.message).not.toBe(item.reason);
+    }
     // Kickable sit carries a server-provided effect; terminal sit carries none.
-    expect(needsKick[0]).toMatchObject({ reason: "ci-not-completed", kick: { effect: expect.any(String) } });
-    expect(Object.keys(needsKick[0].kick as object)).toEqual(["effect"]);
-    expect(sitting[0]).toMatchObject({ reason: "no-changes" });
+    expect(needsKick[0]).toMatchObject({
+      reason: "not-labeled",
+      message: expect.any(String),
+      kick: { effect: "Remove this board row only", kick: "sit-clear" },
+    });
+    expect(Object.keys(needsKick[0].kick as object).sort()).toEqual(["effect", "kick"]);
+    expect(sitting[0]).toMatchObject({ reason: "no-changes", message: expect.any(String) });
     expect(sitting[0]).not.toHaveProperty("kick");
 
     // Commit known on the review row, omitted on the issue row with no head SHA.
@@ -130,8 +142,35 @@ describe("operator board read API", () => {
     const store = await seedStore();
     const groups = await buildBoardGroups(store);
     expect(groups.in_progress).toHaveLength(2);
-    expect(groups.needs_kick.map((item) => item.reason)).toEqual(["ci-not-completed"]);
+    expect(groups.needs_kick.map((item) => item.reason)).toEqual(["not-labeled"]);
     expect(groups.sitting.map((item) => item.reason)).toEqual(["no-changes"]);
+  });
+
+  test("waits the operator cannot finish are status lines with no button", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.sits.remember("kirmanak", "demo", 31, "ci-not-completed");
+    await store.sits.remember("kirmanak", "demo", 32, "draft-wip");
+    await store.sits.remember("kirmanak", "demo", 33, "repo-mutex");
+    const groups = await buildBoardGroups(store);
+    expect(groups.needs_kick).toHaveLength(0);
+    expect(groups.sitting.map((item) => item.reason).sort()).toEqual(["ci-not-completed", "draft-wip", "repo-mutex"]);
+    for (const item of groups.sitting) {
+      expect(item.kick).toBeUndefined();
+      expect(typeof item.message).toBe("string");
+    }
+    const mutex = groups.sitting.find((item) => item.reason === "repo-mutex");
+    expect(mutex?.message?.toLowerCase()).toContain("already working on this pull");
+    expect(mutex?.message?.toLowerCase()).not.toContain("locked");
+  });
+
+  test("sit duplicating an in-progress row is hidden, not a second problem", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob({ delivery: "d-1", prNumber: 7, headSha: "abc123" }));
+    await store.sits.remember("kirmanak", "demo", 7, "not-labeled");
+    const groups = await buildBoardGroups(store);
+    expect(groups.in_progress).toHaveLength(1);
+    expect(groups.needs_kick).toHaveLength(0);
+    expect(groups.sitting).toHaveLength(0);
   });
 
   test("board paths stay 404 on the webhook host", async () => {
@@ -401,9 +440,15 @@ describe("operator board read API", () => {
       expect(response.headers.get("Content-Type")).toContain("text/html");
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       const html = await response.text();
-      // Two lists on the phone; reason is the headline elsewhere via payload.
+      // Two lists on the phone; the server sentence is the headline via payload.
       expect(html).toContain("<h2>In progress</h2>");
       expect(html).toContain("<h2>Sitting</h2>");
+      expect(html).toContain("headlineOf(item)");
+      expect(html).toContain("Remove row");
+      expect(html).toContain("Clear latch and queue follow-up");
+      expect(html).toContain("Sitting on purpose");
+      expect(html).not.toContain("Sitting on purpose ·");
+      expect(html).not.toContain(">Kick<");
       // Forge switch, inspector, and phone sheet.
       expect(html).toContain('id="forge-switch"');
       expect(html).toContain('id="inspector"');

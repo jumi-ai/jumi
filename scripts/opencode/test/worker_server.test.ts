@@ -261,7 +261,8 @@ describe("createWorkerFetchHandler", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "closing issue already assigned" });
     expect(queue.jobs).toHaveLength(0);
-    expect(await sits.get("kirmanak", "demo", 127)).toMatchObject({ reason: "implement-latch" });
+    // Sits on purpose with no board button.
+    expect(await sits.get("kirmanak", "demo", 127)).toMatchObject({ reason: "repo-mutex" });
   });
 
   test("skips PR-assign when getIssue of the closer fails", async () => {
@@ -350,6 +351,33 @@ describe("createWorkerFetchHandler", () => {
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs).toHaveLength(1);
+  });
+
+  test("a listed sender's issue assign is a job when the forge says none", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ trustedSenderLogins: ["Alice"] }), {
+      queue,
+      api: pushApi({ getCollaboratorPermission: async () => ({ permission: "none" }) }),
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "alice" }) }))
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
+  });
+
+  test("skips an issue assigned by an unlisted sender who can push when the list is set", async () => {
+    const queue = makeQueue();
+    const handler = createWorkerFetchHandler(makeWorkerConfig({ trustedSenderLogins: ["alice"] }), {
+      queue,
+      api: pushApi(),
+    });
+    const response = await handler(
+      await signedRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "mallory" }) }))
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "sender not on trusted list" });
+    expect(queue.jobs).toHaveLength(0);
   });
 
   test("skips an issue assigned by someone who cannot push", async () => {

@@ -20,6 +20,7 @@ export interface WorkerConfig {
   githubAppInstallationId?: string;
   botUsername: string;
   followupIgnoreLogins: string[];
+  trustedSenderLogins: string[];
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -130,6 +131,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     githubWebhookSecret: resolved[GITHUB_ENV.webhookSecret] || undefined,
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
+    trustedSenderLogins: csvEnv(resolved, "TRUSTED_SENDER_LOGINS"),
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,

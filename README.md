@@ -102,6 +102,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `GITEA_ALLOWED_REPOS` | unset | Optional comma-separated `owner/repo` allowlist |
 | `BOT_USERNAME` | `jumi` | Bot login used to find the sticky comment and for assign pickup |
 | `FOLLOWUP_IGNORE_LOGINS` | unset | Optional comma-separated logins skipped for follow-up in addition to `BOT_USERNAME` |
+| `TRUSTED_SENDER_LOGINS` | unset | Optional comma-separated logins that may start implement and steer follow-up (label, assign, review, comment). When set, only these logins are admitted, whole login, case-insensitive, and the forge is not asked. Unset or empty admits only a sender whose collaborator lookup says write, admin, or owner (or a maintain/push role); an App's public permission record and team grants the lookup does not show are not consulted, so list such senders. Router and worker both read it |
 | `OPENCODE_MODEL` | `openai/gpt-5.5` | OpenCode model ID passed to `opencode run -m`; shared provider/small-model defaults come from the remote `.well-known/opencode` config |
 | `OPENCODE_VARIANT` | unset | OpenCode reasoning effort passed to `opencode run --variant`. Unset or empty omits the flag (model default). Do not bake an effort into the image |
 | `OPENCODE_FALLBACK_MODEL` | unset | Optional OpenCode model ID (`provider/model`) for one from-scratch hop when the primary child exits because the provider/model is unavailable. Unset, empty, or same-provider fallback does not hop: Zen/Free quota then delayed-requeues the same job instead of a human kill-switch |
@@ -143,7 +144,7 @@ It posts `jumi/opencode-review` on the PR head SHA from an explicit trailer in `
 
 - `pending` while the review is running
 - `success` / `failure` from that trailer (❓ may still be `success`)
-- `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md` continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check and posts `stuck: incomplete review`; stdout/chat is never the artifact
+- `failure` if OpenCode crashes, returns empty output, or omits the trailer. Missing/empty `JUMI_REVIEW.md`, or a `failure` trailer with no published finding lines (a trailer reason is not a finding; dropped prose is not promoted), continues the same session with a write-only turn (see `MAX_INCOMPLETE_RETRIES`) then fails the check as `Incomplete review: no findings` and posts `stuck: incomplete review`; stdout/chat is never the artifact. A `success` trailer with no findings stays a clean review
 - `warning` when a queued job is skipped after it already went pending (for example the PR head changed)
 
 The engine inspects live non-jumi commit statuses / check-runs (and in-progress Actions jobs) before that pending status. Pending or red CI is a cheap skip with no model and no `jumi/opencode-review` status — not success for “waiting” or “CI failed”. Title-gated skips (`WIP:`) still post no status. Plan summaries stay the existing PR-thread comments (Tapio sticky) once the review actually starts.
@@ -224,7 +225,7 @@ A `type: claude` child leaves no session DB for that exporter, so its spans come
 The router (not the engine, not the worker) serves an operator board on port `3001`. The webhook listener never serves these paths. Reach it through the auth proxy in front of that port. A direct-to-pod route lets a caller self-assert identity headers. The webhook secret is not board auth.
 
 - `GET /` and `GET /board` are the page. `GET /api/board` is the same data as JSON.
-- `POST /api/board/kick` (alias `POST /board/kick`) is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, queue an implement again after a no-changes latch, or clear a kickable sitting row (this one queues no job). It does not push, does not create an empty commit, and does not rerun CI.
+- `POST /api/board/kick` (alias `POST /board/kick`) is a typed retry. It can requeue a failed or skipped review of the same commit, close-then-reopen a foreign or reuse pull without a push, queue an implement again after a no-changes latch, clear a stuck latch and queue follow-up on the open closer, or clear a kickable sitting row (this one queues no job). It does not push, does not create an empty commit, and does not rerun CI.
 
 In-progress rows come from the job ledger. Sitting rows come from persisted refusals. The router stays a single replica.
 

@@ -379,7 +379,7 @@ describe("reviewPullRequest", () => {
           home,
           api: makeApi(),
           openCodeRunner: async () => {
-            await writeReview(workspace, "please fix the tests\n<!-- jumi-check: failure -->");
+            await writeReview(workspace, "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->");
             return { status: "ok" };
           },
         });
@@ -387,7 +387,9 @@ describe("reviewPullRequest", () => {
         expect(state.fingerprints).toEqual([
           {
             kind: "action",
-            hash: fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!,
+            hash: fingerprintReviewArtifact(
+              "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->"
+            )!,
           },
         ]);
       });
@@ -1472,7 +1474,7 @@ describe("reviewPullRequest", () => {
             createCommitStatus: (owner, repo, sha, status) => github.createCommitStatus(owner, repo, sha, status),
           }),
           openCodeRunner: async () => {
-            await writeReview(workspace, `note\n<!-- jumi-check: failure; ${reason} -->`);
+            await writeReview(workspace, `src/foo.ts:1: 🔴 bug: note.\n<!-- jumi-check: failure; ${reason} -->`);
             return { status: "ok" };
           },
         });

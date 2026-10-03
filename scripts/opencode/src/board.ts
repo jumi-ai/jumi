@@ -2,9 +2,11 @@ import {
   isImplementKickId,
   isKickPath,
   isReopenKickId,
+  isStuckKickId,
   parseImplementKickBody,
   parseKickBody,
   parseReopenKickBody,
+  parseStuckKickBody,
   rawKickIdOf,
 } from "./kick.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
@@ -13,6 +15,7 @@ import {
   isQueueUnavailable,
   isUniqueViolation,
   reopenIdempotencyMismatch,
+  stuckIdempotencyMismatch,
 } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
@@ -105,6 +108,40 @@ export function isHomelabForge(forge?: string): boolean {
   return (forge ?? "gitea") !== PEER_FORGE;
 }
 
+/**
+ * Public origin of this board behind the ingress.
+ *
+ * The page is served over HTTPS while the board process sees a cleartext hop
+ * from the ingress, so `new URL(request.url).origin` is the internal origin,
+ * not the browser one. Only the ingress can reach the board port and it sets
+ * the forwarded protocol/host, so those headers are the public origin.
+ */
+export function boardPublicOrigin(request: Request): string {
+  const url = new URL(request.url);
+  const proto = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
+  const host = (request.headers.get("x-forwarded-host") ?? "").split(",")[0].trim();
+  const scheme = proto === "http" || proto === "https" ? proto : url.protocol.replace(":", "").toLowerCase();
+  const hostPart = host || url.host;
+  try {
+    return new URL(`${scheme}://${hostPart}`).origin;
+  } catch {
+    return url.origin;
+  }
+}
+
+/** Same-origin guard shared by every confirm path. Absent Origin is allowed. */
+export function isAllowedBoardOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  let normalized: string;
+  try {
+    normalized = new URL(origin).origin;
+  } catch {
+    return false;
+  }
+  return normalized === boardPublicOrigin(request);
+}
+
 function idempotencyKeyOf(request: Request): string {
   const value = request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
   return value.trim();
@@ -113,11 +150,15 @@ function idempotencyKeyOf(request: Request): string {
 export interface BoardKick {
   /** Server-provided effect text for this kick. */
   effect: string;
+  /** Kick id the page must send back. Absent on legacy payloads. */
+  kick: string;
 }
 
 export interface BoardItem {
-  /** Headline reason: ledger kind+state for in-progress, sit code for sits. */
+  /** Internal code: ledger kind+state for in-progress, sit code for sits. Never the card headline. */
   reason: string;
+  /** Server-supplied one-sentence headline. The page renders this; reason may stay in the inspector only. */
+  message?: string;
   owner: string;
   repo: string;
   /** Pull or issue number (shared number space). */
@@ -157,23 +198,57 @@ export interface BoardPeerStatus {
   error?: string;
 }
 
-/** Sits with no button: already done, nothing to ship, or already queued. */
-const NO_KICK_SITS = new Set<string>(["terminal-result", "no-changes", "repo-mutex"]);
+/**
+ * Sits with no button: waits the operator cannot finish from this page
+ * (draft/not-ready, CI), plus already done, nothing to ship, or already queued.
+ */
+const NO_KICK_SITS = new Set<string>(["terminal-result", "no-changes", "repo-mutex", "ci-not-completed", "draft-wip"]);
 
+/** One sentence per sit reason, supplied by the server. The page renders this as the headline. */
+const SIT_MESSAGES: Record<string, string> = {
+  "ci-not-completed": "Waiting for CI to finish before review can start.",
+  "draft-wip": "Pull is draft or not ready and is waiting to be marked ready.",
+  "foreign-branch": "Pull comes from a foreign branch and cannot be picked up here.",
+  "no-closer": "No closing issue is linked to this pull.",
+  "implement-latch": "Stuck latch is holding follow-up for the open closer.",
+  "no-changes": "Finished with nothing to ship.",
+  "terminal-result": "Finished with a terminal result.",
+  "repo-mutex": "Already working on this pull in another job.",
+  "no-write-access": "Sender lacks write access for this pull.",
+  "not-labeled": "Pull is not labeled for pickup.",
+};
+
+export function sitMessage(reason: RouterSitReason): string {
+  return SIT_MESSAGES[reason] ?? "Sitting on purpose.";
+}
+
+/**
+ * A click that only removes the board row must say it only removes the row.
+ * Only the stuck latch queues follow-up; every other kickable sit is a
+ * row-only clear, so its effect names just that.
+ */
 const SIT_KICK_EFFECTS: Record<string, string> = {
-  "ci-not-completed": "Re-check once CI finishes",
-  "draft-wip": "Re-evaluate when marked ready",
-  "foreign-branch": "Re-evaluate if the branch becomes local",
-  "no-closer": "Re-evaluate when a closing issue is linked",
-  "implement-latch": "Re-evaluate after the owning job finishes",
-  "no-write-access": "Re-evaluate when the sender gains write access",
-  "not-labeled": "Re-evaluate when labeled for pickup",
+  "foreign-branch": "Remove this board row only",
+  "no-closer": "Remove this board row only",
+  "implement-latch": "Clear the stuck latch and queue follow-up on the open closer",
+  "no-write-access": "Remove this board row only",
+  "not-labeled": "Remove this board row only",
+};
+
+/** Kick id the page must send for each kickable sit. Owner-only payloads never confirm these. */
+const SIT_KICK_IDS: Record<string, string> = {
+  "foreign-branch": "sit-clear",
+  "no-closer": "sit-clear",
+  "implement-latch": "stuck",
+  "no-write-access": "sit-clear",
+  "not-labeled": "sit-clear",
 };
 
 function kickForSit(reason: RouterSitReason): BoardKick | undefined {
   if (NO_KICK_SITS.has(reason)) return undefined;
-  const effect = SIT_KICK_EFFECTS[reason] ?? "Re-evaluate on the next webhook";
-  return { effect };
+  const effect = SIT_KICK_EFFECTS[reason] ?? "Remove this board row only";
+  const kick = SIT_KICK_IDS[reason] ?? "sit-clear";
+  return { effect, kick };
 }
 
 export { kickForSit };
@@ -194,7 +269,7 @@ function boardCatalogHash(input: string): string {
  * kicks until it is refreshed. An old page can never outlive a new catalog.
  */
 export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
-  JSON.stringify({ effects: SIT_KICK_EFFECTS, none: [...NO_KICK_SITS].sort() })
+  JSON.stringify({ effects: SIT_KICK_EFFECTS, ids: SIT_KICK_IDS, none: [...NO_KICK_SITS].sort() })
 );
 
 function primaryNumber(row: ReviewJobRecord): number {
@@ -205,9 +280,26 @@ function primaryNumber(row: ReviewJobRecord): number {
   return row.prNumber;
 }
 
+function inflightMessage(kind: string, state: string): string {
+  const key = `${kind} ${state}`;
+  const messages: Record<string, string> = {
+    "review queued": "Review is queued and waiting for a worker.",
+    "review leased": "Review is running.",
+    "implement queued": "Implement is queued and waiting for a worker.",
+    "implement leased": "Implement is running.",
+    "follow-up queued": "Follow-up is queued and waiting for a worker.",
+    "follow-up leased": "Follow-up is running.",
+    "conflict queued": "Conflict merge is queued and waiting for a worker.",
+    "conflict leased": "Conflict merge is running.",
+  };
+  return messages[key] ?? `${kind} is ${state}.`;
+}
+
 function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
+  const reason = `${row.kind} ${row.state}`;
   const item: BoardItem = {
-    reason: `${row.kind} ${row.state}`,
+    reason,
+    message: inflightMessage(row.kind, row.state),
     owner: row.owner,
     repo: row.repo,
     number: primaryNumber(row),
@@ -225,6 +317,7 @@ function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
 function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kickable: boolean } {
   const item: BoardItem = {
     reason: sit.reason,
+    message: sitMessage(sit.reason),
     owner: sit.owner,
     repo: sit.repo,
     number: sit.number,
@@ -245,9 +338,16 @@ export interface BoardStore {
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
   const [inflight, sits] = await Promise.all([store.listInflight(200), store.sits.list()]);
   const in_progress = inflight.map((row) => inflightItem(row, forge));
+  // A sit that duplicates a job already in progress is not a second problem:
+  // hide it here. Recording and clearing are unchanged; this is read-time only.
+  const inflightKeys = new Set(
+    in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
+  );
   const needs_kick: BoardItem[] = [];
   const sitting: BoardItem[] = [];
   for (const sit of sits) {
+    const key = `${sit.owner.toLowerCase()}/${sit.repo.toLowerCase()}#${sit.number}`;
+    if (inflightKeys.has(key)) continue;
     const { item, kickable } = sitItem(sit, forge);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
@@ -267,14 +367,18 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
     typeof rec.number === "number" && Number.isInteger(rec.number) && rec.number > 0 ? rec.number : undefined;
   if (!owner || !repo || !reason || !kind || number === undefined) return undefined;
   const item: BoardItem = { reason, owner, repo, number, kind };
+  if (typeof rec.message === "string" && rec.message.trim() !== "") {
+    item.message = rec.message.trim().slice(0, 500);
+  }
   const forge = typeof rec.forge === "string" && rec.forge.trim() !== "" ? rec.forge.trim() : fallbackForge;
   if (forge) item.forge = forge;
   if (typeof rec.commit === "string" && rec.commit.trim() !== "") item.commit = rec.commit.trim();
   if (typeof rec.headSha === "string" && rec.headSha.trim() !== "") item.headSha = rec.headSha.trim();
   if (typeof rec.decidedAt === "number" && Number.isFinite(rec.decidedAt)) item.decidedAt = rec.decidedAt;
-  const kick = rec.kick as { effect?: unknown } | undefined;
+  const kick = rec.kick as { effect?: unknown; kick?: unknown } | undefined;
   if (kick && typeof kick === "object" && typeof kick.effect === "string" && kick.effect.trim() !== "") {
-    item.kick = { effect: kick.effect };
+    const id = typeof kick.kick === "string" && kick.kick.trim() !== "" ? kick.kick.trim() : "sit-clear";
+    item.kick = { effect: kick.effect, kick: id };
   }
   return item;
 }
@@ -460,8 +564,9 @@ function withForgeGroups(groups: BoardGroups, forge: string): BoardGroups {
  * never calls the forge. Forge URLs below are link hrefs only.
  *
  * Layout contract:
- * - Phone: two lists (In progress, Sitting). Reason is the headline. A Kick
- *   button renders only when the payload carries `kick`. Sitting on purpose
+ * - Phone: two lists (In progress, Sitting). Message is the headline; reason
+ *   stays as code in the inspector only. A button naming the real side effect
+ *   renders only when the payload carries `kick`. Sitting on purpose
  *   is a status line, never a disabled button.
  * - Confirm names the server-provided side effect (`kick.effect`) before it
  *   commits. Narrow viewports confirm in a bottom sheet; wide viewports
@@ -549,7 +654,7 @@ button.secondary { opacity: 0.85; }
 </main>
 <div id="sheet-wrap" hidden>
 <div id="sheet-backdrop"></div>
-<div id="sheet" role="dialog" aria-modal="true" aria-label="Confirm kick"></div>
+<div id="sheet" role="dialog" aria-modal="true" aria-label="Confirm action"></div>
 </div>
 <script>
 const PAGE_CATALOG = ${JSON.stringify(catalog)};
@@ -632,6 +737,12 @@ async function load() {
   }
   render();
 }
+function headlineOf(item) { return (typeof item.message === "string" && item.message.trim() !== "" ? item.message : item.reason); }
+function kickLabelOf(item) {
+  const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
+  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") return "Clear latch and queue follow-up";
+  return "Remove row";
+}
 function rowItem(item, opts) {
   const li = document.createElement("li");
   li.className = "row" + (state.selected === keyOf(item) ? " selected" : "");
@@ -639,7 +750,7 @@ function rowItem(item, opts) {
   head.className = "row-head";
   const h = document.createElement("p");
   h.className = "reason";
-  h.textContent = item.reason;
+  h.textContent = headlineOf(item);
   head.appendChild(h);
   li.appendChild(head);
   const sub = document.createElement("div");
@@ -654,14 +765,14 @@ function rowItem(item, opts) {
     actions.className = "row-actions";
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.textContent = "Kick";
+    btn.textContent = kickLabelOf(item);
     btn.addEventListener("click", (ev) => { ev.stopPropagation(); state.selected = keyOf(item); render(); openConfirm(item); });
     actions.appendChild(btn);
     li.appendChild(actions);
   } else if (opts.section === "sitting" && !hasKick) {
     const line = document.createElement("div");
     line.className = "status-line";
-    line.textContent = "Sitting on purpose · " + item.reason;
+    line.textContent = "Sitting on purpose";
     li.appendChild(line);
   }
   li.addEventListener("click", () => { state.selected = keyOf(item); render(); if (!narrow()) { const el = $("inspector").querySelector("button.primary"); } });
@@ -704,6 +815,8 @@ function selectedItem() {
 function confirmBlock(item, data, confirmIdPrefix) {
   const wrap = document.createElement("div");
   const hasKick = Boolean(item.kick && typeof item.kick.effect === "string") && isLocalRow(item, data);
+  const kickId = item.kick && typeof item.kick.kick === "string" && item.kick.kick.trim() !== "" ? item.kick.kick.trim() : "";
+  const idempotencyKey = (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.floor(Math.random() * 1e9));
   if (hasKick && state.catalogOk) {
     const note = document.createElement("p");
     note.className = "consequence";
@@ -713,7 +826,7 @@ function confirmBlock(item, data, confirmIdPrefix) {
     primary.type = "button";
     primary.className = "primary";
     primary.id = confirmIdPrefix + "-confirm";
-    primary.textContent = "Confirm kick";
+    primary.textContent = kickLabelOf(item);
     const msg = document.createElement("div");
     msg.className = "sub";
     msg.id = confirmIdPrefix + "-msg";
@@ -724,11 +837,14 @@ function confirmBlock(item, data, confirmIdPrefix) {
       }
       msg.textContent = "Working…";
       try {
+        const payload = { owner: item.owner, repo: item.repo, number: item.number };
+        if (kickId) payload.kick = kickId;
+        payload.idempotencyKey = idempotencyKey;
         const res = await fetch("/api/board/kick", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({ owner: item.owner, repo: item.repo, number: item.number })
+          headers: { "Content-Type": "application/json", Accept: "application/json", "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload)
         });
         if (res.ok) {
           closeConfirm();
@@ -770,11 +886,11 @@ function renderInspector() {
   const item = selectedItem();
   if (!item || !data) { box.textContent = "Select a row to see detail."; return; }
   const title = document.createElement("h2");
-  title.textContent = item.reason;
+  title.textContent = headlineOf(item);
   box.appendChild(title);
   const sub = document.createElement("div");
   sub.className = "sub";
-  let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind + " · " + forgeOf(item, data);
+  let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind + " · " + forgeOf(item, data) + " · " + item.reason;
   if (item.commit) subText += " · " + item.commit;
   if (typeof item.decidedAt === "number") subText += " · decided " + new Date(item.decidedAt).toLocaleString();
   sub.textContent = subText;
@@ -797,7 +913,7 @@ function openConfirm(item) {
   sheet.textContent = "";
   const data = state.data;
   const title = document.createElement("h2");
-  title.textContent = item.reason;
+  title.textContent = headlineOf(item);
   sheet.appendChild(title);
   const sub = document.createElement("div");
   sub.className = "sub";
@@ -993,12 +1109,11 @@ async function handleKick(
   if (!isPeer && !actor) return json(401, { error: "missing edge identity" });
   // Same-origin JSON only: the kick is state-changing behind edge-proxy
   // cookie auth, so a simple-request CSRF (e.g. cross-origin text/plain
-  // form) must not fire it. Matches the sit-clear guards below.
-  const url = new URL(request.url);
+  // form) must not fire it. Compares against the public origin behind the
+  // ingress (forwarded proto/host), not the internal cleartext hop URL.
   const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-  const origin = request.headers.get("origin");
-  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  if (!isAllowedBoardOrigin(request)) return json(403, { error: "forbidden" });
   let body: unknown;
   try {
     const text = await request.text();
@@ -1020,6 +1135,9 @@ async function handleKick(
   }
   if (isImplementKickId(rawKickIdOf(body))) {
     return handleImplementKick(request, body, store, logger, forgeApi, actor);
+  }
+  if (isStuckKickId(rawKickIdOf(body))) {
+    return handleStuckKick(request, body, store, logger, actor);
   }
   const parsed = parseKickBody(body, idempotencyKeyOf(request));
   if ("error" in parsed) return json(400, { error: parsed.error });
@@ -1585,14 +1703,11 @@ function isSitClearPayload(body: unknown): boolean {
   ) {
     return false;
   }
-  if (
-    nonEmptyString(rec.kick) ||
-    nonEmptyString(rec.kickId) ||
-    nonEmptyString(rec.kick_id) ||
-    nonEmptyString(rec.id) ||
-    nonEmptyString(rec.reason)
-  ) {
-    return false;
+  // The page always sends a kick id; "sit-clear" is the id for plain
+  // sit clears. Anything else is a typed kick.
+  for (const field of ["kick", "kickId", "kick_id", "id", "reason"] as const) {
+    const value = rec[field];
+    if (typeof value === "string" && value.trim() !== "" && value.trim() !== "sit-clear") return false;
   }
   return true;
 }
@@ -1604,11 +1719,9 @@ async function handleSitClear(
   logger: (message: string) => void,
   kickActor?: string
 ): Promise<Response> {
-  const url = new URL(request.url);
   const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-  const origin = request.headers.get("origin");
-  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  if (!isAllowedBoardOrigin(request)) return json(403, { error: "forbidden" });
   const record = body as { owner?: unknown; repo?: unknown; number?: unknown };
   const owner = typeof record.owner === "string" ? record.owner.trim() : "";
   const repo = typeof record.repo === "string" ? record.repo.trim() : "";
@@ -1624,6 +1737,12 @@ async function handleSitClear(
     return json(503, { error: "queue unavailable" });
   }
   if (!sit) return json(404, { error: "sit not found" });
+  // A stuck latch is never confirmed by an owner-only payload: the page
+  // sends the stuck kick id so one click clears the latch and queues
+  // follow-up on the open closer in a single transaction.
+  if (sit.reason === "implement-latch") {
+    return json(400, { error: "missing kick" });
+  }
   const kick = kickForSit(sit.reason);
   if (!kick) return json(409, { error: "no kick for this row" });
   try {
@@ -1637,4 +1756,177 @@ async function handleSitClear(
   if (kickActor) logger(`board kick ${owner}/${repo}#${number} ${sit.reason} by ${kickActor}`);
   else logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
   return json(200, { ok: true, owner, repo, number, effect: kick.effect });
+}
+
+/**
+ * Stuck-latch kick for an open closer.
+ *
+ * Same route and same edge-identity/idempotency rules as the other kicks,
+ * but a different kick id (`stuck`, aliases `follow-up`/`followup`/
+ * `stuck-latch`). It clears the issue skip latch and inserts a follow-up
+ * job for the open closer in one transaction; the sit row goes away
+ * because that enqueue landed, never via a bare sit delete. It never opens
+ * a second pull, never unassigns, and never adds a pickup label: the
+ * inserted job is the wake. The implement retry path is untouched.
+ */
+async function handleStuckKick(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  actor: string
+): Promise<Response> {
+  const parsed = parseStuckKickBody(body, idempotencyKeyOf(request));
+  if ("error" in parsed) return json(400, { error: parsed.error });
+  const item = { owner: parsed.owner, repo: parsed.repo, issueNumber: parsed.number, kick: parsed.kick };
+
+  if (parsed.idempotencyKey) {
+    let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>>;
+    try {
+      prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+    } catch (err) {
+      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (prior) {
+      if (stuckIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayStuckPrior(store, prior);
+    }
+  }
+
+  const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  let outcome: Awaited<ReturnType<ReviewJobStore["stuckKick"]>>;
+  try {
+    outcome = await store.stuckKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      issueNumber: parsed.number,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      delivery,
+    });
+  } catch (err) {
+    if (isQueueUnavailable(err)) {
+      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return json(503, { error: "queue unavailable" });
+    }
+    if (parsed.idempotencyKey && isUniqueViolation(err)) {
+      let prior: KickLogRecord | undefined;
+      try {
+        prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+      } catch {
+        return json(503, { error: "queue unavailable" });
+      }
+      if (!prior) return json(503, { error: "queue unavailable" });
+      if (stuckIdempotencyMismatch(item, prior)) {
+        return json(400, {
+          error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+          code: "bad-request",
+          terminalJobId: null,
+          newJobId: null,
+        });
+      }
+      return await replayStuckPrior(store, prior);
+    }
+    logger(`stuck kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+
+  if (outcome.status === "ok") {
+    logger(
+      `stuck kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+    );
+    return json(200, {
+      ok: true,
+      jobId: outcome.job.id,
+      newJobId: outcome.job.id,
+      key: outcome.job.jobKey,
+      terminalJobId: outcome.terminalId,
+      deduped: outcome.deduped,
+    });
+  }
+
+  logger(
+    `stuck kick ${outcome.code} actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)}: ${outcome.why}`
+  );
+  const status =
+    outcome.code === "not-found"
+      ? 404
+      : outcome.code === "stale-kick" || outcome.code === "conflict"
+        ? 409
+        : outcome.code === "not-kickable"
+          ? 422
+          : 400;
+  return json(status, {
+    error: outcome.why,
+    code: outcome.code,
+    terminalJobId: outcome.terminalId,
+    newJobId: outcome.newJobId,
+    ...(outcome.deduped ? { deduped: true } : {}),
+  });
+}
+
+async function replayStuckPrior(store: ReviewJobStore, prior: KickLogRecord): Promise<Response> {
+  if (prior.result === "ok") {
+    if (prior.newJobId != null) {
+      try {
+        const job = await store.get(prior.newJobId);
+        if (job) {
+          return json(200, {
+            ok: true,
+            jobId: prior.newJobId,
+            newJobId: prior.newJobId,
+            key: job.jobKey,
+            terminalJobId: prior.terminalJobId,
+            deduped: true,
+          });
+        }
+      } catch {
+        // Fall through to the key-less shape rather than failing a replay
+        // for a ledger row that already committed.
+      }
+    }
+    return json(200, {
+      ok: true,
+      jobId: prior.newJobId,
+      newJobId: prior.newJobId,
+      terminalJobId: prior.terminalJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "not-found") {
+    return json(404, {
+      error: "already decided: not-found",
+      code: "not-found",
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "stale-kick" || prior.result === "conflict") {
+    const code = prior.result === "conflict" ? "conflict" : "stale-kick";
+    const status = 409;
+    return json(status, {
+      error: `already decided: ${prior.result}`,
+      code,
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  return json(422, {
+    error: `already decided: ${prior.result}`,
+    code: "not-kickable",
+    terminalJobId: prior.terminalJobId,
+    newJobId: prior.newJobId,
+    deduped: true,
+  });
 }

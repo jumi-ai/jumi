@@ -154,6 +154,95 @@ describe("board kick contract (#162)", () => {
     expect(crossOrigin.status).toBe(403);
   });
 
+  test("forwarded https origin behind the ingress is accepted (#207)", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedFailed(store);
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const item = { owner: "kirmanak", repo: "demo", number: 7, commit: "abc123", kick: "boom" };
+    const forwarded = { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "board.example.test" };
+
+    // The board sees an internal cleartext hop; the browser origin is the public HTTPS one.
+    const ok = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-ok" }),
+      })
+    );
+    expect(ok.status).toBe(200);
+
+    const foreign = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://evil.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-foreign" }),
+      })
+    );
+    expect(foreign.status).toBe(403);
+
+    // Non-http(s) forwarded proto fails closed on the public origin.
+    const badScheme = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          "X-Forwarded-Proto": "gopher",
+          "X-Forwarded-Host": "board.example.test",
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ ...item, idempotencyKey: "forwarded-bad-scheme" }),
+      })
+    );
+    expect(badScheme.status).toBe(403);
+  });
+
+  test("forwarded https origin is accepted on the sit-clear path (#207)", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.sits.remember("kirmanak", "demo", 21, "not-labeled");
+    await store.sits.remember("kirmanak", "demo", 22, "not-labeled");
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+    const forwarded = { "X-Forwarded-Proto": "https", "X-Forwarded-Host": "board.example.test" };
+
+    const ok = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://board.example.test",
+        }),
+        body: JSON.stringify({ owner: "kirmanak", repo: "demo", number: 21 }),
+      })
+    );
+    expect(ok.status).toBe(200);
+
+    const foreign = await handler(
+      new Request("http://10.0.0.5:3001/api/board/kick", {
+        method: "POST",
+        headers: new Headers({
+          "Content-Type": "application/json",
+          ...EDGE_HEADERS,
+          ...forwarded,
+          Origin: "https://evil.test",
+        }),
+        body: JSON.stringify({ owner: "kirmanak", repo: "demo", number: 22 }),
+      })
+    );
+    expect(foreign.status).toBe(403);
+  });
+
   test("non-kickable reasons stay status lines with a 422", async () => {
     for (const reason of ["provider auth death", "draft or WIP pull request"]) {
       const store = new MemoryReviewJobStore();
@@ -564,5 +653,120 @@ describe("board implement kick contract (#164)", () => {
     );
     expect(blocked.status).toBe(422);
     expect(((await blocked.json()) as Record<string, unknown>).code).toBe("not-kickable");
+  });
+});
+
+describe("board stuck-latch kick contract (#208)", () => {
+  async function seedStuck(store: MemoryReviewJobStore): Promise<number> {
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 7, headSha: "abc123" }));
+    const leased = await store.lease("worker", 60_000, new Date(), ["follow-up"]);
+    if (!leased) throw new Error("expected a follow-up lease");
+    await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: conflict round failed" });
+    await store.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: conflict round failed" });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: conflict round failed");
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+    return leased.id;
+  }
+
+  function stuckInput(overrides: Record<string, unknown> = {}) {
+    return {
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      kick: "stuck",
+      actor: "operator",
+      idempotencyKey: "stuck-1",
+      delivery: "board-kick:test:1",
+      ...overrides,
+    };
+  }
+
+  test("ok clears the latch and sit in one enqueue; alias replay dedupes", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+
+    const outcome = await store.stuckKick(stuckInput());
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.terminalId).toBe(terminalId);
+    expect(outcome.deduped).toBe(false);
+    expect(outcome.job.kind).toBe("follow-up");
+    expect(outcome.job.prNumber).toBe(7);
+    expect(outcome.job.jobKey).toBe("follow-up:kirmanak/demo#7:abc123");
+    // The terminal row is kept; the latch is cleared and the sit went away
+    // because the enqueue landed.
+    expect((await store.get(terminalId))?.state).toBe("skipped");
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({ skipReason: null });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+
+    // A replay under a different alias replays the first result.
+    const replay = await store.stuckKick(stuckInput({ kick: "follow-up", delivery: "board-kick:test:2" }));
+    expect(replay.status).toBe("ok");
+    if (replay.status !== "ok") throw new Error("expected ok replay");
+    expect(replay.deduped).toBe(true);
+    expect(replay.job.id).toBe(outcome.job.id);
+    expect(replay.terminalId).toBe(terminalId);
+  });
+
+  test("wrong sit reason is stale-kick; non-stuck latch is not-kickable", async () => {
+    const wrongSit = new MemoryReviewJobStore();
+    await seedStuck(wrongSit);
+    await wrongSit.sits.remember("kirmanak", "demo", 12, "ci-not-completed");
+    const stale = await wrongSit.stuckKick(stuckInput({ idempotencyKey: "stuck-stale" }));
+    expect(stale.status).toBe("rejected");
+    if (stale.status !== "rejected") throw new Error("expected rejection");
+    expect(stale.code).toBe("stale-kick");
+
+    const noLatch = new MemoryReviewJobStore();
+    await noLatch.enqueueIssue(
+      makeIssueJob({ delivery: "d-terminal", mode: "follow-up", prNumber: 7, headSha: "abc123" })
+    );
+    const leased = await noLatch.lease("worker", 60_000, new Date(), ["follow-up"]);
+    if (!leased) throw new Error("expected a follow-up lease");
+    await noLatch.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: conflict round failed" });
+    await noLatch.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: conflict round failed" });
+    await noLatch.sits.remember("kirmanak", "demo", 12, "implement-latch");
+    const notKickable = await noLatch.stuckKick(stuckInput({ idempotencyKey: "stuck-nolatch" }));
+    expect(notKickable.status).toBe("rejected");
+    if (notKickable.status !== "rejected") throw new Error("expected rejection");
+    expect(notKickable.code).toBe("not-kickable");
+  });
+
+  test("in-flight conflict leaves the latch and sit untouched", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+    await store.enqueueIssue(
+      makeIssueJob({ delivery: "d-inflight", mode: "follow-up", prNumber: 7, headSha: "other-sha" })
+    );
+    // The enqueue clears the sit; the board sit is still waiting.
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+
+    const conflict = await store.stuckKick(stuckInput({ idempotencyKey: "stuck-conflict" }));
+    expect(conflict.status).toBe("rejected");
+    if (conflict.status !== "rejected") throw new Error("expected rejection");
+    expect(conflict.code).toBe("conflict");
+    expect(conflict.terminalId).toBe(terminalId);
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({
+      skipReason: "stuck: conflict round failed",
+    });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toMatchObject({ reason: "implement-latch" });
+  });
+
+  test("owner-only payload never confirms implement-latch; stuck kick id does", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+
+    const sitClear = await handler(kickRequest({ owner: "kirmanak", repo: "demo", number: 12 }));
+    expect(sitClear.status).toBe(400);
+
+    const ok = await handler(
+      kickRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "stuck", idempotencyKey: "board-stuck-1" })
+    );
+    expect(ok.status).toBe(200);
+    const okBody = (await ok.json()) as Record<string, unknown>;
+    expect(okBody.terminalJobId).toBe(terminalId);
+    expect(okBody.deduped).toBe(false);
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
   });
 });

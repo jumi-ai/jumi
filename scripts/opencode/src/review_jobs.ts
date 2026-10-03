@@ -1,6 +1,6 @@
 import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
 import { isInfraRetryMarker } from "./infra.ts";
-import { disabledKickWhy, isKickableTerminalState, terminalReasonOf } from "./kick.ts";
+import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
@@ -134,6 +134,17 @@ export interface ReviewJobStore {
    * idempotency key space with requeue/reopen.
    */
   implementKick(input: ImplementKickInput): Promise<ImplementKickOutcome>;
+  /**
+   * Stuck-latch follow-up kick for an open closer. Clears the issue skip
+   * latch (bumping the generation and dropping the stuck skip reason plus
+   * the followup/conflict/ci/stuck latch state) and inserts a follow-up job
+   * for the open closer in one transaction; the router sit goes away
+   * because that enqueue landed, never via a bare sit delete. Never opens
+   * a pull request, never unassigns, never adds a pickup label: the
+   * inserted job is the wake. Shares the review_kicks idempotency key
+   * space with requeue/reopen/implement.
+   */
+  stuckKick(input: StuckKickInput): Promise<StuckKickOutcome>;
   /** Kick audit log. Never served by the board page. */
   listKickLog(limit?: number): Promise<KickLogRecord[]>;
   /** Find a kick log row by idempotency key. Empty key never matches. */
@@ -245,6 +256,33 @@ export interface ImplementKickInput {
 }
 
 export type ImplementKickOutcome = RequeueKickOutcome;
+
+export interface StuckKickInput {
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  /** Must be a stuck-latch kick id (stuck, follow-up, followup, stuck-latch). */
+  kick: string;
+  /** Edge identity. Never taken from the body. */
+  actor: string;
+  idempotencyKey: string;
+  /** Delivery stamp for the new queued row. */
+  delivery: string;
+}
+
+export type StuckKickOutcome = RequeueKickOutcome;
+
+/** Stuck kicks share the review_kicks key space; identity is issue-based, commit is always empty. */
+export function stuckIdempotencyMismatch(
+  input: { owner: string; repo: string; issueNumber: number; kick: string },
+  prior: KickLogRecord
+): boolean {
+  if (prior.owner !== input.owner || prior.repo !== input.repo || prior.number !== input.issueNumber) return true;
+  if (prior.kick === input.kick) return false;
+  // Aliases address the same operation: a replay under a different alias
+  // replays the first result instead of failing as a different kick.
+  return !(STUCK_KICK_ALIASES.has(prior.kick.trim()) && STUCK_KICK_ALIASES.has(input.kick.trim()));
+}
 
 /** Implement kicks share the review_kicks key space; identity is issue-based, commit is always empty. */
 export function implementIdempotencyMismatch(
@@ -1349,6 +1387,239 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       // the caller updates the forge label afterwards so the forge matches.
       // Never calls createPullRequest: the worker owns PR creation.
       this.rows.push(job);
+      await this.sits.clear(input.owner, input.repo, input.issueNumber);
+      const entry = record(terminal.id, job.id, "ok");
+      return { status: "ok", job: { ...job }, terminalId: terminal.id, deduped: false, kickLogId: entry.id };
+    });
+  }
+
+  async stuckKick(input: StuckKickInput): Promise<StuckKickOutcome> {
+    return this.locked(async () => {
+      const now = Date.now();
+      if (input.idempotencyKey) {
+        const prior = this.kickLog.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+        if (prior) {
+          if (
+            stuckIdempotencyMismatch(
+              { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber, kick: input.kick },
+              prior
+            )
+          ) {
+            return {
+              status: "rejected",
+              code: "bad-request",
+              why: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+              terminalId: null,
+              newJobId: null,
+              kickLogId: null,
+            };
+          }
+          if (prior.result === "ok" && prior.newJobId != null) {
+            const job = this.rows.find((row) => row.id === prior.newJobId);
+            if (job) {
+              return {
+                status: "ok",
+                job: { ...job },
+                terminalId: prior.terminalJobId ?? 0,
+                deduped: true,
+                kickLogId: prior.id,
+              };
+            }
+          }
+          return {
+            status: "rejected",
+            code:
+              prior.result === "conflict"
+                ? "conflict"
+                : prior.result === "stale-kick"
+                  ? "stale-kick"
+                  : prior.result === "not-found"
+                    ? "not-found"
+                    : "not-kickable",
+            why: prior.result === "ok" ? "already kicked" : `already decided: ${prior.result}`,
+            terminalId: prior.terminalJobId,
+            newJobId: prior.newJobId,
+            kickLogId: prior.id,
+            deduped: true,
+          };
+        }
+      }
+      const record = (terminalId: number | null, newJobId: number | null, result: string): KickLogRecord => {
+        const entry: KickLogRecord = {
+          id: this.nextKickId++,
+          idempotencyKey: input.idempotencyKey,
+          actor: input.actor,
+          owner: input.owner,
+          repo: input.repo,
+          number: input.issueNumber,
+          commit: "",
+          kick: input.kick,
+          result,
+          terminalJobId: terminalId,
+          newJobId: newJobId,
+          createdAt: now,
+        };
+        this.kickLog.push(entry);
+        return entry;
+      };
+      const sit = await this.sits.get(input.owner, input.repo, input.issueNumber);
+      if (!sit) {
+        const entry = record(null, null, "not-found");
+        return {
+          status: "rejected",
+          code: "not-found",
+          why: `No sitting row for ${input.owner}/${input.repo}#${input.issueNumber}.`,
+          terminalId: null,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      if (sit.reason !== "implement-latch") {
+        const entry = record(null, null, "stale-kick");
+        return {
+          status: "rejected",
+          code: "stale-kick",
+          why: `Kick id does not match the item's current reason (expected ${JSON.stringify(sit.reason)}).`,
+          terminalId: null,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      if (!STUCK_KICK_ALIASES.has(input.kick.trim())) {
+        const entry = record(null, null, "stale-kick");
+        return {
+          status: "rejected",
+          code: "stale-kick",
+          why: `Kick id does not match the item's current reason (expected "stuck").`,
+          terminalId: null,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      const latchKey = issueSkipLatchKey(input.owner, input.repo, input.issueNumber);
+      const latch = this.issueSkipLatches.get(latchKey);
+      if (!latch?.skipReason?.startsWith("stuck:")) {
+        const entry = record(null, null, "not-kickable");
+        return {
+          status: "rejected",
+          code: "not-kickable",
+          why: "No kick: no stuck latch for this issue; sitting on purpose until the owning job finishes.",
+          terminalId: null,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      const candidates = this.rows.filter(
+        (row) =>
+          row.owner === input.owner &&
+          row.repo === input.repo &&
+          row.issueNumber === input.issueNumber &&
+          (rowKind(row) === "follow-up" || rowKind(row) === "conflict" || rowKind(row) === "implement")
+      );
+      const terminals = candidates
+        .filter((row) => row.state === "succeeded" || row.state === "skipped" || row.state === "failed")
+        .sort((a, b) => a.id - b.id);
+      const terminal = terminals.length > 0 ? terminals[terminals.length - 1] : undefined;
+      if (!terminal) {
+        const entry = record(null, null, "not-found");
+        return {
+          status: "rejected",
+          code: "not-found",
+          why: `No terminal work for ${input.owner}/${input.repo}#${input.issueNumber}.`,
+          terminalId: null,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      const closer = terminal.prNumber;
+      const headSha = terminal.headSha ?? "";
+      if (!closer || closer <= 0) {
+        const entry = record(terminal.id, null, "not-kickable");
+        return {
+          status: "rejected",
+          code: "not-kickable",
+          why: "No kick: no open closer to follow up on; not opening a second pull.",
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      const basePayload = terminal.payload;
+      if (!basePayload) {
+        const entry = record(terminal.id, null, "not-kickable");
+        return {
+          status: "rejected",
+          code: "not-kickable",
+          why: "No kick: terminal row has no payload to follow up on.",
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      if (
+        this.rows.some(
+          (row) =>
+            row.owner === input.owner &&
+            row.repo === input.repo &&
+            row.issueNumber === input.issueNumber &&
+            (rowKind(row) === "implement" || rowKind(row) === "follow-up" || rowKind(row) === "conflict") &&
+            (row.state === "queued" || row.state === "leased")
+        )
+      ) {
+        const entry = record(terminal.id, null, "conflict");
+        return {
+          status: "rejected",
+          code: "conflict",
+          why: `A job for ${input.owner}/${input.repo}#${input.issueNumber} is already queued or leased; not a second queued row.`,
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      const key = `follow-up:${input.owner}/${input.repo}#${closer}:${headSha}`;
+      if (this.rows.some((row) => row.jobKey === key && (row.state === "queued" || row.state === "leased"))) {
+        const entry = record(terminal.id, null, "conflict");
+        return {
+          status: "rejected",
+          code: "conflict",
+          why: `A job for ${key} is already queued or leased; not a second queued row.`,
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
+      // One locked section clears the issue skip latch and inserts the
+      // follow-up job together; the sit row goes away because this enqueue
+      // landed. Never opens a pull request, never unassigns, never labels.
+      const generation = (latch.generation ?? 0) + 1;
+      const job: ReviewJobRecord = {
+        id: this.nextId++,
+        jobKey: key,
+        kind: "follow-up",
+        owner: terminal.owner,
+        repo: terminal.repo,
+        prNumber: closer,
+        headSha,
+        issueNumber: input.issueNumber,
+        payload: { ...basePayload, generation },
+        delivery: input.delivery,
+        state: "queued",
+        attempt: 0,
+        leasedBy: null,
+        leasedUntil: null,
+        resultMarkdown: null,
+        resultRunner: null,
+        resultReason: null,
+        error: null,
+        pendingStatusAt: null,
+        publishedAt: null,
+        prUpdatedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.rows.push(job);
+      this.issueSkipLatches.set(latchKey, { generation, skipReason: null });
+      await this.skipLatches.delete({ owner: input.owner, repo: input.repo, issueNumber: input.issueNumber });
       await this.sits.clear(input.owner, input.repo, input.issueNumber);
       const entry = record(terminal.id, job.id, "ok");
       return { status: "ok", job: { ...job }, terminalId: terminal.id, deduped: false, kickLogId: entry.id };
@@ -2774,6 +3045,306 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: prior.id,
             deduped: true,
           } as ImplementKickOutcome;
+        }
+      }
+      throw err;
+    }
+  }
+
+  async stuckKick(input: StuckKickInput): Promise<StuckKickOutcome> {
+    const toMismatch = (prior: KickLogRecord) => ({
+      status: "rejected" as const,
+      code: "bad-request" as const,
+      why: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+      terminalId: null,
+      newJobId: null,
+      kickLogId: null,
+    });
+    const replayPrior = async (tx: SqlClient, prior: KickLogRecord): Promise<StuckKickOutcome> => {
+      if (
+        stuckIdempotencyMismatch(
+          { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber, kick: input.kick },
+          prior
+        )
+      ) {
+        return toMismatch(prior);
+      }
+      if (prior.result === "ok" && prior.newJobId != null) {
+        const jobs = asRows<ReviewJobRow>(await tx.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [prior.newJobId]));
+        if (jobs[0]) {
+          return {
+            status: "ok",
+            job: mapRow(jobs[0]),
+            terminalId: prior.terminalJobId ?? 0,
+            deduped: true,
+            kickLogId: prior.id,
+          } as StuckKickOutcome;
+        }
+      }
+      const code =
+        prior.result === "conflict"
+          ? ("conflict" as const)
+          : prior.result === "stale-kick"
+            ? ("stale-kick" as const)
+            : prior.result === "not-found"
+              ? ("not-found" as const)
+              : ("not-kickable" as const);
+      return {
+        status: "rejected",
+        code,
+        why: prior.result === "ok" ? "already kicked" : `already decided: ${prior.result}`,
+        terminalId: prior.terminalJobId,
+        newJobId: prior.newJobId,
+        kickLogId: prior.id,
+        deduped: true,
+      } as StuckKickOutcome;
+    };
+    try {
+      return await this.sql.begin(async (tx) => {
+        if (input.idempotencyKey) {
+          const prior = await this.findKickByIdempotency(tx, input.idempotencyKey);
+          if (prior) return replayPrior(tx, prior);
+        }
+        const sitRows = asRows<{ reason: unknown }>(
+          await tx.unsafe(`SELECT reason FROM router_sits WHERE owner = $1 AND repo = $2 AND number = $3`, [
+            input.owner,
+            input.repo,
+            input.issueNumber,
+          ])
+        );
+        if (!sitRows[0]) {
+          const logged = await this.insertImplementKickLog(tx, input, "not-found", null, null);
+          return {
+            status: "rejected",
+            code: "not-found",
+            why: `No sitting row for ${input.owner}/${input.repo}#${input.issueNumber}.`,
+            terminalId: null,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        if (str(sitRows[0].reason) !== "implement-latch") {
+          const logged = await this.insertImplementKickLog(tx, input, "stale-kick", null, null);
+          return {
+            status: "rejected",
+            code: "stale-kick",
+            why: `Kick id does not match the item's current reason (expected ${JSON.stringify(str(sitRows[0].reason))}).`,
+            terminalId: null,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        if (!STUCK_KICK_ALIASES.has(input.kick.trim())) {
+          const logged = await this.insertImplementKickLog(tx, input, "stale-kick", null, null);
+          return {
+            status: "rejected",
+            code: "stale-kick",
+            why: `Kick id does not match the item's current reason (expected "stuck").`,
+            terminalId: null,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const latchRows = asRows<{ generation: unknown; skip_reason: unknown }>(
+          await tx.unsafe(
+            `SELECT generation, skip_reason FROM issue_skip_latches WHERE owner = $1 AND repo = $2 AND issue_number = $3`,
+            [input.owner, input.repo, input.issueNumber]
+          )
+        );
+        const skipReason = latchRows[0] ? strOrNull(latchRows[0].skip_reason) : null;
+        if (!skipReason?.startsWith("stuck:")) {
+          const logged = await this.insertImplementKickLog(tx, input, "not-kickable", null, null);
+          return {
+            status: "rejected",
+            code: "not-kickable",
+            why: "No kick: no stuck latch for this issue; sitting on purpose until the owning job finishes.",
+            terminalId: null,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const terminals = asRows<ReviewJobRow>(
+          await tx.unsafe(
+            `SELECT * FROM review_jobs
+             WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[])
+               AND state IN ('succeeded', 'skipped', 'failed')
+             ORDER BY id DESC
+             LIMIT 1`,
+            [input.owner, input.repo, input.issueNumber, pgTextArrayLiteral([...WORKER_JOB_KINDS])]
+          )
+        );
+        const terminal = terminals[0] ? mapRow(terminals[0]) : undefined;
+        if (!terminal) {
+          const logged = await this.insertImplementKickLog(tx, input, "not-found", null, null);
+          return {
+            status: "rejected",
+            code: "not-found",
+            why: `No terminal work for ${input.owner}/${input.repo}#${input.issueNumber}.`,
+            terminalId: null,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const closer = terminal.prNumber;
+        const headSha = terminal.headSha ?? "";
+        if (!closer || closer <= 0) {
+          const logged = await this.insertImplementKickLog(tx, input, "not-kickable", terminal.id, null);
+          return {
+            status: "rejected",
+            code: "not-kickable",
+            why: "No kick: no open closer to follow up on; not opening a second pull.",
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        if (!terminal.payload) {
+          const logged = await this.insertImplementKickLog(tx, input, "not-kickable", terminal.id, null);
+          return {
+            status: "rejected",
+            code: "not-kickable",
+            why: "No kick: terminal row has no payload to follow up on.",
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const inflight = asRows<{ id: unknown }>(
+          await tx.unsafe(
+            `SELECT id FROM review_jobs
+             WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[])
+               AND state IN ('queued', 'leased')
+             LIMIT 1`,
+            [input.owner, input.repo, input.issueNumber, pgTextArrayLiteral([...WORKER_JOB_KINDS])]
+          )
+        );
+        if (inflight.length > 0) {
+          const logged = await this.insertImplementKickLog(tx, input, "conflict", terminal.id, null);
+          return {
+            status: "rejected",
+            code: "conflict",
+            why: `A job for ${input.owner}/${input.repo}#${input.issueNumber} is already queued or leased; not a second queued row.`,
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const key = `follow-up:${input.owner}/${input.repo}#${closer}:${headSha}`;
+        // Clear the issue skip latch and insert the follow-up job in one
+        // transaction; the sit row goes away because this enqueue landed.
+        // Never opens a pull request, never unassigns, never labels.
+        // The latch is only mutated after the insert succeeds: a job_key
+        // conflict must leave the latch (and the sit) untouched.
+        const nextGeneration = (latchRows[0] ? num(latchRows[0].generation) : 0) + 1;
+        const payload = { ...terminal.payload, generation: nextGeneration };
+        const inserted = asRows<ReviewJobRow>(
+          await tx.unsafe(
+            `INSERT INTO review_jobs (job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt)
+             VALUES ($1, 'follow-up', $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', 0)
+             ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
+             DO NOTHING
+             RETURNING *`,
+            [
+              key,
+              terminal.owner,
+              terminal.repo,
+              closer,
+              headSha,
+              input.issueNumber,
+              JSON.stringify(payload),
+              input.delivery,
+            ]
+          )
+        );
+        if (inserted.length === 0) {
+          const logged = await this.insertImplementKickLog(tx, input, "conflict", terminal.id, null);
+          return {
+            status: "rejected",
+            code: "conflict",
+            why: `A job for ${key} is already queued or leased; not a second queued row.`,
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as StuckKickOutcome;
+        }
+        const job = inserted[0] ? mapRow(inserted[0]) : undefined;
+        if (!job) throw new Error("failed to queue stuck kick");
+        await tx.unsafe(
+          `INSERT INTO issue_skip_latches (owner, repo, issue_number, generation, skip_reason, updated_at)
+           VALUES ($1, $2, $3, $4, NULL, NOW())
+           ON CONFLICT (owner, repo, issue_number)
+           DO UPDATE SET generation = issue_skip_latches.generation + 1, skip_reason = NULL,
+             followup = '{}'::jsonb, conflict = '{}'::jsonb, ci = '{}'::jsonb, stuck = '{}'::jsonb,
+             updated_at = NOW()`,
+          [input.owner, input.repo, input.issueNumber, nextGeneration]
+        );
+        await this.clearSitTx(tx, input.owner, input.repo, input.issueNumber);
+        const logged = await this.insertImplementKickLog(tx, input, "ok", terminal.id, job.id);
+        return {
+          status: "ok",
+          job,
+          terminalId: terminal.id,
+          deduped: false,
+          kickLogId: logged.id,
+        } as StuckKickOutcome;
+      });
+    } catch (err) {
+      if (isUniqueViolation(err) && input.idempotencyKey) {
+        const rows = asRows<{
+          id: unknown;
+          idempotency_key: unknown;
+          actor: unknown;
+          owner: unknown;
+          repo: unknown;
+          number: unknown;
+          commit: unknown;
+          kick: unknown;
+          result: unknown;
+          terminal_job_id: unknown;
+          new_job_id: unknown;
+          created_at: unknown;
+        }>(await this.sql.unsafe(`SELECT * FROM review_kicks WHERE idempotency_key = $1`, [input.idempotencyKey]));
+        const prior = rows[0] ? this.mapKickRow(rows[0]) : undefined;
+        if (prior) {
+          if (
+            stuckIdempotencyMismatch(
+              { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber, kick: input.kick },
+              prior
+            )
+          ) {
+            return toMismatch(prior);
+          }
+          if (prior.result === "ok" && prior.newJobId != null) {
+            const jobs = asRows<ReviewJobRow>(
+              await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [prior.newJobId])
+            );
+            if (jobs[0]) {
+              return {
+                status: "ok",
+                job: mapRow(jobs[0]),
+                terminalId: prior.terminalJobId ?? 0,
+                deduped: true,
+                kickLogId: prior.id,
+              } as StuckKickOutcome;
+            }
+          }
+          const code =
+            prior.result === "conflict"
+              ? ("conflict" as const)
+              : prior.result === "stale-kick"
+                ? ("stale-kick" as const)
+                : prior.result === "not-found"
+                  ? ("not-found" as const)
+                  : ("not-kickable" as const);
+          return {
+            status: "rejected",
+            code,
+            why: prior.result === "ok" ? "already kicked" : `already decided: ${prior.result}`,
+            terminalId: prior.terminalJobId,
+            newJobId: prior.newJobId,
+            kickLogId: prior.id,
+            deduped: true,
+          } as StuckKickOutcome;
         }
       }
       throw err;

@@ -219,3 +219,13 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
     verdict: { state: check.state, description, incomplete: false },
   };
 }
+
+/**
+ * Whether the review publishes at least one finding: an inline
+ * (`file:line:` / `L<line>:`) or a severity-marker line left in the body.
+ * Parent-authored `keep` notes (e.g. the no-CI note) are not findings. A
+ * trailer reason such as "1 risk" is not a finding either.
+ */
+export function hasPublishedFindings(text: string, opts?: { singleFilePath?: string }): boolean {
+  return keepReviewFindingLines(text, opts).trim() !== "";
+}

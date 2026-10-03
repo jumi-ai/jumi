@@ -7,7 +7,7 @@ import {
   isJumiPrIdentity,
   isWipOrDraft,
 } from "./gitea_issues.ts";
-import { canPush, type PermissionApi } from "./permissions.ts";
+import { hasTrustedSenders, type PermissionApi, senderCanSteer } from "./permissions.ts";
 import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -15,9 +15,11 @@ import { assertRepositoryPolicy } from "./webhook.ts";
 export type FollowUpWebhookPolicy = WebhookPolicy &
   PickupPolicy & {
     followupIgnoreLogins?: readonly string[];
+    trustedSenderLogins?: readonly string[];
   };
 
 export const SENDER_CANNOT_PUSH = "sender lacks write access";
+export const SENDER_NOT_TRUSTED = "sender not on trusted list";
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -329,22 +331,24 @@ export function shouldEnqueuePullRejectedFollowUp(
 }
 
 /**
- * Filter an event's own wake by its sender. Fail-closed: unless the sender can
- * push (`canPush`: write or stronger, or an App installation that writes
- * contents), the enqueue becomes a skip. Skips and cancels pass through, so
- * pickup rules and the bot/ignore-login skips stay as they are: push is
- * necessary, not sufficient. Scope checks run first so out-of-scope events
- * never cost a forge round-trip and keep their scope skip reason.
+ * Filter an event's own wake by its sender. Fail-closed: unless the sender may
+ * steer (`senderCanSteer`: on the operator's trusted list when one is set,
+ * otherwise the forge push check), the enqueue becomes a skip. Skips and
+ * cancels pass through, so pickup rules and the bot/ignore-login skips stay as
+ * they are: trust is necessary, not sufficient. Scope checks run first so
+ * out-of-scope events never cost a forge round-trip and keep their scope skip
+ * reason.
  */
 export async function requireSenderPush<D extends { type: string }>(
   decision: D,
   api: Partial<PermissionApi> | undefined,
-  sender: string | undefined
+  sender: string | undefined,
+  trustedSenderLogins?: readonly string[]
 ): Promise<D | { type: "skip"; reason: string }> {
   if (decision.type !== "enqueue") return decision;
   const { owner, repo } = (decision as unknown as { job: { owner: string; repo: string } }).job;
-  if (await canPush(api, owner, repo, sender)) return decision;
-  return { type: "skip", reason: SENDER_CANNOT_PUSH };
+  if (await senderCanSteer(api, owner, repo, sender, trustedSenderLogins)) return decision;
+  return { type: "skip", reason: hasTrustedSenders(trustedSenderLogins) ? SENDER_NOT_TRUSTED : SENDER_CANNOT_PUSH };
 }
 
 /** Push-gated wake for issue/PR comments. */
@@ -356,7 +360,7 @@ export async function shouldEnqueueIssueCommentFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueueIssueCommentFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login);
+  return requireSenderPush(scope, api, payload.sender?.login, policy.trustedSenderLogins);
 }
 
 /** Push-gated wake for request-changes / review rejections. Same bar as comments. */
@@ -368,7 +372,7 @@ export async function shouldEnqueuePullRejectedFollowUpWithTrust(
   api?: Partial<PermissionApi>
 ): Promise<FollowUpWebhookDecision> {
   const scope = shouldEnqueuePullRejectedFollowUp(payload, policy, eventName, closingIssue);
-  return requireSenderPush(scope, api, payload.sender?.login);
+  return requireSenderPush(scope, api, payload.sender?.login, policy.trustedSenderLogins);
 }
 
 export async function shouldEnqueuePullAssign(

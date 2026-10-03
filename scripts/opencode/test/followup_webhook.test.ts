@@ -1172,6 +1172,125 @@ describe("follow-up write gating", () => {
     expect(decision).toEqual({ type: "skip", reason: "sender ignored" });
   });
 
+  describe("trusted sender list", () => {
+    const noneApi = {
+      getCollaboratorPermission: async () => ({ permission: "none" }),
+    };
+    const listed = { ...policy, trustedSenderLogins: ["Alice", "filer[bot]"] };
+
+    test("a listed commenter and reviewer wake work when the forge says none", async () => {
+      expect(
+        (
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload({ sender: makeUser({ login: "alice" }) }),
+            listed,
+            "issue_comment",
+            undefined,
+            noneApi
+          )
+        ).type
+      ).toBe("enqueue");
+      expect(
+        (
+          await shouldEnqueuePullRejectedFollowUpWithTrust(
+            { ...reviewCommentPayload(), sender: makeUser({ login: "filer[bot]" }) },
+            listed,
+            "pull_request_rejected",
+            undefined,
+            noneApi
+          )
+        ).type
+      ).toBe("enqueue");
+    });
+
+    test("an unlisted sender with write is skipped, and a prefix of a listed login does not match", async () => {
+      for (const login of ["mallory", "alic", "labeler[bot]", "filer"]) {
+        expect(
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload({ sender: makeUser({ login }) }),
+            listed,
+            "issue_comment",
+            undefined,
+            writeApi
+          )
+        ).toEqual({ type: "skip", reason: "sender not on trusted list" });
+        expect(
+          await shouldEnqueuePullRejectedFollowUpWithTrust(
+            { ...reviewCommentPayload(), sender: makeUser({ login }) },
+            listed,
+            "pull_request_rejected",
+            undefined,
+            writeApi
+          )
+        ).toEqual({ type: "skip", reason: "sender not on trusted list" });
+      }
+    });
+
+    test("an empty list keeps the forge check", async () => {
+      const empty = { ...policy, trustedSenderLogins: [] };
+      expect(
+        (
+          await shouldEnqueueIssueCommentFollowUpWithTrust(
+            makeIssueCommentPayload(),
+            empty,
+            "issue_comment",
+            undefined,
+            writeApi
+          )
+        ).type
+      ).toBe("enqueue");
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload(),
+          empty,
+          "issue_comment",
+          undefined,
+          readApi
+        )
+      ).toEqual({ type: "skip", reason: "sender lacks write access" });
+    });
+
+    test("the factory bot and ignored logins stay skipped when they are on the list", async () => {
+      const both = { ...policy, followupIgnoreLogins: ["tapio"], trustedSenderLogins: ["jumi", "tapio"] };
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload({ sender: makeUser({ login: "jumi" }) }),
+          both,
+          "issue_comment",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender is bot" });
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload({ sender: makeUser({ login: "Tapio" }) }),
+          both,
+          "issue_comment",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender ignored" });
+      expect(
+        await shouldEnqueuePullRejectedFollowUpWithTrust(
+          { ...reviewCommentPayload(), sender: makeUser({ login: "jumi" }) },
+          both,
+          "pull_request_rejected",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender is bot" });
+      expect(
+        await shouldEnqueuePullRejectedFollowUpWithTrust(
+          { ...reviewCommentPayload(), sender: makeUser({ login: "tapio" }) },
+          both,
+          "pull_request_rejected",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender ignored" });
+    });
+  });
+
   test("pull rejection wakes for write and skips for read", async () => {
     const payload = reviewCommentPayload();
     expect(

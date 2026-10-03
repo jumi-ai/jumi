@@ -6,6 +6,7 @@ import {
   hasWritePermission,
   pullAuthorCanPush,
   resolvePermissions,
+  senderCanSteer,
   trustedPushLogins,
 } from "../src/permissions.ts";
 
@@ -76,22 +77,35 @@ describe("canPush", () => {
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
   });
 
-  test("an App whose installation writes contents can push even when its lookup says none", async () => {
+  test("only write, admin, owner, or a maintain/push role is a writer", async () => {
+    const as = (permission: string, role_name?: string) => ({
+      getCollaboratorPermission: async () => (role_name ? { permission, role_name } : { permission }),
+    });
+    for (const yes of [as("write"), as("admin"), as("owner"), as("read", "maintain"), as("read", "push")]) {
+      expect(await canPush(yes, "o", "r", "alice")).toBe(true);
+    }
+    for (const no of [as("none"), as("read"), as("read", "triage"), as("")]) {
+      expect(await canPush(no, "o", "r", "alice")).toBe(false);
+    }
+    const missing = { getCollaboratorPermission: async () => undefined as unknown as { permission: string } };
+    expect(await canPush(missing, "o", "r", "alice")).toBe(false);
+  });
+
+  test("an App whose lookup says none is skipped even when its public record says contents write", async () => {
     const slugs: string[] = [];
     const api = {
       getCollaboratorPermission: async () => ({ permission: "none" }),
       getAppPermissions: async (slug: string): Promise<Record<string, string>> => {
         slugs.push(slug);
-        return slug === "renovate" ? { contents: "write", pull_requests: "write" } : { issues: "write" };
+        return { contents: "write", pull_requests: "write" };
       },
     };
-    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
-    expect(await canPush(api, "o", "r", "labeler[bot]")).toBe(false);
+    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(false);
     expect(await canPush(api, "o", "r", "mallory")).toBe(false);
-    expect(slugs).toEqual(["renovate", "labeler"]);
+    expect(slugs).toEqual([]);
   });
 
-  test("an App lookup that 404s still falls back to the installation; failures there stay out", async () => {
+  test("a 404 or a failed App lookup is skipped", async () => {
     const notAUser = async () => {
       throw new Error("GitHub API 404: not a user");
     };
@@ -102,7 +116,7 @@ describe("canPush", () => {
         "r",
         "renovate[bot]"
       )
-    ).toBe(true);
+    ).toBe(false);
     expect(
       await canPush(
         {
@@ -160,8 +174,6 @@ describe("pullAuthorCanPush", () => {
     };
     const fork = { user: { login: "renovate[bot]" }, head: { repo: { full_name: "renovate/r" } } };
     expect(await pullAuthorCanPush(api, "o", "r", fork)).toBe(false);
-    // Sender gating keeps the App fallback: the event proves the app acts on this repo.
-    expect(await canPush(api, "o", "r", "renovate[bot]")).toBe(true);
   });
 });
 
@@ -191,5 +203,90 @@ describe("trustedPushLogins", () => {
     };
     const trusted = await trustedPushLogins(api, "o", "r", ["Alice", "ALICE", "mallory", undefined, ""]);
     expect([...trusted].sort()).toEqual(["alice"]);
+  });
+});
+
+describe("senderCanSteer", () => {
+  function countingApi(permission: string, apps: Record<string, Record<string, string>> = {}) {
+    const calls: string[] = [];
+    return {
+      calls,
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
+        calls.push(`collaborator:${username}`);
+        return { permission };
+      },
+      getAppPermissions: async (slug: string) => {
+        calls.push(`app:${slug}`);
+        return apps[slug];
+      },
+    };
+  }
+
+  test("a listed login is admitted when the forge says none, without asking the forge", async () => {
+    const api = countingApi("none");
+    expect(await senderCanSteer(api, "o", "r", "alice", ["alice", "filer[bot]"])).toBe(true);
+    expect(await senderCanSteer(api, "o", "r", "filer[bot]", ["alice", "filer[bot]"])).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "alice", ["alice"])).toBe(true);
+    expect(api.calls).toEqual([]);
+  });
+
+  test("an unlisted login is skipped when the list is set, whatever the forge or an app record says", async () => {
+    const api = countingApi("admin", { labeler: { contents: "write" } });
+    expect(await senderCanSteer(api, "o", "r", "mallory", ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", "labeler[bot]", ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", undefined, ["alice"])).toBe(false);
+    expect(await senderCanSteer(api, "o", "r", " ", ["alice"])).toBe(false);
+    expect(api.calls).toEqual([]);
+  });
+
+  test("the match is the whole login, case-insensitive, with surrounding space ignored", async () => {
+    const list = [" Alice ", "Filer[bot]"];
+    expect(await senderCanSteer(undefined, "o", "r", "ALICE", list)).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "filer[BOT]", list)).toBe(true);
+    expect(await senderCanSteer(undefined, "o", "r", "alic", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "alice2", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "filer", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "other-filer[bot]", list)).toBe(false);
+    expect(await senderCanSteer(undefined, "o", "r", "filer-two[bot]", list)).toBe(false);
+  });
+
+  test("an unset, empty, or blank list admits only what the collaborator lookup calls a writer", async () => {
+    for (const list of [undefined, [], [" ", ""]]) {
+      expect(await senderCanSteer(countingApi("write"), "o", "r", "alice", list)).toBe(true);
+      expect(await senderCanSteer(countingApi("owner"), "o", "r", "alice", list)).toBe(true);
+      expect(await senderCanSteer(countingApi("read"), "o", "r", "alice", list)).toBe(false);
+      expect(await senderCanSteer(countingApi("triage"), "o", "r", "alice", list)).toBe(false);
+      const app = countingApi("none", { filer: { contents: "write" } });
+      expect(await senderCanSteer(app, "o", "r", "filer[bot]", list)).toBe(false);
+      expect(app.calls).toEqual(["collaborator:filer[bot]"]);
+      const notFound = {
+        getCollaboratorPermission: async () => {
+          throw new Error("GitHub API 404");
+        },
+        getAppPermissions: async () => ({ contents: "write" }),
+      };
+      expect(await senderCanSteer(notFound, "o", "r", "filer[bot]", list)).toBe(false);
+      expect(await senderCanSteer(undefined, "o", "r", "alice", list)).toBe(false);
+    }
+  });
+
+  test("a non-empty list ignores the collaborator result either way", async () => {
+    expect(await senderCanSteer(countingApi("none"), "o", "r", "alice", ["alice"])).toBe(true);
+    expect(await senderCanSteer(countingApi("write"), "o", "r", "mallory", ["alice"])).toBe(false);
+  });
+});
+
+describe("trustedPushLogins with a trusted sender list", () => {
+  test("keeps listed logins only and never asks the forge", async () => {
+    let lookups = 0;
+    const api = {
+      getCollaboratorPermission: async (_o: string, _r: string, username: string) => {
+        lookups += 1;
+        return username === "mallory" ? { permission: "write" } : { permission: "none" };
+      },
+    };
+    const trusted = await trustedPushLogins(api, "o", "r", ["Alice", "mallory", undefined], ["alice"]);
+    expect([...trusted]).toEqual(["alice"]);
+    expect(lookups).toBe(0);
   });
 });
