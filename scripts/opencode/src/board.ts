@@ -105,6 +105,40 @@ export function isHomelabForge(forge?: string): boolean {
   return (forge ?? "gitea") !== PEER_FORGE;
 }
 
+/**
+ * Public origin of this board behind the ingress.
+ *
+ * The page is served over HTTPS while the board process sees a cleartext hop
+ * from the ingress, so `new URL(request.url).origin` is the internal origin,
+ * not the browser one. Only the ingress can reach the board port and it sets
+ * the forwarded protocol/host, so those headers are the public origin.
+ */
+export function boardPublicOrigin(request: Request): string {
+  const url = new URL(request.url);
+  const proto = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
+  const host = (request.headers.get("x-forwarded-host") ?? "").split(",")[0].trim();
+  const scheme = proto || url.protocol.replace(":", "").toLowerCase();
+  const hostPart = host || url.host;
+  try {
+    return new URL(`${scheme}://${hostPart}`).origin;
+  } catch {
+    return url.origin;
+  }
+}
+
+/** Same-origin guard shared by every confirm path. Absent Origin is allowed. */
+export function isAllowedBoardOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true;
+  let normalized: string;
+  try {
+    normalized = new URL(origin).origin;
+  } catch {
+    return false;
+  }
+  return normalized === boardPublicOrigin(request);
+}
+
 function idempotencyKeyOf(request: Request): string {
   const value = request.headers.get("idempotency-key") ?? request.headers.get("x-idempotency-key") ?? "";
   return value.trim();
@@ -993,12 +1027,11 @@ async function handleKick(
   if (!isPeer && !actor) return json(401, { error: "missing edge identity" });
   // Same-origin JSON only: the kick is state-changing behind edge-proxy
   // cookie auth, so a simple-request CSRF (e.g. cross-origin text/plain
-  // form) must not fire it. Matches the sit-clear guards below.
-  const url = new URL(request.url);
+  // form) must not fire it. Compares against the public origin behind the
+  // ingress (forwarded proto/host), not the internal cleartext hop URL.
   const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-  const origin = request.headers.get("origin");
-  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  if (!isAllowedBoardOrigin(request)) return json(403, { error: "forbidden" });
   let body: unknown;
   try {
     const text = await request.text();
@@ -1604,11 +1637,9 @@ async function handleSitClear(
   logger: (message: string) => void,
   kickActor?: string
 ): Promise<Response> {
-  const url = new URL(request.url);
   const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
   if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-  const origin = request.headers.get("origin");
-  if (origin && origin !== url.origin) return json(403, { error: "forbidden" });
+  if (!isAllowedBoardOrigin(request)) return json(403, { error: "forbidden" });
   const record = body as { owner?: unknown; repo?: unknown; number?: unknown };
   const owner = typeof record.owner === "string" ? record.owner.trim() : "";
   const repo = typeof record.repo === "string" ? record.repo.trim() : "";
