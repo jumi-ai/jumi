@@ -11,14 +11,14 @@ concurrency:
 
 jobs:
   image:
-    if: github.repository == 'kirmanak/jumi'
+    if: github.repository == 'jumi-ai/jumi'
     # GitHub-hosted runner with Docker Buildx.
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     env:
-      IMAGE: ghcr.io/kirmanak/jumi-worker
+      IMAGE: ghcr.io/jumi-ai/jumi-worker
       REGISTRY: ghcr.io
 
     steps:
@@ -82,7 +82,7 @@ jobs:
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
-            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.source=https://github.com/jumi-ai/jumi
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
 
@@ -178,8 +178,8 @@ jobs:
           echo "Verified opencode debug config"
 
           source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${TEST_TAG}")"
-          if [ "${source_label}" != "https://github.com/kirmanak/jumi" ]; then
-            echo "Expected org.opencontainers.image.source=https://github.com/kirmanak/jumi, got ${source_label:-<empty>}" >&2
+          if [ "${source_label}" != "https://github.com/jumi-ai/jumi" ]; then
+            echo "Expected org.opencontainers.image.source=https://github.com/jumi-ai/jumi, got ${source_label:-<empty>}" >&2
             exit 1
           fi
           version_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "${TEST_TAG}")"
@@ -218,7 +218,7 @@ jobs:
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
-            org.opencontainers.image.source=https://github.com/kirmanak/jumi
+            org.opencontainers.image.source=https://github.com/jumi-ai/jumi
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
 
