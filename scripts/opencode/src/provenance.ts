@@ -266,7 +266,7 @@ export function normalizeForge(value: string | ForgeKind | undefined): string {
 }
 
 function normalizeHead(value: string | undefined): string {
-  return (value ?? "").trim();
+  return (value ?? "").trim().toLowerCase();
 }
 
 function unknownLookup(input: {
@@ -367,7 +367,7 @@ export class MemoryProvenanceStore implements ProvenanceStore {
   async migrate(): Promise<void> {}
 
   private headKey(forge: string, owner: string, repo: string, headSha: string): string {
-    return `${forge}|${owner}|${repo}|${headSha.toLowerCase()}`;
+    return `${forge}|${owner}|${repo}|${normalizeHead(headSha)}`;
   }
 
   async ensureIntent(input: EnsureIntentInput): Promise<IntentRecord> {
@@ -420,7 +420,7 @@ export class MemoryProvenanceStore implements ProvenanceStore {
     if (intent.status === "confirmed") return;
     intent.status = "failed";
     intent.error = error.slice(0, 2000);
-    if (headSha) intent.headSha = headSha;
+    if (headSha) intent.headSha = normalizeHead(headSha);
     intent.updatedAt = Date.now();
   }
 
@@ -816,7 +816,7 @@ export class PgProvenanceStore implements ProvenanceStore {
         `UPDATE pr_publication_intents
          SET status = 'failed', error = $2, head_sha = $3, updated_at = NOW()
          WHERE job_id = $1 AND status = 'pending'`,
-        [jobId, error.slice(0, 2000), headSha]
+        [jobId, error.slice(0, 2000), normalizeHead(headSha)]
       );
     } else {
       await this.sql.unsafe(
