@@ -163,7 +163,7 @@ ENV HOME=/data \
     OPENCODE_CONFIG=/app/.gitea/opencode-review.json \
     OPENCODE_MODEL=openai/gpt-5.5
 
-EXPOSE 3000 3001
+EXPOSE 3000 3001 3010
 ENTRYPOINT ["/app/scripts/opencode/entrypoint.sh"]
 CMD ["bun", "run", "src/server.ts"]
 

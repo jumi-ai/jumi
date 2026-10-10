@@ -70,6 +70,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 #### ports
 - `3000`
 - `3001`
+- `3010`
+
+`3010` is engine-only; the router never binds it. Ordinal-local Grok device login; the chart allows router->ordinal:3010.
 
 #### runAs
 - `10001:10001`
@@ -143,6 +146,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 
 #### ports
 - `3000`
+- `3010`
+
+`3010` is ordinal-local Grok device login; the chart allows router->ordinal:3010.
 
 #### runAs
 - `10001:10001`
