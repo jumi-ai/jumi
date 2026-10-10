@@ -1,7 +1,7 @@
 import { readFileSync, unlinkSync } from "node:fs";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
-import { loadRunnersCatalog, modelsFromCatalog, type RunnerConfig } from "./runners.ts";
+import { type IndependentReviewConfig, loadRunnersCatalog, modelsFromCatalog, type RunnerConfig } from "./runners.ts";
 
 export type JumiRole = "router" | "engine";
 
@@ -28,6 +28,7 @@ export interface ServiceConfig {
   fallbackVariant?: string;
   runners: Record<string, RunnerConfig>;
   chain: string[];
+  independentReview?: IndependentReviewConfig;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -226,6 +227,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,
+    ...(runnersCatalog.independentReview ? { independentReview: runnersCatalog.independentReview } : {}),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:
