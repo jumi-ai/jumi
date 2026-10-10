@@ -1,6 +1,7 @@
 import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
 import { isInfraRetryMarker } from "./infra.ts";
 import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
+import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
@@ -157,6 +158,8 @@ export interface ReviewJobStore {
   recordReopenKick(input: RecordReopenKickInput): Promise<KickLogRecord>;
   readonly skipLatches: SkipLatchStore;
   readonly sits: RouterSitStore;
+  /** Durable writer provenance for published PR heads. Old heads stay unknown; never guessed from prose. */
+  readonly provenance: ProvenanceStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -667,6 +670,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
   readonly skipLatches = new MemorySkipLatchStore();
   readonly sits = new MemoryRouterSitStore();
+  readonly provenance = new MemoryProvenanceStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
@@ -1855,10 +1859,12 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
 export class PgReviewJobStore implements ReviewJobStore {
   readonly skipLatches: PgSkipLatchStore;
   readonly sits: PgRouterSitStore;
+  readonly provenance: PgProvenanceStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
     this.sits = new PgRouterSitStore(sql);
+    this.provenance = new PgProvenanceStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -1867,6 +1873,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
       await this.sql.unsafe(ROUTER_SITS_SCHEMA_SQL);
       await this.sql.unsafe(REVIEW_KICKS_SCHEMA_SQL);
+      await this.sql.unsafe(PROVENANCE_SCHEMA_SQL);
     } catch (err) {
       wrapSqlError(err);
     }

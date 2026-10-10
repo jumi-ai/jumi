@@ -8,7 +8,7 @@
     "server": "bun run src/server.ts",
     "lint": "biome check src test package.json tsconfig.json ../../.gitea/opencode-review.json ../../.gitea/opencode-implement.json",
     "test": "bun test",
-    "test:pg": "bun test ./test/review_jobs_pg.test.ts",
+    "test:pg": "bun test ./test/review_jobs_pg.test.ts ./test/provenance_pg.test.ts",
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit",
     "ci": "bun run lint && bun run typecheck && bun test"

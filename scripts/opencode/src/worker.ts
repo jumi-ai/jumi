@@ -391,6 +391,15 @@ export async function processWorkerTick(
       logger: (message: string) => logger(message),
       jobId: String(row.id),
       previousError: row.error,
+      provenance: store.provenance,
+      provenanceJob: {
+        jobId: row.id,
+        jobKey: row.jobKey,
+        delivery: row.delivery,
+        kind: row.kind,
+        forge: config.forge,
+        issueNumber: job.issueNumber,
+      },
     };
     const runImplement = extras.implement ?? implementIssue;
     const runFollowUp = extras.followUp ?? implementFollowUp;

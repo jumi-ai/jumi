@@ -138,20 +138,22 @@ export function thrownChainIndex(err: unknown): number | undefined {
 /**
  * Spawn `engine` and report the runner behind this spawn to `onRunner`, whether
  * the spawn returns or throws, so failure diaries carry the runner that failed.
+ * The chain position rides along so provenance can conservatively include an
+ * earlier failed runner whose edits could survive into a later hop.
  */
 export async function runEngineStamped(
   engine: Engine,
   opts: EngineRunOptions,
-  onRunner: (runner: RunnerStamp) => void
+  onRunner: (runner: RunnerStamp, chainIndex?: number) => void
 ): Promise<EngineResult> {
   let result: EngineResult;
   try {
     result = await engine(opts);
   } catch (err) {
     attachRunner(err, runnerStamp(opts));
-    onRunner(thrownRunner(err) ?? runnerStamp(opts));
+    onRunner(thrownRunner(err) ?? runnerStamp(opts), thrownChainIndex(err));
     throw err;
   }
-  onRunner(resultRunner(result, opts));
+  onRunner(resultRunner(result, opts), result.chainIndex);
   return result;
 }

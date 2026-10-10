@@ -30,7 +30,7 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { type Engine, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type Engine, type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { engineScratchTrackedReason, tipTracksEngineScratch } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
@@ -38,7 +38,8 @@ import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } 
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
-import type { Forge, IssueApi, Tracker } from "./ports.ts";
+import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
+import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
@@ -163,10 +164,133 @@ export interface ImplementOptions extends PickupPolicy {
   jobId?: string;
   skipLatches?: SkipLatchStore;
   previousError?: string | null;
+  /** Durable writer provenance. Unset keeps the legacy in-memory path (tests, local/dev). */
+  provenance?: ProvenanceStore;
+  /** Ledger identity for the provenance intent; required when `provenance` is set. */
+  provenanceJob?: {
+    jobId: number;
+    jobKey: string;
+    delivery: string;
+    kind: string;
+    forge: string;
+    issueNumber: number;
+  };
 }
 
 function logDefault(message: string) {
   console.log(`[implement] ${message}`);
+}
+
+export function provenanceForgeFor(opts: Pick<ImplementOptions, "provenanceJob">): string {
+  return normalizeForge(opts.provenanceJob?.forge);
+}
+
+export async function ensureProvenanceIntent(
+  opts: Pick<ImplementOptions, "provenance" | "provenanceJob" | "job" | "logger">,
+  target: { prNumber?: number; branch?: string },
+  log: (message: string) => void
+): Promise<void> {
+  if (!opts.provenance || !opts.provenanceJob) return;
+  try {
+    await opts.provenance.ensureIntent({
+      forge: provenanceForgeFor(opts),
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      issueNumber: opts.provenanceJob.issueNumber,
+      prNumber: target.prNumber ?? 0,
+      branch: target.branch ?? "",
+      jobId: opts.provenanceJob.jobId,
+      jobKey: opts.provenanceJob.jobKey,
+      jobKind: opts.provenanceJob.kind,
+      delivery: opts.provenanceJob.delivery,
+    });
+    if (target.prNumber != null || target.branch != null) {
+      await opts.provenance.setIntentTarget(opts.provenanceJob.jobId, target);
+    }
+  } catch (err) {
+    log(`provenance intent unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function noteProvenanceRunners(
+  opts: Pick<ImplementOptions, "provenance" | "provenanceJob" | "logger">,
+  collector: ProvenanceCollector,
+  log: (message: string) => void
+): Promise<void> {
+  if (!opts.provenance || !opts.provenanceJob || collector.isEmpty()) return;
+  try {
+    await opts.provenance.noteIntentRunners(
+      opts.provenanceJob.jobId,
+      collector.getContributors(),
+      collector.getPublisher() ?? null
+    );
+  } catch (err) {
+    log(`provenance note unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function confirmProvenancePublication(
+  opts: Pick<ImplementOptions, "provenance" | "provenanceJob" | "job" | "logger">,
+  input: { prNumber: number; branch: string; headSha: string; collector: ProvenanceCollector },
+  log: (message: string) => void
+): Promise<void> {
+  if (!opts.provenance || !opts.provenanceJob) return;
+  if (!input.headSha) return;
+  try {
+    await opts.provenance.ensureIntent({
+      forge: provenanceForgeFor(opts),
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      issueNumber: opts.provenanceJob.issueNumber,
+      prNumber: input.prNumber,
+      branch: input.branch,
+      jobId: opts.provenanceJob.jobId,
+      jobKey: opts.provenanceJob.jobKey,
+      jobKind: opts.provenanceJob.kind,
+      delivery: opts.provenanceJob.delivery,
+    });
+    await opts.provenance.setIntentTarget(opts.provenanceJob.jobId, {
+      prNumber: input.prNumber,
+      branch: input.branch,
+    });
+    await opts.provenance.noteIntentRunners(
+      opts.provenanceJob.jobId,
+      input.collector.getContributors(),
+      input.collector.getPublisher() ?? null
+    );
+    await opts.provenance.confirmPublication({
+      forge: provenanceForgeFor(opts),
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      prNumber: input.prNumber,
+      branch: input.branch,
+      headSha: input.headSha,
+      contributors: input.collector.getContributors(),
+      publisher: input.collector.getPublisher() ?? null,
+      jobId: opts.provenanceJob.jobId,
+      jobKey: opts.provenanceJob.jobKey,
+      delivery: opts.provenanceJob.delivery,
+      jobKind: opts.provenanceJob.kind,
+      issueNumber: opts.provenanceJob.issueNumber,
+    });
+  } catch (err) {
+    // The push already landed; provenance stays pending for a later round to preserve.
+    log(`provenance confirm unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function failProvenanceIntent(
+  opts: Pick<ImplementOptions, "provenance" | "provenanceJob" | "logger">,
+  error: string,
+  headSha: string | undefined,
+  log: (message: string) => void
+): Promise<void> {
+  if (!opts.provenance || !opts.provenanceJob) return;
+  try {
+    await opts.provenance.markIntentFailed(opts.provenanceJob.jobId, error, headSha);
+  } catch (err) {
+    log(`provenance fail unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export function issueBranchName(issueNumber: number, title: string): string {
@@ -333,6 +457,8 @@ async function implementExternalIssue(
   const { worktree, sanitizeEnv, engine } = claimed;
   const loop = openClaimedLoop(claimed, opts);
   let runner: RunnerStamp | undefined;
+  const provenanceCollector = new ProvenanceCollector(opts.chain);
+  const provenanceOpts = { ...opts, job: effectiveJob };
 
   return runClaimedLoop(
     loop,
@@ -352,6 +478,7 @@ async function implementExternalIssue(
         log,
       });
       await loop.stampHeadSha(headSha);
+      await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
       throwIfAborted(opts.abortSignal);
       await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
       await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
@@ -379,9 +506,19 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         onPid: loop.engineOnPid(opts.onPid),
       };
-      const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
-        runner = r;
-      });
+      let result: EngineResult;
+      try {
+        result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+          runner = r;
+          provenanceCollector.noteRunner(r, idx);
+        });
+      } catch (err) {
+        provenanceCollector.noteError(err);
+        await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
+        throw err;
+      }
+      provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+      await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
       throwIfEngineFailed(result);
 
       throwIfAborted(opts.abortSignal);
@@ -408,24 +545,45 @@ async function implementExternalIssue(
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "skipped", reason };
       }
-      await pushClaimedBranch(loop, branch);
+      try {
+        await pushClaimedBranch(loop, branch);
+      } catch (err) {
+        await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
+        throw err;
+      }
       throwIfAborted(opts.abortSignal);
 
       const stamp = runner ? formatRunnerStamp(runner) : undefined;
-      const pr = await forge.createPullRequest(owner, repo, {
-        title: job.title,
-        body: wrapJumiPrBody(
-          redactGitSecrets(buildExternalPullRequestBody(prFileContents, ref.url, stamp), [loop.auth.token])
-        ),
-        head: branch,
-        base: effectiveJob.defaultBranch,
-      });
+      let pr: Pull;
+      try {
+        pr = await forge.createPullRequest(owner, repo, {
+          title: job.title,
+          body: wrapJumiPrBody(
+            redactGitSecrets(buildExternalPullRequestBody(prFileContents, ref.url, stamp), [loop.auth.token])
+          ),
+          head: branch,
+          base: effectiveJob.defaultBranch,
+        });
+      } catch (err) {
+        await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
+        throw err;
+      }
+      const publishedHead = (
+        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+      ).trim();
+      await confirmProvenancePublication(
+        provenanceOpts,
+        { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
+        log
+      );
       // Push already landed; a failed destroy must not discard it.
       await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
     },
     async (err) => {
       runner = thrownRunner(err) ?? runner;
+      provenanceCollector.noteError(err);
+      await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
       await (opts.runtime ?? standingPodRuntime)
         .destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log })
         .catch(() => undefined);
@@ -521,6 +679,7 @@ export async function implementIssue(
   const loop = openClaimedLoop(claimed, opts);
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
+  const provenanceCollector = new ProvenanceCollector(opts.chain);
   const diary = (body: string) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
@@ -542,6 +701,7 @@ export async function implementIssue(
         log,
       });
       await loop.stampHeadSha(headSha);
+      await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
       throwIfAborted(opts.abortSignal);
       const writeTaskFiles = async (job: IssueJob) => {
@@ -603,9 +763,19 @@ export async function implementIssue(
         runner = undefined;
         hopDeclined = false;
         const runtime = opts.runtime ?? standingPodRuntime;
-        const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
-          runner = r;
-        });
+        let result: EngineResult;
+        try {
+          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+            runner = r;
+            provenanceCollector.noteRunner(r, idx);
+          });
+        } catch (err) {
+          provenanceCollector.noteError(err);
+          await noteProvenanceRunners(opts, provenanceCollector, log);
+          throw err;
+        }
+        provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+        await noteProvenanceRunners(opts, provenanceCollector, log);
         if (result.hopDeclined === true) {
           // No spawn happened, so the stamp would name a runner that never ran.
           runner = undefined;
@@ -843,15 +1013,34 @@ export async function implementIssue(
         await loop.detachWorktree();
         return { status: "skipped", reason };
       }
-      await pushClaimedBranch(loop, branch);
+      try {
+        await pushClaimedBranch(loop, branch);
+      } catch (err) {
+        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        throw err;
+      }
       throwIfAborted(opts.abortSignal);
 
-      const pr = await opts.api.createPullRequest(owner, repo, {
-        title: liveJob.title,
-        body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner, [loop.auth.token])),
-        head: branch,
-        base: opts.job.defaultBranch,
-      });
+      let pr: Pull;
+      try {
+        pr = await opts.api.createPullRequest(owner, repo, {
+          title: liveJob.title,
+          body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner, [loop.auth.token])),
+          head: branch,
+          base: opts.job.defaultBranch,
+        });
+      } catch (err) {
+        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        throw err;
+      }
+      const publishedHead = (
+        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+      ).trim();
+      await confirmProvenancePublication(
+        opts,
+        { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
+        log
+      );
       await diary(`Opened ${pr.html_url}`);
       // Push already landed; a failed destroy must not discard it.
       await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
@@ -859,6 +1048,8 @@ export async function implementIssue(
     },
     async (err) => {
       runner = thrownRunner(err) ?? runner;
+      provenanceCollector.noteError(err);
+      await noteProvenanceRunners(opts, provenanceCollector, log);
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,
