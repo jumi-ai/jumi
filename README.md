@@ -153,6 +153,38 @@ Repo-specific review rules live in the reviewed repository, in `REVIEW.md` at th
 
 The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure or leftover simplifications (`success; N suggestions`). Questions-only success does not enqueue.
 
+### Independent review (opt-in)
+
+Unset/disabled preserves today's behavior: the reviewer runs the configured chain in order, with synthesized `OPENCODE_MODEL` / `OPENCODE_FALLBACK_*` chains working as before. No factory chain is changed by this ticket; activation is a later explicit `JUMI_RUNNERS_FILE` decision.
+
+To require a reviewer from a different model family than the writer, add `independentReview` to `JUMI_RUNNERS_FILE`:
+
+```json
+{
+  "runners": {
+    "opus-review": { "type": "claude", "model": "claude-opus-5", "effort": "high" },
+    "grok-review": { "type": "opencode", "model": "xai/grok-4.6" }
+  },
+  "chain": ["opus-review", "grok-review"],
+  "independentReview": {
+    "enabled": true,
+    "groups": {
+      "opus": [
+        { "type": "claude", "model": "claude-opus-5" },
+        { "type": "opencode", "model": "anthropic/claude-opus-5" }
+      ],
+      "grok": [{ "type": "opencode", "model": "xai/grok-4.6" }]
+    }
+  }
+}
+```
+
+Group mapping is explicit: the same family through different harnesses, providers, runner names, effort levels, or model versions stays one family only when every `{type, model}` identity is listed under that family. Effort/variant are ignored for family identity. Nothing is guessed from harness, provider prefix, or fuzzy model-name matching. A contradictory identity (same `{type, model}` in two families) fails process start; a known writer or chain candidate with no group fails the review closed. Old heads stay resolvable only while their recorded identities remain in `groups`; removing one fails closed instead of silently reinterpreting that head as today's primary.
+
+When enabled, the parent resolves writer provenance for the exact expected PR head, keeps chain order, and excludes every known contributing writer family. Only runners already in the active reviewer chain are eligible: a `runners` catalog entry that is not in `chain` is dormant and never selected, and worker chains are unchanged. Availability/auth/quota hops, same-model retries, artifact-extra rounds, lease reclaim, and review retries all stay inside the eligible set; an allowed hop never returns to an author family or a same-model cross-harness alias.
+
+Genuinely unknown external/legacy/untracked authorship follows the ordinary chain with a `provenance-unknown/independence-not-established` diagnostic. Pending/failed provenance for a known Jumi publication (including the publication race) and provenance-storage lookup failures fail closed with `Independent review unavailable: …` (failure status, no success verdict, no fabricated artifact). Mixed known authorship excludes all its families; independence is attested only for recorded Jumi writers and untracked contributions are disclosed, never inferred from PR prose, logins, trailers, or style. Recovery is the existing bounded retry/kick path: the refusal is terminal for that head, so push a new commit or kick the same commit after fixing groups/availability. The decision (head, policy, writers/groups, exclusions, chosen reviewer, refusal reason) is logged as `independent_review`; the post-hop runner stamp and trailer/status contract are unchanged. Both forges share this parent behavior.
+
 ## Worker jobs
 
 On Gitea (the default when `FORGE` is unset), work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead, except a closer whose related issue is already open and assigned to the bot — that assign is skipped so the issue job owns the work.

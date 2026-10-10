@@ -71,9 +71,20 @@ export function usesEffort(
 
 export type NamedRunner = RunnerConfig & { name: string };
 
+export interface IndependenceGroupMember {
+  type: string;
+  model: string;
+}
+
+export interface IndependentReviewConfig {
+  enabled: boolean;
+  groups: Record<string, IndependenceGroupMember[]>;
+}
+
 export interface RunnersCatalog {
   runners: Record<string, RunnerConfig>;
   chain: string[];
+  independentReview?: IndependentReviewConfig;
 }
 
 export interface SynthesizeRunnersInput {
@@ -152,6 +163,65 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
   fail(`Unknown runner type: ${String(spec.type)}`);
 }
 
+export function parseIndependentReview(raw: unknown): IndependentReviewConfig | undefined {
+  if (raw == null) return undefined;
+  if (!isPlainObject(raw)) fail(`Invalid ${RUNNERS_FILE_ENV}: independentReview must be an object`);
+  const enabled = (raw as Record<string, unknown>).enabled;
+  if (enabled !== true) return undefined;
+  const groupsRaw = (raw as Record<string, unknown>).groups;
+  if (!isPlainObject(groupsRaw)) fail(`Invalid ${RUNNERS_FILE_ENV}: independentReview.groups must be an object`);
+  const entries = Object.entries(groupsRaw);
+  if (entries.length === 0) fail(`Invalid ${RUNNERS_FILE_ENV}: independentReview.groups must not be empty`);
+  const groups: Record<string, IndependenceGroupMember[]> = {};
+  const identityOwners = new Map<string, string>();
+  for (const [familyRaw, membersRaw] of entries) {
+    const family = familyRaw.trim();
+    if (!family) fail(`Invalid ${RUNNERS_FILE_ENV}: independentReview group names must not be empty`);
+    if (groups[family]) fail(`Invalid ${RUNNERS_FILE_ENV}: duplicate independence group ${family}`);
+    if (!Array.isArray(membersRaw) || membersRaw.length === 0) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: independence group ${family} must be a non-empty array`);
+    }
+    const members: IndependenceGroupMember[] = [];
+    const seenMember = new Set<string>();
+    for (const memberRaw of membersRaw) {
+      if (!isPlainObject(memberRaw)) {
+        fail(`Invalid ${RUNNERS_FILE_ENV}: independence group ${family} members must be {type, model} objects`);
+      }
+      const typeRaw = (memberRaw as Record<string, unknown>).type;
+      const modelRaw = (memberRaw as Record<string, unknown>).model;
+      if (typeof typeRaw !== "string" || !typeRaw.trim()) {
+        fail(`Invalid ${RUNNERS_FILE_ENV}: independence group ${family} member missing type`);
+      }
+      if (typeof modelRaw !== "string" || !modelRaw.trim()) {
+        fail(`Invalid ${RUNNERS_FILE_ENV}: independence group ${family} member missing model`);
+      }
+      const type = typeRaw.trim().toLowerCase();
+      const model = modelRaw.trim();
+      if (
+        type !== OPENCODE_RUNNER_TYPE &&
+        type !== CLAUDE_RUNNER_TYPE &&
+        type !== AGY_RUNNER_TYPE &&
+        type !== CODEX_RUNNER_TYPE
+      ) {
+        fail(`Invalid ${RUNNERS_FILE_ENV}: independence group ${family} unknown type ${typeRaw}`);
+      }
+      const key = `${type}|${model}`;
+      if (seenMember.has(key)) continue;
+      seenMember.add(key);
+      const owner = identityOwners.get(key);
+      if (owner && owner !== family) {
+        fail(
+          `Invalid ${RUNNERS_FILE_ENV}: independence identity ${type}:${model} in contradictory groups ${owner} and ${family}`
+        );
+      }
+      identityOwners.set(key, family);
+      members.push({ type, model });
+    }
+    groups[family] = members;
+  }
+  return { enabled: true, groups };
+}
+
 export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
   if (!isPlainObject(raw)) fail(`Invalid ${RUNNERS_FILE_ENV}: expected object`);
   if (!isPlainObject(raw.runners)) fail(`Invalid ${RUNNERS_FILE_ENV}: runners must be an object`);
@@ -172,7 +242,8 @@ export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
     seen.add(name);
     chain.push(name);
   }
-  return { runners, chain };
+  const independentReview = parseIndependentReview((raw as Record<string, unknown>).independentReview);
+  return independentReview ? { runners, chain, independentReview } : { runners, chain };
 }
 
 export function parseRunnersFile(path: string): RunnersCatalog {

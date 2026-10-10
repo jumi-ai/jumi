@@ -110,6 +110,8 @@ export interface RunReviewJobExtras {
   now?: () => number;
   /** Previous job error (quota-wait marker) for the wait-budget decision. */
   previousError?: string | null;
+  /** Durable writer provenance. ProcessEngineTick wires `store.provenance`; unset fails closed only when the policy is enabled. */
+  provenance?: import("./provenance.ts").ProvenanceStore;
 }
 
 export async function runReviewJob(
@@ -183,6 +185,9 @@ export async function runReviewJob(
       fallbackModel: config.fallbackModel,
       fallbackVariant: config.fallbackVariant,
       chain: orderedRunners(config),
+      independentReview: config.independentReview,
+      provenance: extras.provenance,
+      forgeKind: config.forge,
       remainingLeaseMs: extras.remainingLeaseMs,
       extendLease: extras.extendLease,
       workspace,
@@ -606,6 +611,7 @@ export async function processEngineTick(
       abortSignal: abort.signal,
       jobId: String(row.id),
       previousError: row.error ?? extras.previousError ?? null,
+      provenance: extras.provenance ?? store.provenance,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;

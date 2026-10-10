@@ -8,6 +8,11 @@ import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
 import { extractClosingIssueNumbers } from "./gitea_issues.ts";
+import {
+  isIndependentReviewRefusal,
+  provenanceLookupFailureReason,
+  resolveIndependentReviewers,
+} from "./independent_review.ts";
 import { isInfraFailure } from "./infra.ts";
 import { resolvePermissions } from "./permissions.ts";
 import type {
@@ -23,6 +28,7 @@ import type {
   Task,
 } from "./ports.ts";
 import { buildIncompleteWritePrompt, buildNoFindingsWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
+import type { ProvenanceLookup, ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
@@ -36,7 +42,13 @@ import {
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
-import { appendRunnerStamp, formatRunnerStamp, type NamedRunner } from "./runners.ts";
+import {
+  appendRunnerStamp,
+  formatRunnerStamp,
+  type IndependentReviewConfig,
+  type NamedRunner,
+  OPENCODE_RUNNER_TYPE,
+} from "./runners.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
   omitOpenCodeStderr,
@@ -120,6 +132,12 @@ export interface ReviewOptions {
   fallbackModel?: string;
   fallbackVariant?: string;
   chain?: NamedRunner[];
+  /** Opt-in independent-review policy from the runners catalog. Unset/disabled preserves today's behavior. */
+  independentReview?: IndependentReviewConfig;
+  /** Durable writer provenance. Required when the policy is enabled; unset keeps legacy behavior. */
+  provenance?: ProvenanceStore;
+  /** Forge kind for the provenance lookup. Defaults to `gitea`; shared parent behavior for both forges. */
+  forgeKind?: string;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   workspace: string;
@@ -640,8 +658,8 @@ function statusForResult(
   verdict?: { state: CheckPayload["state"]; description: string }
 ): { state: CheckPayload["state"]; description: string } {
   if (result.status === "skipped") {
-    if (result.reason?.startsWith("Incomplete review:")) {
-      return { state: "failure", description: result.reason };
+    if (result.reason?.startsWith("Incomplete review:") || isIndependentReviewRefusal(result.reason)) {
+      return { state: "failure", description: result.reason ?? "Incomplete review" };
     }
     return { state: "warning", description: statusDescriptionForSkip(result) };
   }
@@ -751,7 +769,52 @@ export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): stri
 
 export function isTerminalSkipReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
-  return reason.startsWith("Incomplete review:") || reason.startsWith("PR head changed from ");
+  return (
+    reason.startsWith("Incomplete review:") ||
+    reason.startsWith("PR head changed from ") ||
+    isIndependentReviewRefusal(reason)
+  );
+}
+
+export function activeReviewChain(
+  opts: Pick<ReviewOptions, "model" | "variant" | "fallbackModel" | "fallbackVariant" | "chain">
+): NamedRunner[] {
+  if (opts.chain && opts.chain.length > 0) return [...opts.chain];
+  const primary: NamedRunner = {
+    name: "primary",
+    type: OPENCODE_RUNNER_TYPE,
+    model: opts.model,
+    ...(opts.variant ? { variant: opts.variant } : {}),
+  } as NamedRunner;
+  if (!opts.fallbackModel) return [primary];
+  return [
+    primary,
+    {
+      name: "fallback",
+      type: OPENCODE_RUNNER_TYPE,
+      model: opts.fallbackModel,
+      ...(opts.fallbackVariant ? { variant: opts.fallbackVariant } : {}),
+    } as NamedRunner,
+  ];
+}
+
+async function resolveProvenanceForReview(
+  opts: Pick<ReviewOptions, "provenance" | "forgeKind" | "owner" | "repo" | "prNumber">,
+  pr: Pull,
+  headSha: string
+): Promise<ProvenanceLookup> {
+  if (!opts.provenance) {
+    throw new Error(provenanceLookupFailureReason(headSha, "provenance store unavailable"));
+  }
+  const forge = (opts.forgeKind ?? "gitea").trim() || "gitea";
+  return opts.provenance.lookupForReview({
+    forge,
+    owner: opts.owner,
+    repo: opts.repo,
+    prNumber: opts.prNumber,
+    headSha,
+    branch: pr.head.ref,
+  });
 }
 
 function prepareFiles(
@@ -998,14 +1061,6 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const log = opts.logger ?? defaultLog;
   const trackerApi = opts.tracker ?? opts.api;
   const forgeApi = opts.forge ?? opts.api;
-  const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
-    chain: opts.chain,
-    fallbackModel: opts.fallbackModel,
-    fallbackVariant: opts.fallbackVariant,
-    remainingLeaseMs: opts.remainingLeaseMs,
-    extendLease: opts.extendLease,
-    logger: log,
-  });
   throwIfAborted(opts.abortSignal);
   const repoFullName = `${opts.owner}/${opts.repo}`;
   const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
@@ -1043,6 +1098,70 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const ciSkip = await skipReasonForOtherChecks({ ...opts, api: forgeApi }, reviewedHeadSha, log);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
   }
+
+  // Parent-owned independent reviewer selection from exact-head writer provenance.
+  // Unset/disabled preserves today's behavior without touching provenance storage.
+  let effectiveChain = opts.chain;
+  let effectiveFallbackModel = opts.fallbackModel;
+  let effectiveFallbackVariant = opts.fallbackVariant;
+  if (opts.independentReview?.enabled === true) {
+    let lookup: ProvenanceLookup;
+    try {
+      lookup = await resolveProvenanceForReview(opts, pr, reviewedHeadSha);
+    } catch (err) {
+      const reason = provenanceLookupFailureReason(reviewedHeadSha, err instanceof Error ? err.message : String(err));
+      logDiagnostic(log, "independent_review", {
+        review: `${repoFullName}#${pr.number}`,
+        head: reviewedHeadSha,
+        policy: "enabled",
+        provenance_status: "error",
+        reason,
+      });
+      await opts.persistResult?.({ kind: "skip", reason });
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
+      return { status: "skipped", reason };
+    }
+    const active = activeReviewChain(opts);
+    const outcome = resolveIndependentReviewers({
+      chain: active,
+      provenance: lookup,
+      policy: opts.independentReview,
+      headSha: reviewedHeadSha,
+    });
+    logDiagnostic(log, "independent_review", {
+      review: `${repoFullName}#${pr.number}`,
+      head: outcome.diagnostics.head,
+      policy: outcome.diagnostics.policy,
+      provenance_status: outcome.diagnostics.provenanceStatus,
+      writers: outcome.diagnostics.writers.join(",") || null,
+      writer_groups: outcome.diagnostics.writerGroups.join(",") || null,
+      excluded: outcome.diagnostics.excludedFamilies.join(",") || null,
+      eligible: outcome.diagnostics.eligible.join(",") || null,
+      chosen: outcome.diagnostics.chosen ?? null,
+      reason: outcome.diagnostics.reason ?? null,
+    });
+    if (outcome.kind === "refused") {
+      await opts.persistResult?.({ kind: "skip", reason: outcome.reason });
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", outcome.reason, pr.html_url);
+      return { status: "skipped", reason: outcome.reason };
+    }
+    // `unknown` keeps the ordinary chain with an explicit diagnostic;
+    // `selected` retains chain order while excluding every writer family.
+    // Dormant catalog entries are never eligible: only the active chain filters.
+    // Clearing the legacy fallback keeps an availability hop inside the eligible set.
+    effectiveChain = outcome.eligible;
+    effectiveFallbackModel = undefined;
+    effectiveFallbackVariant = undefined;
+  }
+
+  const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
+    chain: effectiveChain,
+    fallbackModel: effectiveFallbackModel,
+    fallbackVariant: effectiveFallbackVariant,
+    remainingLeaseMs: opts.remainingLeaseMs,
+    extendLease: opts.extendLease,
+    logger: log,
+  });
 
   await postReviewStatus(
     forgeApi,
@@ -1315,8 +1434,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         throwIfQuotaWait({
           result: engineResult,
           model: opts.model,
-          fallbackModel: opts.fallbackModel,
-          chain: opts.chain,
+          fallbackModel: effectiveFallbackModel,
+          chain: effectiveChain,
           previousError: opts.previousError,
         });
         if (opts.home) {
@@ -1468,11 +1587,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       // Resetting quota with wait budget left waits and retries the same
       // head; QuotaWaitError propagates to the queue. Hard or exhausted
       // quota falls through to the day-long skip below.
+      // The eligible chain keeps exclusions through the wait-budget decision:
+      // an excluded author family is never a later model.
       throwIfQuotaWait({
         err,
         model: opts.model,
-        fallbackModel: opts.fallbackModel,
-        chain: opts.chain,
+        fallbackModel: effectiveFallbackModel,
+        chain: effectiveChain,
         previousError: opts.previousError,
       });
       if (opts.home) {
