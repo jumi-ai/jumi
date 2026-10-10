@@ -178,6 +178,19 @@ export class DeviceLoginManager {
   private activeActor?: string;
   private cancelled = false;
   private recordedTerminal = false;
+  /**
+   * Synchronous in-flight guard: set before the first await so concurrent
+   * start() callers share one spawn instead of both seeing idle and
+   * spawning two flows that write the same retained auth file.
+   */
+  private pendingStart?: Promise<{
+    refused: boolean;
+    reason?: string;
+    state: DeviceLoginStateName;
+    url?: string;
+    userCode?: string;
+    expiresAt?: number;
+  }>;
 
   constructor(readonly options: DeviceLoginManagerOptions) {}
 
@@ -228,6 +241,33 @@ export class DeviceLoginManager {
   }
 
   async start(actor: string): Promise<{
+    refused: boolean;
+    reason?: string;
+    state: DeviceLoginStateName;
+    url?: string;
+    userCode?: string;
+    expiresAt?: number;
+  }> {
+    if (this.state.state === "waiting") {
+      return {
+        refused: false,
+        state: this.state.state,
+        url: this.state.url,
+        userCode: this.state.userCode,
+        expiresAt: this.state.expiresAt,
+      };
+    }
+    if (this.pendingStart) return this.pendingStart;
+    const task = this.runStart(actor);
+    this.pendingStart = task;
+    try {
+      return await task;
+    } finally {
+      this.pendingStart = undefined;
+    }
+  }
+
+  private async runStart(actor: string): Promise<{
     refused: boolean;
     reason?: string;
     state: DeviceLoginStateName;
@@ -480,7 +520,6 @@ function isOrdinalAllowedBoardOrigin(request: Request): boolean {
 
 export interface OrdinalDeviceLoginServerOptions extends DeviceLoginManagerOptions {
   host?: string;
-  port?: number;
 }
 
 /**
@@ -512,6 +551,9 @@ export function createOrdinalDeviceLoginServer(options: OrdinalDeviceLoginServer
       }
       if (url.pathname === DEVICE_LOGIN_STATUS_PATH || url.pathname === "/status") {
         if (request.method !== "GET") return json(405, { error: "method not allowed" });
+        // The in-memory code is served here, so writes and reads share the
+        // edge-identity gate; the router already forwards the headers.
+        if (!ordinalBoardUsername(request)) return json(401, { error: "missing edge identity" });
         const status = await manager.getStatus();
         return json(200, status);
       }

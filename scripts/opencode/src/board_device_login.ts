@@ -35,6 +35,12 @@ const ORDINAL_START_PATH = "/api/device-login/start";
 const ORDINAL_CANCEL_PATH = "/api/device-login/cancel";
 
 export const DEVICE_LOGIN_FETCH_TIMEOUT_MS = 5_000;
+/**
+ * Start-hop budget: the ordinal waits up to 30s for the CLI to print the
+ * URL and code, so the router must wait longer or it 502s while the ordinal
+ * keeps a live waiting flow. Status/cancel stay on the short budget.
+ */
+export const DEVICE_LOGIN_START_FETCH_TIMEOUT_MS = 35_000;
 export const DEVICE_LOGIN_FETCH_MAX_BYTES = 1_048_576;
 
 export type DeviceLoginBoardState = "idle" | "waiting" | "signed-in" | "expired" | "denied" | "error" | "cancelled";
@@ -307,7 +313,8 @@ async function handleDeviceLoginWrite(
   // any other free-form input is never forwarded: the ordinal runs one fixed
   // invocation and reads the actor from the forwarded edge headers.
   const fetchFn = deps.fetchFn ?? fetch;
-  const timeoutMs = deps.timeoutMs ?? DEVICE_LOGIN_FETCH_TIMEOUT_MS;
+  const timeoutMs =
+    deps.timeoutMs ?? (kind === "start" ? DEVICE_LOGIN_START_FETCH_TIMEOUT_MS : DEVICE_LOGIN_FETCH_TIMEOUT_MS);
   const ordinalPath = kind === "start" ? ORDINAL_START_PATH : ORDINAL_CANCEL_PATH;
   let response: Response;
   try {
@@ -362,7 +369,8 @@ async function handleDeviceLoginWrite(
     return json(502, { error: "ordinal unavailable", ordinal, role, available: false });
   }
   const rec = (parsed ?? {}) as Record<string, unknown>;
-  const state = typeof rec.state === "string" ? rec.state : "waiting";
+  const rawState = typeof rec.state === "string" ? rec.state.trim() : "waiting";
+  const state = ALLOWED_STATES.has(rawState) ? rawState : "error";
   const out: Record<string, unknown> = { ok: true, ordinal, role, state };
   const outUrl = asHttpsUrl(rec.url);
   if (outUrl) out.url = outUrl;

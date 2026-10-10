@@ -1068,6 +1068,7 @@ async function fetchGrokStatus(showErrors) {
     }
     const status = await res.json();
     renderGrokStatus(status);
+    if (status && (status.state === "signed-in" || status.state === "expired" || status.state === "denied" || status.state === "error" || status.state === "cancelled")) stopGrokPoll();
     return status;
   } catch (err) {
     if (showErrors) grokNote("Ordinal unavailable. The router reaches it once the chart change lands.");
@@ -1108,6 +1109,9 @@ function openGrokConfirm(role, ordinal) {
   const msg = document.createElement("div");
   msg.className = "sub";
   primary.addEventListener("click", async () => {
+    if (grok.starting) return;
+    grok.starting = true;
+    primary.disabled = true;
     msg.textContent = "Working…";
     try {
       const res = await fetch("/api/board/device-login/start", {
@@ -1134,6 +1138,9 @@ function openGrokConfirm(role, ordinal) {
       }
     } catch (err) {
       msg.textContent = "Sign-in did not start.";
+    } finally {
+      grok.starting = false;
+      primary.disabled = false;
     }
   });
   sheet.appendChild(primary);
