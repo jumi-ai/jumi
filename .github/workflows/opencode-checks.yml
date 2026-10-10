@@ -123,6 +123,21 @@ jobs:
           docker run --rm jumi-reviewer:ci helm version --short
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
+          docker run --rm jumi-reviewer:ci codex --version
+          # `--version` proves the binary exists, not that it accepts the argv
+          # the codex runner spawns. These no-auth help probes fail the image
+          # job when a CODEX_VERSION bump renames a flag the fresh spawn or
+          # the resume extra turn depends on, instead of failing every Codex
+          # run in production. Help output can only prove flag presence;
+          # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
+          codex_exec_help="$(docker run --rm jumi-reviewer:ci codex exec --help)"
+          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
+          codex_resume_help="$(docker run --rm jumi-reviewer:ci codex exec resume --help)"
+          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
           # Claude tracing is vendored, never installed at run time, and its
           # hooks are pure shell over jq + python3 — both must be in the image.
@@ -230,6 +245,17 @@ jobs:
           printf '%s\n' "$java_version" | grep -F Temurin
           docker run --rm jumi-worker:ci claude --version
           docker run --rm jumi-worker:ci agy --version
+          docker run --rm jumi-worker:ci codex --version
+          # Same no-auth help probe as the reviewer job: the worker image also
+          # spawns Codex runners, so its binary has to accept the same argv.
+          codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"
+          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
+          codex_resume_help="$(docker run --rm jumi-worker:ci codex exec resume --help)"
+          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md

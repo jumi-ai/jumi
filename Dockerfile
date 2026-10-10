@@ -13,6 +13,11 @@ ARG CLAUDE_VERSION
 ARG AGY_VERSION=1.2.7-6731160148115456
 ARG AGY_SHA512_AMD64=fec769d611c4afdf0ae72d38bdb2652c8e2c8e71e4f6de97a27b80dda3c50429160d9e03776a36a59b8857c20e76783c4a49cb0feb8b2f5c3bf925b0cc03bb77
 ARG AGY_SHA512_ARM64=d39f939ffc80776bfd2dc10db7b9a1a1b58650f08115fa21065c11d10882c71210f368c2e6060f26966d1a33d6b2dd2bc19bfd641062305af6546c51d494511a
+# Official Linux Codex CLI (musl package the stock installer ships). Pinning
+# this binary must not change the synthesized OpenCode chain.
+ARG CODEX_VERSION=0.157.1
+ARG CODEX_SHA256_AMD64=0e211868c9fd73cb49ad35ac675b5eafdf6b9f453df8a493df980c59a590fe5f
+ARG CODEX_SHA256_ARM64=499fe70d70f4e4904b6a5a4ec1b1edf6c4a1a47a075ea7e2ec2b5262ba47b471
 ARG HELM_VERSION
 ARG TARGETARCH
 
@@ -51,6 +56,19 @@ RUN set -eu; \
     echo "${agy_sha512}  ${tmp_dir}/agy.tar.gz" | sha512sum -c -; \
     tar -xzf "${tmp_dir}/agy.tar.gz" -C "${tmp_dir}" antigravity; \
     install -m 755 "${tmp_dir}/antigravity" /usr/local/bin/agy; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) codex_target="x86_64-unknown-linux-musl"; codex_sha256="${CODEX_SHA256_AMD64}" ;; \
+      arm64) codex_target="aarch64-unknown-linux-musl"; codex_sha256="${CODEX_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz" -o "${tmp_dir}/codex.tar.gz"; \
+    echo "${codex_sha256}  ${tmp_dir}/codex.tar.gz" | sha256sum -c -; \
+    mkdir -p /usr/local/lib/codex; \
+    tar -xzf "${tmp_dir}/codex.tar.gz" -C /usr/local/lib/codex; \
+    test -x /usr/local/lib/codex/bin/codex; \
     rm -rf "${tmp_dir}"
 RUN set -eu; \
     case "${TARGETARCH:-amd64}" in \
@@ -101,7 +119,9 @@ COPY --from=tools /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=tools /usr/local/bin/claude /usr/local/bin/claude
 COPY --from=tools /usr/local/bin/agy /usr/local/bin/agy
+COPY --from=tools /usr/local/lib/codex /usr/local/lib/codex
 COPY --from=tools /usr/local/bin/helm /usr/local/bin/helm
+RUN ln -sfn /usr/local/lib/codex/bin/codex /usr/local/bin/codex
 RUN git --version \
   && rg --version \
   && jq --version \
@@ -111,7 +131,8 @@ RUN git --version \
   && bun --version \
   && /usr/local/bin/opencode version \
   && /usr/local/bin/claude --version \
-  && /usr/local/bin/agy --version
+  && /usr/local/bin/agy --version \
+  && /usr/local/bin/codex --version
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./

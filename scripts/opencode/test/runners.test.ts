@@ -7,6 +7,8 @@ import {
   AntigravityRefusedError,
   appendRunnerStamp,
   CLAUDE_EFFORT_LEVELS,
+  CODEX_DEFAULT_EFFORT,
+  CODEX_EFFORT_LEVELS,
   formatRunnerStamp,
   parseRunnersCatalog,
   parseRunnersFile,
@@ -67,6 +69,32 @@ describe("parseRunnersCatalog", () => {
     expect(
       parseRunnersCatalog({ runners: { a: { type: "agy", model: "m", effort: "unbounded" } }, chain: ["a"] }).runners.a
     ).toEqual({ type: "agy", model: "m", effort: "unbounded" });
+  });
+
+  test("registers type codex with model and effort, and refuses ultra", () => {
+    expect(
+      parseRunnersCatalog({
+        runners: { cx: { type: "codex", model: "gpt-6-sol" } },
+        chain: ["cx"],
+      }).runners.cx
+    ).toEqual({ type: "codex", model: "gpt-6-sol", effort: CODEX_DEFAULT_EFFORT });
+    expect(
+      parseRunnersCatalog({
+        runners: { cx: { type: "codex", model: "gpt-6-sol", effort: "high" } },
+        chain: ["cx"],
+      }).runners.cx
+    ).toEqual({ type: "codex", model: "gpt-6-sol", effort: "high" });
+    for (const effort of CODEX_EFFORT_LEVELS) {
+      expect(
+        parseRunnersCatalog({ runners: { cx: { type: "codex", model: "m", effort } }, chain: ["cx"] }).runners.cx
+      ).toEqual({ type: "codex", model: "m", effort });
+    }
+    expect(() =>
+      parseRunnersCatalog({ runners: { cx: { type: "codex", model: "m", effort: "ultra" } }, chain: ["cx"] })
+    ).toThrow("effort ultra is not one of low, medium, high, xhigh, max");
+    expect(formatRunnerStamp(runnerStamp({ type: "codex", model: "gpt-6-sol", effort: "high" }))).toBe(
+      "_Jumi · codex · gpt-6-sol (high)_"
+    );
   });
 
   test("registers type agy with model and optional effort", () => {
@@ -130,6 +158,7 @@ describe("synthesizeRunners", () => {
       chain: ["primary"],
     });
     expect(Object.values(catalog.runners).some((runner) => runner.type === "agy")).toBe(false);
+    expect(Object.values(catalog.runners).some((runner) => runner.type === "codex")).toBe(false);
     expect(() => refuseAntigravityUnlessGithub(catalog, "gitea")).not.toThrow();
   });
 });

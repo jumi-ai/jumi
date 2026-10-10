@@ -131,6 +131,21 @@ jobs:
           echo "Verified worker env: ${config} ${instance}"
 
           docker run --rm "${TEST_TAG}" claude --version
+          docker run --rm "${TEST_TAG}" codex --version
+          # `--version` proves the binary exists, not that it accepts the argv
+          # the codex runner spawns. These no-auth help probes fail the image
+          # job when a CODEX_VERSION bump renames a flag the fresh spawn or
+          # the resume extra turn depends on, instead of failing every Codex
+          # run in production. Help output can only prove flag presence;
+          # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
+          codex_exec_help="$(docker run --rm "${TEST_TAG}" codex exec --help)"
+          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
+          codex_resume_help="$(docker run --rm "${TEST_TAG}" codex exec resume --help)"
+          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
 
           # The version only proves the binary is there. Run the production
           # argv against a loopback stub endpoint (nothing billed) so a flag

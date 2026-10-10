@@ -125,6 +125,42 @@ verify_reviewer_runtime() {
     echo "agy missing in reviewer image" >&2
     exit 1
   fi
+  if ! buildah run "${ctr}" -- codex --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex missing in reviewer image" >&2
+    exit 1
+  fi
+  # `--version` proves the binary is there, not that it still accepts the argv
+  # `codexArgv()` spawns. These no-auth `--help` probes fail the image job
+  # when a CODEX_VERSION bump renames or drops a flag the fresh spawn or the
+  # `exec resume` extra turn depends on, instead of failing every Codex run in
+  # production. `--help` can only prove flag presence: pre/post-`resume`
+  # ordering (`--color` is not global, `-c` is) is pinned by unit tests in
+  # test/codex.test.ts, which is why `--color` is asserted on `exec` only.
+  if ! codex_exec_help="$(buildah run "${ctr}" -- codex exec --help)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex exec --help failed in reviewer image" >&2
+    exit 1
+  fi
+  for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+    if ! printf '%s\n' "${codex_exec_help}" | grep -E -- "${flag}([ ,=]|$)" >/dev/null; then
+      buildah rm "${ctr}" >/dev/null 2>&1 || true
+      echo "codex exec --help is missing ${flag} the codex runner spawns with" >&2
+      exit 1
+    fi
+  done
+  if ! codex_resume_help="$(buildah run "${ctr}" -- codex exec resume --help)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex exec resume --help failed in reviewer image" >&2
+    exit 1
+  fi
+  for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+    if ! printf '%s\n' "${codex_resume_help}" | grep -E -- "${flag}([ ,=]|$)" >/dev/null; then
+      buildah rm "${ctr}" >/dev/null 2>&1 || true
+      echo "codex exec resume --help is missing ${flag} the codex resume turn spawns with" >&2
+      exit 1
+    fi
+  done
   # Drive the installed opencode binary over a loopback provider and make it
   # resolve the reviewer webfetch map for a table of URLs. Proves the forge-host
   # deny against the real matcher, not a copy of it.

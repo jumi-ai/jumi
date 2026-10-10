@@ -124,6 +124,21 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" helm version --short
           docker run --rm "${IMAGE}:${VERSION}" claude --version
           docker run --rm "${IMAGE}:${VERSION}" agy --version
+          docker run --rm "${IMAGE}:${VERSION}" codex --version
+          # `--version` proves the binary exists, not that it accepts the argv
+          # the codex runner spawns. These no-auth help probes fail the image
+          # job when a CODEX_VERSION bump renames a flag the fresh spawn or
+          # the resume extra turn depends on, instead of failing every Codex
+          # run in production. Help output can only prove flag presence;
+          # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
+          codex_exec_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec --help)"
+          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
+          codex_resume_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec resume --help)"
+          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+            printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
+          done
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
           printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null

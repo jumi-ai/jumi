@@ -5,6 +5,9 @@ export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 export const OPENCODE_RUNNER_TYPE = "opencode";
 export const CLAUDE_RUNNER_TYPE = "claude";
 export const AGY_RUNNER_TYPE = "agy";
+export const CODEX_RUNNER_TYPE = "codex";
+/** Catalog default when a `type: codex` entry omits effort. Not a synthesized-chain model. */
+export const CODEX_DEFAULT_EFFORT = "high";
 /**
  * Deploy-contract required constraint. Homelab (`FORGE` unset, empty, or `gitea`)
  * must not start if a runners file names `type: agy`. `FORGE=github` may.
@@ -32,7 +35,13 @@ export interface AgyRunnerConfig {
   effort?: string;
 }
 
-export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig | AgyRunnerConfig;
+export interface CodexRunnerConfig {
+  type: typeof CODEX_RUNNER_TYPE;
+  model: string;
+  effort: string;
+}
+
+export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig | AgyRunnerConfig | CodexRunnerConfig;
 export type RunnerType = RunnerConfig["type"];
 
 /**
@@ -46,9 +55,18 @@ export type RunnerType = RunnerConfig["type"];
  */
 export const CLAUDE_EFFORT_LEVELS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
 
+/**
+ * Effort levels a `type: codex` runner may set. `ultra` is refused: it burns the
+ * shared ChatGPT pool and is not required for parity. Unknown levels fail at
+ * load for the same reason as Claude — a typo must not silently downgrade.
+ */
+export const CODEX_EFFORT_LEVELS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
 /** First-party CLI runners that take `effort` rather than OpenCode's `variant`. */
-export function usesEffort(type: string | undefined): type is typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE {
-  return type === CLAUDE_RUNNER_TYPE || type === AGY_RUNNER_TYPE;
+export function usesEffort(
+  type: string | undefined
+): type is typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE | typeof CODEX_RUNNER_TYPE {
+  return type === CLAUDE_RUNNER_TYPE || type === AGY_RUNNER_TYPE || type === CODEX_RUNNER_TYPE;
 }
 
 export type NamedRunner = RunnerConfig & { name: string };
@@ -96,6 +114,19 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
       fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid variant`);
     }
     return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined);
+  }
+  if (spec.type === CODEX_RUNNER_TYPE) {
+    const effort = spec.effort;
+    if (effort != null && typeof effort !== "string") {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid effort`);
+    }
+    const level = typeof effort === "string" && effort ? effort : CODEX_DEFAULT_EFFORT;
+    if (!CODEX_EFFORT_LEVELS.includes(level)) {
+      fail(
+        `Invalid ${RUNNERS_FILE_ENV}: runner ${name} effort ${level} is not one of ${CODEX_EFFORT_LEVELS.join(", ")}`
+      );
+    }
+    return { type: CODEX_RUNNER_TYPE, model: spec.model, effort: level };
   }
   if (usesEffort(spec.type as string | undefined)) {
     const effort = spec.effort;

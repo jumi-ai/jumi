@@ -1,4 +1,4 @@
-/** Process-local OpenCode, Claude, and agy token counters for Prometheus /metrics. */
+/** Process-local OpenCode, Claude, agy, and Codex token counters for Prometheus /metrics. */
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
@@ -8,7 +8,7 @@ import { resetTraceExportForTests, traceExportErrors } from "./phoenix.ts";
 export const TOKEN_TYPES = ["input", "cached_input", "output", "cache_write", "reasoning"] as const;
 export type TokenType = (typeof TOKEN_TYPES)[number];
 /** Harness that produced the tokens; exported as the existing `source` label. */
-export type TokenSource = "opencode" | "claude" | "agy";
+export type TokenSource = "opencode" | "claude" | "agy" | "codex";
 /** Per-model token totals for one harness run. */
 export type ModelTokenUsage = Map<string, Record<TokenType, number>>;
 
@@ -136,6 +136,11 @@ export function recordClaudeUsage(usage: ModelTokenUsage | undefined): void {
 /** Same as `recordClaudeUsage` for an `agy -p --output-format stream-json` child. */
 export function recordAgyUsage(usage: ModelTokenUsage | undefined): void {
   recordCliUsage("agy", usage);
+}
+
+/** Same as `recordClaudeUsage` for a `codex exec --json` child. Missing usage records nothing. */
+export function recordCodexUsage(usage: ModelTokenUsage | undefined): void {
+  recordCliUsage("codex", usage);
 }
 
 function recordCliUsage(source: TokenSource, usage: ModelTokenUsage | undefined): void {
