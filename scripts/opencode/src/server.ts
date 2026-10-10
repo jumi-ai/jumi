@@ -4,6 +4,12 @@ import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLook
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
+import {
+  chainHasOpenCodeXai,
+  createOrdinalDeviceLoginServer,
+  deviceLoginResultLogger,
+  ORDINAL_DEVICE_LOGIN_PORT,
+} from "./device_login.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
@@ -819,6 +825,7 @@ export interface StartedReviewer {
   role: ServiceConfig["role"];
   server?: ReturnType<typeof Bun.serve>;
   boardServer?: ReturnType<typeof Bun.serve>;
+  deviceLoginServer?: ReturnType<typeof Bun.serve>;
   store?: ReviewJobStore;
   stop: () => void;
 }
@@ -983,6 +990,47 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
     deps
   );
   if (deps.listen !== false) {
+    // Ordinal-local Grok device login on the constant 3010, engine only.
+    // The router is diskless and never binds this port. HOME is the same
+    // durable root the review child uses, so the CLI writes the retained
+    // auth file as the container uid. A refused connection until the chart
+    // allows router->ordinal:3010 is fine.
+    try {
+      const ordinal = hostname();
+      const { server: deviceLoginServer } = createOrdinalDeviceLoginServer({
+        ordinal,
+        role: "engine",
+        home: config.home,
+        // The isolated GitHub factory never shows the control: its Grok hop
+        // is skip-if-unauthed.
+        hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
+        isLeased: async () => {
+          try {
+            const rows = await store.listInflight(50);
+            return rows.some((row) => row.state === "leased" && row.leasedBy === leasedBy);
+          } catch {
+            return false;
+          }
+        },
+        logger,
+        onResult: deviceLoginResultLogger(logger),
+      });
+      logger(
+        `device login listening on ${deviceLoginServer.hostname}:${ORDINAL_DEVICE_LOGIN_PORT} role=${config.role} ordinal=${ordinal}`
+      );
+      started.deviceLoginServer = deviceLoginServer;
+      const priorStop = started.stop;
+      started.stop = () => {
+        try {
+          deviceLoginServer.stop(true);
+        } catch {
+          // Best-effort.
+        }
+        priorStop();
+      };
+    } catch (err) {
+      logger(`device login unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
     const run = async () => {
       while (!shutdown.signal.aborted) {
         try {

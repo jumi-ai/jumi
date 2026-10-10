@@ -1,6 +1,12 @@
 import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
 import { meterWebhook, renderProcessMetrics } from "./control_metrics.ts";
+import {
+  chainHasOpenCodeXai,
+  createOrdinalDeviceLoginServer,
+  deviceLoginResultLogger,
+  ORDINAL_DEVICE_LOGIN_PORT,
+} from "./device_login.ts";
 import { createForge } from "./forge.ts";
 import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
@@ -186,8 +192,53 @@ async function main() {
 
   if (ramQueue) bindAbort(shutdown.signal, () => abortIssueQueue(ramQueue));
 
+  // Ordinal-local Grok device login on the constant 3010, worker only.
+  // Same HOME the implement child uses, so the CLI writes the retained auth
+  // file as the container uid. A refused connection until the chart allows
+  // router->ordinal:3010 is fine.
+  const workerOrdinal = hostname();
+  const workerLeasedBy = workerId();
+  try {
+    const { server: deviceLoginServer } = createOrdinalDeviceLoginServer({
+      ordinal: workerOrdinal,
+      role: "worker",
+      home: config.home,
+      // The isolated GitHub factory never shows the control: its Grok hop is
+      // skip-if-unauthed.
+      hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
+      isLeased: async () => {
+        if (aborts.size > 0) return true;
+        if (!store) return false;
+        try {
+          const rows = await store.listInflight(50);
+          return rows.some((row) => row.state === "leased" && row.leasedBy === workerLeasedBy);
+        } catch {
+          return false;
+        }
+      },
+      logger: log,
+      onResult: deviceLoginResultLogger(log),
+    });
+    log(
+      `device login listening on ${deviceLoginServer.hostname}:${ORDINAL_DEVICE_LOGIN_PORT} ordinal=${workerOrdinal}`
+    );
+    shutdown.signal.addEventListener(
+      "abort",
+      () => {
+        try {
+          deviceLoginServer.stop(true);
+        } catch {
+          // Best-effort.
+        }
+      },
+      { once: true }
+    );
+  } catch (err) {
+    log(`device login unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
   if (store) {
-    const leasedBy = workerId();
+    const leasedBy = workerLeasedBy;
     const run = async () => {
       while (!shutdown.signal.aborted) {
         try {
