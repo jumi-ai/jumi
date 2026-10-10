@@ -78,7 +78,7 @@ export async function runRuntimeEngine(
   loop: ClaimedLoop,
   engine: Engine,
   opts: EngineRunOptions,
-  onRunner: (runner: RunnerStamp) => void
+  onRunner: (runner: RunnerStamp, chainIndex?: number) => void
 ): Promise<EngineResult> {
   return runEngineStamped(engine, { ...opts, workdir: loop.worktree }, onRunner);
 }

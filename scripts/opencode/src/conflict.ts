@@ -21,13 +21,23 @@ import {
   withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
-import { type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { buildTaskMarkdown, type HelmRunner, type ImplementOptions, type OpenCodeRunner } from "./implement.ts";
+import {
+  buildTaskMarkdown,
+  confirmProvenancePublication,
+  ensureProvenanceIntent,
+  failProvenanceIntent,
+  type HelmRunner,
+  type ImplementOptions,
+  noteProvenanceRunners,
+  type OpenCodeRunner,
+} from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
+import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -77,6 +87,8 @@ export interface MergeDefaultResult {
   conflicted: boolean;
   /** Set when a runner resolved the conflict; the one that actually ran. */
   runner?: RunnerStamp;
+  /** Chain position of `runner`; lets provenance include an earlier hopped runner. */
+  runnerChainIndex?: number;
 }
 
 export interface MergeDefaultIntoWorktreeOpts {
@@ -110,7 +122,7 @@ export interface MergeDefaultIntoWorktreeOpts {
   jobId?: string;
   skipCleanMerge?: boolean;
   /** Called with the runner that ran, before any engine failure is thrown. */
-  onRunner?: (runner: RunnerStamp) => void;
+  onRunner?: (runner: RunnerStamp, chainIndex?: number) => void;
 }
 
 function logDefault(message: string) {
@@ -430,6 +442,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   remaining = remaining.filter((path) => !isGeneratedLock(path));
   let openCodeRan = false;
   let runner: RunnerStamp | undefined;
+  let runnerChainIndex: number | undefined;
   if (leftoverLocks.length > 0) {
     return { status: "stuck", headSha, baseSha, openCodeRan: false, conflicted: true };
   }
@@ -480,9 +493,10 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       abortSignal: opts.abortSignal,
       onPid: opts.onPid,
     };
-    const engineResult = await opts.runtime.runRuntimeEngine(opts.loop, opts.openCodeRunner, runOpts, (r) => {
+    const engineResult = await opts.runtime.runRuntimeEngine(opts.loop, opts.openCodeRunner, runOpts, (r, idx) => {
       runner = r;
-      opts.onRunner?.(r);
+      runnerChainIndex = idx;
+      opts.onRunner?.(r, idx);
     });
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
@@ -492,7 +506,15 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
     if (remaining.length > 0) {
-      return { status: "stuck", headSha, baseSha, openCodeRan, conflicted: true, runner };
+      return {
+        status: "stuck",
+        headSha,
+        baseSha,
+        openCodeRan,
+        conflicted: true,
+        runner,
+        ...(runnerChainIndex != null ? { runnerChainIndex } : {}),
+      };
     }
   }
 
@@ -501,7 +523,15 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
   }
   await commitMergeIfNeeded(git, env, worktree, defaultBranch, headRef);
-  return { status: "merged", headSha, baseSha, openCodeRan, conflicted, ...(runner ? { runner } : {}) };
+  return {
+    status: "merged",
+    headSha,
+    baseSha,
+    openCodeRan,
+    conflicted,
+    ...(runner ? { runner } : {}),
+    ...(runnerChainIndex != null ? { runnerChainIndex } : {}),
+  };
 }
 
 export function shouldIncrementRound(result: MergeDefaultResult): boolean {
@@ -524,6 +554,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
+  const provenanceCollector = new ProvenanceCollector(opts.chain);
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
       index,
@@ -537,6 +568,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
+  await ensureProvenanceIntent(opts, { prNumber: pr.number, branch: pr.head.ref }, log);
 
   const branch = pr.head.ref;
   claim.branch = branch;
@@ -660,8 +692,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           ciMarkdown,
           jobId: opts.jobId ?? opts.job.delivery,
           onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r) => {
+          onRunner: (r, idx) => {
             runner = r;
+            provenanceCollector.noteRunner(r, idx);
           },
         });
       } catch (err: unknown) {
@@ -684,6 +717,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       }
 
       runner = mergeResult.runner;
+      if (mergeResult.runner) provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      await noteProvenanceRunners(opts, provenanceCollector, log);
       if (mergeResult.status === "up-to-date") {
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "up-to-date" };
@@ -734,9 +769,19 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             };
             runner = undefined;
             const runtime = opts.runtime ?? standingPodRuntime;
-            const continued = await runtime.runRuntimeEngine(loop, engine, continuedOpts, (r) => {
-              runner = r;
-            });
+            let continued: EngineResult;
+            try {
+              continued = await runtime.runRuntimeEngine(loop, engine, continuedOpts, (r, idx) => {
+                runner = r;
+                provenanceCollector.noteRunner(r, idx);
+              });
+            } catch (err) {
+              provenanceCollector.noteError(err);
+              await noteProvenanceRunners(opts, provenanceCollector, log);
+              throw err;
+            }
+            provenanceCollector.noteResult(continued, { model: opts.model, variant: opts.variant });
+            await noteProvenanceRunners(opts, provenanceCollector, log);
             // Gate on the message so a future non-quota `stuck` producer does
             // not set the human-clear quota flag.
             if (continued.status === "stuck" && isQuotaText(continued.message)) {
@@ -787,10 +832,19 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: "remote already contains default" };
         }
+        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
       throwIfAborted(opts.abortSignal);
 
+      const publishedHead = (
+        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+      ).trim();
+      await confirmProvenancePublication(
+        opts,
+        { prNumber: pr.number, branch, headSha: publishedHead || mergeResult.headSha, collector: provenanceCollector },
+        log
+      );
       await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
       await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
       // Push already landed; a failed destroy must not discard it.
@@ -799,6 +853,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     },
     async (err) => {
       runner = thrownRunner(err) ?? runner;
+      provenanceCollector.noteError(err);
+      await noteProvenanceRunners(opts, provenanceCollector, log);
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,

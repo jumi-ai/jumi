@@ -34,7 +34,7 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import { type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -42,8 +42,12 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
+  confirmProvenancePublication,
+  ensureProvenanceIntent,
+  failProvenanceIntent,
   type ImplementOptions,
   jumiPrBodyRegion,
+  noteProvenanceRunners,
   PR_DESCRIPTION_FILE,
   readPullRequestDescription,
   replaceJumiPrBodyRegion,
@@ -52,6 +56,7 @@ import {
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
+import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -799,6 +804,7 @@ export async function implementFollowUp(
 
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
+  const provenanceCollector = new ProvenanceCollector(opts.chain);
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
       index,
@@ -812,6 +818,7 @@ export async function implementFollowUp(
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
+  await ensureProvenanceIntent(opts, { prNumber: pr.number, branch: pr.head.ref }, log);
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
@@ -1075,8 +1082,9 @@ export async function implementFollowUp(
           jobId: opts.jobId ?? opts.job.delivery,
           ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
           onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r) => {
+          onRunner: (r, idx) => {
             runner = r;
+            provenanceCollector.noteRunner(r, idx);
           },
         });
       } catch (err: unknown) {
@@ -1097,6 +1105,8 @@ export async function implementFollowUp(
         throw err;
       }
       runner = mergeResult.runner;
+      if (mergeResult.runner) provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      await noteProvenanceRunners(opts, provenanceCollector, log);
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
         await writeConflictLatch(latches, latchKey, {
@@ -1228,9 +1238,19 @@ export async function implementFollowUp(
         };
         runner = undefined;
         const runtime = opts.runtime ?? standingPodRuntime;
-        const result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
-          runner = r;
-        });
+        let result: EngineResult;
+        try {
+          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+            runner = r;
+            provenanceCollector.noteRunner(r, idx);
+          });
+        } catch (err) {
+          provenanceCollector.noteError(err);
+          await noteProvenanceRunners(opts, provenanceCollector, log);
+          throw err;
+        }
+        provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+        await noteProvenanceRunners(opts, provenanceCollector, log);
         // Gate on the message so a future non-quota `stuck` producer uses the
         // fingerprint path instead of the human-clear quota flag.
         if (result.status === "stuck" && isQuotaText(result.message)) {
@@ -1317,6 +1337,7 @@ export async function implementFollowUp(
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha) };
         }
+        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
       throwIfAborted(opts.abortSignal);
@@ -1325,6 +1346,11 @@ export async function implementFollowUp(
       await refreshPullRequestBody(prFileContents);
 
       const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+      await confirmProvenancePublication(
+        opts,
+        { prNumber: pr.number, branch, headSha: sha || pr.head.sha, collector: provenanceCollector },
+        log
+      );
       await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
       await recordAttempt(sha || pr.head.sha);
       // Push already landed; a failed destroy must not discard it.
@@ -1333,6 +1359,8 @@ export async function implementFollowUp(
     },
     async (err) => {
       runner = thrownRunner(err) ?? runner;
+      provenanceCollector.noteError(err);
+      await noteProvenanceRunners(opts, provenanceCollector, log);
       if (isQuotaError(err)) {
         throwIfQuotaWait({
           err,
