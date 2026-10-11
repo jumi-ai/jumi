@@ -1902,6 +1902,121 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("emits writer pull reviews and inline feedback after a linked-issue constraint", async () => {
+    // Regression: the reviewer once received only PR comments + linked-issue
+    // comments, so a writer REQUEST_CHANGES override was invisible and the
+    // next review demanded a rollback to the superseded issue text. Every
+    // assertion below on review/inline bodies fails on that old prompt.
+    await withWorkspace(async (workspace) => {
+      let prompt = "";
+      const logs: string[] = [];
+      await reviewPullRequest({
+        ...reviewOptions(workspace),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+        api: makeApi({
+          getPR: async () => makePR({ body: "Fixes #12" }),
+          getIssue: async () => makeIssue({ number: 12, body: "ORIGINAL_CONSTRAINT_USE_SQLITE" }),
+          listPullReviews: async () => [
+            {
+              id: 101,
+              body: "WRITER_OVERRIDE_USE_POSTGRES",
+              user: makeUser({ login: "alice" }),
+              state: "REQUEST_CHANGES",
+              submitted_at: "2026-05-23T01:00:00Z",
+              updated_at: "2026-05-23T01:00:00Z",
+              created_at: "2026-05-23T01:00:00Z",
+            },
+            {
+              id: 102,
+              body: "WRITER_CORRECTION_POSTGRES_WITH_TIMEOUT",
+              user: makeUser({ login: "alice" }),
+              state: "REQUEST_CHANGES",
+              dismissed: true,
+              submitted_at: "2026-05-24T01:00:00Z",
+              updated_at: "2026-05-24T01:00:00Z",
+              created_at: "2026-05-24T01:00:00Z",
+            },
+            {
+              id: 103,
+              body: "OUTSIDER_SUGGESTION",
+              user: makeUser({ login: "bob" }),
+              state: "COMMENTED",
+              submitted_at: "2026-05-24T02:00:00Z",
+              updated_at: "2026-05-24T02:00:00Z",
+              created_at: "2026-05-24T02:00:00Z",
+            },
+            {
+              id: 104,
+              body: "JUMI_BOT_REVIEW_MUST_NOT_APPEAR",
+              user: makeUser({ login: "jumi" }),
+              state: "COMMENTED",
+              submitted_at: "2026-05-24T03:00:00Z",
+              updated_at: "2026-05-24T03:00:00Z",
+              created_at: "2026-05-24T03:00:00Z",
+            },
+          ],
+          listPullReviewComments: async () => [
+            {
+              id: 201,
+              body: "WRITER_INLINE_ONLY_SET_TIMEOUT",
+              user: makeUser({ login: "alice" }),
+              created_at: "2026-05-23T02:00:00Z",
+              updated_at: "2026-05-23T02:00:00Z",
+              path: "src/db.ts",
+              new_position: 12,
+              pull_request_review_id: 101,
+              commit_id: "abc123",
+            },
+            {
+              id: 202,
+              body: "OUTSIDER_INLINE_IDEA",
+              user: makeUser({ login: "bob" }),
+              created_at: "2026-05-23T03:00:00Z",
+              updated_at: "2026-05-23T03:00:00Z",
+              path: "src/db.ts",
+              new_position: 13,
+              pull_request_review_id: 103,
+            },
+          ],
+          getCollaboratorPermission: async (_owner, _repo, login) => {
+            if (login.toLowerCase() === "alice") return { permission: "write" };
+            return { permission: "read" };
+          },
+        }),
+        openCodeRunner: async (opts) => {
+          prompt = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Review\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      // Original constraint plus the newer writer intent, oldest-first within reviews.
+      expect(prompt).toContain("ORIGINAL_CONSTRAINT_USE_SQLITE");
+      expect(prompt).toContain("WRITER_OVERRIDE_USE_POSTGRES");
+      expect(prompt).toContain("WRITER_CORRECTION_POSTGRES_WITH_TIMEOUT");
+      expect(prompt.indexOf("WRITER_OVERRIDE_USE_POSTGRES")).toBeLessThan(
+        prompt.indexOf("WRITER_CORRECTION_POSTGRES_WITH_TIMEOUT")
+      );
+      // Dismissal does not erase the correction.
+      expect(prompt).toContain('dismissed="true"');
+      // Review-body and inline-only instructions, with path metadata.
+      expect(prompt).toContain("<pull_reviews>");
+      expect(prompt).toContain("<review_comments>");
+      expect(prompt).toContain("WRITER_INLINE_ONLY_SET_TIMEOUT");
+      expect(prompt).toContain('path="src/db.ts"');
+      // Trust policy: writers steer, outsiders are discussion, bot stays out.
+      expect(prompt).toContain('intent="product">WRITER_OVERRIDE_USE_POSTGRES');
+      expect(prompt).toContain('intent="discussion">OUTSIDER_SUGGESTION');
+      expect(prompt).toContain('intent="discussion">OUTSIDER_INLINE_IDEA');
+      expect(prompt).not.toContain("JUMI_BOT_REVIEW_MUST_NOT_APPEAR");
+      expect(prompt).toContain("later explicit writer correction supersedes");
+      expect(prompt).toContain("dismissed or stale review is not a retraction");
+      expect(logs.join("\n")).toContain("pull_reviews=");
+    });
+  });
+
   const matchingContract = `# Deploy contract
 
 ## GitOps

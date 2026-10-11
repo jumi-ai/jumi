@@ -219,6 +219,76 @@ describe("buildPROpenedPrompt", () => {
       "Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug."
     );
   });
+
+  test("renders writer pull reviews and inline feedback with supersession guidance", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      thread: {
+        comments: [],
+        pullReviews: [
+          {
+            id: 101,
+            author: "alice",
+            created_at: "2026-05-23T00:00:00Z",
+            body: "Use postgres, not sqlite.",
+            state: "request_changes",
+            permission: "write",
+            intent: "product",
+          },
+          {
+            id: 102,
+            author: "alice",
+            created_at: "2026-05-24T00:00:00Z",
+            body: "Correction: use postgres with a 30s timeout.",
+            state: "request_changes",
+            permission: "write",
+            intent: "product",
+          },
+        ],
+        reviewComments: [
+          {
+            id: 201,
+            review_id: 101,
+            author: "alice",
+            created_at: "2026-05-23T01:00:00Z",
+            body: "Set timeout on the pool.",
+            path: "src/db.ts",
+            line: 12,
+            permission: "write",
+            intent: "product",
+          },
+          {
+            id: 202,
+            author: "bob",
+            created_at: "2026-05-23T02:00:00Z",
+            body: "Outsider idea.",
+            path: "src/db.ts",
+            line: 13,
+            permission: "read",
+            intent: "discussion",
+          },
+        ],
+        linkedIssues: [],
+      },
+    });
+
+    // Both the review-body override and the inline-only instruction are emitted.
+    expect(prompt).toContain("<pull_reviews>");
+    expect(prompt).toContain("Use postgres, not sqlite.");
+    expect(prompt).toContain("Correction: use postgres with a 30s timeout.");
+    expect(prompt).toContain("<review_comments>");
+    expect(prompt).toContain("Set timeout on the pool.");
+    expect(prompt).toContain('path="src/db.ts"');
+    expect(prompt).toContain('intent="discussion"');
+    // Chronology + trust policy: later writer text supersedes, dismissal is not retraction.
+    expect(prompt.indexOf("Use postgres, not sqlite.")).toBeLessThan(
+      prompt.indexOf("Correction: use postgres with a 30s timeout.")
+    );
+    expect(prompt).toContain("later explicit writer correction supersedes");
+    expect(prompt).toContain("dismissed or stale review is not a retraction");
+  });
 });
 
 describe("buildIncompleteWritePrompt", () => {

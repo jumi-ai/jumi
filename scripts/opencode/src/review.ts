@@ -891,6 +891,8 @@ async function resolveThreadPermissions(
   repo: string,
   prComments: Comment[],
   linkedIssues: Array<{ issue: Task; comments: Comment[] }>,
+  pullReviews: PullReview[],
+  reviewComments: InlineComment[],
   log: (message: string) => void
 ): Promise<{
   permissions: Map<string, boolean>;
@@ -902,6 +904,11 @@ async function resolveThreadPermissions(
   for (const comment of prComments) logins.push(comment.user?.login);
   for (const linked of linkedIssues) {
     for (const comment of linked.comments) logins.push(comment.user?.login);
+  }
+  for (const review of pullReviews) logins.push(review.user?.login);
+  for (const comment of reviewComments) {
+    logins.push(comment.user?.login);
+    if (comment.resolver?.login) logins.push(comment.resolver.login);
   }
   let detail: Map<string, string>;
   let writes: Map<string, boolean>;
@@ -1223,13 +1230,39 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       linkedIssues.push({ issue: result.issue, comments: result.comments });
     }
     const prComments = prCommentResult.comments;
+    // Writer pull-review bodies and inline feedback are reviewer product
+    // context alongside PR discussion and linked-issue comments. The same
+    // fetches already drive previous-review tracking; reuse them here so both
+    // forges behave the same. Jumi's own reviews/inlines stay out: delta
+    // findings already carry them, and bot text must not become a product
+    // requirement. Dismissed/stale human reviews stay in: dismissal is not a
+    // retraction, and a stale review the worker implemented is not withdrawn.
+    const botLower = opts.botUsername.trim().toLowerCase();
+    const threadReviews = prReviews.filter((review) => (review.user?.login ?? "").toLowerCase() !== botLower);
+    const threadInlines = prInlines.filter((comment) => (comment.user?.login ?? "").toLowerCase() !== botLower);
     const {
       permissions,
       permissionDetail,
       lookups: permissionLookups,
       failures: permissionFailures,
-    } = await resolveThreadPermissions(forgeApi, opts.owner, opts.repo, prComments, linkedIssues, log);
-    const thread = mapReviewThread({ prComments, linkedIssues, permissions, permissionDetail });
+    } = await resolveThreadPermissions(
+      forgeApi,
+      opts.owner,
+      opts.repo,
+      prComments,
+      linkedIssues,
+      threadReviews,
+      threadInlines,
+      log
+    );
+    const thread = mapReviewThread({
+      prComments,
+      linkedIssues,
+      pullReviews: threadReviews,
+      reviewComments: threadInlines,
+      permissions,
+      permissionDetail,
+    });
 
     const maxFiles = opts.maxFiles ?? 100;
     const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
@@ -1320,6 +1353,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     notes.push(...scopeNotes);
     const allFittedComments = [
       ...fitted.thread.comments,
+      ...(fitted.thread.pullReviews ?? []),
+      ...(fitted.thread.reviewComments ?? []),
       ...fitted.thread.linkedIssues.flatMap((issue) => issue.comments),
     ];
     const productComments = allFittedComments.filter((comment) => comment.intent === "product").length;
@@ -1327,6 +1362,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     logDiagnostic(log, "review_thread", {
       review: reviewLabel,
       pr_comments: fitted.thread.comments.length,
+      pull_reviews: (fitted.thread.pullReviews ?? []).length,
+      review_comments: (fitted.thread.reviewComments ?? []).length,
       linked_issues: fitted.thread.linkedIssues.length,
       linked_issue_comments: fitted.thread.linkedIssues.reduce((sum, issue) => sum + issue.comments.length, 0),
       thread_bytes: fitted.threadBytes,

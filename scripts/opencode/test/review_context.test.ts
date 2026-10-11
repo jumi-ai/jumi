@@ -3,7 +3,12 @@ import { byteLength } from "../src/diagnostics.ts";
 import { resolvePermissions } from "../src/permissions.ts";
 import {
   fitReviewThread,
+  formatPullReviewsXml,
+  formatReviewCommentsXml,
+  mapPullReview,
   mapReviewComment,
+  mapReviewInline,
+  mapReviewThread,
   type ReviewComment,
   type ReviewThread,
   serializeReviewThread,
@@ -34,6 +39,8 @@ describe("fitReviewThread", () => {
           comments: [makeReviewComment({ id: 1, author: "alice", body: "ack" })],
         },
       ],
+      pullReviews: [],
+      reviewComments: [],
     };
 
     const result = fitReviewThread(thread, 200_000);
@@ -230,5 +237,165 @@ describe("mapReviewComment", () => {
     const untagged = mapReviewComment(makeForgeComment("alice"));
     expect(untagged.permission).toBeUndefined();
     expect(untagged.intent).toBeUndefined();
+  });
+});
+
+describe("mapReviewThread pull reviews", () => {
+  const permissions = new Map([
+    ["alice", true],
+    ["bob", false],
+  ]);
+  const detail = new Map([
+    ["alice", "write"],
+    ["bob", "read"],
+  ]);
+
+  function makeReview(
+    id: number,
+    author: string,
+    created_at: string,
+    body: string,
+    extra: Record<string, unknown> = {}
+  ) {
+    return {
+      id,
+      body,
+      user: { login: author },
+      submitted_at: created_at,
+      updated_at: created_at,
+      created_at,
+      ...extra,
+    };
+  }
+
+  function makeInline(
+    id: number,
+    author: string,
+    created_at: string,
+    body: string,
+    extra: Record<string, unknown> = {}
+  ) {
+    return {
+      id,
+      body,
+      user: { login: author },
+      created_at,
+      updated_at: created_at,
+      ...extra,
+    };
+  }
+
+  test("keeps writer review bodies with identity/state and sorts oldest-first", () => {
+    const thread = mapReviewThread({
+      prComments: [],
+      linkedIssues: [],
+      pullReviews: [
+        makeReview(2, "alice", "2026-05-24T00:00:00Z", "Use postgres, not sqlite.", {
+          state: "REQUEST_CHANGES",
+          commit_id: "abc123",
+        }),
+        makeReview(1, "alice", "2026-05-23T00:00:00Z", "Earlier note.", { state: "COMMENTED" }),
+      ],
+      reviewComments: [],
+      permissions,
+      permissionDetail: detail,
+    });
+
+    expect(thread.pullReviews?.map((review) => review.id)).toEqual([1, 2]);
+    expect(thread.pullReviews?.[1]?.body).toContain("Use postgres");
+    expect(thread.pullReviews?.[1]?.state).toContain("request_changes");
+    expect(thread.pullReviews?.[1]?.commit_id).toBe("abc123");
+    expect(thread.pullReviews?.[1]?.intent).toBe("product");
+    expect(thread.pullReviews?.[1]?.permission).toBe("write");
+  });
+
+  test("keeps dismissed reviews: dismissal is not a retraction", () => {
+    const thread = mapReviewThread({
+      prComments: [],
+      linkedIssues: [],
+      pullReviews: [makeReview(9, "alice", "2026-05-23T00:00:00Z", "Keep the retry budget.", { dismissed: true })],
+      reviewComments: [],
+      permissions,
+      permissionDetail: detail,
+    });
+    expect(thread.pullReviews?.length).toBe(1);
+    expect(thread.pullReviews?.[0]?.dismissed).toBe(true);
+    expect(serializeReviewThread(thread)).toContain('dismissed="true"');
+    expect(serializeReviewThread(thread)).toContain("Keep the retry budget.");
+  });
+
+  test("keeps inline-only instructions with path/line metadata and skips empty review bodies", () => {
+    const thread = mapReviewThread({
+      prComments: [],
+      linkedIssues: [],
+      pullReviews: [makeReview(7, "alice", "2026-05-23T00:00:00Z", "   ")],
+      reviewComments: [
+        makeInline(31, "alice", "2026-05-23T01:00:00Z", "Set timeout to 30s here.", {
+          path: "src/worker.ts",
+          new_position: 42,
+          pull_request_review_id: 7,
+          commit_id: "abc123",
+        }),
+      ],
+      permissions,
+      permissionDetail: detail,
+    });
+    // The empty review body carries no instruction; the inline still does.
+    expect(thread.pullReviews?.length).toBe(0);
+    expect(thread.reviewComments?.length).toBe(1);
+    const xml = serializeReviewThread(thread);
+    expect(xml).toContain("Set timeout to 30s here.");
+    expect(xml).toContain('path="src/worker.ts"');
+    expect(xml).toContain('line="42"');
+    expect(xml).toContain('review_id="7"');
+    expect(xml).toContain('intent="product"');
+  });
+
+  test("labels non-writer reviews and inlines as discussion", () => {
+    const thread = mapReviewThread({
+      prComments: [],
+      linkedIssues: [],
+      pullReviews: [makeReview(5, "bob", "2026-05-23T00:00:00Z", "Outsider suggestion.", { state: "COMMENTED" })],
+      reviewComments: [makeInline(32, "bob", "2026-05-23T01:00:00Z", "Outsider inline.", { path: "src/a.ts" })],
+      permissions,
+      permissionDetail: detail,
+    });
+    expect(thread.pullReviews?.[0]?.intent).toBe("discussion");
+    expect(thread.reviewComments?.[0]?.intent).toBe("discussion");
+    const xml = serializeReviewThread(thread);
+    expect(xml).toContain('intent="discussion"');
+  });
+
+  test("mapPullReview and mapReviewInline tag product/discussion like comments", () => {
+    const product = mapPullReview(
+      makeReview(1, "Alice", "2026-05-23T00:00:00Z", "Do X.", { state: "REQUEST_CHANGES" }),
+      permissions,
+      detail
+    );
+    expect(product.intent).toBe("product");
+    const discussion = mapReviewInline(
+      makeInline(2, "bob", "2026-05-23T00:00:00Z", "Maybe Y.", { path: "src/a.ts" }),
+      permissions,
+      detail
+    );
+    expect(discussion.intent).toBe("discussion");
+  });
+
+  test("formats review sections and keeps them under the thread budget", () => {
+    const thread = mapReviewThread({
+      prComments: [],
+      linkedIssues: [],
+      pullReviews: [makeReview(1, "alice", "2026-05-23T00:00:00Z", "Use postgres.", { state: "REQUEST_CHANGES" })],
+      reviewComments: [makeInline(2, "alice", "2026-05-24T00:00:00Z", "z".repeat(100_000), { path: "src/a.ts" })],
+      permissions,
+      permissionDetail: detail,
+    });
+    expect(formatPullReviewsXml(thread.pullReviews ?? [])).toContain("<pull_reviews>");
+    expect(formatReviewCommentsXml(thread.reviewComments ?? [])).toContain("<review_comments>");
+    const fitted = fitReviewThread(thread, 5_000);
+    expect(fitted.truncated).toBe(true);
+    expect(byteLength(serializeReviewThread(fitted.thread))).toBeLessThanOrEqual(5_000);
+    // The writer instruction survives fitting in some form (possibly omitted-body marker).
+    expect(serializeReviewThread(fitted.thread)).toContain("<pull_reviews>");
   });
 });
