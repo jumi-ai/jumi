@@ -6,13 +6,27 @@
   ],
   "customManagers": [
     {
+      "description": "Non-Docker tool versions in .gitea/tool-versions.env (no digest handling).",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.gitea\\/tool-versions\\.env$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)\\n[A-Z_]+=(?<currentValue>[^\\s]+)"
+        "# renovate: datasource=(?<datasource>github-releases|npm) depName=(?<depName>[^\\s]+)\\n[A-Z_]+=(?<currentValue>[^\\s]+)"
       ]
+    },
+    {
+      "description": "Temurin JDK tag with Docker digest pinning in .gitea/tool-versions.env.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=docker depName=eclipse-temurin\\nTEMURIN_TAG=(?<currentValue>[^\\s@]+)(@(?<currentDigest>sha256:[0-9a-f]+))?"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "eclipse-temurin",
+      "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
     },
     {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
