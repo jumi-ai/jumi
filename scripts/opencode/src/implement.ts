@@ -137,6 +137,13 @@ export interface ImplementOptions extends PickupPolicy {
   fallbackModel?: string;
   fallbackVariant?: string;
   chain?: NamedRunner[];
+  /**
+   * Opt-in runner distribution. `ordered` (default when absent) keeps
+   * configured order; `random-start` uniformly picks a start per fresh job.
+   */
+  runnerSelection?: string;
+  /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
+  runnerRandom?: () => number;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   home: string;
@@ -457,7 +464,7 @@ async function implementExternalIssue(
   const { worktree, sanitizeEnv, engine } = claimed;
   const loop = openClaimedLoop(claimed, opts);
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(opts.chain);
+  const provenanceCollector = new ProvenanceCollector(claimed.effectiveChain ?? opts.chain);
   const provenanceOpts = { ...opts, job: effectiveJob };
 
   return runClaimedLoop(
@@ -679,7 +686,8 @@ export async function implementIssue(
   const loop = openClaimedLoop(claimed, opts);
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(opts.chain);
+  const jobChain = claimed.effectiveChain ?? opts.chain;
+  const provenanceCollector = new ProvenanceCollector(jobChain);
   const diary = (body: string) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
@@ -789,7 +797,7 @@ export async function implementIssue(
             result,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
-            chain: opts.chain,
+            chain: jobChain,
             previousError: opts.previousError,
           });
           await diary(QUOTA_STUCK_TEXT);
@@ -957,7 +965,7 @@ export async function implementIssue(
               err,
               model: opts.model,
               fallbackModel: opts.fallbackModel,
-              chain: opts.chain,
+              chain: jobChain,
               previousError: opts.previousError,
             });
             // The stuck outcome is decided; teardown noise must not replace it.
@@ -1055,7 +1063,7 @@ export async function implementIssue(
           err,
           model: opts.model,
           fallbackModel: opts.fallbackModel,
-          chain: opts.chain,
+          chain: jobChain,
           previousError: opts.previousError,
         });
         await diary(QUOTA_STUCK_TEXT).catch(() => undefined);

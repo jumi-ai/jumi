@@ -3,13 +3,14 @@ import { dirname, join, resolve } from "node:path";
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
 import { ENGINE_TEMP_DIR, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { withEngineChain } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaWaitError } from "./quota.ts";
-import type { NamedRunner } from "./runners.ts";
+import { describeAttemptOrder, type NamedRunner, orderChainForJob, resolveRunnerSelection } from "./runners.ts";
 import {
   type GitAuth,
   type GitAuthResolver,
@@ -39,6 +40,8 @@ export interface ClaimedWorktree {
   useClaim: boolean;
   sanitizeEnv: boolean;
   engine: Engine;
+  /** Effective attempt order for this job (rotated when random-start). */
+  effectiveChain?: NamedRunner[];
   git: GitRunner;
   now: () => Date;
   forgetClaim: () => Promise<void>;
@@ -65,6 +68,8 @@ export interface BeginClaimedWorktreeOpts {
   fallbackModel?: string;
   fallbackVariant?: string;
   chain?: NamedRunner[];
+  runnerSelection?: string;
+  runnerRandom?: () => number;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   logger?: (message: string) => void;
@@ -100,10 +105,27 @@ export async function beginClaimedWorktree(
   const now = () => opts.now?.() ?? new Date();
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
+  const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
+  const effectiveChain =
+    opts.chain && opts.chain.length > 1
+      ? orderChainForJob(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random)
+      : opts.chain
+        ? [...opts.chain]
+        : undefined;
+  if (effectiveChain && opts.chain && effectiveChain.length === opts.chain.length && opts.logger) {
+    logDiagnostic(opts.logger, "runner_selection", {
+      job: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
+      selection: runnerSelection,
+      start: effectiveChain[0]?.name ?? null,
+      order: describeAttemptOrder(effectiveChain),
+    });
+  }
   const engine = withEngineChain(resolveEngine(opts, opts.fallbackEngine), {
-    chain: opts.chain,
+    chain: effectiveChain,
     fallbackModel: opts.fallbackModel,
     fallbackVariant: opts.fallbackVariant,
+    selection: runnerSelection,
+    random: () => 0,
     remainingLeaseMs: opts.remainingLeaseMs,
     extendLease: opts.extendLease,
     logger: opts.logger,
@@ -156,6 +178,7 @@ export async function beginClaimedWorktree(
     useClaim,
     sanitizeEnv,
     engine,
+    effectiveChain,
     git,
     now,
     forgetClaim,

@@ -44,10 +44,13 @@ import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDe
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
 import {
   appendRunnerStamp,
+  describeAttemptOrder,
   formatRunnerStamp,
   type IndependentReviewConfig,
   type NamedRunner,
   OPENCODE_RUNNER_TYPE,
+  orderChainForJob,
+  resolveRunnerSelection,
 } from "./runners.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
@@ -134,6 +137,14 @@ export interface ReviewOptions {
   chain?: NamedRunner[];
   /** Opt-in independent-review policy from the runners catalog. Unset/disabled preserves today's behavior. */
   independentReview?: IndependentReviewConfig;
+  /**
+   * Opt-in runner distribution. `ordered` (default when absent) keeps
+   * configured order; `random-start` uniformly picks a start from the eligible
+   * chain per fresh job and rotates. Invalid modes fail at config load.
+   */
+  runnerSelection?: string;
+  /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
+  runnerRandom?: () => number;
   /** Durable writer provenance. Required when the policy is enabled; unset keeps legacy behavior. */
   provenance?: ProvenanceStore;
   /** Forge kind for the provenance lookup. Defaults to `gitea`; shared parent behavior for both forges. */
@@ -1161,10 +1172,32 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     effectiveFallbackVariant = undefined;
   }
 
+  // Opt-in random-start distribution: exclusions first, then uniformly pick a
+  // start from the eligible chain and rotate. Continuations and
+  // artifact-recovery calls reuse this order via the engine wrapper.
+  const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
+  if (effectiveChain && effectiveChain.length > 1) {
+    const rotated = orderChainForJob(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random);
+    if (rotated.length === effectiveChain.length) {
+      logDiagnostic(log, "runner_selection", {
+        review: `${repoFullName}#${pr.number}`,
+        head: reviewedHeadSha,
+        selection: runnerSelection,
+        start: rotated[0]?.name ?? null,
+        order: describeAttemptOrder(rotated),
+      });
+    }
+    effectiveChain = rotated;
+  }
+
   const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
     chain: effectiveChain,
     fallbackModel: effectiveFallbackModel,
     fallbackVariant: effectiveFallbackVariant,
+    // Already rotated above for quota/provenance correctness; keep order here
+    // but still report the opt-in mode so hop logs stay consistent.
+    selection: runnerSelection,
+    random: () => 0,
     remainingLeaseMs: opts.remainingLeaseMs,
     extendLease: opts.extendLease,
     logger: log,

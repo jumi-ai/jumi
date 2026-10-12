@@ -551,10 +551,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
+  const jobChain = claimed.effectiveChain ?? opts.chain;
 
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(opts.chain);
+  const provenanceCollector = new ProvenanceCollector(jobChain);
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
       index,
@@ -703,7 +704,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
-            chain: opts.chain,
+            chain: jobChain,
             previousError: opts.previousError,
           });
           await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -789,7 +790,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 result: continued,
                 model: opts.model,
                 fallbackModel: opts.fallbackModel,
-                chain: opts.chain,
+                chain: jobChain,
                 previousError: opts.previousError,
               });
               await sticky(QUOTA_STUCK_TEXT, pr.number);
@@ -806,7 +807,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             err,
             model: opts.model,
             fallbackModel: opts.fallbackModel,
-            chain: opts.chain,
+            chain: jobChain,
             previousError: opts.previousError,
           });
           // The stuck outcome is decided; teardown noise must not replace it.

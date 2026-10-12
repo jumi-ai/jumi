@@ -4,7 +4,17 @@ import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
-import { type NamedRunner, OPENCODE_RUNNER_TYPE, runnerStamp, usesEffort } from "./runners.ts";
+import {
+  describeAttemptOrder,
+  type NamedRunner,
+  OPENCODE_RUNNER_TYPE,
+  orderChainForJob,
+  RUNNER_SELECTION_ORDERED,
+  type RunnerSelectionMode,
+  resolveRunnerSelection,
+  runnerStamp,
+  usesEffort,
+} from "./runners.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 /** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
@@ -26,6 +36,15 @@ export interface ModelHopOptions {
 
 export interface EngineChainOptions extends ModelHopOptions {
   chain?: NamedRunner[];
+  /**
+   * Opt-in per-factory selection mode. `ordered` (default when absent) keeps
+   * configured order. `random-start` uniformly picks a start from the eligible
+   * chain once per fresh job and rotates around it. Validated at load; an
+   * invalid mode fails process start before any job runs.
+   */
+  selection?: RunnerSelectionMode | string;
+  /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
+  random?: () => number;
 }
 
 export function looksLikeProviderUnavailable(text: string): boolean {
@@ -229,19 +248,60 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     return async (opts: EngineRunOptions): Promise<EngineResult> =>
       opts.hopFromIncomplete === true ? { status: "ok", hopDeclined: true } : engine(opts);
   }
+  // Validate early so an invalid mode fails clearly instead of silently
+  // running ordered. File load already rejects it at process start.
+  const selection = resolveRunnerSelection({ selection: hop.selection ?? undefined });
 
-  let chain: NamedRunner[] | undefined;
-  if (hop.chain && hop.chain.length >= 2) chain = hop.chain;
-  else if (hop.chain?.length === 1 && !hop.fallbackModel) chain = hop.chain;
+  let configured: NamedRunner[] | undefined;
+  if (hop.chain && hop.chain.length >= 2) configured = [...hop.chain];
+  else if (hop.chain?.length === 1 && !hop.fallbackModel) configured = [...hop.chain];
+  let effective: NamedRunner[] | undefined;
+  let selectionLogged = false;
   let index = 0;
 
+  const ensureEffective = (opts: EngineRunOptions, base: NamedRunner[]): NamedRunner[] => {
+    if (effective) return effective;
+    // One fresh selection per wrapper (per job): uniformly pick a start from
+    // the eligible chain and rotate around it. Continuations and
+    // artifact-recovery calls reuse this order; never rerandomize mid-job.
+    // `orderChainForJob` copies, so catalog/config ordering is never mutated
+    // and independent jobs never share array state.
+    effective = orderChainForJob(base, selection, hop.random ?? Math.random);
+    if (!selectionLogged) {
+      selectionLogged = true;
+      const log = hop.logger ?? opts.logger;
+      if (log && effective.length > 0) {
+        logDiagnostic(log, "runner_selection", {
+          review: opts.reviewLabel ?? null,
+          selection,
+          start: effective[0]?.name ?? null,
+          order: describeAttemptOrder(effective),
+          kind: opts.trace?.kind ?? null,
+          job: opts.trace?.jobId ?? null,
+        });
+      }
+    }
+    return effective;
+  };
+
   const runnersFor = (opts: EngineRunOptions): NamedRunner[] => {
-    if (chain) return chain;
-    chain = lazyChain(opts, hop);
-    return chain;
+    if (configured) return ensureEffective(opts, configured);
+    if (effective) return effective;
+    const lazy = lazyChain(opts, hop);
+    // A synthesized 1-2 entry env-compatible chain keeps ordered behavior
+    // when the option is absent; an explicit random-start still distributes
+    // its two entries. Single-runner chains behave as before.
+    if (selection === RUNNER_SELECTION_ORDERED) {
+      effective = [...lazy];
+      return effective;
+    }
+    return ensureEffective(opts, lazy);
   };
 
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
+    // Resolve (and, on the fresh job, randomly order) before any hop logic so
+    // availability hops can still reach entries that originally preceded the
+    // selected start. Chain positions below are in effective attempt order.
     const runners = runnersFor(opts);
 
     if (opts.hopFromIncomplete === true) {

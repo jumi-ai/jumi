@@ -81,10 +81,19 @@ export interface IndependentReviewConfig {
   groups: Record<string, IndependenceGroupMember[]>;
 }
 
+export const RUNNER_SELECTION_ORDERED = "ordered" as const;
+export const RUNNER_SELECTION_RANDOM_START = "random-start" as const;
+export type RunnerSelectionMode = typeof RUNNER_SELECTION_ORDERED | typeof RUNNER_SELECTION_RANDOM_START;
+export const RUNNER_SELECTION_MODES: readonly RunnerSelectionMode[] = [
+  RUNNER_SELECTION_ORDERED,
+  RUNNER_SELECTION_RANDOM_START,
+];
+
 export interface RunnersCatalog {
   runners: Record<string, RunnerConfig>;
   chain: string[];
   independentReview?: IndependentReviewConfig;
+  selection?: RunnerSelectionMode;
 }
 
 export interface SynthesizeRunnersInput {
@@ -222,6 +231,25 @@ export function parseIndependentReview(raw: unknown): IndependentReviewConfig | 
   return { enabled: true, groups };
 }
 
+export function parseRunnerSelection(raw: unknown): RunnerSelectionMode | undefined {
+  if (raw == null) return undefined;
+  if (raw === RUNNER_SELECTION_ORDERED) return RUNNER_SELECTION_ORDERED;
+  if (raw === RUNNER_SELECTION_RANDOM_START) return RUNNER_SELECTION_RANDOM_START;
+  fail(
+    `Invalid ${RUNNERS_FILE_ENV}: selection ${JSON.stringify(raw)} must be one of ${RUNNER_SELECTION_MODES.join(", ")}`
+  );
+}
+
+export function resolveRunnerSelection(catalog: { selection?: string | undefined }): RunnerSelectionMode {
+  if (catalog.selection == null) return RUNNER_SELECTION_ORDERED;
+  if (catalog.selection === RUNNER_SELECTION_ORDERED || catalog.selection === RUNNER_SELECTION_RANDOM_START) {
+    return catalog.selection;
+  }
+  fail(
+    `Invalid ${RUNNERS_FILE_ENV}: selection ${JSON.stringify(catalog.selection)} must be one of ${RUNNER_SELECTION_MODES.join(", ")}`
+  );
+}
+
 export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
   if (!isPlainObject(raw)) fail(`Invalid ${RUNNERS_FILE_ENV}: expected object`);
   if (!isPlainObject(raw.runners)) fail(`Invalid ${RUNNERS_FILE_ENV}: runners must be an object`);
@@ -243,7 +271,11 @@ export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
     chain.push(name);
   }
   const independentReview = parseIndependentReview((raw as Record<string, unknown>).independentReview);
-  return independentReview ? { runners, chain, independentReview } : { runners, chain };
+  const selection = parseRunnerSelection((raw as Record<string, unknown>).selection);
+  const catalog: RunnersCatalog = { runners, chain };
+  if (independentReview) catalog.independentReview = independentReview;
+  if (selection) catalog.selection = selection;
+  return catalog;
 }
 
 export function parseRunnersFile(path: string): RunnersCatalog {
@@ -304,6 +336,56 @@ export function orderedRunners(catalog: RunnersCatalog): NamedRunner[] {
     if (!runner) fail(`Unknown runner in chain: ${name}`);
     return { name, ...runner };
   });
+}
+
+/**
+ * Uniformly choose a starting position in an eligible chain. The caller passes
+ * the already-filtered eligible chain (independent-review exclusions applied,
+ * dormant catalog entries never included). Returns 0 for empty input; the
+ * engine chain refuses empty chains elsewhere.
+ */
+export function chooseRandomStartIndex(length: number, random: () => number = Math.random): number {
+  if (length <= 0) return 0;
+  if (length === 1) return 0;
+  const value = random();
+  const safe = Number.isFinite(value) ? Math.min(Math.max(value, 0), 0.9999999999999999) : 0;
+  const index = Math.floor(safe * length);
+  return Math.min(Math.max(index, 0), length - 1);
+}
+
+/**
+ * Rotate an eligible chain around `startIndex`, preserving relative configured
+ * order and wrapping. Never mutates the input; each job gets its own array so
+ * independent jobs never share ordering state.
+ */
+export function rotateChainForStart(chain: readonly NamedRunner[], startIndex: number): NamedRunner[] {
+  const copy = [...chain];
+  if (copy.length <= 1) return copy;
+  const normalized = ((Math.trunc(startIndex) % copy.length) + copy.length) % copy.length;
+  if (normalized === 0) return copy;
+  return [...copy.slice(normalized), ...copy.slice(0, normalized)];
+}
+
+/**
+ * Effective attempt order for one fresh job. Ordered (the default when the
+ * option is absent) returns a copy in configured order. Random-start uniformly
+ * picks a start from the eligible chain and rotates around it. Single-runner
+ * chains behave as before.
+ */
+export function orderChainForJob(
+  chain: readonly NamedRunner[],
+  selection?: RunnerSelectionMode | string | undefined,
+  random: () => number = Math.random
+): NamedRunner[] {
+  const copy = [...chain];
+  const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
+  if (mode !== RUNNER_SELECTION_RANDOM_START) return copy;
+  if (copy.length <= 1) return copy;
+  return rotateChainForStart(copy, chooseRandomStartIndex(copy.length, random));
+}
+
+export function describeAttemptOrder(chain: readonly NamedRunner[]): string {
+  return chain.map((runner) => runner.name).join("->");
 }
 
 export function modelsFromCatalog(catalog: RunnersCatalog): SynthesizeRunnersInput {

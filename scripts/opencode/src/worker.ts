@@ -87,6 +87,7 @@ export function createIssueQueue(
           fallbackModel: config.fallbackModel,
           fallbackVariant: config.fallbackVariant,
           chain: orderedRunners(config),
+          runnerSelection: config.runnerSelection,
           home: config.home,
           skipLatches,
           workdir: config.workdir,
@@ -372,6 +373,7 @@ export async function processWorkerTick(
       fallbackModel: config.fallbackModel,
       fallbackVariant: config.fallbackVariant,
       chain: orderedRunners(config),
+      runnerSelection: config.runnerSelection,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
