@@ -861,7 +861,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           err,
           model: opts.model,
           fallbackModel: opts.fallbackModel,
-          chain: opts.chain,
+          chain: jobChain,
           previousError: opts.previousError,
         });
         await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
