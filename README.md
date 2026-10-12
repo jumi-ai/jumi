@@ -185,6 +185,25 @@ When enabled, the parent resolves writer provenance for the exact expected PR he
 
 Genuinely unknown external/legacy/untracked authorship follows the ordinary chain with a `provenance-unknown/independence-not-established` diagnostic. Pending/failed provenance for a known Jumi publication (including the publication race) and provenance-storage lookup failures fail closed with `Independent review unavailable: …` (failure status, no success verdict, no fabricated artifact). Mixed known authorship excludes all its families; independence is attested only for recorded Jumi writers and untracked contributions are disclosed, never inferred from PR prose, logins, trailers, or style. Recovery is the existing bounded retry/kick path: the refusal is terminal for that head, so push a new commit or kick the same commit after fixing groups/availability. The decision (head, policy, writers/groups, exclusions, chosen reviewer, refusal reason) is logged as `independent_review`; the post-hop runner stamp and trailer/status contract are unchanged. Both forges share this parent behavior.
 
+### Runner distribution (opt-in random-start)
+
+Unset preserves today's behavior: every fresh job starts at chain entry zero and hops forward in configured order, with synthesized `OPENCODE_MODEL` / `OPENCODE_FALLBACK_*` chains working as before.
+
+To distribute fresh jobs across enabled subscription-backed runners instead of always starting at the first chain entry, add `selection` to `JUMI_RUNNERS_FILE` on reviewer and worker alike:
+
+```json
+{
+  "runners": {
+    "grok": { "type": "opencode", "model": "xai/grok-4.6" },
+    "opus": { "type": "claude", "model": "claude-opus-5", "effort": "high" }
+  },
+  "chain": ["grok", "opus"],
+  "selection": "random-start"
+}
+```
+
+`selection` is `ordered` (default when absent) or `random-start`; any other value fails process start. For each fresh review, implement, follow-up, or conflict job that actually invokes a runner, the parent uniformly picks a start from that job's eligible enabled chain and rotates around it, preserving relative configured order and wrapping. Availability hops can still reach entries that originally preceded the start, and a runner is never retried by cycling. Eligibility and independent-review exclusions apply before the draw; dormant catalog entries never become candidates. Continuations and same-session artifact-recovery calls stay on the already-selected runner, including after a hop. The selection mode, start, and effective order are logged as `runner_selection` with normal job correlation; stamps, metrics, errors, and provenance still name the runner that actually ran, and `chainIndex` is the position in the effective order. Single-runner chains behave as before. Random selection balances starting opportunities over time; it does not promise equal token spend or remaining quota. There is no quota-aware scheduler, round-robin coordinator, or parallel execution.
+
 ## Worker jobs
 
 On Gitea (the default when `FORGE` is unset), work runs only when the issue or pull request is assigned to bot username `jumi` (`BOT_USERNAME`). Pull-request issues (`issue.pull_request` present) are ignored for first-run implement; assigning an already-open PR (any author, including Renovate) is follow-up on that PR's head ref instead, except a closer whose related issue is already open and assigned to the bot — that assign is skipped so the issue job owns the work.

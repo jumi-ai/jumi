@@ -2,7 +2,14 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { GITHUB_ENV, loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
-import { type IndependentReviewConfig, loadRunnersCatalog, modelsFromCatalog, type RunnerConfig } from "./runners.ts";
+import {
+  type IndependentReviewConfig,
+  loadRunnersCatalog,
+  modelsFromCatalog,
+  type RunnerConfig,
+  type RunnerSelectionMode,
+  resolveRunnerSelection,
+} from "./runners.ts";
 
 export interface WorkerConfig {
   host: string;
@@ -28,6 +35,7 @@ export interface WorkerConfig {
   runners: Record<string, RunnerConfig>;
   chain: string[];
   independentReview?: IndependentReviewConfig;
+  runnerSelection: RunnerSelectionMode;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -137,6 +145,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,
     ...(runnersCatalog.independentReview ? { independentReview: runnersCatalog.independentReview } : {}),
+    runnerSelection: resolveRunnerSelection(runnersCatalog),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:

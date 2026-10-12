@@ -186,6 +186,7 @@ export async function runReviewJob(
       fallbackVariant: config.fallbackVariant,
       chain: orderedRunners(config),
       independentReview: config.independentReview,
+      runnerSelection: config.runnerSelection,
       provenance: extras.provenance,
       forgeKind: config.forge,
       remainingLeaseMs: extras.remainingLeaseMs,
