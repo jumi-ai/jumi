@@ -72,6 +72,32 @@ describe("looksLikeProviderUnavailable", () => {
     expect(looksLikeProviderUnavailable("invalid provider options")).toBe(false);
     expect(looksLikeProviderUnavailable("opencode exited with code 1:\nbad things")).toBe(false);
   });
+
+  test("hops on account/model incompatibility for the current account", () => {
+    const message = "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.";
+    expect(looksLikeProviderUnavailable(message)).toBe(true);
+    expect(
+      looksLikeProviderUnavailable(
+        `codex exited with code 1:\n${JSON.stringify({ type: "error", status: 400, error: { type: "invalid_request_error", message } })}`
+      )
+    ).toBe(true);
+  });
+
+  test("does not hop on generic 400 or invalid-request errors", () => {
+    expect(
+      looksLikeProviderUnavailable(
+        JSON.stringify({
+          type: "error",
+          status: 400,
+          error: { type: "invalid_request_error", message: "invalid value for 'temperature': 5" },
+        })
+      )
+    ).toBe(false);
+    expect(looksLikeProviderUnavailable("codex exited with code 1:\n400 bad request")).toBe(false);
+    expect(looksLikeProviderUnavailable("invalid_request_error: invalid arguments")).toBe(false);
+    expect(looksLikeProviderUnavailable("tool failed: exit 1")).toBe(false);
+    expect(looksLikeProviderUnavailable("review finding: missing null check")).toBe(false);
+  });
 });
 
 describe("isProviderUnavailableResult", () => {
@@ -1049,6 +1075,140 @@ describe("withEngineChain", () => {
     });
     expect(isProviderUnavailableResult(result)).toBe(true);
     expect(models).toEqual([spark.model, grok.model]);
+  });
+
+  test("codex account/model rejection hops to the next runner and can complete", async () => {
+    const codex = { name: "codex", type: "codex" as const, model: "gpt-6.1-sol", effort: "high" as const };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const rejection: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: `codex exited with code 1:\n${JSON.stringify({ type: "error", status: 400, error: { type: "invalid_request_error", message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." } })}`,
+    };
+    const calls: Array<{ type?: string; model: string; continueSession?: boolean; hop?: boolean }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ type: opts.type, model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
+      if (opts.type === "codex") return rejection;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [codex, claude] })({
+      model: codex.model,
+      workdir: "/tmp",
+    });
+    expect(result).toMatchObject(ok(claude.model));
+    expect(result.runner).toEqual({ type: "claude", model: claude.model, effort: "high" });
+    expect(calls).toEqual([
+      { type: "codex", model: codex.model, continueSession: undefined, hop: undefined },
+      { type: "claude", model: claude.model, continueSession: false, hop: true },
+    ]);
+  });
+
+  test("codex rejection at a random-start hops and can still reach an earlier entry", async () => {
+    const codex = { name: "codex", type: "codex" as const, model: "gpt-6.1-sol", effort: "high" as const };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const rejection: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+    };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === codex.model) return rejection;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, {
+      chain: [codex, claude, grok],
+      selection: "random-start",
+      random: () => 0.0,
+    })({ model: codex.model, workdir: "/tmp" });
+    expect(result).toMatchObject(ok(claude.model));
+    expect(models).toEqual([codex.model, claude.model]);
+    expect(result.runner?.model).toBe(claude.model);
+    expect(result.chainIndex).toBe(1);
+  });
+
+  test("codex rejection after a prior availability hop still hops once more", async () => {
+    const codex = { name: "codex", type: "codex" as const, model: "gpt-6.1-sol", effort: "high" as const };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const codexRejection: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+    };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === spark.model) return unavailable;
+      if (opts.model === codex.model) return codexRejection;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [spark, codex, claude] })({
+      model: spark.model,
+      workdir: "/tmp",
+    });
+    expect(result).toMatchObject(ok(claude.model));
+    expect(models).toEqual([spark.model, codex.model, claude.model]);
+    expect(result.runner).toEqual({ type: "claude", model: claude.model, effort: "high" });
+    expect(result.chainIndex).toBe(2);
+  });
+
+  test("exhausted codex-rejection chain fails closed with the last runner stamped", async () => {
+    const codex = { name: "codex", type: "codex" as const, model: "gpt-6.1-sol", effort: "high" as const };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const rejection: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+    };
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      return rejection;
+    };
+    const result = await withEngineChain(engine, { chain: [codex, claude] })({
+      model: codex.model,
+      workdir: "/tmp",
+    });
+    expect(isProviderUnavailableResult(result)).toBe(true);
+    expect(models).toEqual([codex.model, claude.model]);
+    expect(result.runner?.model).toBe(claude.model);
+    expect(result.chainIndex).toBe(1);
+  });
+
+  test("representative non-availability 400 errors do not hop", async () => {
+    const cases: EngineResult[] = [
+      {
+        status: "exit",
+        exitCode: 1,
+        message: `codex exited with code 1:\n${JSON.stringify({ type: "error", status: 400, error: { type: "invalid_request_error", message: "invalid value for 'temperature': 5" } })}`,
+      },
+      { status: "exit", exitCode: 1, message: "codex exited with code 1:\n400 bad request: invalid arguments" },
+      { status: "exit", exitCode: 1, message: "codex exited with code 1:\ntool failed: exit 1" },
+      { status: "exit", exitCode: 1, message: "codex exited with code 1:\nreview finding: missing null check" },
+      {
+        status: "exit",
+        exitCode: 143,
+        message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+      },
+      {
+        status: "timeout",
+        message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+      },
+    ];
+    for (const failure of cases) {
+      let n = 0;
+      const engine: Engine = async () => {
+        n++;
+        return failure;
+      };
+      const result = await withEngineChain(engine, { chain: [spark, grok] })({
+        model: spark.model,
+        workdir: "/tmp",
+      });
+      expect(result).toMatchObject(failure);
+      expect(n).toBe(1);
+    }
   });
 });
 

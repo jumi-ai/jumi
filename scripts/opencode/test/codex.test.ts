@@ -842,6 +842,88 @@ describe("codex dispatch and chain", () => {
       }
     );
   });
+
+  test("codex account/model rejection replays the structured error and hops", async () => {
+    const rejection = `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."}}`;
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `cat <<'EOF'\n${rejection}\nEOF\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.runner).toEqual(runnerStamp(claude));
+        const lines = await argLines(argsLog);
+        expect(lines.map((line) => line.split(" ")[0])).toEqual(["codex", "claude"]);
+      }
+    );
+  });
+
+  test("agent message quoting the account/model rejection does not hop", async () => {
+    const quoted = JSON.stringify({
+      type: "item.completed",
+      item: {
+        id: "m1",
+        type: "agent_message",
+        text: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.",
+      },
+    });
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `cat <<'EOF'\n${quoted}\nEOF\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.runner?.type).toBe("codex");
+        expect(result.stdout).toContain("not supported when using Codex");
+        expect(result.message).not.toContain("not supported when using Codex");
+        expect((await argLines(argsLog)).map((line) => line.split(" ")[0])).toEqual(["codex"]);
+      }
+    );
+  });
+
+  test("generic invalid-request 400 does not hop", async () => {
+    const generic = `{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"invalid value for temperature: 5"}}`;
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `cat <<'EOF'\n${generic}\nEOF\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.runner?.type).toBe("codex");
+        expect((await argLines(argsLog)).map((line) => line.split(" ")[0])).toEqual(["codex"]);
+      }
+    );
+  });
 });
 
 describe("codex catalog", () => {
