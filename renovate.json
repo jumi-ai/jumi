@@ -29,7 +29,7 @@
       "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
     },
     {
-      "description": "Codex amd64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
+      "description": "Codex amd64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/rust-vX.Y.Z.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.gitea\\/tool-versions\\.env$/"
@@ -39,11 +39,11 @@
       ],
       "datasourceTemplate": "github-release-attachments",
       "depNameTemplate": "openai/codex",
-      "extractVersionTemplate": "^rust-v(?<version>.+)$",
-      "autoReplaceStringTemplate": "CODEX_AMD64_TAG=rust-v{{{newValue}}}\nCODEX_SHA256_AMD64={{{newDigest}}}"
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "CODEX_AMD64_TAG={{{newValue}}}\nCODEX_SHA256_AMD64={{{newDigest}}}"
     },
     {
-      "description": "Codex arm64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
+      "description": "Codex arm64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/rust-vX.Y.Z.",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.gitea\\/tool-versions\\.env$/"
@@ -53,8 +53,8 @@
       ],
       "datasourceTemplate": "github-release-attachments",
       "depNameTemplate": "openai/codex",
-      "extractVersionTemplate": "^rust-v(?<version>.+)$",
-      "autoReplaceStringTemplate": "CODEX_ARM64_TAG=rust-v{{{newValue}}}\nCODEX_SHA256_ARM64={{{newDigest}}}"
+      "versioningTemplate": "regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "CODEX_ARM64_TAG={{{newValue}}}\nCODEX_SHA256_ARM64={{{newDigest}}}"
     },
     {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
@@ -87,16 +87,27 @@
       "ignoreTests": false
     },
     {
-      "description": "Codex ships rust-v0.1.2 tags with prerelease alpha builds; only stable numeric releases grouped so version and both archive checksums move in one update.",
+      "description": "Codex numeric version via github-releases: rust-v tags map to CODEX_VERSION, only stable numeric releases, grouped so version and both archive checksums move in one update.",
       "matchDatasources": [
-        "github-releases",
-        "github-release-attachments"
+        "github-releases"
       ],
       "matchPackageNames": [
         "openai/codex"
       ],
       "extractVersion": "^rust-v(?<version>.+)$",
       "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "codex",
+      "groupSlug": "codex"
+    },
+    {
+      "description": "Codex tag-form archive checksums via github-release-attachments stay on rust-v tags so getDigest requests releases/tags/rust-vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "openai/codex"
+      ],
+      "allowedVersions": "/^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$/",
       "groupName": "codex",
       "groupSlug": "codex"
     },

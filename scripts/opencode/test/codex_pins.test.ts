@@ -13,6 +13,7 @@ const renovate = JSON.parse(renovateRaw) as {
     datasourceTemplate?: string;
     depNameTemplate?: string;
     extractVersionTemplate?: string;
+    versioningTemplate?: string;
     autoReplaceStringTemplate?: string;
   }[];
   packageRules?: {
@@ -50,7 +51,7 @@ function codexDigestManagers() {
 }
 
 function codexRule() {
-  return renovate.packageRules?.find((r) => r.matchPackageNames?.includes("openai/codex"));
+  return renovate.packageRules?.filter((r) => r.matchPackageNames?.includes("openai/codex"));
 }
 
 function extractFirst(matchString: string, content: string) {
@@ -85,11 +86,15 @@ describe("codex renovate monitoring", () => {
       expect(manager?.matchStrings?.length).toBe(1);
       expect(manager?.datasourceTemplate).toBe("github-release-attachments");
       expect(manager?.depNameTemplate).toBe("openai/codex");
-      expect(manager?.extractVersionTemplate).toBe("^rust-v(?<version>.+)$");
-      // The lookup's numeric newValue must be re-prefixed on write, or the
-      // TAG==rust-vVERSION invariant breaks and getDigest gets a bare version.
-      expect(manager?.autoReplaceStringTemplate).toContain("rust-v{{{newValue}}}");
+      // Tag-form values: no extractVersionTemplate, so newValue stays
+      // rust-vX.Y.Z and getDigest requests releases/tags/rust-vX.Y.Z.
+      expect(manager?.extractVersionTemplate).toBeUndefined();
+      expect(manager?.versioningTemplate).toBe("regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$");
+      // The tag is written verbatim; re-adding a prefix would double it to
+      // rust-vrust-v….
+      expect(manager?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
       expect(manager?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+      expect(manager?.autoReplaceStringTemplate).not.toContain("rust-v{{{newValue}}}");
     }
     const patterns = (managers ?? []).flatMap((m) => m.matchStrings ?? []);
     expect(patterns.some((s) => s.includes("CODEX_AMD64_TAG"))).toBe(true);
@@ -100,12 +105,21 @@ describe("codex renovate monitoring", () => {
       expect(() => new RegExp(s, "g")).not.toThrow();
       expect(s).not.toMatch(/\(\?!|\(\?<=|\(\?<!/);
     }
-    const rule = codexRule();
-    expect(rule?.extractVersion).toBe("^rust-v(?<version>.+)$");
-    expect(rule?.allowedVersions).toBe("/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
-    expect(rule?.groupName).toBe("codex");
-    expect(rule?.groupSlug).toBe("codex");
-    expect(rule?.matchPackageNames).toContain("openai/codex");
+    const rules = codexRule();
+    expect(rules?.length).toBe(2);
+    const numericRule = rules?.find((r) => r.matchDatasources?.includes("github-releases"));
+    const tagRule = rules?.find((r) => r.matchDatasources?.includes("github-release-attachments"));
+    expect(numericRule?.extractVersion).toBe("^rust-v(?<version>.+)$");
+    expect(numericRule?.allowedVersions).toBe("/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(numericRule?.groupName).toBe("codex");
+    expect(numericRule?.groupSlug).toBe("codex");
+    expect(tagRule?.extractVersion).toBeUndefined();
+    expect(tagRule?.allowedVersions).toBe("/^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(tagRule?.groupName).toBe("codex");
+    expect(tagRule?.groupSlug).toBe("codex");
+    for (const r of rules ?? []) {
+      expect(r?.matchPackageNames).toContain("openai/codex");
+    }
   });
 
   test("release tag maps to the intended numeric version; prereleases stay out", () => {
@@ -117,6 +131,16 @@ describe("codex renovate monitoring", () => {
     expect(allowed.test("0.163.0-alpha.8")).toBe(false);
     expect(allowed.test("0.163.0-beta.1")).toBe(false);
     expect(allowed.test("0.162.1")).toBe(true);
+    // Tag-form digest entries keep the rust-v prefix and order via the
+    // regex versioning; only stable rust-vX.Y.Z tags pass the filter.
+    const tagVersioning = /^rust-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/;
+    expect(tagVersioning.exec(CODEX_TAG)?.groups?.major).toBe("0");
+    expect(tagVersioning.exec("rust-v0.163.0-alpha.8")).toBeNull();
+    const tagAllowed = /^rust-v[0-9]+\.[0-9]+\.[0-9]+$/;
+    expect(tagAllowed.test(CODEX_TAG)).toBe(true);
+    expect(tagAllowed.test("rust-v0.163.0-alpha.8")).toBe(false);
+    expect(tagAllowed.test("rust-v0.163.0")).toBe(true);
+    expect(tagAllowed.test("0.163.0")).toBe(false);
   });
 
   test("preserves release-age, scheduling, review, and CI policy", () => {
@@ -125,8 +149,10 @@ describe("codex renovate monitoring", () => {
     expect(renovate.ignoreTests).toBe(true);
     // No codex-specific automerge widening: patch/digest automerge is the
     // existing global policy, not a new per-package bypass.
-    const rule = codexRule();
-    expect((rule as Record<string, unknown> | undefined)?.automerge).toBeUndefined();
+    const rules = codexRule();
+    for (const rule of rules ?? []) {
+      expect((rule as Record<string, unknown> | undefined)?.automerge).toBeUndefined();
+    }
   });
 });
 
@@ -184,16 +210,16 @@ describe("codex pin coherence", () => {
     expect(amd?.groups.currentDigest).toBe(OLD_SHA256_AMD64);
     expect(arm?.groups.currentValue).toBe("rust-v0.157.1");
     expect(arm?.groups.currentDigest).toBe(OLD_SHA256_ARM64);
-    // The lookup yields the numeric version (extractVersion strips rust-v);
-    // each arch autoReplace template re-adds the prefix with its new digest.
-    // A bare numeric write would break TAG==rust-vVERSION and hand getDigest
-    // an invalid tag, so assert the prefix survives the replacement.
+    // The lookup yields the tag verbatim (tag-form versioning, no
+    // extractVersion); each arch autoReplace template writes that tag with
+    // its new digest. A numeric newValue would hand getDigest a bare
+    // version (tags/0.x.y → 404), so assert the tag survives verbatim.
     const amdNew = compileAutoReplace(amdManager?.autoReplaceStringTemplate ?? "", {
-      newValue: CODEX_VERSION,
+      newValue: CODEX_TAG,
       newDigest: CODEX_SHA256_AMD64,
     });
     const armNew = compileAutoReplace(armManager?.autoReplaceStringTemplate ?? "", {
-      newValue: CODEX_VERSION,
+      newValue: CODEX_TAG,
       newDigest: CODEX_SHA256_ARM64,
     });
     expect(amdNew).toBe(`CODEX_AMD64_TAG=${CODEX_TAG}\nCODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}`);
