@@ -79,6 +79,9 @@ jobs:
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
             CLAUDE_VERSION=${{ env.CLAUDE_VERSION }}
             HELM_VERSION=${{ env.HELM_VERSION }}
+            CODEX_VERSION=${{ env.CODEX_VERSION }}
+            CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}
+            CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |

@@ -29,6 +29,20 @@
       "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
     },
     {
+      "description": "Codex musl-package archive checksums: each architecture tag plus its verified sha256 move with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "CODEX_AMD64_TAG=(?<currentValue>rust-v[^\\s]+)\\nCODEX_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})",
+        "CODEX_ARM64_TAG=(?<currentValue>rust-v[^\\s]+)\\nCODEX_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "openai/codex",
+      "extractVersionTemplate": "^rust-v(?<version>.+)$"
+    },
+    {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -57,6 +71,20 @@
       "automerge": true,
       "platformAutomerge": true,
       "ignoreTests": false
+    },
+    {
+      "description": "Codex ships rust-v0.1.2 tags with prerelease alpha builds; only stable numeric releases grouped so version and both archive checksums move in one update.",
+      "matchDatasources": [
+        "github-releases",
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "openai/codex"
+      ],
+      "extractVersion": "^rust-v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "codex",
+      "groupSlug": "codex"
     },
     {
       "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",

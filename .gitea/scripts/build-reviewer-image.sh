@@ -14,6 +14,9 @@ fi
 : "${OPENCODE_VERSION:?OPENCODE_VERSION is required}"
 : "${CLAUDE_VERSION:?CLAUDE_VERSION is required}"
 : "${HELM_VERSION:?HELM_VERSION is required}"
+: "${CODEX_VERSION:?CODEX_VERSION is required}"
+: "${CODEX_SHA256_AMD64:?CODEX_SHA256_AMD64 is required}"
+: "${CODEX_SHA256_ARM64:?CODEX_SHA256_ARM64 is required}"
 
 primary_tag="$1"
 shift
@@ -48,6 +51,9 @@ buildah bud \
   --build-arg "OPENCODE_VERSION=${OPENCODE_VERSION}" \
   --build-arg "CLAUDE_VERSION=${CLAUDE_VERSION}" \
   --build-arg "HELM_VERSION=${HELM_VERSION}" \
+  --build-arg "CODEX_VERSION=${CODEX_VERSION}" \
+  --build-arg "CODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}" \
+  --build-arg "CODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
