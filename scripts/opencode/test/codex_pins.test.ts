@@ -13,6 +13,7 @@ const renovate = JSON.parse(renovateRaw) as {
     datasourceTemplate?: string;
     depNameTemplate?: string;
     extractVersionTemplate?: string;
+    autoReplaceStringTemplate?: string;
   }[];
   packageRules?: {
     description?: string;
@@ -59,6 +60,16 @@ function extractFirst(matchString: string, content: string) {
   return { replaceString: match[0], groups: (match.groups ?? {}) as Record<string, string | undefined> };
 }
 
+// Minimal Handlebars subset used by our autoReplace templates:
+// {{{newValue}}} and {{{newDigest}}}.
+function compileAutoReplace(template: string, vars: { newValue?: string; newDigest?: string }): string {
+  return template
+    .replace(/\{\{\{newValue\}\}\}/g, vars.newValue ?? "")
+    .replace(/\{\{\{newDigest\}\}\}/g, vars.newDigest ?? "")
+    .replace(/\{\{newValue\}\}/g, vars.newValue ?? "")
+    .replace(/\{\{newDigest\}\}/g, vars.newDigest ?? "");
+}
+
 describe("codex renovate monitoring", () => {
   test("uses hosted-supported digest updating, not self-hosted post-upgrade commands", () => {
     expect(renovate.postUpgradeTasks).toBeUndefined();
@@ -68,14 +79,24 @@ describe("codex renovate monitoring", () => {
 
   test("discovers openai/codex with rust-v prefix handling and stable-only grouping", () => {
     const managers = codexDigestManagers();
-    expect(managers?.length).toBe(1);
-    const manager = managers?.[0];
-    expect(manager?.managerFilePatterns).toContain("/^\\.gitea\\/tool-versions\\.env$/");
-    expect(manager?.matchStrings?.length).toBe(2);
-    expect(manager?.datasourceTemplate).toBe("github-release-attachments");
-    expect(manager?.depNameTemplate).toBe("openai/codex");
-    expect(manager?.extractVersionTemplate).toBe("^rust-v(?<version>.+)$");
-    for (const s of manager?.matchStrings ?? []) {
+    expect(managers?.length).toBe(2);
+    for (const manager of managers ?? []) {
+      expect(manager?.managerFilePatterns).toContain("/^\\.gitea\\/tool-versions\\.env$/");
+      expect(manager?.matchStrings?.length).toBe(1);
+      expect(manager?.datasourceTemplate).toBe("github-release-attachments");
+      expect(manager?.depNameTemplate).toBe("openai/codex");
+      expect(manager?.extractVersionTemplate).toBe("^rust-v(?<version>.+)$");
+      // The lookup's numeric newValue must be re-prefixed on write, or the
+      // TAG==rust-vVERSION invariant breaks and getDigest gets a bare version.
+      expect(manager?.autoReplaceStringTemplate).toContain("rust-v{{{newValue}}}");
+      expect(manager?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    }
+    const patterns = (managers ?? []).flatMap((m) => m.matchStrings ?? []);
+    expect(patterns.some((s) => s.includes("CODEX_AMD64_TAG"))).toBe(true);
+    expect(patterns.some((s) => s.includes("CODEX_ARM64_TAG"))).toBe(true);
+    expect(patterns.some((s) => s.includes("CODEX_SHA256_AMD64"))).toBe(true);
+    expect(patterns.some((s) => s.includes("CODEX_SHA256_ARM64"))).toBe(true);
+    for (const s of patterns) {
       expect(() => new RegExp(s, "g")).not.toThrow();
       expect(s).not.toMatch(/\(\?!|\(\?<=|\(\?<!/);
     }
@@ -133,18 +154,22 @@ describe("codex pin coherence", () => {
 
   test("digest managers extract the tag and its arch checksum together", () => {
     const managers = codexDigestManagers();
-    const [amdPattern, armPattern] = managers?.[0]?.matchStrings ?? [];
-    const amd = extractFirst(amdPattern ?? "", toolVersions);
+    const amdPattern = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_AMD64_TAG"))?.matchStrings?.[0] ?? "";
+    const armPattern = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_ARM64_TAG"))?.matchStrings?.[0] ?? "";
+    const amd = extractFirst(amdPattern, toolVersions);
     expect(amd?.groups.currentValue).toBe(CODEX_TAG);
     expect(amd?.groups.currentDigest).toBe(CODEX_SHA256_AMD64);
-    const arm = extractFirst(armPattern ?? "", toolVersions);
+    const arm = extractFirst(armPattern, toolVersions);
     expect(arm?.groups.currentValue).toBe(CODEX_TAG);
     expect(arm?.groups.currentDigest).toBe(CODEX_SHA256_ARM64);
   });
 
   test("a representative update moves the version and both archive pins coherently", () => {
     const managers = codexDigestManagers();
-    const [amdPattern, armPattern] = managers?.[0]?.matchStrings ?? [];
+    const amdManager = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_AMD64_TAG"));
+    const armManager = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_ARM64_TAG"));
+    const amdPattern = amdManager?.matchStrings?.[0] ?? "";
+    const armPattern = armManager?.matchStrings?.[0] ?? "";
     const oldContent = [
       "# renovate: datasource=github-release-attachments depName=openai/codex",
       "CODEX_AMD64_TAG=rust-v0.157.1",
@@ -153,19 +178,27 @@ describe("codex pin coherence", () => {
       "CODEX_ARM64_TAG=rust-v0.157.1",
       `CODEX_SHA256_ARM64=${OLD_SHA256_ARM64}`,
     ].join("\n");
-    const amd = extractFirst(amdPattern ?? "", oldContent);
-    const arm = extractFirst(armPattern ?? "", oldContent);
+    const amd = extractFirst(amdPattern, oldContent);
+    const arm = extractFirst(armPattern, oldContent);
     expect(amd?.groups.currentValue).toBe("rust-v0.157.1");
     expect(amd?.groups.currentDigest).toBe(OLD_SHA256_AMD64);
     expect(arm?.groups.currentValue).toBe("rust-v0.157.1");
     expect(arm?.groups.currentDigest).toBe(OLD_SHA256_ARM64);
-    // Renovate replaces currentValue with the new tag and currentDigest with
-    // the new asset digest in the same update; both arch blocks must change.
-    const updated = oldContent
-      .replace("rust-v0.157.1", CODEX_TAG)
-      .replace(OLD_SHA256_AMD64, CODEX_SHA256_AMD64)
-      .replace("rust-v0.157.1", CODEX_TAG)
-      .replace(OLD_SHA256_ARM64, CODEX_SHA256_ARM64);
+    // The lookup yields the numeric version (extractVersion strips rust-v);
+    // each arch autoReplace template re-adds the prefix with its new digest.
+    // A bare numeric write would break TAG==rust-vVERSION and hand getDigest
+    // an invalid tag, so assert the prefix survives the replacement.
+    const amdNew = compileAutoReplace(amdManager?.autoReplaceStringTemplate ?? "", {
+      newValue: CODEX_VERSION,
+      newDigest: CODEX_SHA256_AMD64,
+    });
+    const armNew = compileAutoReplace(armManager?.autoReplaceStringTemplate ?? "", {
+      newValue: CODEX_VERSION,
+      newDigest: CODEX_SHA256_ARM64,
+    });
+    expect(amdNew).toBe(`CODEX_AMD64_TAG=${CODEX_TAG}\nCODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}`);
+    expect(armNew).toBe(`CODEX_ARM64_TAG=${CODEX_TAG}\nCODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}`);
+    const updated = oldContent.replace(amd?.replaceString ?? "", amdNew).replace(arm?.replaceString ?? "", armNew);
     expect(updated).toContain(CODEX_TAG);
     expect(updated).toContain(CODEX_SHA256_AMD64);
     expect(updated).toContain(CODEX_SHA256_ARM64);
@@ -173,8 +206,8 @@ describe("codex pin coherence", () => {
     expect(updated).not.toContain(OLD_SHA256_AMD64);
     expect(updated).not.toContain(OLD_SHA256_ARM64);
     // Re-extract after the update: both entries land on the new tag+digest.
-    expect(extractFirst(amdPattern ?? "", updated)?.groups.currentDigest).toBe(CODEX_SHA256_AMD64);
-    expect(extractFirst(armPattern ?? "", updated)?.groups.currentDigest).toBe(CODEX_SHA256_ARM64);
+    expect(extractFirst(amdPattern, updated)?.groups.currentDigest).toBe(CODEX_SHA256_AMD64);
+    expect(extractFirst(armPattern, updated)?.groups.currentDigest).toBe(CODEX_SHA256_ARM64);
   });
 
   test("a version-only bump with stale hashes is detected", () => {

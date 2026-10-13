@@ -29,18 +29,32 @@
       "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
     },
     {
-      "description": "Codex musl-package archive checksums: each architecture tag plus its verified sha256 move with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
+      "description": "Codex amd64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
       "customType": "regex",
       "managerFilePatterns": [
         "/^\\.gitea\\/tool-versions\\.env$/"
       ],
       "matchStrings": [
-        "CODEX_AMD64_TAG=(?<currentValue>rust-v[^\\s]+)\\nCODEX_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})",
+        "CODEX_AMD64_TAG=(?<currentValue>rust-v[^\\s]+)\\nCODEX_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "openai/codex",
+      "extractVersionTemplate": "^rust-v(?<version>.+)$",
+      "autoReplaceStringTemplate": "CODEX_AMD64_TAG=rust-v{{{newValue}}}\nCODEX_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "Codex arm64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
         "CODEX_ARM64_TAG=(?<currentValue>rust-v[^\\s]+)\\nCODEX_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
       ],
       "datasourceTemplate": "github-release-attachments",
       "depNameTemplate": "openai/codex",
-      "extractVersionTemplate": "^rust-v(?<version>.+)$"
+      "extractVersionTemplate": "^rust-v(?<version>.+)$",
+      "autoReplaceStringTemplate": "CODEX_ARM64_TAG=rust-v{{{newValue}}}\nCODEX_SHA256_ARM64={{{newDigest}}}"
     },
     {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",

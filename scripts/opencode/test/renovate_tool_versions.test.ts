@@ -86,7 +86,7 @@ describe("renovate tool-versions config", () => {
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(3);
+    expect(managers?.length).toBe(4);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
