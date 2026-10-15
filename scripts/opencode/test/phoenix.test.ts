@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  buildOpenCodeSpansFromEvents,
   buildOpenCodeTraceRequest,
   exportOpenCodeTrace,
   PHOENIX_OTLP_TIMEOUT_MS,
@@ -284,6 +285,119 @@ function writeTraceDb(
   db.close();
 }
 
+function writeTraceV2Db(
+  path: string,
+  opts: {
+    tools?: Array<{
+      tool: string;
+      status: string;
+      command?: string;
+      path?: string;
+      name?: string;
+      output?: string;
+      error?: string;
+      start?: number;
+      end?: number;
+      extraInput?: Record<string, unknown>;
+    }>;
+    assistant?: { modelID?: string; providerID?: string; input?: number; output?: number; error?: string };
+    userText?: string;
+    assistantText?: string;
+  } = {}
+): void {
+  const db = new Database(path);
+  db.run("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, time_created INTEGER, time_updated INTEGER)");
+  db.run(
+    "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
+  );
+  db.run("INSERT INTO session_v2 VALUES (?, ?, ?)", ["ses1", 1_000, 5_000]);
+
+  let seq = 1;
+  if (opts.userText) {
+    db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [
+      "msg-user",
+      "ses1",
+      900,
+      900,
+      "message",
+      seq++,
+      JSON.stringify({ role: "user", time: { created: 900 } }),
+    ]);
+    db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [
+      "part-user",
+      "ses1",
+      900,
+      900,
+      "part",
+      seq++,
+      JSON.stringify({ type: "text", text: opts.userText, messageID: "msg-user" }),
+    ]);
+  }
+
+  const assistant = opts.assistant ?? { modelID: "grok-4.6", providerID: "xai", input: 10, output: 3 };
+  db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [
+    "msg1",
+    "ses1",
+    1_000,
+    2_000,
+    "message",
+    seq++,
+    JSON.stringify({
+      role: "assistant",
+      modelID: assistant.modelID,
+      providerID: assistant.providerID,
+      tokens: { input: assistant.input ?? 0, output: assistant.output ?? 0 },
+      time: { created: 1_000, completed: 2_000 },
+      error: assistant.error ? { message: assistant.error } : undefined,
+    }),
+  ]);
+
+  let i = 0;
+  if (opts.assistantText) {
+    i += 1;
+    db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [
+      `part${i}`,
+      "ses1",
+      1_050,
+      1_080,
+      "part",
+      seq++,
+      JSON.stringify({ type: "text", text: opts.assistantText, messageID: "msg1" }),
+    ]);
+  }
+
+  for (const tool of opts.tools ?? []) {
+    i += 1;
+    db.run("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)", [
+      `part${i}`,
+      "ses1",
+      tool.start ?? 1_100,
+      tool.end ?? 1_200,
+      "part",
+      seq++,
+      JSON.stringify({
+        type: "tool",
+        tool: tool.tool,
+        messageID: "msg1",
+        callID: `call${i}`,
+        state: {
+          status: tool.status,
+          input: {
+            ...(tool.command ? { command: tool.command } : {}),
+            ...(tool.path ? { filePath: tool.path } : {}),
+            ...(tool.name ? { name: tool.name } : {}),
+            ...tool.extraInput,
+          },
+          output: tool.output,
+          error: tool.error,
+          time: { start: tool.start ?? 1_100, end: tool.end ?? 1_200 },
+        },
+      }),
+    ]);
+  }
+  db.close();
+}
+
 describe("buildOpenCodeTraceRequest", () => {
   test("builds an AGENT root with full TOOL and LLM payloads", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
@@ -494,6 +608,171 @@ describe("buildOpenCodeTraceRequest", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("builds an AGENT root with full TOOL and LLM payloads from session_v2 and session_message (V2 database)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-v2-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      writeTraceV2Db(dbPath, {
+        userText: "review this PR please",
+        assistantText: "looks fine after grep",
+        tools: [
+          {
+            tool: "shell",
+            status: "completed",
+            command: "ls -la /work",
+            output: "HUGE_STDOUT_BODY_MUST_APPEAR",
+            start: 1_100,
+            end: 1_250,
+          },
+          {
+            tool: "read",
+            status: "completed",
+            path: "src/git.ts",
+            output: "FILE_BODY_MUST_APPEAR",
+          },
+          {
+            tool: "skill",
+            status: "error",
+            name: "gitops-apply-review",
+            error: "denied",
+          },
+        ],
+      });
+      const body = buildOpenCodeTraceRequest(dbPath, {
+        kind: "review",
+        owner: "personal",
+        repo: "jumi",
+        sha: "abc123",
+        jobId: "42",
+      });
+      expect(body).toBeDefined();
+      const text = new TextDecoder().decode(body);
+      expect(text).toContain("HUGE_STDOUT_BODY_MUST_APPEAR");
+      expect(text).toContain("FILE_BODY_MUST_APPEAR");
+      expect(text).toContain("review this PR please");
+      expect(text).toContain("looks fine after grep");
+      const resource = decodeResourceAttrs(body!);
+      expect(resource["openinference.project.name"]).toBe("jumi");
+      expect(resource.kind).toBe("review");
+      expect(resource.owner).toBe("personal");
+      expect(resource.repo).toBe("jumi");
+      expect(resource.sha).toBe("abc123");
+      expect(resource.job_id).toBe("42");
+      expect(resource["session.id"]).toBe("42");
+      const spans = decodeSpans(body!);
+      expect(spans[0]?.name).toBe("jumi review");
+      expect(spans[0]?.attrs["openinference.span.kind"]).toBe("AGENT");
+      expect(spans[0]?.attrs["input.value"]).toBe("review this PR please");
+      const llm = spans.find((s) => s.attrs["openinference.span.kind"] === "LLM");
+      expect(llm?.attrs["llm.model_name"]).toBe("grok-4.6");
+      expect(llm?.attrs["llm.provider"]).toBe("xai");
+      expect(llm?.attrs["llm.token_count.prompt"]).toBe(10);
+      expect(llm?.attrs["output.value"]).toBe("looks fine after grep");
+      const shell = spans.find((s) => s.name === "shell");
+      expect(shell?.attrs["openinference.span.kind"]).toBe("TOOL");
+      expect(shell?.attrs["tool.name"]).toBe("shell");
+      expect(shell?.attrs["tool.status"]).toBe("completed");
+      expect(shell?.attrs["tool.duration_ms"]).toBe(150);
+      expect(String(shell?.attrs["tool.parameters"])).toContain("ls -la /work");
+      expect(shell?.attrs["output.value"]).toBe("HUGE_STDOUT_BODY_MUST_APPEAR");
+      const skill = spans.find((s) => s.name === "skill:gitops-apply-review");
+      expect(skill?.attrs["tool.status"]).toBe("error");
+      expect(skill?.attrs["output.value"]).toBe("denied");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("builds spans and trace request from V2 JSON events without tokens.total", () => {
+    const events = [
+      { type: "step_start", model: "xai/grok-4.6", provider: "xai", time: 1000 },
+      { type: "user", content: "implement issue 254", time: 900 },
+      {
+        type: "tool_use",
+        name: "shell",
+        input: { command: "git status" },
+        time: 1100,
+        state: { status: "completed", output: "clean", time: { start: 1100, end: 1200 } },
+      },
+      {
+        type: "text",
+        text: "git status was clean",
+        time: 1250,
+      },
+      {
+        type: "step_finish",
+        time: 1300,
+        part: {
+          tokens: {
+            input: 50,
+            output: 20,
+            reasoning: 5,
+            cache: { read: 10, write: 0 },
+          },
+        },
+      },
+    ];
+    const spans = buildOpenCodeSpansFromEvents(events, {
+      kind: "implement",
+      owner: "personal",
+      repo: "jumi",
+      sha: "cde",
+      jobId: "123",
+    });
+    expect(spans).toBeDefined();
+    const agent = spans.find((s) => s.attributes["openinference.span.kind"] === "AGENT");
+    expect(agent).toBeDefined();
+    expect(agent?.attributes["input.value"]).toBe("implement issue 254");
+
+    const llm = spans.find((s) => s.attributes["openinference.span.kind"] === "LLM");
+    expect(llm).toBeDefined();
+    expect(llm?.attributes["llm.model_name"]).toBe("xai/grok-4.6");
+    expect(llm?.attributes["llm.provider"]).toBe("xai");
+    expect(llm?.attributes["llm.token_count.prompt"]).toBe(50);
+    expect(llm?.attributes["llm.token_count.completion"]).toBe(20);
+    expect(llm?.attributes["output.value"]).toContain("git status was clean");
+
+    const tool = spans.find((s) => s.attributes["openinference.span.kind"] === "TOOL");
+    expect(tool).toBeDefined();
+    expect(tool?.name).toBe("shell");
+    expect(tool?.attributes["tool.name"]).toBe("shell");
+    expect(tool?.attributes["tool.status"]).toBe("completed");
+    expect(String(tool?.attributes["tool.parameters"])).toContain("git status");
+    expect(tool?.attributes["output.value"]).toBe("clean");
+
+    const body = buildOpenCodeTraceRequest(events, {
+      kind: "implement",
+      owner: "personal",
+      repo: "jumi",
+      sha: "cde",
+      jobId: "123",
+    });
+    expect(body).toBeDefined();
+    expect(body instanceof Uint8Array).toBe(true);
+    const decodedSpans = decodeSpans(body!);
+    expect(decodedSpans.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("unrecognized schema fails soft and returns undefined", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-unknown-"));
+    try {
+      const noSession = join(dir, "no-session.db");
+      const db1 = new Database(noSession);
+      db1.run("CREATE TABLE random_table (id TEXT)");
+      db1.close();
+      expect(buildOpenCodeTraceRequest(noSession)).toBeUndefined();
+
+      const sessionV2NoMessages = join(dir, "session-v2-only.db");
+      const db2 = new Database(sessionV2NoMessages);
+      db2.run("CREATE TABLE session_v2 (id TEXT, time_created INTEGER, time_updated INTEGER)");
+      db2.run("INSERT INTO session_v2 VALUES ('s1', 1, 2)");
+      db2.close();
+      expect(buildOpenCodeTraceRequest(sessionV2NoMessages)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("exportOpenCodeTrace", () => {
@@ -622,5 +901,46 @@ describe("exportOpenCodeTrace", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("POSTs OTLP protobuf from JSON events array", async () => {
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
+    process.env.AGENT_INSTANCE = "jumi-worker";
+    const posts: Array<{ url: string; type: string | null; project: string | null; body: Uint8Array }> = [];
+    setTraceFetchForTests(async (url, init) => {
+      const headers = new Headers(init?.headers);
+      posts.push({
+        url,
+        type: headers.get("content-type"),
+        project: headers.get("phoenix-project"),
+        body: new Uint8Array(init?.body as Uint8Array),
+      });
+      return new Response(null, { status: 200 });
+    });
+    const events = [
+      { type: "step_start", model: "xai/grok-4.6", provider: "xai", time: 1000 },
+      {
+        type: "tool_use",
+        name: "shell",
+        input: { command: "pwd" },
+        time: 1100,
+        state: { status: "completed", output: "/app" },
+      },
+      { type: "step_finish", time: 1200, part: { tokens: { input: 10, output: 5 } } },
+    ];
+    await exportOpenCodeTrace({
+      events,
+      trace: { kind: "follow-up", owner: "personal", repo: "jumi", sha: "def", jobId: "9" },
+    });
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("http://phoenix.internal:6006/v1/traces");
+    expect(posts[0].type).toBe("application/x-protobuf");
+    expect(posts[0].project).toBe("jumi-worker");
+    const resource = decodeResourceAttrs(posts[0].body);
+    expect(resource["openinference.project.name"]).toBe("jumi-worker");
+    expect(resource.kind).toBe("follow-up");
+    expect(resource.job_id).toBe("9");
+    expect(resource["session.id"]).toBe("9");
+    expect(traceExportErrors()).toBe(0);
   });
 });

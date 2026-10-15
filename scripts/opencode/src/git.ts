@@ -353,6 +353,72 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
   return `opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`;
 }
 
+let openCodeMajorOverride: number | undefined;
+let cachedMajor: number | undefined;
+
+export function setOpenCodeMajorForTests(major?: number): void {
+  openCodeMajorOverride = major;
+}
+
+export function resetOpenCodeVersionForTests(): void {
+  openCodeMajorOverride = undefined;
+  cachedMajor = undefined;
+}
+
+export function detectOpenCodeMajor(bin = "opencode"): number {
+  if (openCodeMajorOverride !== undefined) {
+    return openCodeMajorOverride;
+  }
+  try {
+    const proc = Bun.spawnSync([bin, "--version"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode === 0) {
+      const text = proc.stdout.toString().trim();
+      const match = /(\d+)\.\d+\.\d+/.exec(text);
+      if (match) {
+        return Number.parseInt(match[1], 10);
+      }
+    }
+  } catch {
+    // Binary missing or spawn error; fall back to 1.
+  }
+  return 1;
+}
+
+export function getOpenCodeMajor(): number {
+  if (openCodeMajorOverride !== undefined) {
+    return openCodeMajorOverride;
+  }
+  if (cachedMajor !== undefined) {
+    return cachedMajor;
+  }
+  cachedMajor = detectOpenCodeMajor();
+  return cachedMajor;
+}
+
+export interface OpenCodeArgOptions {
+  workdir: string;
+  model: string;
+  variant?: string;
+  continueSession?: boolean;
+}
+
+export function buildOpenCodeArgs(opts: OpenCodeArgOptions, major: number = getOpenCodeMajor()): string[] {
+  if (major >= 2) {
+    const variant = opts.variant?.trim();
+    const model = variant ? `${opts.model}#${variant}` : opts.model;
+    const args = ["opencode", "run", "--standalone", "-m", model];
+    if (opts.continueSession) args.push("--continue");
+    return args;
+  }
+  const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
+  if (opts.variant) args.push("--variant", opts.variant);
+  if (opts.continueSession) args.push("--continue");
+  return args;
+}
+
 export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
@@ -403,12 +469,12 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   }
 
   try {
-    const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
-    if (opts.variant) args.push("--variant", opts.variant);
-    if (opts.continueSession) args.push("--continue");
+    const major = getOpenCodeMajor();
+    const args = buildOpenCodeArgs(opts, major);
     const proc = (() => {
       try {
         return Bun.spawn(args, {
+          cwd: opts.workdir,
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",

@@ -8,9 +8,12 @@ import {
   classifyQuotaText,
   decideQuotaRetry,
   encodeQuotaWaitMarker,
+  hasQuotaInEvents,
   hasQuotaInLogDir,
   hasQuotaInLogText,
   hasQuotaRetryInDb,
+  inspectQuotaHit,
+  inspectQuotaInEvents,
   inspectQuotaInLogText,
   isHardQuotaText,
   isQuotaError,
@@ -236,6 +239,124 @@ describe("hasQuotaRetryInDb", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test("detects quota in V2 session_message retry and error records", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        "msg1",
+        "ses1",
+        1,
+        2,
+        "message",
+        1,
+        JSON.stringify({
+          role: "assistant",
+          error: { message: "Free usage exceeded, subscribe to Go" },
+        })
+      );
+      db.close();
+      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("detects quota in V2 session_message part retry payload", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-part-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        "p1",
+        "ses1",
+        1,
+        2,
+        "part",
+        2,
+        JSON.stringify({
+          type: "retry",
+          attempt: 2,
+          message: "Go limit reached",
+          action: { reason: "account_rate_limit" },
+        })
+      );
+      db.close();
+      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("ignores user-message in V2 session_message quoting quota strings", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-user-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        "msg1",
+        "ses1",
+        1,
+        2,
+        "message",
+        1,
+        JSON.stringify({ role: "user", content: "Abort on FreeUsageLimitError" })
+      );
+      db.close();
+      expect(hasQuotaRetryInDb(dbPath)).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("inspectQuotaInEvents", () => {
+  test("detects quota from JSON events array and JSONL stream", () => {
+    const events = [
+      { type: "step_start" },
+      { type: "step_finish", part: { error: "Free usage exceeded, subscribe to Go retry-after: 3600" } },
+    ];
+    const hit = inspectQuotaInEvents(events);
+    expect(hit).toBeDefined();
+    expect(hit?.kind).toBe("resetting");
+    expect(hit?.retryAfterMs).toBe(3_600_000);
+
+    const jsonl = [
+      JSON.stringify({ type: "step_start" }),
+      JSON.stringify({ type: "error", error: "Go limit reached" }),
+    ].join("\n");
+    const jsonlHit = inspectQuotaInEvents(jsonl);
+    expect(jsonlHit).toBeDefined();
+    expect(jsonlHit?.kind).toBe("hard");
+  });
+
+  test("returns undefined for events without quota", () => {
+    const events = [
+      { type: "step_start" },
+      { type: "tool_use", name: "shell", input: { command: "ls" } },
+      { type: "step_finish" },
+    ];
+    expect(inspectQuotaInEvents(events)).toBeUndefined();
+    expect(hasQuotaInEvents(events)).toBe(false);
+  });
+
+  test("inspectQuotaHit prioritizes events when provided", () => {
+    const events = [{ type: "step_finish", part: { error: "Free usage exceeded, subscribe to Go" } }];
+    const hit = inspectQuotaHit("/nonexistent.db", "/nonexistent", events);
+    expect(hit).toBeDefined();
+    expect(hit?.kind).toBe("resetting");
   });
 });
 

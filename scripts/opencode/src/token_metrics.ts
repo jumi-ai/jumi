@@ -81,7 +81,9 @@ export function recordOpenCodeDb(path: string): boolean {
     const db = new Database(path);
     try {
       const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
-      if (!tables.some((row) => row.name === "session")) return false;
+      const tableNames = new Set(tables.map((row) => row.name));
+      const sessionTable = tableNames.has("session_v2") ? "session_v2" : tableNames.has("session") ? "session" : null;
+      if (!sessionTable) return false;
       const rows = db
         .query(
           `SELECT
@@ -92,7 +94,7 @@ export function recordOpenCodeDb(path: string): boolean {
             COALESCE(SUM(tokens_cache_write), 0) AS tokens_cache_write,
             COALESCE(SUM(tokens_reasoning), 0) AS tokens_reasoning,
             COUNT(*) AS session_count
-          FROM session
+          FROM ${sessionTable}
           GROUP BY model`
         )
         .all() as Array<{
@@ -123,6 +125,88 @@ export function recordOpenCodeDb(path: string): boolean {
     errors += 1;
     return false;
   }
+}
+
+/** Record token usage for OpenCode parsed from parent-held events or usage structures. */
+export function recordOpenCodeUsage(usage: ModelTokenUsage | undefined): void {
+  recordCliUsage("opencode", usage);
+  if (usage && usage.size > 0) {
+    lastSuccessSeconds = Math.floor(Date.now() / 1000);
+  }
+}
+
+/**
+ * Parse OpenCode JSON events (both V1 with `tokens.total` and V2 without `tokens.total`).
+ * Extracts token usage per model.
+ */
+export function parseOpenCodeEvents(events: unknown[] | string, defaultModel = "unknown"): ModelTokenUsage | undefined {
+  let list: unknown[];
+  if (typeof events === "string") {
+    list = [];
+    for (const line of events.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        list.push(JSON.parse(trimmed));
+      } catch {
+        // ignore non-JSON line
+      }
+    }
+  } else if (Array.isArray(events)) {
+    list = events;
+  } else {
+    return undefined;
+  }
+
+  const usage: ModelTokenUsage = new Map();
+  let currentModel = defaultModel;
+
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const ev = item as Record<string, unknown>;
+    if (typeof ev.model === "string" && ev.model.trim()) {
+      currentModel = ev.model.trim();
+    }
+    const part = (ev.part && typeof ev.part === "object" ? ev.part : ev) as Record<string, unknown>;
+    if (typeof part.model === "string" && part.model.trim()) {
+      currentModel = part.model.trim();
+    }
+    if (ev.type === "step_finish" || part.tokens != null || ev.tokens != null) {
+      const tokensObj = (part.tokens ?? ev.tokens) as Record<string, unknown> | undefined;
+      if (tokensObj && typeof tokensObj === "object") {
+        const cache = (tokensObj.cache && typeof tokensObj.cache === "object" ? tokensObj.cache : {}) as Record<
+          string,
+          unknown
+        >;
+        const model = normalizeOpenCodeModel(currentModel);
+        const tokens: Record<TokenType, number> = {
+          input: Number(tokensObj.input) || 0,
+          cached_input: Number(cache.read ?? tokensObj.cached_input ?? tokensObj.cache_read) || 0,
+          output: Number(tokensObj.output) || 0,
+          cache_write: Number(cache.write ?? tokensObj.cache_write ?? tokensObj.cache_creation) || 0,
+          reasoning: Number(tokensObj.reasoning) || 0,
+        };
+        const current = usage.get(model) ?? {
+          input: 0,
+          cached_input: 0,
+          output: 0,
+          cache_write: 0,
+          reasoning: 0,
+        };
+        for (const t of TOKEN_TYPES) current[t] += tokens[t];
+        usage.set(model, current);
+      }
+    }
+  }
+
+  return usage.size > 0 ? usage : undefined;
+}
+
+export function recordOpenCodeEvents(events: unknown[] | string, defaultModel?: string): boolean {
+  const usage = parseOpenCodeEvents(events, defaultModel);
+  if (!usage) return false;
+  recordOpenCodeUsage(usage);
+  return true;
 }
 
 /**

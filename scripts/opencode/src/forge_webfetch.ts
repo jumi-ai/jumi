@@ -20,6 +20,18 @@
 /** Fallback for spawns that carry no `GIT_AUTH_HOST` (reviewer, tests). */
 export const FORGE_DENY_DOMAIN = "kirmanak.stream";
 
+export const PERMISSION_DENY_V1_TEXT =
+  "The user has specified a rule which prevents you from using this specific tool call";
+export const PERMISSION_DENY_V2_PREFIX = "Permission denied:";
+
+export const PERMISSION_DENY_RE =
+  /The user has specified a rule which prevents you from using this specific tool call|Permission denied:\s*\w+|Permission denied/i;
+
+export function isPermissionDenyText(text: unknown): boolean {
+  if (typeof text !== "string" || !text) return false;
+  return PERMISSION_DENY_RE.test(text);
+}
+
 /**
  * The host the child must not reach, taken from the same env the git credential
  * helper authenticates against (`gitEnv` sets it from the configured forge URL).

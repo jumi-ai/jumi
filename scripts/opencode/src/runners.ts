@@ -429,3 +429,5 @@ export function appendRunnerStamp(body: string, runner: RunnerStamp | string | u
   const text = body.trimEnd();
   return text ? `${text}\n\n${line}` : line;
 }
+
+export { buildOpenCodeArgs, detectOpenCodeMajor, getOpenCodeMajor, setOpenCodeMajorForTests } from "./git.ts";
