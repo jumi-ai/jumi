@@ -25,7 +25,7 @@ export const PERMISSION_DENY_V1_TEXT =
 export const PERMISSION_DENY_V2_PREFIX = "Permission denied:";
 
 export const PERMISSION_DENY_RE =
-  /The user has specified a rule which prevents you from using this specific tool call|Permission denied:\s*\w+|Permission denied/i;
+  /The user has specified a rule which prevents you from using this specific tool call|Permission denied:\s*\w+/i;
 
 export function isPermissionDenyText(text: unknown): boolean {
   if (typeof text !== "string" || !text) return false;

@@ -23,8 +23,6 @@ import {
   FORGE_DENY_DOMAIN,
   forgeOpenCodePermission,
   forgeWebfetchPermission,
-  isPermissionDenyText,
-  PERMISSION_DENY_V1_TEXT,
 } from "./forge_webfetch.ts";
 import { getOpenCodeMajor } from "./git.ts";
 
@@ -238,8 +236,8 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
   // OpenCode reports a blocked call by echoing the webfetch ruleset it was
   // holding (V1) or by returning "Permission denied: <action>" (V2).
   const missing = DENY_PATTERNS.filter((pattern) => !result.includes(pattern));
-  const isV1Deny = missing.length === 0 || result.includes(PERMISSION_DENY_V1_TEXT);
-  const isV2Deny = isPermissionDenyText(result);
+  const isV1Deny = missing.length === 0;
+  const isV2Deny = getOpenCodeMajor() >= 2 && /Permission denied:\s*\w+/.test(result);
   const ok = (isV1Deny || isV2Deny) && !result.includes(FETCH_MARKER);
   return {
     probe,

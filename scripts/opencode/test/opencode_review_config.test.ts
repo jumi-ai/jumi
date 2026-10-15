@@ -319,7 +319,6 @@ describe("isPermissionDenyText", () => {
   });
 
   test("matches V2 Permission denied prefix", () => {
-    expect(isPermissionDenyText(PERMISSION_DENY_V2_PREFIX)).toBe(true);
     expect(
       isPermissionDenyText("Permission denied: webfetch is not allowed for https://gitea.kirmanak.stream/foo")
     ).toBe(true);
@@ -329,6 +328,8 @@ describe("isPermissionDenyText", () => {
   test("does not match unrelated errors or non-string input", () => {
     expect(isPermissionDenyText("404 Not Found")).toBe(false);
     expect(isPermissionDenyText("Connection refused")).toBe(false);
+    expect(isPermissionDenyText("Permission denied")).toBe(false);
+    expect(isPermissionDenyText(PERMISSION_DENY_V2_PREFIX)).toBe(false);
     expect(isPermissionDenyText("")).toBe(false);
     expect(isPermissionDenyText(null)).toBe(false);
     expect(isPermissionDenyText(undefined)).toBe(false);
