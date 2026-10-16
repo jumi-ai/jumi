@@ -1214,7 +1214,6 @@ export async function implementFollowUp(
       ): Promise<{ status: "skipped"; reason: string } | undefined> => {
         throwIfAborted(opts.abortSignal);
         log(label);
-        followUpEngineRan = true;
         const runOpts: EngineRunOptions = {
           model: opts.model,
           variant: opts.variant,
@@ -1269,6 +1268,9 @@ export async function implementFollowUp(
           return { status: "skipped", reason: QUOTA_STUCK_TEXT };
         }
         throwIfEngineFailed(result);
+        // Only a successful engine result counts as having run: an
+        // unsuccessful provider/runner attempt must not consume CI work.
+        followUpEngineRan = true;
         return undefined;
       };
 
@@ -1406,7 +1408,9 @@ export async function implementFollowUp(
         handledReviewFindings: state.handledReviewFindings,
         updatedAt: now().toISOString(),
       }).catch(() => undefined);
-      await persistCi().catch(() => undefined);
+      // Intentionally no persistCi(): an unsuccessful attempt must not
+      // consume the outstanding CI-fix work. Only recordAttempt() on a
+      // pushed fix or successful no-change disposition marks CI handled.
       await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
     }
   );
