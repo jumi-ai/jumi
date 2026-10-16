@@ -614,7 +614,6 @@ describe("implement and review take tracker and forge separately", () => {
 
     const workspace = await mkdtemp(join(tmpdir(), "jumi-tracker-review-"));
     try {
-      await writeFile(join(workspace, "JUMI_REVIEW.md"), "No blocking issues.\n<!-- jumi-check: success -->\n");
       const result = await reviewPullRequest({
         api: forgeApi,
         tracker: trackerApi,
@@ -637,7 +636,10 @@ describe("implement and review take tracker and forge separately", () => {
           if (a[0] === "status") return "?? JUMI_REVIEW.md";
           return "";
         },
-        openCodeRunner: async () => ({ status: "ok" }),
+        openCodeRunner: async () => {
+          await writeFile(join(workspace, "JUMI_REVIEW.md"), "No blocking issues.\n<!-- jumi-check: success -->\n");
+          return { status: "ok" };
+        },
         inspectOtherChecks: false,
         logger: () => undefined,
       });

@@ -574,6 +574,42 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("publishes a valid JUMI_REVIEW.md hidden from porcelain by gitignore", async () => {
+    // A repo ignoring `JUMI_REVIEW.md` (or `JUMI_*.md`) hides the artifact
+    // from `git status --porcelain` even though the file exists. The parent
+    // must still discover and publish it without write-only retries.
+    for (const _ignore of ["JUMI_REVIEW.md", "JUMI_*.md"]) {
+      await withWorkspace(async (workspace) => {
+        const comments: string[] = [];
+        const statuses: Array<{ state: string; description?: string }> = [];
+        let ran = 0;
+        const result = await reviewPullRequest({
+          ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
+          api: makeApi({
+            createIssueComment: async (_owner, _repo, _index, body) => {
+              comments.push(body);
+              return makeComment({ id: comments.length, body });
+            },
+            createCommitStatus: async (_owner, _repo, _sha, status) => {
+              statuses.push(status);
+              return status;
+            },
+          }),
+          openCodeRunner: async () => {
+            ran++;
+            await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+            return { status: "ok" };
+          },
+        });
+        expect(result).toEqual({ status: "posted" });
+        expect(ran).toBe(1);
+        expect(comments.some((body) => body.includes(INCOMPLETE_REVIEW_STUCK))).toBe(false);
+        expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+        await expect(access(join(workspace, "JUMI_REVIEW.md"))).rejects.toThrow();
+      });
+    }
+  });
+
   test("treats a JUMI_REVIEW.md symlink as missing and does not follow it", async () => {
     await withWorkspace(async (workspace) => {
       const comments: string[] = [];
