@@ -352,7 +352,10 @@ function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kicka
 export interface BoardStore {
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   listTerminalReviews?(limit?: number): Promise<ReviewJobRecord[]>;
-  sits: { list(): Promise<RouterSitRecord[]> };
+  sits: {
+    list(): Promise<RouterSitRecord[]>;
+    listClosedPulls?(): Promise<Array<{ owner: string; repo: string; number: number }>>;
+  };
 }
 
 function requeueMessage(state: string, reason: string): string {
@@ -381,11 +384,15 @@ function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): Boar
 }
 
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
-  const [inflight, sits, terminals] = await Promise.all([
+  const [inflight, sits, terminals, closedPulls] = await Promise.all([
     store.listInflight(200),
     store.sits.list(),
     store.listTerminalReviews ? store.listTerminalReviews(200) : Promise.resolve([]),
+    store.sits.listClosedPulls ? store.sits.listClosedPulls() : Promise.resolve([]),
   ]);
+  const closedKeys = new Set(
+    closedPulls.map((pull) => `${pull.owner.toLowerCase()}/${pull.repo.toLowerCase()}#${pull.number}`)
+  );
   const in_progress = inflight.map((row) => inflightItem(row, forge));
   // A sit that duplicates a job already in progress is not a second problem:
   // hide it here. Recording and clearing are unchanged; this is read-time only.
@@ -406,6 +413,7 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
   for (const row of latestByPull.values()) {
     const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
     if (inflightKeys.has(key)) continue;
+    if (closedKeys.has(key)) continue;
     if (inflightJobKeys.has(row.jobKey)) continue;
     if (!isKickableTerminalState(row.state)) continue;
     const reason = terminalReasonOf(row);

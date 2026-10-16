@@ -173,10 +173,31 @@ export interface RouterSitStore {
   clear(owner: string, repo: string, number: number): Promise<void>;
   get(owner: string, repo: string, number: number): Promise<RouterSitRecord | undefined>;
   list(): Promise<RouterSitRecord[]>;
+  /** Forge-free closed/merged marker for the board requeue filter. Set from the closed/merged webhook path, cleared on reopen. */
+  markPullClosed?(owner: string, repo: string, number: number): Promise<void>;
+  clearPullClosed?(owner: string, repo: string, number: number): Promise<void>;
+  listClosedPulls?(): Promise<ClosedPullRecord[]>;
 }
+
+export interface ClosedPullRecord {
+  owner: string;
+  repo: string;
+  number: number;
+}
+
+export const CLOSED_PULLS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS closed_pulls (
+  owner TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  closed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (owner, repo, number)
+);
+`;
 
 export class MemoryRouterSitStore implements RouterSitStore {
   private readonly rows = new Map<string, RouterSitRecord>();
+  private readonly closed = new Map<string, ClosedPullRecord>();
 
   private key(owner: string, repo: string, number: number): string {
     return `${owner}/${repo}#${number}`;
@@ -208,6 +229,19 @@ export class MemoryRouterSitStore implements RouterSitStore {
         if (a.repo !== b.repo) return a.repo < b.repo ? -1 : 1;
         return a.number - b.number;
       });
+  }
+
+  async markPullClosed(owner: string, repo: string, number: number): Promise<void> {
+    if (!owner || !repo || !Number.isFinite(number)) return;
+    this.closed.set(this.key(owner, repo, number), { owner, repo, number });
+  }
+
+  async clearPullClosed(owner: string, repo: string, number: number): Promise<void> {
+    this.closed.delete(this.key(owner, repo, number));
+  }
+
+  async listClosedPulls(): Promise<ClosedPullRecord[]> {
+    return [...this.closed.values()].map((row) => ({ ...row }));
   }
 }
 
@@ -243,6 +277,7 @@ export class PgRouterSitStore implements RouterSitStore {
   async migrate(): Promise<void> {
     try {
       await this.sql.unsafe(ROUTER_SITS_SCHEMA_SQL);
+      await this.sql.unsafe(CLOSED_PULLS_SCHEMA_SQL);
     } catch (err) {
       wrapSqlError(err);
     }
@@ -336,6 +371,46 @@ export class PgRouterSitStore implements RouterSitStore {
         });
       }
       return out;
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async markPullClosed(owner: string, repo: string, number: number): Promise<void> {
+    if (!owner || !repo || !Number.isFinite(number)) return;
+    try {
+      await this.sql.unsafe(
+        `INSERT INTO closed_pulls (owner, repo, number, closed_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (owner, repo, number)
+         DO UPDATE SET closed_at = NOW()`,
+        [owner, repo, number]
+      );
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async clearPullClosed(owner: string, repo: string, number: number): Promise<void> {
+    try {
+      await this.sql.unsafe(`DELETE FROM closed_pulls WHERE owner = $1 AND repo = $2 AND number = $3`, [
+        owner,
+        repo,
+        number,
+      ]);
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async listClosedPulls(): Promise<ClosedPullRecord[]> {
+    try {
+      const rows = asRows<{ owner: unknown; repo: unknown; number: unknown }>(
+        await this.sql.unsafe(
+          `SELECT owner, repo, number FROM closed_pulls ORDER BY owner ASC, repo ASC, number ASC LIMIT 500`
+        )
+      );
+      return rows.map((row) => ({ owner: String(row.owner), repo: String(row.repo), number: num(row.number) }));
     } catch (err) {
       wrapSqlError(err);
     }

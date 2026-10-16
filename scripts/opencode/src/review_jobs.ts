@@ -5,7 +5,13 @@ import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type P
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
-import { MemoryRouterSitStore, PgRouterSitStore, ROUTER_SITS_SCHEMA_SQL, type RouterSitStore } from "./router_sits.ts";
+import {
+  CLOSED_PULLS_SCHEMA_SQL,
+  MemoryRouterSitStore,
+  PgRouterSitStore,
+  ROUTER_SITS_SCHEMA_SQL,
+  type RouterSitStore,
+} from "./router_sits.ts";
 import {
   ISSUE_SKIP_LATCHES_SCHEMA_SQL,
   MemorySkipLatchStore,
@@ -625,6 +631,11 @@ function leasesWorkerKinds(kinds: readonly JobKind[]): boolean {
   return kinds.some((kind) => isWorkerKind(kind));
 }
 
+/** Reopen actions mean the pull is open again: the closed marker must go. */
+function isPullReopenAction(action: string | undefined): boolean {
+  return action === "opened" || action === "reopened" || action === "ready_for_review";
+}
+
 function isImplementTerminal(
   row: Pick<ReviewJobRecord, "kind" | "state" | "resultReason" | "payload">,
   job: IssueJob
@@ -696,6 +707,11 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(async () => {
       const key = reviewJobKey(job);
       const now = Date.now();
+      // A reopen means the pull is open again: drop the closed marker even
+      // when this enqueue dedupes against the terminal row (same SHA).
+      if (isPullReopenAction(job.action)) {
+        await this.sits.clearPullClosed?.(job.owner, job.repo, job.prNumber);
+      }
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => isTerminalOutcome(row.state, row.resultReason))) {
         await this.sits.remember(job.owner, job.repo, job.prNumber, "terminal-result");
@@ -758,6 +774,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         updatedAt: now,
       });
       await this.sits.clear(job.owner, job.repo, job.prNumber);
+      await this.sits.clearPullClosed?.(job.owner, job.repo, job.prNumber);
       return { key, queued: true };
     });
   }
@@ -1892,6 +1909,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       await this.sql.unsafe(REVIEW_JOBS_SCHEMA_SQL);
       await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
       await this.sql.unsafe(ROUTER_SITS_SCHEMA_SQL);
+      await this.sql.unsafe(CLOSED_PULLS_SCHEMA_SQL);
       await this.sql.unsafe(REVIEW_KICKS_SCHEMA_SQL);
       await this.sql.unsafe(PROVENANCE_SCHEMA_SQL);
     } catch (err) {
@@ -1922,7 +1940,15 @@ export class PgReviewJobStore implements ReviewJobStore {
   async enqueue(job: ReviewJob): Promise<EnqueueResult> {
     const key = reviewJobKey(job);
     const prUpdatedAt = job.prUpdatedAt ?? null;
+    const reopened = isPullReopenAction(job.action);
     return this.sql.begin(async (tx) => {
+      if (reopened) {
+        await tx.unsafe(`DELETE FROM closed_pulls WHERE owner = $1 AND repo = $2 AND number = $3`, [
+          job.owner,
+          job.repo,
+          job.prNumber,
+        ]);
+      }
       const done = asRows<{ state: unknown; result_reason: unknown }>(
         await tx.unsafe(
           `SELECT state, result_reason FROM review_jobs WHERE job_key = $1 AND state IN ('succeeded', 'skipped')`,
@@ -1994,6 +2020,11 @@ export class PgReviewJobStore implements ReviewJobStore {
         [job.owner, job.repo, job.prNumber, key, prUpdatedAt, REVIEW_KIND]
       );
       await this.clearSitTx(tx, job.owner, job.repo, job.prNumber);
+      await tx.unsafe(`DELETE FROM closed_pulls WHERE owner = $1 AND repo = $2 AND number = $3`, [
+        job.owner,
+        job.repo,
+        job.prNumber,
+      ]);
       return { key, queued: true };
     });
   }

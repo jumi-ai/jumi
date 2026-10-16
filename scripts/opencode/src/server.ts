@@ -312,6 +312,23 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
       if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
         try {
           const payload = parsePullRequestPayload(rawBody);
+          if (payload.action === "closed" || payload.action === "merged") {
+            // Review-only mode has no worker handler to record the close:
+            // mark it here so the board hides the requeue row. Forge-free.
+            try {
+              const [owner, repo] = payload.repository.full_name.split("/");
+              const sits = (
+                deps.queue as unknown as {
+                  sits?: { markPullClosed?: (o: string, r: string, n: number) => Promise<void> };
+                }
+              )?.sits;
+              if (owner && repo && sits?.markPullClosed) {
+                await sits.markPullClosed(owner, repo, payload.pull_request.number);
+              }
+            } catch {
+              // Best-effort marker only; the skip below owns the response.
+            }
+          }
           const validation = validateWebhookPayload(payload, {
             giteaUrl: config.giteaUrl,
             allowedOrgs: config.allowedOrgs,

@@ -155,6 +155,11 @@ describe("board requeue review kick (#260)", () => {
       "stalled: no heartbeat for 10m",
       "killed by SIGKILL",
       "Jumi review failed: max attempts exceeded",
+      "PR head changed from aaa to bbb",
+      "PR is closed",
+      "PR is merged",
+      "PR is already merged",
+      "Incomplete review: HEAD moved",
     ];
     for (const reason of disabledReasons) {
       const store = new MemoryReviewJobStore();
@@ -219,6 +224,29 @@ describe("board requeue review kick (#260)", () => {
     expect(body.code).toBe("stale-kick");
     expect(typeof body.error).toBe("string");
     expect((body.error as string).length).toBeGreaterThan(0);
+  });
+
+  test("closed pull with a failed terminal shows no requeue row", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedFailed(store);
+    await store.sits.markPullClosed?.("kirmanak", "demo", 7);
+    const groups = await buildBoardGroups(store);
+    expect(groups.needs_kick).toHaveLength(0);
+    expect(groups.in_progress).toHaveLength(0);
+
+    // Reopen clears the marker so the requeue row comes back. Use a skipped
+    // Incomplete terminal here: it dedupes on reopen (same SHA) instead of
+    // inserting a new queued row, so the row returns as needs_kick.
+    const reopened = new MemoryReviewJobStore();
+    await seedSkippedIncomplete(reopened);
+    await reopened.sits.markPullClosed?.("kirmanak", "demo", 7);
+    expect((await buildBoardGroups(reopened)).needs_kick).toHaveLength(0);
+    await reopened.enqueue(makeJob({ delivery: "d-reopen-7", prNumber: 7, headSha: HEAD_SHA, action: "reopened" }));
+    const afterReopen = await buildBoardGroups(reopened);
+    expect(afterReopen.needs_kick).toHaveLength(1);
+    expect(afterReopen.needs_kick[0]).toMatchObject({
+      kick: { effect: REQUEUE_KICK_EFFECT, kick: INCOMPLETE_REASON },
+    });
   });
 
   test("page offers Requeue review with the full-SHA payload and clear kick errors", async () => {

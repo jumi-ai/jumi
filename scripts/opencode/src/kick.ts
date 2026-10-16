@@ -130,6 +130,18 @@ function isStalledOrKilledReason(reason: string): boolean {
   return false;
 }
 
+function isHeadChangedReason(reason: string): boolean {
+  return reason.trim().startsWith("PR head changed from ");
+}
+
+function isPullClosedReason(reason: string): boolean {
+  return reason.trim().startsWith("PR is ");
+}
+
+function isHeadMovedIncompleteReason(reason: string): boolean {
+  return reason.trim() === "Incomplete review: HEAD moved";
+}
+
 /**
  * Terminal review failures that must stay status lines. Returns the `why`
  * for the 422, or undefined when the reason may be kicked.
@@ -161,6 +173,21 @@ export function disabledKickWhy(reason: string): string | undefined {
   }
   if (isStalledOrKilledReason(reason)) {
     return "No kick: a stalled or killed job is reclaimed by the lease loop, never auto-retried by this endpoint.";
+  }
+  if (isHeadChangedReason(reason)) {
+    return (
+      "No kick: the pull request head moved; requeueing this stale commit would review an old SHA. " +
+      "Push or sync the pull to review the current head."
+    );
+  }
+  if (isPullClosedReason(reason)) {
+    return "No kick: the pull request is closed or merged; requeueing cannot reopen it. Reopen the pull to review again.";
+  }
+  if (isHeadMovedIncompleteReason(reason)) {
+    return (
+      "No kick: the review stopped because the head moved mid-run; " +
+      "requeueing this stale commit would review an old SHA."
+    );
   }
   return undefined;
 }

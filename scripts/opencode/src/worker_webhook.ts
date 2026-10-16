@@ -180,6 +180,22 @@ async function clearSitForEnqueue(
   return undefined;
 }
 
+/** Best-effort closed/merged marker for the board requeue filter. Never fails the webhook. */
+async function markPullClosedBestEffort(
+  sits: RouterSitStore | undefined,
+  owner: string,
+  repo: string,
+  number: number,
+  logger: (message: string) => void
+): Promise<void> {
+  if (!sits?.markPullClosed || !owner || !repo || !Number.isFinite(number)) return;
+  try {
+    await sits.markPullClosed(owner, repo, number);
+  } catch (err) {
+    logger(`closed marker remember failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
   if (isQueueUnavailable(err)) {
     logger(`queue unavailable: ${err.message}`);
@@ -290,11 +306,22 @@ export async function handleWorkerWebhookEvent(
             if (deps.sits) {
               const [owner, repo] = payload.repository.full_name.split("/");
               if (owner && repo) {
+                await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
                 const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.pull_request.number, logger);
                 if (cleared) return cleared;
               }
             }
             return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
+          }
+          // The pull itself is closed even when blocked issues wake: mark it
+          // so the board hides its requeue row. The woken issue rows are separate.
+          try {
+            const [owner, repo] = payload.repository.full_name.split("/");
+            if (owner && repo) {
+              await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
+            }
+          } catch {
+            // Best-effort marker only; the enqueue below owns the response.
           }
           return enqueueJobList(jobs, deps.queue, delivery, logger, deps.sits);
         } catch (err) {
@@ -604,6 +631,7 @@ export async function handleWorkerWebhookEvent(
               repo: payload.repository.full_name.split("/")[1] ?? "",
             };
             if (owner && repo && deps.sits) {
+              await markPullClosedBestEffort(deps.sits, owner, repo, payload.issue.number, logger);
               const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.issue.number, logger);
               if (cleared) return cleared;
             }
