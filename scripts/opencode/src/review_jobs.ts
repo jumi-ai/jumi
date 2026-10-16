@@ -118,6 +118,8 @@ export interface ReviewJobStore {
   get(id: number): Promise<ReviewJobRecord | undefined>;
   /** Queued or leased rows for the operator board. No forge calls. Throws when the ledger is down. */
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
+  /** Terminal review rows for the operator board requeue kick. No forge calls. Throws when the ledger is down. */
+  listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]>;
   /**
    * Same-commit requeue for a terminal review row. Bypasses the enqueue
    * terminal no-op: the terminal row is kept and a new queued row with the
@@ -1052,6 +1054,24 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       return this.rows
         .filter((row) => row.state === "queued" || row.state === "leased")
         .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
+    });
+  }
+
+  listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
+    return this.locked(() => {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+      return this.rows
+        .filter(
+          (row) =>
+            rowKind(row) === REVIEW_KIND &&
+            (row.state === "failed" ||
+              row.state === "skipped" ||
+              row.state === "succeeded" ||
+              row.state === "cancelled")
+        )
+        .sort((a, b) => b.id - a.id)
         .slice(0, cap)
         .map((row) => ({ ...row }));
     });
@@ -2392,6 +2412,17 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
         `SELECT * FROM review_jobs WHERE state IN ('queued', 'leased') ORDER BY created_at ASC, id ASC LIMIT $1`,
+        [cap]
+      )
+    );
+    return rows.map(mapRow);
+  }
+
+  async listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY id DESC LIMIT $1`,
         [cap]
       )
     );

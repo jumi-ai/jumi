@@ -7,7 +7,9 @@ import {
   handleDeviceLoginStatus,
 } from "./board_device_login.ts";
 import {
+  disabledKickWhy,
   isImplementKickId,
+  isKickableTerminalState,
   isKickPath,
   isReopenKickId,
   isStuckKickId,
@@ -16,6 +18,7 @@ import {
   parseReopenKickBody,
   parseStuckKickBody,
   rawKickIdOf,
+  terminalReasonOf,
 } from "./kick.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
@@ -261,6 +264,9 @@ function kickForSit(reason: RouterSitReason): BoardKick | undefined {
 
 export { kickForSit };
 
+/** Server-provided effect for the same-commit requeue kick. The page confirms this text. */
+export const REQUEUE_KICK_EFFECT = "Rerun the review on the same commit, with no push and no CI rerun";
+
 function boardCatalogHash(input: string): string {
   let hash = 5381;
   for (let index = 0; index < input.length; index++) {
@@ -277,7 +283,12 @@ function boardCatalogHash(input: string): string {
  * kicks until it is refreshed. An old page can never outlive a new catalog.
  */
 export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
-  JSON.stringify({ effects: SIT_KICK_EFFECTS, ids: SIT_KICK_IDS, none: [...NO_KICK_SITS].sort() })
+  JSON.stringify({
+    effects: SIT_KICK_EFFECTS,
+    ids: SIT_KICK_IDS,
+    none: [...NO_KICK_SITS].sort(),
+    requeue: REQUEUE_KICK_EFFECT,
+  })
 );
 
 function primaryNumber(row: ReviewJobRecord): number {
@@ -340,22 +351,77 @@ function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kicka
 
 export interface BoardStore {
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
+  listTerminalReviews?(limit?: number): Promise<ReviewJobRecord[]>;
   sits: { list(): Promise<RouterSitRecord[]> };
 }
 
+function requeueMessage(state: string, reason: string): string {
+  const trimmed = reason.trim();
+  if (trimmed === "") return `Review ${state} — ready to requeue on the same commit.`;
+  return `Review ${state}: ${trimmed} — ready to requeue.`;
+}
+
+function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): BoardItem {
+  const item: BoardItem = {
+    reason: `${row.kind} ${row.state}`,
+    message: requeueMessage(row.state, reason),
+    owner: row.owner,
+    repo: row.repo,
+    number: row.prNumber,
+    kind: row.kind,
+    kick: { effect: REQUEUE_KICK_EFFECT, kick: reason },
+  };
+  if (forge) item.forge = forge;
+  const sha = (row.headSha ?? "").trim();
+  if (sha !== "") {
+    item.commit = sha;
+    item.headSha = sha;
+  }
+  return item;
+}
+
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
-  const [inflight, sits] = await Promise.all([store.listInflight(200), store.sits.list()]);
+  const [inflight, sits, terminals] = await Promise.all([
+    store.listInflight(200),
+    store.sits.list(),
+    store.listTerminalReviews ? store.listTerminalReviews(200) : Promise.resolve([]),
+  ]);
   const in_progress = inflight.map((row) => inflightItem(row, forge));
   // A sit that duplicates a job already in progress is not a second problem:
   // hide it here. Recording and clearing are unchanged; this is read-time only.
   const inflightKeys = new Set(
     in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
   );
+  const inflightJobKeys = new Set(inflight.map((row) => row.jobKey));
+  // Latest terminal review per pull only: older commits are history, not the current head.
+  const latestByPull = new Map<string, ReviewJobRecord>();
+  for (const row of terminals) {
+    if (row.kind !== "review") continue;
+    const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
+    const existing = latestByPull.get(key);
+    if (!existing || row.id > existing.id) latestByPull.set(key, row);
+  }
   const needs_kick: BoardItem[] = [];
+  const requeueKeys = new Set<string>();
+  for (const row of latestByPull.values()) {
+    const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
+    if (inflightKeys.has(key)) continue;
+    if (inflightJobKeys.has(row.jobKey)) continue;
+    if (!isKickableTerminalState(row.state)) continue;
+    const reason = terminalReasonOf(row);
+    if (reason === "") continue;
+    if (disabledKickWhy(reason)) continue;
+    if ((row.headSha ?? "").trim() === "") continue;
+    needs_kick.push(requeueItem(row, reason, forge));
+    requeueKeys.add(key);
+  }
   const sitting: BoardItem[] = [];
   for (const sit of sits) {
     const key = `${sit.owner.toLowerCase()}/${sit.repo.toLowerCase()}#${sit.number}`;
     if (inflightKeys.has(key)) continue;
+    // A requeueable terminal replaces its terminal-result sit: the row is
+    // offered as a requeue kick above, never as "Sitting on purpose".
+    if (sit.reason === "terminal-result" && requeueKeys.has(key)) continue;
     const { item, kickable } = sitItem(sit, forge);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
@@ -777,6 +843,7 @@ function headlineOf(item) { return (typeof item.message === "string" && item.mes
 function kickLabelOf(item) {
   const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
   if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") return "Clear latch and queue follow-up";
+  if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
   return "Remove row";
 }
 function rowItem(item, opts) {
@@ -874,6 +941,8 @@ function confirmBlock(item, data, confirmIdPrefix) {
       msg.textContent = "Working…";
       try {
         const payload = { owner: item.owner, repo: item.repo, number: item.number };
+        if (typeof item.commit === "string" && item.commit.trim() !== "") payload.commit = item.commit;
+        else if (typeof item.headSha === "string" && item.headSha.trim() !== "") payload.commit = item.headSha;
         if (kickId) payload.kick = kickId;
         payload.idempotencyKey = idempotencyKey;
         const res = await fetch("/api/board/kick", {
@@ -885,8 +954,19 @@ function confirmBlock(item, data, confirmIdPrefix) {
         if (res.ok) {
           closeConfirm();
           await load();
-        } else if (res.status === 409) {
-          msg.textContent = "That kick is no longer offered for this row.";
+        } else if (res.status === 409 || res.status === 422) {
+          let detail = "";
+          try {
+            const data = await res.json();
+            if (data && typeof data.error === "string" && data.error.trim() !== "") detail = data.error.trim();
+          } catch {}
+          if (detail !== "") {
+            msg.textContent = detail;
+          } else if (res.status === 409) {
+            msg.textContent = "That kick is no longer offered for this row.";
+          } else {
+            msg.textContent = "Kick did not land (422). Close and confirm again to try once more.";
+          }
         } else if (res.status === 404) {
           msg.textContent = "That row is gone. Refresh to update the list.";
         } else if (res.status === 401) {
