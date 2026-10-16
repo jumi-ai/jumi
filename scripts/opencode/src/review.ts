@@ -615,14 +615,6 @@ function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
   return true;
 }
 
-function porcelainIncludesReviewArtifact(porcelain: string): boolean {
-  for (const line of porcelain.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    if (porcelainPaths(line).some((path) => path === REVIEW_ARTIFACT)) return true;
-  }
-  return false;
-}
-
 type ReviewArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "too_large" };
 
 async function readReviewArtifact(worktree: string, maxOutputBytes: number): Promise<ReviewArtifactRead> {
@@ -1528,8 +1520,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       return engineResult;
     };
 
-    let lastStdout = (await runOpenCode()).stdout;
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
+    // A stale JUMI_REVIEW.md planted before this run must not count as this
+    // run's output. Porcelain cannot distinguish stale from fresh (and an
+    // ignored artifact is absent from porcelain entirely), so clear any
+    // pre-existing artifact and read the filesystem directly afterwards.
+    await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+    let lastStdout = (await runOpenCode()).stdout;
     const persistSkipAndStatus = async (
       reason: string,
       htmlUrl?: string,
@@ -1563,10 +1560,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
         }
 
-        const noArtifact = !porcelainIncludesReviewArtifact(porcelain);
-        const artifact = noArtifact
-          ? ({ status: "missing" } as const)
-          : await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
+        // Read the artifact directly from the filesystem. An ignored
+        // JUMI_REVIEW.md (e.g. via `JUMI_REVIEW.md` or `JUMI_*.md` in
+        // .gitignore) is absent from `git status --porcelain` even though it
+        // exists, so porcelain must not gate discovery. The dirty-tree check
+        // above still guards source modifications; the pre-run removal above
+        // guards stale pre-existing output.
+        const artifact = await readReviewArtifact(opts.workspace, opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES);
         if (artifact.status === "too_large") {
           return await persistSkipAndStatus("Incomplete review: output too large", currentPR.html_url);
         }
