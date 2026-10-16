@@ -540,6 +540,27 @@ exit 1
     );
   });
 
+  test("classifies provider 401 invalid key as auth, not infra", async () => {
+    // Verified against OpenCode provider errors: `ProviderAuthError: Failed to
+    // authenticate with ...` and `HTTP 401: Invalid API key.`
+    const { looksLikeProviderAuthDeath } = await import("../src/auth.ts");
+    expect(looksLikeProviderAuthDeath("ProviderAuthError: Failed to authenticate with openai")).toBe(true);
+    expect(looksLikeProviderAuthDeath("HTTP 401: Invalid API key.")).toBe(true);
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ProviderAuthError: Failed to authenticate with openai\\nHTTP 401: Invalid API key.\\n' >&2
+exit 1
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.infra).toBe(false);
+        expect(result.message).toBe(providerAuthDeathMessage());
+      }
+    );
+  });
+
   test("classifies missing provider key as auth, not infra", async () => {
     await withFakeOpenCode(
       `#!/bin/sh

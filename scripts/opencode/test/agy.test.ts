@@ -11,6 +11,7 @@ import {
   agyPrintTimeout,
   agyPromptArg,
   ensureAgyForgeDeny,
+  looksLikeAgyAuthDeath,
   mergeAgyForgeDeny,
   runAgy,
 } from "../src/agy.ts";
@@ -712,6 +713,31 @@ exec sleep 30`
       expect(result.auth).toBe(true);
       expect(result.message).toBe(providerAuthDeathMessage());
     });
+  });
+
+  test("signed-out keyring token is auth death", async () => {
+    // Verified against Antigravity docs/issues: headless `authentication
+    // required`, `Please sign in`, and keyring failures like `You are not
+    // logged into Antigravity` / `failed to retrieve token` /
+    // `error getting token source`.
+    expect(looksLikeAgyAuthDeath("You are not logged into Antigravity.")).toBe(true);
+    expect(looksLikeAgyAuthDeath("Error: failed to retrieve token: secret keyring is locked")).toBe(true);
+    expect(looksLikeAgyAuthDeath("Failed to get OAuth token: error getting token source")).toBe(true);
+    await withFakeBins(
+      { agy: fakeBin("agy", `printf 'You are not logged into Antigravity.\\n' >&2\nexit 1`) },
+      async ({ workdir, argsLog }) => {
+        const result = await runAgy({
+          prompt: "p",
+          model: "m",
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.message).toBe(providerAuthDeathMessage());
+      }
+    );
   });
 
   test("response text about authentication is not auth death", async () => {

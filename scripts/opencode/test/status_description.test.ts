@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   codePointLength,
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
+  omitClaudeConfigWarning,
   omitOpenCodeStderr,
   truncateStatusDescription,
 } from "../src/status_description.ts";
@@ -65,5 +66,15 @@ describe("omitOpenCodeStderr", () => {
     expect(omitOpenCodeStderr("Jumi review failed: model unavailable", "pod-a")).toBe(
       "Jumi review failed: model unavailable"
     );
+  });
+
+  test("strips the Claude config warning so the cause line shows", () => {
+    const description =
+      "Jumi review failed: claude exited with code 1:\nClaude configuration file not found at: /data/.claude.json\nRestoring configuration from backup\nFailed to authenticate: OAuth session expired and could not be refreshed";
+    const cleaned = omitOpenCodeStderr(description, "pod-a");
+    expect(cleaned).toContain("Failed to authenticate: OAuth session expired");
+    expect(cleaned).not.toContain("configuration file not found");
+    expect(cleaned).not.toContain("/data/.claude.json");
+    expect(omitClaudeConfigWarning("Claude configuration file not found at: /data/.claude.json\nok")).toBe("ok");
   });
 });

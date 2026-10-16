@@ -16,10 +16,27 @@ export function codePointLength(text: string): number {
 
 /** Drop OpenCode stderr from a status description. Auth-death text has no stderr and keeps the pod hostname. */
 export function omitOpenCodeStderr(description: string, host = hostname()): string {
-  const match = OPENCODE_EXIT_STDERR_RE.exec(description);
-  if (!match) return description;
+  const cleaned = omitClaudeConfigWarning(description);
+  const match = OPENCODE_EXIT_STDERR_RE.exec(cleaned);
+  if (!match) return cleaned;
   const prefix = match[1] ?? "";
   return `${prefix}${host}: opencode exited with code ${match[2]}`;
+}
+
+/**
+ * The `Claude configuration file not found at: ...` / backup-restore warning
+ * also appears on successful runs. Strip it so a failure status shows the
+ * actual cause line, not the leading warning.
+ */
+export function omitClaudeConfigWarning(description: string): string {
+  if (!description) return description;
+  const kept = description.split(/\r?\n/).filter((line) => {
+    if (/claude configuration file not found/i.test(line)) return false;
+    if (/backup/i.test(line) && /restor/i.test(line)) return false;
+    if (/\.claude\.json/i.test(line) && /not found|missing|backup|restor/i.test(line)) return false;
+    return true;
+  });
+  return kept.join("\n");
 }
 
 export function truncateStatusDescription(

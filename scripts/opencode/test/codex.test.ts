@@ -2,7 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CODEX_APPROVAL, CODEX_SANDBOX, codexArgv, REVIEW_ARTIFACT, runCodex } from "../src/codex.ts";
+import { providerAuthDeathMessage } from "../src/auth.ts";
+import {
+  CODEX_APPROVAL,
+  CODEX_SANDBOX,
+  codexArgv,
+  looksLikeCodexAuthDeath,
+  REVIEW_ARTIFACT,
+  runCodex,
+} from "../src/codex.ts";
 import { buildCodexSpans } from "../src/codex_tracing.ts";
 import { CodexStreamParser } from "../src/codex_usage.ts";
 import { resetControlMetricsForTests } from "../src/control_metrics.ts";
@@ -472,6 +480,35 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
       });
       expect(result.status).toBe("ok");
     });
+  });
+
+  test("revoked refresh token is auth death with a short message", async () => {
+    // Verified against real Codex CLI output: refresh rejection with
+    // `refresh_token_invalidated` plus `Your session has ended`.
+    const stderr =
+      "Failed to refresh token: 401 Unauthorized: Your session has ended. Please log in again. code: refresh_token_invalidated";
+    expect(looksLikeCodexAuthDeath(stderr)).toBe(true);
+    expect(
+      looksLikeCodexAuthDeath("Your access token could not be refreshed because your refresh token was revoked.")
+    ).toBe(true);
+    await withFakeBins(
+      { codex: fakeBin("codex", `printf '%s\\n' '${THREAD}'\nprintf '${stderr}\\n' >&2\nexit 1`) },
+      async ({ workdir, home, argsLog }) => {
+        const result = await runCodex({
+          type: "codex",
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).not.toContain("refresh_token_invalidated");
+      }
+    );
   });
 
   test("exit 0 wins over quota/auth-looking stderr, mirroring claude", async () => {
