@@ -1,5 +1,6 @@
 import { hostname } from "node:os";
 import { EngineFailedError } from "./engine.ts";
+import { omitClaudeConfigWarning } from "./status_description.ts";
 
 export const AUTH_DEATH_REASON = "provider auth death";
 
@@ -30,13 +31,7 @@ const AUTH_STDERR_RE =
 
 export function stripClaudeConfigWarning(text: string): string {
   if (!text) return text;
-  const kept = text.split(/\r?\n/).filter((line) => {
-    if (/claude configuration file not found/i.test(line)) return false;
-    if (/backup/i.test(line) && /restor/i.test(line)) return false;
-    if (/\.claude\.json/i.test(line) && /not found|missing|backup|restor/i.test(line)) return false;
-    return true;
-  });
-  return kept.join("\n").trim();
+  return omitClaudeConfigWarning(text).trim();
 }
 
 export function looksLikeProviderAuthDeath(text: string): boolean {
