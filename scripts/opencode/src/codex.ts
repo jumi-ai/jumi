@@ -27,7 +27,7 @@ export const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const CODEX_STDERR_MAX_BYTES = 64_000;
 const API_KEY_ENV = ["OPENAI_API_KEY", "CODEX_API_KEY"] as const;
 const CODEX_AUTH_RE =
-  /not logged in|please (?:sign in|log in)|authentication required|login required|no credentials|unauthorized|invalid api key|missing api key|chatgpt login/i;
+  /not logged in|please (?:sign in|log in)|authentication required|login required|no credentials|unauthorized|invalid api key|missing api key|chatgpt login|failed to refresh token|session has ended|refresh_token_invalidated|token_invalidated|token_revoked|access token could not be refreshed|authentication token has been invalidated|invalidated oauth token|refresh token was revoked/i;
 const CODEX_USAGE_LIMIT_RE =
   /usage[_\s-]*limit|rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|out of quota|hit your (?:usage|free|session) limit/i;
 

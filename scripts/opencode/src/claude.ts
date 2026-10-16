@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { looksLikeProviderAuthDeath, providerAuthDeathMessage, stripClaudeConfigWarning } from "./auth.ts";
 import { stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
@@ -305,7 +305,11 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     const stdoutResult = limitText(parser.text(), "claude output", opts.maxOutputBytes);
     const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
     const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
-    const combined = [stderr, stdout].filter(Boolean).join("\n");
+    // The `Claude configuration file not found` / backup-restore warning also
+    // appears on successful runs: it must not decide auth classification, and
+    // failure messages must show the actual cause line, not the warning.
+    const cleanStderr = stripClaudeConfigWarning(stderr);
+    const combined = [cleanStderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
     const quota = !timedOut ? inspectClaudeUsageLimit(combined) : undefined;
     const auth = !quota && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);

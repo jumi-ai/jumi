@@ -3,7 +3,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { providerAuthDeathMessage } from "../src/auth.ts";
+import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "../src/auth.ts";
 import {
   CLAUDE_ALLOWED_TOOLS,
   CLAUDE_OUTPUT_FORMAT,
@@ -16,8 +16,10 @@ import {
 import { setClaudeTracingPluginDirForTests } from "../src/claude_tracing.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
+import { withEngineChain } from "../src/fallback.ts";
 import { claudeDisallowedTools, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
+import { omitClaudeConfigWarning } from "../src/status_description.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
@@ -279,6 +281,80 @@ exit 1
         expect(result.message).toContain(hostname());
         const text = renderRunMetrics();
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+      }
+    );
+  });
+
+  test("expired OAuth session after the config warning is auth death", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\\n' 'Claude configuration file not found at: /data/.claude.json' >&2
+printf '%s\\n' 'Restoring configuration from backup' >&2
+printf '%s\\n' 'Failed to authenticate: OAuth session expired and could not be refreshed' >&2
+exit 1
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("exit");
+        expect(result.auth).toBe(true);
+        expect(result.infra).toBe(false);
+        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).not.toContain("configuration file not found");
+        expect(result.message).not.toContain("/data/.claude.json");
+        expect(
+          looksLikeProviderAuthDeath(
+            "Claude configuration file not found at: /data/.claude.json\nRestoring configuration from backup\nFailed to authenticate: OAuth session expired and could not be refreshed"
+          )
+        ).toBe(true);
+        const description = omitClaudeConfigWarning(
+          `Jumi review failed: claude exited with code 1:\nClaude configuration file not found at: /data/.claude.json\nRestoring configuration from backup\nFailed to authenticate: OAuth session expired and could not be refreshed`
+        );
+        expect(description).toContain("Failed to authenticate: OAuth session expired");
+        expect(description).not.toContain("configuration file not found");
+      }
+    );
+  });
+
+  test("config warning alone on a successful run is not auth", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\\n' 'Claude configuration file not found at: /data/.claude.json' >&2
+printf '%s\\n' 'Restoring configuration from backup' >&2
+printf 'ok\\n'
+`,
+      async (workdir) => {
+        const result = await runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("ok");
+        expect(result.auth).toBeFalsy();
+      }
+    );
+  });
+
+  test("expired OAuth chain hops to the next runner", async () => {
+    await withFakeClaude(
+      `#!/bin/sh
+printf '%s\\n' 'Claude configuration file not found at: /data/.claude.json' >&2
+printf '%s\\n' 'Restoring configuration from backup' >&2
+printf '%s\\n' 'Failed to authenticate: OAuth session expired and could not be refreshed' >&2
+exit 1
+`,
+      async (workdir) => {
+        const seen: string[] = [];
+        const engine = async (opts: { model: string; workdir: string }) => {
+          seen.push(opts.model);
+          if (opts.model === "opus") {
+            return runClaude({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true });
+          }
+          return { status: "ok" as const, stdout: "fallback ok" };
+        };
+        const result = await withEngineChain(engine as never, {
+          chain: [
+            { name: "claude", type: "claude", model: "opus" },
+            { name: "grok", type: "opencode", model: "grok" },
+          ],
+        })({ prompt: "prompt", model: "opus", workdir, sanitizeEnv: true } as never);
+        expect(seen).toEqual(["opus", "grok"]);
+        expect(result).toMatchObject({ status: "ok", stdout: "fallback ok" });
       }
     );
   });

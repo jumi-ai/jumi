@@ -40,7 +40,8 @@ export const AGY_PROJECT_AGENT_NAMES = [".agents", ".agent", "_agents", "_agent"
 const AGY_SKILLS_DIR = "skills";
 
 const AGY_STDERR_MAX_BYTES = 64_000;
-const AGY_AUTH_RE = /Please sign in|authentication required/i;
+const AGY_AUTH_RE =
+  /Please sign in|authentication required|you are not logged into|not signed in|failed to retrieve token|error getting token source|failed to get oauth token/i;
 
 /**
  * Resetting-quota signal for the Antigravity runner, from that runner's own
