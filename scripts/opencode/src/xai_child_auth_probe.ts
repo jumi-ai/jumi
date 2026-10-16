@@ -26,6 +26,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getOpenCodeMajor } from "./git.ts";
 import { childAuthFile, XAI_CHILD_AUTH_SHAPE, XAI_PROVIDER_ID } from "./xai_auth.ts";
 
 /** Never a real token: the probe only needs the string to be echoed back. */
@@ -78,7 +79,12 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
 }
 
 async function runOpenCode(env: Record<string, string>, workdir: string): Promise<void> {
-  const proc = Bun.spawn(["opencode", "run", "--dir", workdir, "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"], {
+  const major = getOpenCodeMajor();
+  const args =
+    major >= 2
+      ? ["opencode", "run", "--standalone", "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"]
+      : ["opencode", "run", "--dir", workdir, "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"];
+  const proc = Bun.spawn(args, {
     cwd: workdir,
     stdin: "ignore",
     stdout: "pipe",

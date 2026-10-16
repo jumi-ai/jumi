@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
+import {
+  FORGE_DENY_DOMAIN,
+  forgeOpenCodePermission,
+  forgeWebfetchPermission,
+  isPermissionDenyText,
+  PERMISSION_DENY_V1_TEXT,
+  PERMISSION_DENY_V2_PREFIX,
+} from "../src/forge_webfetch.ts";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
@@ -293,5 +300,40 @@ describe("renovate bun pin", () => {
     const rule = renovate.packageRules?.find((r) => r.matchPackageNames?.includes("oven-sh/bun"));
     expect(rule?.extractVersion).toBe("^bun-v(?<version>.+)$");
     expect(new RegExp(rule?.extractVersion ?? "").exec("bun-v1.2.5")?.groups?.version).toBe("1.2.5");
+  });
+});
+
+describe("isPermissionDenyText", () => {
+  test("matches V1 ruleset echo and deny text", () => {
+    expect(isPermissionDenyText(PERMISSION_DENY_V1_TEXT)).toBe(true);
+    expect(
+      isPermissionDenyText(
+        "The user has specified a rule which prevents you from using this specific tool call with the provided arguments"
+      )
+    ).toBe(true);
+    expect(
+      isPermissionDenyText(
+        "Error: The user has specified a rule which prevents you from using this specific tool call."
+      )
+    ).toBe(true);
+  });
+
+  test("matches V2 Permission denied prefix", () => {
+    expect(
+      isPermissionDenyText("Permission denied: webfetch is not allowed for https://gitea.kirmanak.stream/foo")
+    ).toBe(true);
+    expect(isPermissionDenyText("permission denied: tool execution forbidden")).toBe(true);
+  });
+
+  test("does not match unrelated errors or non-string input", () => {
+    expect(isPermissionDenyText("404 Not Found")).toBe(false);
+    expect(isPermissionDenyText("Connection refused")).toBe(false);
+    expect(isPermissionDenyText("Permission denied")).toBe(false);
+    expect(isPermissionDenyText(PERMISSION_DENY_V2_PREFIX)).toBe(false);
+    expect(isPermissionDenyText("")).toBe(false);
+    expect(isPermissionDenyText(null)).toBe(false);
+    expect(isPermissionDenyText(undefined)).toBe(false);
+    expect(isPermissionDenyText(123)).toBe(false);
+    expect(isPermissionDenyText({ error: "denied" })).toBe(false);
   });
 });

@@ -8,12 +8,16 @@ import { withModelHop } from "../src/fallback.ts";
 import { FORGE_DENY_DOMAIN, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
+  buildOpenCodeArgs,
   CONFLICT_PROMPT,
   FOLLOWUP_PROMPT,
+  getOpenCodeMajor,
   IMPLEMENT_PROMPT,
   IMPLEMENT_YIELD_PROMPT,
+  resetOpenCodeVersionForTests,
   resolveOpenCodePrompt,
   runOpenCode,
+  setOpenCodeMajorForTests,
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
@@ -49,6 +53,8 @@ afterEach(async () => {
   if (originalApiKey === undefined) delete process.env.OPENCODE_API_KEY;
   else process.env.OPENCODE_API_KEY = originalApiKey;
   resetTokenMetricsForTests();
+  setOpenCodeMajorForTests(undefined);
+  resetOpenCodeVersionForTests();
 });
 
 async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
@@ -204,6 +210,113 @@ printf 'ARGS=%s\n' "$*"
         expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5 --continue`);
       }
     );
+  });
+
+  test("runs with 2.x argv when OpenCode major is 2", async () => {
+    setOpenCodeMajorForTests(2);
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'ARGS=%s VARIANT=%s PWD=%s\\n' "$*" "$OPENCODE_VARIANT" "$(pwd)"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "openai/gpt-5.5",
+            variant: "xhigh",
+            workdir,
+            sanitizeEnv: true,
+          });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("ARGS=run --standalone -m openai/gpt-5.5#xhigh");
+          expect(result.stdout).not.toContain("--dir");
+          expect(result.stdout).not.toContain("--variant");
+          expect(result.stdout).toContain(`PWD=${workdir}`);
+        }
+      );
+    } finally {
+      setOpenCodeMajorForTests(undefined);
+    }
+  });
+
+  test("getOpenCodeMajor returns detected or overridden major", () => {
+    expect(getOpenCodeMajor()).toBeGreaterThanOrEqual(1);
+    setOpenCodeMajorForTests(2);
+    expect(getOpenCodeMajor()).toBe(2);
+    setOpenCodeMajorForTests(undefined);
+  });
+
+  test("buildOpenCodeArgs builds 1.x argv unchanged", () => {
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5" }, 1)).toEqual([
+      "opencode",
+      "run",
+      "--dir",
+      "/app/work",
+      "-m",
+      "openai/gpt-5.5",
+    ]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh" }, 1)).toEqual([
+      "opencode",
+      "run",
+      "--dir",
+      "/app/work",
+      "-m",
+      "openai/gpt-5.5",
+      "--variant",
+      "xhigh",
+    ]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", continueSession: true }, 1)).toEqual([
+      "opencode",
+      "run",
+      "--dir",
+      "/app/work",
+      "-m",
+      "openai/gpt-5.5",
+      "--continue",
+    ]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "" }, 1)).toEqual([
+      "opencode",
+      "run",
+      "--dir",
+      "/app/work",
+      "-m",
+      "openai/gpt-5.5",
+    ]);
+  });
+
+  test("buildOpenCodeArgs builds 2.x argv with standalone and folded variant", () => {
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5" }, 2)).toEqual([
+      "opencode",
+      "run",
+      "--standalone",
+      "-m",
+      "openai/gpt-5.5",
+    ]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh" }, 2)).toEqual([
+      "opencode",
+      "run",
+      "--standalone",
+      "-m",
+      "openai/gpt-5.5#xhigh",
+    ]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", continueSession: true }, 2)).toEqual([
+      "opencode",
+      "run",
+      "--standalone",
+      "-m",
+      "openai/gpt-5.5",
+      "--continue",
+    ]);
+    expect(
+      buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh", continueSession: true }, 2)
+    ).toEqual(["opencode", "run", "--standalone", "-m", "openai/gpt-5.5#xhigh", "--continue"]);
+    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "" }, 2)).toEqual([
+      "opencode",
+      "run",
+      "--standalone",
+      "-m",
+      "openai/gpt-5.5",
+    ]);
   });
 
   test("forwards extraEnv toolchain vars into the sanitized child", async () => {

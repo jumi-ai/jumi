@@ -20,6 +20,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "./forge_webfetch.ts";
+import { getOpenCodeMajor } from "./git.ts";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
@@ -180,7 +181,11 @@ async function runOpenCode(
   workdir: string,
   configPath: string
 ): Promise<{ code: number; output: string; timedOut: boolean }> {
-  const proc = Bun.spawn(["opencode", "run", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url"], {
+  const major = getOpenCodeMajor();
+  const args = ["opencode", "run"];
+  if (major >= 2) args.push("--standalone");
+  args.push("--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url");
+  const proc = Bun.spawn(args, {
     cwd: workdir,
     stdin: "ignore",
     stdout: "pipe",
@@ -225,10 +230,11 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
     return { probe, ok: false, observed: "DENIED URL WAS FETCHED: the probe target received a request" };
   }
   // OpenCode reports a blocked call by echoing the webfetch ruleset it was
-  // holding — see DENY_PATTERNS for why that is asserted whole rather than
-  // per row.
+  // holding (V1) or by returning "Permission denied: <action>" (V2).
   const missing = DENY_PATTERNS.filter((pattern) => !result.includes(pattern));
-  const ok = missing.length === 0 && !result.includes(FETCH_MARKER);
+  const isV1Deny = missing.length === 0;
+  const isV2Deny = getOpenCodeMajor() >= 2 && /Permission denied:\s*\w+/.test(result);
+  const ok = (isV1Deny || isV2Deny) && !result.includes(FETCH_MARKER);
   return {
     probe,
     ok,
