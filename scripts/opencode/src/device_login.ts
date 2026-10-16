@@ -147,12 +147,6 @@ export function parseDeviceLoginOutput(text: string): { url?: string; userCode?:
     );
     if (oneTime?.[1]) userCode = oneTime[1].replace(/[-.,;:]+$/, "").trim() || undefined;
   }
-  if (!userCode) {
-    // Last resort: a standalone device code token (`XXXX-XXXX` or
-    // `XXXX-XXXXX`; groups are 4-5 characters each).
-    const bare = /\b([A-Za-z0-9]{4,5}-[A-Za-z0-9]{4,5}(?:-[A-Za-z0-9]{4,5})?)\b/.exec(text);
-    if (bare?.[1]) userCode = bare[1].trim() || undefined;
-  }
   return { url, userCode };
 }
 
@@ -224,8 +218,13 @@ export type SpawnLoginFn = (opts: {
 }) => { kill: (signal?: NodeJS.Signals) => void };
 
 export const defaultSpawnLogin: SpawnLoginFn = (opts) => {
+  const env: Record<string, string | undefined> = { ...process.env, HOME: opts.home };
+  // Mirror the Codex runner child (`src/codex.ts`): no `CODEX_HOME` override,
+  // so the credential lands at `$HOME/.codex/auth.json` on this ordinal.
+  delete env.CODEX_HOME;
+  delete env.XDG_CONFIG_HOME;
   const child = spawn(opts.cmd[0], opts.cmd.slice(1), {
-    env: { ...process.env, HOME: opts.home },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stdout?.on("data", (data: Buffer) => opts.onStdout(data.toString("utf8")));
