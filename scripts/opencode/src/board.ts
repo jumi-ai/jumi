@@ -760,6 +760,7 @@ button.secondary { opacity: 0.85; }
 </div>
 <script>
 const PAGE_CATALOG = ${JSON.stringify(catalog)};
+const REQUEUE_EFFECT = ${JSON.stringify(REQUEUE_KICK_EFFECT)};
 const state = { data: null, selected: null, forge: "gitea", catalogOk: true };
 const $ = (id) => document.getElementById(id);
 const narrow = () => !window.matchMedia("(min-width: 700px)").matches;
@@ -843,6 +844,8 @@ function headlineOf(item) { return (typeof item.message === "string" && item.mes
 function kickLabelOf(item) {
   const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
   if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") return "Clear latch and queue follow-up";
+  const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
+  if (effect === REQUEUE_EFFECT) return "Requeue review";
   if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
   return "Remove row";
 }
