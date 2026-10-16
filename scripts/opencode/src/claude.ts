@@ -15,6 +15,7 @@ import {
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
+import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
@@ -176,8 +177,16 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string
 /**
  * `checkoutSkillsPlugin` is the hook-free plugin `stageClaudeCheckoutSkills`
  * wrote for this review spawn, when the checkout has skills.
+ * `imageSkillsPlugin` is the hook-free plugin `stageImageSkillsForClaude`
+ * wrote for this spawn's kind: the reviewer skill for reviews, the worker
+ * skill for implement/follow-up/conflict. Workers never see the reviewer
+ * skill, and reviews never see the worker skill.
  */
-export function claudeArgv(opts: EngineRunOptions, checkoutSkillsPlugin?: string): string[] {
+export function claudeArgv(
+  opts: EngineRunOptions,
+  checkoutSkillsPlugin?: string,
+  imageSkillsPlugin?: string
+): string[] {
   const args = [
     "claude",
     "-p",
@@ -207,6 +216,9 @@ export function claudeArgv(opts: EngineRunOptions, checkoutSkillsPlugin?: string
   // Checkout skills ride the same way: staged by the parent, never read from
   // the checkout's own `.claude/`, so `--setting-sources user` stays.
   if (checkoutSkillsPlugin) args.push("--plugin-dir", checkoutSkillsPlugin);
+  // Shared image skills ride the same way: staged per spawn outside the
+  // checkout, so the tree stays clean and the kind stays separated.
+  if (imageSkillsPlugin) args.push("--plugin-dir", imageSkillsPlugin);
   if (opts.continueSession) args.push("--continue");
   return args;
 }
@@ -240,12 +252,14 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
 
   try {
     // Reviewers only, like the Antigravity skills stash: a worker spawn sees no
-    // checkout skills, as before.
+    // checkout skills, as before. Image skills are per-kind: review gets the
+    // reviewer skill, workers get the worker skill.
     const checkoutSkills =
       opts.trace?.kind === "review"
         ? await stageClaudeCheckoutSkills(opts.workdir, join(tmpDir, "checkout-skills"), log)
         : undefined;
-    const args = claudeArgv(opts, checkoutSkills);
+    const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
+    const args = claudeArgv(opts, checkoutSkills, imageSkills);
     const proc = (() => {
       try {
         return Bun.spawn(args, {
