@@ -529,6 +529,20 @@ export async function handleGithubWebhookEvent(
         logger: deps.worker.logger ?? logger,
       });
     }
+    if ((action === "closed" || action === "merged") && event === "pull_request") {
+      // Review-only mode has no worker handler to record the close: mark it
+      // here so the board hides the requeue row. Forge-free, best-effort.
+      try {
+        const payload = parsePullRequestPayload(rawBody);
+        const [owner, repo] = payload.repository.full_name.split("/");
+        const sits = reviewSitsFor(deps);
+        if (owner && repo && sits?.markPullClosed) {
+          await sits.markPullClosed(owner, repo, payload.pull_request.number).catch(() => {});
+        }
+      } catch {
+        // Best-effort marker only; the skip below owns the response.
+      }
+    }
     return skipped(action ? `unsupported action ${action}` : `unsupported event ${event ?? "pull_request"}`, logger);
   }
 
