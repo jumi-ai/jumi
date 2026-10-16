@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
 import { meterWebhook, renderProcessMetrics } from "./control_metrics.ts";
 import {
+  chainHasCodex,
   chainHasOpenCodeXai,
   createOrdinalDeviceLoginServer,
   deviceLoginResultLogger,
@@ -192,10 +193,10 @@ async function main() {
 
   if (ramQueue) bindAbort(shutdown.signal, () => abortIssueQueue(ramQueue));
 
-  // Ordinal-local Grok device login on the constant 3010, worker only.
-  // Same HOME the implement child uses, so the CLI writes the retained auth
-  // file as the container uid. A refused connection until the chart allows
-  // router->ordinal:3010 is fine.
+  // Ordinal-local device login on the constant 3010, worker only (Grok and
+  // Codex). Same HOME the implement child and the Codex runner child use, so
+  // the CLI writes the retained auth file as the container uid. A refused
+  // connection until the chart allows router->ordinal:3010 is fine.
   const workerOrdinal = hostname();
   const workerLeasedBy = workerId();
   try {
@@ -203,9 +204,10 @@ async function main() {
       ordinal: workerOrdinal,
       role: "worker",
       home: config.home,
-      // The isolated GitHub factory never shows the control: its Grok hop is
+      // The isolated GitHub factory never shows the controls: its Grok hop is
       // skip-if-unauthed.
       hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
+      hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
       isLeased: async () => {
         if (aborts.size > 0) return true;
         if (!store) return false;

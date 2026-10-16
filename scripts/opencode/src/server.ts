@@ -5,6 +5,7 @@ import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
 import {
+  chainHasCodex,
   chainHasOpenCodeXai,
   createOrdinalDeviceLoginServer,
   deviceLoginResultLogger,
@@ -997,20 +998,21 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
     deps
   );
   if (deps.listen !== false) {
-    // Ordinal-local Grok device login on the constant 3010, engine only.
-    // The router is diskless and never binds this port. HOME is the same
-    // durable root the review child uses, so the CLI writes the retained
-    // auth file as the container uid. A refused connection until the chart
-    // allows router->ordinal:3010 is fine.
+    // Ordinal-local device login on the constant 3010, engine only (Grok and
+    // Codex). The router is diskless and never binds this port. HOME is the
+    // same durable root the review child and the Codex runner child use, so
+    // the CLI writes the retained auth file as the container uid. A refused
+    // connection until the chart allows router->ordinal:3010 is fine.
     try {
       const ordinal = hostname();
       const { server: deviceLoginServer } = createOrdinalDeviceLoginServer({
         ordinal,
         role: "engine",
         home: config.home,
-        // The isolated GitHub factory never shows the control: its Grok hop
+        // The isolated GitHub factory never shows the controls: its Grok hop
         // is skip-if-unauthed.
         hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
+        hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
         isLeased: async () => {
           try {
             const rows = await store.listInflight(50);
