@@ -310,10 +310,16 @@ function rowIsQuotaData(data: string, table: string): boolean {
     }
     return false;
   }
-  if (!("error" in rec)) return false;
-  const err = rec.error;
-  if (typeof err === "string") return isQuotaText(err);
-  if (err && typeof err === "object") return isQuotaText(JSON.stringify(err));
+  if ("error" in rec) {
+    const err = rec.error;
+    if (typeof err === "string" && isQuotaText(err)) return true;
+    if (err && typeof err === "object") return isQuotaText(JSON.stringify(err));
+  }
+  if ("state" in rec && rec.state && typeof rec.state === "object") {
+    const stateErr = (rec.state as Record<string, unknown>).error;
+    if (typeof stateErr === "string" && isQuotaText(stateErr)) return true;
+    if (stateErr && typeof stateErr === "object" && isQuotaText(JSON.stringify(stateErr))) return true;
+  }
   return false;
 }
 
@@ -371,8 +377,64 @@ export function hasQuotaRetryInDb(dbPath: string | null | undefined): boolean {
   return inspectQuotaRetryInDb(dbPath) != null;
 }
 
-export function inspectQuotaHit(logDir: string | null | undefined, dbPath?: string | null): QuotaHit | undefined {
-  return inspectQuotaInLogDir(logDir) ?? inspectQuotaRetryInDb(dbPath);
+/**
+ * Scan OpenCode JSON events (both V1 and V2) for quota retry records.
+ */
+export function inspectQuotaInEvents(events: unknown[] | string | null | undefined): QuotaHit | undefined {
+  if (!events) return undefined;
+  let list: unknown[];
+  if (typeof events === "string") {
+    const hit = inspectQuotaInLogText(events);
+    if (hit) return hit;
+    list = [];
+    for (const line of events.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        list.push(JSON.parse(trimmed));
+      } catch {
+        // ignore
+      }
+    }
+  } else if (Array.isArray(events)) {
+    list = events;
+  } else {
+    return undefined;
+  }
+
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const ev = item as Record<string, unknown>;
+    const part = (ev.part && typeof ev.part === "object" ? ev.part : ev) as Record<string, unknown>;
+    const candidates: unknown[] = [
+      ev.error,
+      ev.message,
+      part.error,
+      part.message,
+      (part.state as Record<string, unknown> | undefined)?.error,
+      (ev.state as Record<string, unknown> | undefined)?.error,
+      (part.action as Record<string, unknown> | undefined)?.reason,
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && isQuotaText(c)) return quotaHitFromText(c);
+      if (c && typeof c === "object" && isQuotaText(JSON.stringify(c))) return quotaHitFromText(JSON.stringify(c));
+    }
+  }
+  return undefined;
+}
+
+export function hasQuotaInEvents(events: unknown[] | string | null | undefined): boolean {
+  return inspectQuotaInEvents(events) != null;
+}
+
+export function inspectQuotaHit(
+  logDir: string | null | undefined,
+  dbPath?: string | null,
+  events?: unknown[] | string | null
+): QuotaHit | undefined {
+  return (
+    inspectQuotaInLogDir(logDir) ?? (events ? inspectQuotaInEvents(events) : undefined) ?? inspectQuotaRetryInDb(dbPath)
+  );
 }
 
 export function isQuotaWaitMarker(error: string | null | undefined): boolean {

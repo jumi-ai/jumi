@@ -2565,7 +2565,7 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("CI-only OpenCode failure still records handled CI", async () => {
+  test("CI-only OpenCode failure does not record handled CI", async () => {
     await withDirs(async (home, workdir) => {
       const api = makeApi({
         listIssueComments: async () => [],
@@ -2598,9 +2598,188 @@ describe("implementFollowUp", () => {
         })
       ).rejects.toThrow("opencode exploded");
       const ciState = await readCiState(ciStatePath(home, "kirmanak", "demo", 12));
+      expect(ciState.handled).toEqual([]);
+    });
+  });
+
+  test("provider-overload exit result does not consume CI; retry on same head fixes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Biome formatting error in webfetch probe import\n",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const shared = {
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        logger: () => undefined,
+      };
+      await expect(
+        implementFollowUp({
+          ...shared,
+          openCodeRunner: async () => ({
+            status: "exit" as const,
+            exitCode: 1,
+            message: "The backend is temporarily overloaded. Please retry.",
+          }),
+        })
+      ).rejects.toThrow("temporarily overloaded");
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toEqual([]);
+      let openCode = 0;
+      const retry = await implementFollowUp({
+        ...shared,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(openCode).toBe(1);
+      expect(retry.status).toBe("no-changes");
+      const ciState = await readCiState(ciStatePath(home, "kirmanak", "demo", 12));
       expect(ciState.handled).toHaveLength(1);
       expect(ciState.handled[0]?.checkName).toBe("build");
       expect(ciState.handled[0]?.sha).toBe("headsha");
+    });
+  });
+
+  test("provider-overload exception does not consume CI; retry on same head fixes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Biome formatting error in webfetch probe import\n",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const shared = {
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        logger: () => undefined,
+      };
+      await expect(
+        implementFollowUp({
+          ...shared,
+          openCodeRunner: async () => {
+            throw new EngineFailedError("The backend is temporarily overloaded. Please retry.", false);
+          },
+        })
+      ).rejects.toThrow("temporarily overloaded");
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toEqual([]);
+      let openCode = 0;
+      const retry = await implementFollowUp({
+        ...shared,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(openCode).toBe(1);
+      expect(retry.status).toBe("no-changes");
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toHaveLength(1);
+    });
+  });
+
+  test("chain hop then final provider failure does not consume CI; retry fixes", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]Biome formatting error in webfetch probe import\n",
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const spark = { name: "spark", type: "opencode" as const, model: "provider-a/spark" };
+      const grok = { name: "grok", type: "opencode" as const, model: "provider-b/grok" };
+      let jobs = 0;
+      const shared = {
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: spark.model,
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        chain: [spark, grok],
+        logger: () => undefined,
+      };
+      await expect(
+        implementFollowUp({
+          ...shared,
+          openCodeRunner: async (opts) => {
+            if (opts.model === spark.model) {
+              return {
+                status: "exit" as const,
+                exitCode: 1,
+                message: "RESOURCE_EXHAUSTED (code 429): Individual quota reached",
+              };
+            }
+            return {
+              status: "exit" as const,
+              exitCode: 1,
+              message: "The backend is temporarily overloaded. Please retry.",
+            };
+          },
+        })
+      ).rejects.toThrow("temporarily overloaded");
+      jobs++;
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toEqual([]);
+      let openCode = 0;
+      const retry = await implementFollowUp({
+        ...shared,
+        openCodeRunner: async (opts) => {
+          if (jobs === 0 && opts.model === spark.model) {
+            return {
+              status: "exit" as const,
+              exitCode: 1,
+              message: "RESOURCE_EXHAUSTED (code 429): Individual quota reached",
+            };
+          }
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(openCode).toBe(1);
+      expect(retry.status).toBe("no-changes");
+      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toHaveLength(1);
     });
   });
 
