@@ -1,7 +1,7 @@
 import { boardUsername, isAllowedBoardOrigin } from "./board.ts";
 
 /**
- * Router-side proxy for one ordinal's Grok device login.
+ * Router-side proxy for one ordinal's device login (Grok and Codex).
  *
  * The login process runs on the ordinal (engine/worker `:3010`); the router
  * is diskless and never runs it. The board polls the ordinal through these
@@ -11,20 +11,25 @@ import { boardUsername, isAllowedBoardOrigin } from "./board.ts";
  * - Constant ordinal port 3010, never via an environment variable. Keep in
  *   sync with `ORDINAL_DEVICE_LOGIN_PORT` in `device_login.ts`.
  * - The start control accepts no free-form command: the body carries only
- *   ordinal + role and the ordinal always runs one fixed invocation.
+ *   ordinal + role + provider and the ordinal always runs one fixed
+ *   invocation per provider (`opencode auth login` for xAI, `codex login
+ *   --device-auth` for Codex).
  * - The actor is the existing edge identity, never a field in the body. The
  *   router forwards the edge headers server-side; the ordinal reads the
  *   actor from them.
  * - Same-origin guard as every other board write: a foreign Origin is
  *   forbidden, reconstructed the same way the board already does.
- * - Responses never carry token material: only url, user code, expiry, and
- *   state. Logs record actor, ordinal, provider, and result only.
+ * - Responses never carry token material: only provider, url, user code,
+ *   expiry, and state. Logs record actor, ordinal, provider, and result only.
  * - The isolated GitHub factory has no control: the peer listener answers
- *   these paths with 404 and the page hides the section there.
+ *   these paths with 404 and the page hides the sections there.
  */
 
 export const DEVICE_LOGIN_ORDINAL_PORT = 3010;
 export const DEVICE_LOGIN_PROVIDER = "xai";
+export const DEVICE_LOGIN_PROVIDER_XAI = "xai";
+export const DEVICE_LOGIN_PROVIDER_CODEX = "codex";
+export type DeviceLoginProviderName = typeof DEVICE_LOGIN_PROVIDER_XAI | typeof DEVICE_LOGIN_PROVIDER_CODEX;
 
 export const DEVICE_LOGIN_BOARD_STATUS_PATH = "/api/board/device-login/status";
 export const DEVICE_LOGIN_BOARD_START_PATH = "/api/board/device-login/start";
@@ -49,8 +54,12 @@ export interface DeviceLoginBoardStatus {
   ordinal: string;
   role: "engine" | "worker";
   hasXaiRunner: boolean;
+  hasCodexRunner: boolean;
   authPresent: boolean;
+  codexAuthPresent: boolean;
   leased: boolean;
+  /** Provider of the in-flight login, when the ordinal reports one. */
+  provider?: DeviceLoginProviderName;
   state: DeviceLoginBoardState;
   url?: string;
   userCode?: string;
@@ -65,6 +74,19 @@ const DNS_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export function isValidDeviceRole(value: unknown): value is "engine" | "worker" {
   return value === "engine" || value === "worker";
+}
+
+export function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProviderName {
+  return value === DEVICE_LOGIN_PROVIDER_XAI || value === DEVICE_LOGIN_PROVIDER_CODEX;
+}
+
+function providerOf(body: unknown, query: URLSearchParams): DeviceLoginProviderName | undefined {
+  const rec = (body ?? {}) as Record<string, unknown>;
+  const fromBody = typeof rec.provider === "string" ? rec.provider.trim().toLowerCase() : "";
+  if (fromBody !== "") return isValidDeviceLoginProvider(fromBody) ? fromBody : undefined;
+  const fromQuery = (query.get("provider") ?? "").trim().toLowerCase();
+  if (fromQuery !== "") return isValidDeviceLoginProvider(fromQuery) ? fromQuery : undefined;
+  return DEVICE_LOGIN_PROVIDER_XAI;
 }
 
 /**
@@ -129,7 +151,9 @@ export function sanitizeDeviceLoginStatus(
   const ordinal = asTrimmedString(rec.ordinal, 253) ?? fallbackOrdinal;
   const role = isValidDeviceRole(rec.role) ? rec.role : fallbackRole;
   const hasXaiRunner = rec.hasXaiRunner === true;
+  const hasCodexRunner = rec.hasCodexRunner === true;
   const authPresent = rec.authPresent === true;
+  const codexAuthPresent = rec.codexAuthPresent === true;
   const leased = rec.leased === true;
   const rawState = typeof rec.state === "string" ? rec.state.trim() : "idle";
   const state = (ALLOWED_STATES.has(rawState) ? rawState : "error") as DeviceLoginBoardState;
@@ -137,11 +161,14 @@ export function sanitizeDeviceLoginStatus(
     ordinal,
     role,
     hasXaiRunner,
+    hasCodexRunner,
     authPresent,
+    codexAuthPresent,
     leased,
     state,
     available: true,
   };
+  if (isValidDeviceLoginProvider(rec.provider)) status.provider = rec.provider;
   const url = asHttpsUrl(rec.url);
   if (url) status.url = url;
   const userCode = asUserCode(rec.userCode ?? rec.user_code);
@@ -153,7 +180,17 @@ export function sanitizeDeviceLoginStatus(
 }
 
 export function deviceLoginOrdinalUnavailable(ordinal: string, role: "engine" | "worker"): DeviceLoginBoardStatus {
-  return { ordinal, role, hasXaiRunner: false, authPresent: false, leased: false, state: "error", available: false };
+  return {
+    ordinal,
+    role,
+    hasXaiRunner: false,
+    hasCodexRunner: false,
+    authPresent: false,
+    codexAuthPresent: false,
+    leased: false,
+    state: "error",
+    available: false,
+  };
 }
 
 function forwardedHeaders(request: Request): Record<string, string> {
@@ -256,6 +293,12 @@ export async function handleDeviceLoginStatus(request: Request, deps: DeviceLogi
   const role = (url.searchParams.get("role") ?? "").trim();
   if (!isValidOrdinalHost(ordinal)) return json(400, { error: "invalid ordinal" });
   if (!isValidDeviceRole(role)) return json(400, { error: "invalid role" });
+  // The status shape carries both providers; an explicit provider param is
+  // accepted for per-provider controls but needs no ordinal round-trip.
+  const statusProvider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
+  if (statusProvider !== "" && !isValidDeviceLoginProvider(statusProvider)) {
+    return json(400, { error: "invalid provider" });
+  }
   const fetchFn = deps.fetchFn ?? fetch;
   const timeoutMs = deps.timeoutMs ?? DEVICE_LOGIN_FETCH_TIMEOUT_MS;
   let response: Response;
@@ -307,11 +350,14 @@ async function handleDeviceLoginWrite(
   const url = new URL(request.url);
   const ordinal = ordinalOf(body, url.searchParams);
   const role = roleOf(body, url.searchParams);
+  const provider = providerOf(body, url.searchParams);
   if (!isValidOrdinalHost(ordinal)) return json(400, { error: "invalid ordinal" });
   if (!isValidDeviceRole(role)) return json(400, { error: "invalid role" });
-  // The body carries only ordinal + role. A command field, an actor field, or
-  // any other free-form input is never forwarded: the ordinal runs one fixed
-  // invocation and reads the actor from the forwarded edge headers.
+  if (!provider) return json(400, { error: "invalid provider" });
+  // The body carries only ordinal + role + provider. A command field, an
+  // actor field, or any other free-form input is never forwarded: the ordinal
+  // runs one fixed invocation per provider and reads the actor from the
+  // forwarded edge headers.
   const fetchFn = deps.fetchFn ?? fetch;
   const timeoutMs =
     deps.timeoutMs ?? (kind === "start" ? DEVICE_LOGIN_START_FETCH_TIMEOUT_MS : DEVICE_LOGIN_FETCH_TIMEOUT_MS);
@@ -322,13 +368,17 @@ async function handleDeviceLoginWrite(
       ordinal,
       ordinalPath,
       request,
-      { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: "{}" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ provider }),
+      },
       fetchFn,
       timeoutMs
     );
   } catch (err) {
     logger(
-      `device login ${kind} unavailable actor=${actor} ordinal=${ordinal} provider=${DEVICE_LOGIN_PROVIDER}: ${err instanceof Error ? err.message : String(err)}`
+      `device login ${kind} unavailable actor=${actor} ordinal=${ordinal} provider=${provider}: ${err instanceof Error ? err.message : String(err)}`
     );
     return json(502, { error: "ordinal unavailable", ordinal, role, available: false });
   }
@@ -344,12 +394,15 @@ async function handleDeviceLoginWrite(
     if (response.status === 409)
       return json(409, { error: "Ordinal holds a leased job; refusing login", code: "leased", ordinal, role });
     if (response.status === 422) {
+      const wantsCodex = provider === DEVICE_LOGIN_PROVIDER_CODEX || errCode === "no-codex-runner";
       return json(422, {
         error:
           errCode === "ephemeral-home"
             ? "Refusing device login on an ephemeral HOME"
-            : "xAI runner not configured in chain",
-        code: errCode ?? "no-xai-runner",
+            : wantsCodex
+              ? "codex runner not configured in chain"
+              : "xAI runner not configured in chain",
+        code: errCode ?? (wantsCodex ? "no-codex-runner" : "no-xai-runner"),
         ordinal,
         role,
       });
@@ -359,8 +412,8 @@ async function handleDeviceLoginWrite(
     return json(502, { error: "ordinal unavailable", ordinal, role, available: false });
   }
   if (kind === "cancel") {
-    logger(`device login actor=${actor} ordinal=${ordinal} provider=${DEVICE_LOGIN_PROVIDER} result=cancelled`);
-    return json(200, { ok: true, ordinal, role, state: "cancelled" });
+    logger(`device login actor=${actor} ordinal=${ordinal} provider=${provider} result=cancelled`);
+    return json(200, { ok: true, ordinal, role, provider, state: "cancelled" });
   }
   let parsed: unknown;
   try {
@@ -371,13 +424,14 @@ async function handleDeviceLoginWrite(
   const rec = (parsed ?? {}) as Record<string, unknown>;
   const rawState = typeof rec.state === "string" ? rec.state.trim() : "waiting";
   const state = ALLOWED_STATES.has(rawState) ? rawState : "error";
-  const out: Record<string, unknown> = { ok: true, ordinal, role, state };
+  const outProvider = isValidDeviceLoginProvider(rec.provider) ? rec.provider : provider;
+  const out: Record<string, unknown> = { ok: true, ordinal, role, provider: outProvider, state };
   const outUrl = asHttpsUrl(rec.url);
   if (outUrl) out.url = outUrl;
   const outCode = asUserCode(rec.userCode ?? rec.user_code);
   if (outCode) out.userCode = outCode;
   if (typeof rec.expiresAt === "number" && Number.isFinite(rec.expiresAt)) out.expiresAt = rec.expiresAt;
-  logger(`device login actor=${actor} ordinal=${ordinal} provider=${DEVICE_LOGIN_PROVIDER} result=started`);
+  logger(`device login actor=${actor} ordinal=${ordinal} provider=${outProvider} result=started`);
   return json(200, out);
 }
 
