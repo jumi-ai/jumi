@@ -15,6 +15,7 @@ import {
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { codexThreadPath, codexThreadUsagePath, looksLikeProviderUnavailable } from "./fallback.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
+import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
@@ -253,6 +254,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   const tmpPath = join(tmpDir, "prompt.txt");
   await writeFile(tmpPath, prompt);
   const startedAtMs = Date.now();
+  let imageStaging: { cleanup: () => Promise<void> } | undefined;
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
@@ -260,6 +262,10 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   }
 
   try {
+    // Shared image skills: review gets the reviewer skill, workers get the
+    // worker skill. Staged into the repo-local `.agents/skills` Codex scans,
+    // cleaned up before return so the tree stays clean.
+    imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
     const threadId = opts.continueSession ? await readThreadId(opts.workdir) : undefined;
     const args = codexArgv(opts, threadId);
     const proc = (() => {
@@ -429,6 +435,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
+    await imageStaging?.cleanup().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

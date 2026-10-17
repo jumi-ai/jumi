@@ -16,6 +16,7 @@ import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { agyConversationPath } from "./fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
+import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
@@ -317,6 +318,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const startedAtMs = Date.now();
   const stashRoot = join(tmpDir, "project-agents");
   const movedAgents: StashedAgyRoot[] = [];
+  let imageStaging: { cleanup: () => Promise<void> } | undefined;
 
   if (opts.abortSignal?.aborted) {
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
@@ -344,6 +346,10 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       await mkdir(stashRoot, { recursive: true });
       await stashAgyProjectAgents(opts.workdir, stashRoot, movedAgents);
     }
+    // Shared image skills: review gets the reviewer skill, workers get the
+    // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,
+    // cleaned up before the stash restore so the tree stays clean.
+    imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -510,6 +516,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
+    await imageStaging?.cleanup().catch(() => undefined);
     await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents, log);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
