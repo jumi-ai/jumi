@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   findingFingerprint,
+  hasPublishedFindings,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
@@ -219,5 +220,90 @@ describe("keepReviewFindingLines", () => {
     const note = "This repository has no CI checks on this head.";
     expect(keepReviewFindingLines(`- ${note}\n\nLooks good overall.`, { keep: [note] })).toBe(note);
     expect(keepReviewFindingLines(`Note: ${note} I ran the tests locally.`, { keep: [note] })).toBe(note);
+  });
+
+  test("keeps a bullet list under a finding", () => {
+    const text = [
+      "src/foo.ts:12: ❓ q: which session handling is right?",
+      "- first case breaks X",
+      "- second case breaks Y",
+    ].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(text);
+    const parsed = parseReviewFindings(text);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].body).toContain("first case breaks X");
+    expect(parsed[0].body).toContain("second case breaks Y");
+  });
+
+  test("keeps an indented continuation paragraph under a finding", () => {
+    const text = ["src/bar.ts:7: 🟡 risk: retry swallows the error.", "  The retry discards the cause."].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(text);
+    expect(parseReviewFindings(text)[0].body).toContain("The retry discards the cause.");
+  });
+
+  test("keeps sub-bullets for two adjacent findings", () => {
+    const text = [
+      "src/a.ts:1: 🔴 bug: null deref.",
+      "  - check X",
+      "  - check Y",
+      "src/b.ts:2: 🟡 risk: race.",
+      "  - lock Y",
+      "  - retry Z",
+    ].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(text);
+    const parsed = parseReviewFindings(text);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].body).toContain("check X");
+    expect(parsed[1].body).toContain("retry Z");
+  });
+
+  test("drops filler prose between findings with continuations", () => {
+    const text = [
+      "Tour of the change.",
+      "",
+      "src/a.ts:1: 🔴 bug: null deref.",
+      "  - detail kept",
+      "",
+      "Looks good overall, verified the rest.",
+      "",
+      "src/b.ts:2: 🟡 risk: race.",
+      "  - detail kept",
+    ].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(
+      ["src/a.ts:1: 🔴 bug: null deref.", "  - detail kept", "", "src/b.ts:2: 🟡 risk: race.", "  - detail kept"].join(
+        "\n"
+      )
+    );
+  });
+
+  test("publishes the #5228 question together with both listed cases", () => {
+    const text = [
+      "I read the exporter and traced the session handling.",
+      "",
+      "❓ q: `k3s/_lib/files/ai_token_exporter.py:405`: each `.jsonl` file is treated as an independent session. Two cases would break that, and the fixtures don't cover either:",
+      "  - first case breaks X",
+      "  - second case breaks Y",
+      "",
+      "Verified the rest; nothing else stands out.",
+    ].join("\n");
+    expect(keepReviewFindingLines(text)).toBe(
+      [
+        "❓ q: `k3s/_lib/files/ai_token_exporter.py:405`: each `.jsonl` file is treated as an independent session. Two cases would break that, and the fixtures don't cover either:",
+        "  - first case breaks X",
+        "  - second case breaks Y",
+      ].join("\n")
+    );
+  });
+
+  test("strips a whole finding block when its finding is posted", () => {
+    const text = ["src/a.ts:1: 🔴 bug: null deref.", "  - detail kept", "", "plain prose"].join("\n");
+    const posted = new Set([findingFingerprint("src/a.ts", "🔴 bug: null deref.\n  - detail kept")]);
+    expect(stripFindingLines(text, { posted })).toBe("plain prose");
+    expect(stripFindingLines(text)).toBe("plain prose");
+  });
+
+  test("requires at least one published finding block for a failure trailer", () => {
+    expect(hasPublishedFindings("tour only, no findings")).toBe(false);
+    expect(hasPublishedFindings("src/a.ts:1: 🔴 bug: null deref.\n  - detail kept")).toBe(true);
   });
 });
