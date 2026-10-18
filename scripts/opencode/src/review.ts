@@ -74,6 +74,7 @@ import {
 import type { ReviewJob } from "./types.ts";
 import {
   findingFingerprint,
+  hasColonEndingFinding,
   hasPublishedFindings,
   keepReviewFindingLines,
   parseReviewFindings,
@@ -1001,8 +1002,16 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
     return result;
   }
-  // Publish finding lines and the trailer only; the child's tour is not published.
+  // Publish finding blocks and the trailer only; the child's tour is not published.
+  // A finding keeps its indented/list continuation; unrelated prose is dropped.
   const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  if (hasColonEndingFinding(comment, { singleFilePath })) {
+    logDiagnostic(log, "review_finding_truncated", {
+      review: reviewLabel,
+      reason: "finding_ends_with_colon",
+      kept_bytes: comment.length,
+    });
+  }
   const writeup = buildCommentBody(
     marker,
     opts.expectedHeadSha,
@@ -1582,6 +1591,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, opts.prNumber, log)
               : undefined;
             blankFailure = !hasPublishedFindings(parsedArtifact.comment, { singleFilePath });
+            if (!blankFailure) {
+              const keptArtifact = keepReviewFindingLines(parsedArtifact.comment, { singleFilePath });
+              if (hasColonEndingFinding(keptArtifact, { singleFilePath })) {
+                logDiagnostic(log, "review_finding_truncated", {
+                  review: reviewLabel,
+                  reason: "finding_ends_with_colon",
+                  kept_bytes: keptArtifact.length,
+                });
+              }
+            }
           }
           if (!blankFailure) {
             await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });

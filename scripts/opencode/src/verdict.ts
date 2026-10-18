@@ -109,30 +109,182 @@ function findingFromLine(original: string, opts?: { singleFilePath?: string }): 
   return { path, line: findingLine, body };
 }
 
+function isBlankLine(line: string): boolean {
+  return /^\s*$/.test(line);
+}
+
+function stripQuoteMarkers(line: string): string {
+  return line.replace(/^\s*(?:>\s*)+/, "");
+}
+
+function isQuotedLine(line: string): boolean {
+  return /^\s*>/.test(line);
+}
+
+function isIndentedLine(line: string): boolean {
+  return /^\s+\S/.test(stripQuoteMarkers(line));
+}
+
+function isListItemLine(line: string): boolean {
+  return /^\s*(?:[-*+]|\d+[.)])\s+\S/.test(stripQuoteMarkers(line));
+}
+
+function isHeadingLine(line: string): boolean {
+  return /^#{1,6}(?:\s|$)/.test(stripQuoteMarkers(line).trimStart());
+}
+
+function isCheckTrailerLine(line: string): boolean {
+  return /<!--\s*jumi-check:/i.test(line);
+}
+
+function isFindingLine(original: string, opts?: { singleFilePath?: string }): boolean {
+  return findingFromLine(original, opts) !== undefined || isFindingMarkerLine(original);
+}
+
+function isFindingStartForBlocks(
+  original: string,
+  opts?: { singleFilePath?: string },
+  includeBareL?: boolean
+): boolean {
+  if (isFindingLine(original, opts)) return true;
+  if (includeBareL) {
+    const line = stripFindingPrefix(original);
+    const lForm = L_LINE_RE.exec(line);
+    if (lForm && parseFindingLine(lForm[1])) return true;
+  }
+  return false;
+}
+
+function blockLastEndsWithColon(blockLines: string[]): boolean {
+  for (let i = blockLines.length - 1; i >= 0; i--) {
+    const t = blockLines[i].trim();
+    if (!t) continue;
+    return /[:：]\s*$/.test(t);
+  }
+  return false;
+}
+
+interface FindingBlock {
+  start: number;
+  end: number;
+  lines: string[];
+  first: string;
+  keepNote?: string;
+}
+
+function collectFindingBlocks(
+  text: string,
+  opts?: { singleFilePath?: string; keep?: readonly string[]; includeBareL?: boolean }
+): { blocks: FindingBlock[]; lines: string[] } {
+  const lines = text.split(/\r?\n/);
+  const keepNotes = (opts?.keep ?? []).map((line) => line.trim()).filter(Boolean);
+  const blocks: FindingBlock[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    const original = lines[i];
+    if (isCheckTrailerLine(original)) {
+      i++;
+      continue;
+    }
+    const note = keepNotes.find((k) => original.includes(k));
+    if (note) {
+      blocks.push({ start: i, end: i, lines: [note], first: original, keepNote: note });
+      i++;
+      continue;
+    }
+    if (!isFindingStartForBlocks(original, opts, opts?.includeBareL)) {
+      i++;
+      continue;
+    }
+    const blockLines = [original.trimEnd()];
+    let j = i + 1;
+    let pending = 0;
+    let inFence = /^\s*```/.test(stripQuoteMarkers(original));
+    while (j < lines.length) {
+      const nxt = lines[j];
+      if (isCheckTrailerLine(nxt)) break;
+      if (keepNotes.some((k) => nxt.includes(k))) break;
+      if (!inFence && isHeadingLine(nxt)) break;
+      if (!inFence && isFindingStartForBlocks(nxt, opts, opts?.includeBareL)) break;
+      if (isBlankLine(nxt)) {
+        pending++;
+        j++;
+        continue;
+      }
+      const fenceLine = /^\s*```/.test(stripQuoteMarkers(nxt));
+      if (inFence || fenceLine) {
+        if (pending > 0) blockLines.push("");
+        blockLines.push(nxt.trimEnd());
+        pending = 0;
+        if (fenceLine) {
+          const count = (nxt.match(/```/g) ?? []).length;
+          if (count % 2 === 1) inFence = !inFence;
+        }
+        j++;
+        continue;
+      }
+      const list = isListItemLine(nxt);
+      const indented = isIndentedLine(nxt);
+      const quoted = isQuotedLine(nxt);
+      if (list || indented || quoted) {
+        if (pending > 0) blockLines.push("");
+        blockLines.push(nxt.trimEnd());
+        pending = 0;
+        j++;
+        continue;
+      }
+      if (blockLastEndsWithColon(blockLines)) {
+        if (pending > 0) blockLines.push("");
+        blockLines.push(nxt.trimEnd());
+        pending = 0;
+        j++;
+        continue;
+      }
+      break;
+    }
+    const end = j - 1 - pending;
+    blocks.push({ start: i, end, lines: blockLines, first: original });
+    i = j;
+  }
+  return { blocks, lines };
+}
+
+function fullFindingBody(first: ReviewFinding, blockLines: string[]): string {
+  const cont = [...blockLines.slice(1)];
+  while (cont.length > 0 && cont[0].trim() === "") cont.shift();
+  while (cont.length > 0 && cont[cont.length - 1].trim() === "") cont.pop();
+  if (cont.length === 0) return first.body;
+  return `${first.body}\n${cont.join("\n")}`;
+}
+
 export function parseReviewFindings(text: string, opts?: { singleFilePath?: string }): ReviewFinding[] {
+  const { blocks } = collectFindingBlocks(text, opts);
   const findings: ReviewFinding[] = [];
-  for (const original of text.split(/\r?\n/)) {
-    const finding = findingFromLine(original, opts);
-    if (finding) findings.push(finding);
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    const finding = findingFromLine(block.first, opts);
+    if (finding) findings.push({ path: finding.path, line: finding.line, body: fullFindingBody(finding, block.lines) });
   }
   return findings;
 }
 
 /**
- * Finding lines as written, list prefix stripped: `file:line:`, `L<line>:`, and
- * every severity-marker line `keepReviewFindingLines` publishes (a range, a
- * backticked location, or no path).
+ * Finding blocks as written, first-line list prefix stripped: `file:line:`,
+ * `L<line>:`, and every severity-marker line `keepReviewFindingLines`
+ * publishes (a range, a backticked location, or no path). Continuation lines
+ * (indented, list, or directly wrapped text) stay attached to their finding.
  */
 export function reviewFindingLines(text: string): string[] {
+  const { blocks } = collectFindingBlocks(text, { includeBareL: true });
   const lines: string[] = [];
-  for (const original of text.split(/\r?\n/)) {
-    const line = stripFindingPrefix(original);
-    const lForm = L_LINE_RE.exec(line);
-    if (lForm && parseFindingLine(lForm[1])) {
-      lines.push(line);
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    const firstStripped = stripFindingPrefix(block.first);
+    if (block.lines.length === 1) {
+      lines.push(firstStripped);
       continue;
     }
-    if (findingFromLine(line) || isFindingMarkerLine(line)) lines.push(line);
+    lines.push([firstStripped, ...block.lines.slice(1).map((l) => l.trimEnd())].join("\n"));
   }
   return lines;
 }
@@ -141,19 +293,39 @@ export function stripFindingLines(
   text: string,
   opts?: { singleFilePath?: string; posted?: ReadonlySet<string> }
 ): string {
+  const { blocks, lines } = collectFindingBlocks(text, opts);
+  const byStart = new Map(blocks.filter((b) => !b.keepNote).map((b) => [b.start, b]));
   const kept: string[] = [];
-  for (const original of text.split(/\r?\n/)) {
-    const finding = findingFromLine(original, opts);
-    if (finding) {
-      const key = findingFingerprint(finding.path, finding.body);
-      if (!opts?.posted || opts.posted.has(key)) continue;
+  let i = 0;
+  while (i < lines.length) {
+    const block = byStart.get(i);
+    if (block) {
+      const finding = findingFromLine(block.first, opts);
+      if (finding) {
+        const body = fullFindingBody(finding, block.lines);
+        const key = findingFingerprint(finding.path, body);
+        if (!opts?.posted || opts.posted.has(key)) {
+          i = block.end + 1;
+          continue;
+        }
+        for (const l of block.lines) kept.push(l);
+        i = block.end + 1;
+        continue;
+      }
     }
-    kept.push(original);
+    kept.push(lines[i]);
+    i++;
   }
   return kept
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+/** True when a kept finding block ends in an introducing colon (likely truncated). */
+export function hasColonEndingFinding(text: string, opts?: { singleFilePath?: string }): boolean {
+  const { blocks } = collectFindingBlocks(text, opts);
+  return blocks.some((block) => !block.keepNote && blockLastEndsWithColon(block.lines));
 }
 
 // A severity marker leading the line, optionally after an `L<n>:` or `<path>:<n>:` location.
@@ -166,29 +338,27 @@ function isFindingMarkerLine(original: string): boolean {
 }
 
 /**
- * The published review body: finding lines only. A tour, verification essay,
- * restated diff, or "no findings" paragraph is dropped, never promoted. `keep`
- * lists parent-authored notes (e.g. the no-CI note); a line that contains one
+ * The published review body: finding blocks only. A finding keeps its
+ * continuation lines: nested or indented list items, indented paragraphs, and
+ * text wrapped directly under the finding line, up to the next finding, a
+ * heading, or a trailer. A tour, verification essay, restated diff, or
+ * "no findings" paragraph is dropped, never promoted. `keep` lists
+ * parent-authored notes (e.g. the no-CI note); a line that contains one
  * publishes as that note alone, without the child's bullet or surrounding text.
  */
 export function keepReviewFindingLines(
   text: string,
   opts?: { singleFilePath?: string; keep?: readonly string[] }
 ): string {
-  const keep = (opts?.keep ?? []).map((line) => line.trim()).filter(Boolean);
+  const { blocks } = collectFindingBlocks(text, opts);
   let out = "";
   let previous = -2;
-  const lines = text.split(/\r?\n/);
-  for (let i = 0; i < lines.length; i++) {
-    const original = lines[i];
-    const note = keep.find((k) => original.includes(k));
-    let kept: string | undefined;
-    if (note) kept = note;
-    else if (findingFromLine(original, opts) !== undefined || isFindingMarkerLine(original)) kept = original.trimEnd();
-    if (kept === undefined) continue;
-    if (out) out += previous === i - 1 ? "\n" : "\n\n";
+  for (const block of blocks) {
+    const kept = block.lines.join("\n").trimEnd();
+    if (!kept.trim()) continue;
+    if (out) out += block.start === previous + 1 ? "\n" : "\n\n";
     out += kept;
-    previous = i;
+    previous = block.end;
   }
   return out.trim();
 }
