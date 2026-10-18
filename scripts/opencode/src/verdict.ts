@@ -322,13 +322,10 @@ export function stripFindingLines(
     .trim();
 }
 
-/** True when any non-blank line ends in an introducing colon (likely truncated). */
-export function hasColonEndingFinding(text: string): boolean {
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    if (/[:：]\s*$/.test(line.trimEnd())) return true;
-  }
-  return false;
+/** True when a kept finding block ends in an introducing colon (likely truncated). */
+export function hasColonEndingFinding(text: string, opts?: { singleFilePath?: string }): boolean {
+  const { blocks } = collectFindingBlocks(text, opts);
+  return blocks.some((block) => !block.keepNote && blockLastEndsWithColon(block.lines));
 }
 
 // A severity marker leading the line, optionally after an `L<n>:` or `<path>:<n>:` location.

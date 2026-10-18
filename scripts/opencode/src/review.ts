@@ -1005,7 +1005,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // Publish finding blocks and the trailer only; the child's tour is not published.
   // A finding keeps its indented/list continuation; unrelated prose is dropped.
   const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
-  if (hasColonEndingFinding(comment)) {
+  if (hasColonEndingFinding(comment, { singleFilePath })) {
     logDiagnostic(log, "review_finding_truncated", {
       review: reviewLabel,
       reason: "finding_ends_with_colon",
@@ -1593,7 +1593,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             blankFailure = !hasPublishedFindings(parsedArtifact.comment, { singleFilePath });
             if (!blankFailure) {
               const keptArtifact = keepReviewFindingLines(parsedArtifact.comment, { singleFilePath });
-              if (hasColonEndingFinding(keptArtifact)) {
+              if (hasColonEndingFinding(keptArtifact, { singleFilePath })) {
                 logDiagnostic(log, "review_finding_truncated", {
                   review: reviewLabel,
                   reason: "finding_ends_with_colon",
