@@ -444,6 +444,37 @@ printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
     }
   });
 
+  test("extraEnv cannot override the file-resolved key", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "sk-from-file\n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    process.env.OPENCODE_API_KEY = "sk-from-env";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "openai/gpt-5.5",
+            workdir,
+            sanitizeEnv: true,
+            extraEnv: {
+              OPENCODE_API_KEY: "sk-from-extra-env",
+              OPENCODE_API_KEY_FILE: "/tmp/jumi-spoofed-key",
+              GIT_AUTH_HOST: "gitea.example.com",
+            },
+          });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("KEY=sk-from-file");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
+  });
+
   test("falls back to the env var when the key file is missing", async () => {
     process.env.OPENCODE_API_KEY_FILE = join(tmpdir(), `jumi-missing-key-${Date.now()}`);
     process.env.OPENCODE_API_KEY = "sk-fallback";
