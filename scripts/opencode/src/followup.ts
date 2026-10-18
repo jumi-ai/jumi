@@ -34,7 +34,13 @@ import {
   shouldIncrementRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import {
+  type EngineResult,
+  type EngineRunOptions,
+  resolveEngine,
+  throwIfEngineFailed,
+  thrownRunner,
+} from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -62,6 +68,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
   appendStuckLatchFingerprint,
   evaluateStuck,
@@ -798,14 +805,15 @@ export async function implementFollowUp(
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
-  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
+  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine: claimedEngine, now, forgetClaim, claim } = claimed;
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
-  const jobChain = claimed.effectiveChain ?? opts.chain;
+  let jobChain = claimed.effectiveChain ?? opts.chain;
 
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(jobChain);
+  let provenanceCollector = new ProvenanceCollector(jobChain);
+  let activeEngine = claimedEngine;
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
       index,
@@ -953,6 +961,37 @@ export async function implementFollowUp(
 
   const loop = openClaimedLoop(claimed, opts);
 
+  // Sticky writer family per PR: restart on the existing writer family when the
+  // current head has known Jumi provenance, so random-start does not accumulate
+  // writers until no reviewer is eligible. Falls back to ordinary selection with
+  // a diagnostic when no writer family remains in the chain.
+  {
+    const baseEngine = resolveEngine(opts, registeredEngine);
+    const active = await buildActiveWorkerEngine({
+      baseEngine,
+      baseChain: opts.chain,
+      effectiveChain: claimed.effectiveChain,
+      runnerSelection: opts.runnerSelection,
+      runnerRandom: opts.runnerRandom,
+      independentReview: opts.independentReview,
+      provenance: opts.provenance,
+      provenanceJob: opts.provenanceJob,
+      owner,
+      repo,
+      prNumber: pr.number,
+      headSha: pr.head.sha,
+      branch: pr.head.ref,
+      jobKey: opts.jobId ?? opts.job.delivery,
+      loop,
+      log,
+      remainingLeaseMs: opts.remainingLeaseMs,
+      extendLease: opts.extendLease,
+    });
+    jobChain = active.chain;
+    activeEngine = active.engine;
+    provenanceCollector = active.collector;
+  }
+
   let handledCommentIds = [...state.handledCommentIds];
   let handledReviewIds = [...state.handledReviewIds];
   const handledReviewFindings = [...state.handledReviewFindings];
@@ -1076,16 +1115,15 @@ export async function implementFollowUp(
           extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
           maxOutputBytes: opts.maxOutputBytes,
           timeoutMs: conflictTimeoutMs,
-          openCodeRunner: engine,
+          openCodeRunner: activeEngine,
           helmRunner: opts.helmRunner,
           logger: log,
           abortSignal: opts.abortSignal,
           jobId: opts.jobId ?? opts.job.delivery,
           ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
           onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r, idx) => {
+          onRunner: (r) => {
             runner = r;
-            provenanceCollector.noteRunner(r, idx);
           },
         });
       } catch (err: unknown) {
@@ -1106,7 +1144,11 @@ export async function implementFollowUp(
         throw err;
       }
       runner = mergeResult.runner;
-      if (mergeResult.runner) provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      if (mergeResult.contributors && mergeResult.contributors.length > 0) {
+        provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
+      } else if (mergeResult.runner) {
+        provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      }
       await noteProvenanceRunners(opts, provenanceCollector, log);
       const persistConflictAttempt = async (result: typeof mergeResult) => {
         if (!shouldIncrementRound(result)) return;
@@ -1240,9 +1282,8 @@ export async function implementFollowUp(
         const runtime = opts.runtime ?? standingPodRuntime;
         let result: EngineResult;
         try {
-          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+          result = await runtime.runRuntimeEngine(loop, activeEngine, runOpts, (r) => {
             runner = r;
-            provenanceCollector.noteRunner(r, idx);
           });
         } catch (err) {
           provenanceCollector.noteError(err);

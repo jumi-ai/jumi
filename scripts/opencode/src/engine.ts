@@ -59,6 +59,13 @@ export interface EngineResult {
   hopDeclined?: boolean;
   /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
   hopRefused?: boolean;
+  /**
+   * Narrowed writer set for this engine call: every effective-chain entry up
+   * to `chainIndex` except quota/auth/provider-unavailable hops that left a
+   * clean worktree. Absent means the worktree state was unknown and the
+   * caller must conservatively count every tried runner.
+   */
+  contributors?: RunnerStamp[];
 }
 
 export type Engine = (opts: EngineRunOptions) => Promise<EngineResult>;
@@ -74,6 +81,11 @@ export class EngineFailedError extends Error {
   chainIndex?: number;
   /** A later runner remained, but this quota hop was refused (lease, session, or abort). */
   hopRefused?: boolean;
+  /**
+   * Narrowed writer set for the failed engine call, same semantics as
+   * `EngineResult.contributors`. Absent means unknown: count every tried runner.
+   */
+  contributors?: RunnerStamp[];
 
   constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number; auth?: boolean }) {
     super(message);

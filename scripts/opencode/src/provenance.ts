@@ -235,15 +235,66 @@ export class ProvenanceCollector {
     this.publisher = normalized;
   }
 
+  /**
+   * Merge an explicit narrowed writer set (clean quota/auth hops excluded).
+   * Used when the engine chain could verify the worktree state; otherwise the
+   * conservative `noteRunner` expansion applies and ambiguity fails closed.
+   */
+  noteContributors(contributors: readonly RunnerStamp[], publisher?: RunnerStamp | null): void {
+    if (contributors.length > 0) {
+      this.contributors = mergeContributors(this.contributors, [...contributors]);
+    }
+    if (publisher) {
+      const normalized = normalizeRunnerStamp(publisher);
+      if (normalized) this.publisher = normalized;
+    } else if (contributors.length > 0) {
+      const last = normalizeRunnerStamp(contributors[contributors.length - 1]!);
+      if (last) this.publisher = last;
+    }
+  }
+
   noteResult(
     result: EngineResult,
     fallback?: { type?: string; model: string; variant?: string; effort?: string }
   ): void {
+    if (result.contributors && result.contributors.length > 0) {
+      const publisher = result.runner ?? (fallback ? runnerStamp(fallback) : undefined);
+      this.noteContributors(result.contributors, publisher ?? null);
+      // The narrowed list already names the publisher; keep the stamp exact.
+      if (result.runner) {
+        const normalized = normalizeRunnerStamp(result.runner);
+        if (normalized) this.publisher = normalized;
+      } else if (fallback) {
+        const normalized = normalizeRunnerStamp(runnerStamp(fallback));
+        if (normalized) this.publisher = normalized;
+      }
+      return;
+    }
     const runner = result.runner ?? (fallback ? runnerStamp(fallback) : undefined);
     this.noteRunner(runner, result.chainIndex);
   }
 
   noteError(err: unknown): void {
+    const narrowed = (err as { contributors?: unknown } | null | undefined)?.contributors;
+    if (Array.isArray(narrowed) && narrowed.length > 0) {
+      const stamps: RunnerStamp[] = [];
+      for (const entry of narrowed) {
+        if (!entry || typeof entry !== "object") continue;
+        const rec = entry as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown };
+        if (typeof rec.type !== "string" || typeof rec.model !== "string") continue;
+        const normalized = normalizeRunnerStamp({
+          type: rec.type,
+          model: rec.model,
+          ...(typeof rec.variant === "string" ? { variant: rec.variant } : {}),
+          ...(typeof rec.effort === "string" ? { effort: rec.effort } : {}),
+        });
+        if (normalized) stamps.push(normalized);
+      }
+      if (stamps.length > 0) {
+        this.noteContributors(stamps, thrownRunner(err) ?? null);
+        return;
+      }
+    }
     this.noteRunner(thrownRunner(err), thrownChainIndex(err));
   }
 

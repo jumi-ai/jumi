@@ -288,3 +288,81 @@ export function resolveIndependentReviewers(input: {
 export function provenanceLookupFailureReason(headSha: string, message: string): string {
   return `${INDEPENDENT_REVIEW_UNAVAILABLE_PREFIX} provenance lookup failed for ${headSha} (${message})`;
 }
+
+export interface StickyWorkerResolution {
+  /** Index in `chain` to start from, or undefined when ordinary selection applies. */
+  startIndex: number | undefined;
+  /** Writer families recorded for the PR head, in first-seen order. */
+  writerFamilies: string[];
+  /** Writer identities for diagnostics. */
+  writers: string[];
+  /** Family chosen for the sticky start, when applicable. */
+  stickyFamily?: string;
+  /** Human-readable fallback reason when no sticky start applies. */
+  reason?: string;
+}
+
+/**
+ * Sticky writer family for follow-up-style worker jobs on a PR with known
+ * Jumi provenance. Returns the chain index whose independence family already
+ * wrote the PR, preferring the publisher family and otherwise the first
+ * writer family in chain order. Returns `startIndex: undefined` for first
+ * implementations, unknown/pending/failed provenance, disabled policy, or
+ * when no writer family remains in the active chain (caller falls back to
+ * ordinary random-start and logs `reason`).
+ */
+export function resolveStickyWorkerStart(input: {
+  chain: readonly NamedRunner[];
+  provenance: ProvenanceLookup;
+  policy?: IndependentReviewConfig | undefined;
+}): StickyWorkerResolution {
+  const empty: StickyWorkerResolution = { startIndex: undefined, writerFamilies: [], writers: [] };
+  if (input.chain.length === 0) return { ...empty, reason: "empty worker chain" };
+  if (input.policy?.enabled !== true) return { ...empty, reason: "independent review disabled" };
+  if (input.provenance.status !== "known") return { ...empty, reason: `provenance ${input.provenance.status}` };
+  const contributors = [...(input.provenance.contributors ?? [])];
+  if (input.provenance.publisher) contributors.push(input.provenance.publisher);
+  if (contributors.length === 0) return { ...empty, reason: "known provenance names no writer" };
+
+  let familyMap: Map<string, string>;
+  try {
+    familyMap = buildFamilyMap(input.policy);
+  } catch (err) {
+    return {
+      ...empty,
+      reason: `contradictory independence groups (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+  const writers = contributors.map(stampLabel);
+  const writerFamilies: string[] = [];
+  for (const contributor of contributors) {
+    const family = familyOfStamp(contributor, familyMap);
+    if (!family) return { ...empty, writerFamilies, writers, reason: `writer lacks independence group` };
+    if (!writerFamilies.includes(family)) writerFamilies.push(family);
+  }
+  if (writerFamilies.length === 0) return { ...empty, writers, reason: "no writer family" };
+
+  const chainFamilies = input.chain.map((runner) => familyOfRunner(runner, familyMap));
+  if (chainFamilies.some((family) => family == null)) {
+    return { ...empty, writerFamilies, writers, reason: "worker chain has unmapped runner" };
+  }
+  // Prefer the publisher family so a re-pushed head stays on its last writer;
+  // otherwise the first writer family in chain order keeps the choice stable.
+  const publisherFamily = input.provenance.publisher ? familyOfStamp(input.provenance.publisher, familyMap) : undefined;
+  const orderedFamilies =
+    publisherFamily && writerFamilies.includes(publisherFamily)
+      ? [publisherFamily, ...writerFamilies.filter((family) => family !== publisherFamily)]
+      : writerFamilies;
+  for (const family of orderedFamilies) {
+    const idx = input.chain.findIndex((runner) => familyOfRunner(runner, familyMap) === family);
+    if (idx >= 0) {
+      return { startIndex: idx, writerFamilies, writers, stickyFamily: family };
+    }
+  }
+  return {
+    ...empty,
+    writerFamilies,
+    writers,
+    reason: `no writer family in worker chain (writers: ${writerFamilies.join(", ")})`,
+  };
+}

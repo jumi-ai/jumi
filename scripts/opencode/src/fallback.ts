@@ -11,6 +11,7 @@ import {
   orderChainForJob,
   RUNNER_SELECTION_ORDERED,
   type RunnerSelectionMode,
+  type RunnerStamp,
   resolveRunnerSelection,
   runnerStamp,
   usesEffort,
@@ -45,6 +46,14 @@ export interface EngineChainOptions extends ModelHopOptions {
   selection?: RunnerSelectionMode | string;
   /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
   random?: () => number;
+  /**
+   * Best-effort worktree dirtiness probe for narrowing writer provenance.
+   * Return true when the worktree has non-scratch changes, false when clean,
+   * undefined when unknown. When absent the chain falls back to a direct
+   * `git status --porcelain` in `workdir`; when that also fails the hop stays
+   * conservative and counts the failed runner.
+   */
+  worktreeDirty?: () => Promise<boolean | undefined>;
 }
 
 export function looksLikeProviderUnavailable(text: string): boolean {
@@ -239,6 +248,74 @@ function stampRunner(result: EngineResult, runner: NamedRunner, chainIndex: numb
   return { ...result, runner: runnerStamp(runner), chainIndex };
 }
 
+function porcelainRelevantLines(status: string): string[] {
+  const out: string[] = [];
+  for (const line of status.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const rest = line.length >= 4 ? line.slice(3) : line;
+    const parts = rest.includes(" -> ") ? rest.split(" -> ") : [rest];
+    let relevant = false;
+    for (let part of parts) {
+      part = part.trim();
+      if (part.startsWith('"') && part.endsWith('"') && part.length >= 2) part = part.slice(1, -1);
+      if (part.endsWith("/")) part = part.slice(0, -1);
+      if (part !== ".jumi-tmp" && !part.startsWith(".jumi-tmp/") && part !== "") {
+        relevant = true;
+        break;
+      }
+    }
+    if (relevant) out.push(line);
+  }
+  return out;
+}
+
+async function probeWorktreeDirty(
+  workdir: string | undefined,
+  custom: EngineChainOptions["worktreeDirty"]
+): Promise<boolean | undefined> {
+  if (custom) {
+    try {
+      return await custom();
+    } catch {
+      return undefined;
+    }
+  }
+  if (!workdir) return undefined;
+  try {
+    const proc = Bun.spawn(["git", "status", "--porcelain"], {
+      cwd: workdir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (exitCode !== 0) return undefined;
+    return porcelainRelevantLines(stdout).length > 0;
+  } catch {
+    return undefined;
+  }
+}
+
+function narrowedContributors(
+  runners: readonly NamedRunner[],
+  uptoIndex: number,
+  excluded: Set<number>
+): RunnerStamp[] {
+  const out: RunnerStamp[] = [];
+  const seen = new Set<string>();
+  const end = Math.min(uptoIndex, runners.length - 1);
+  for (let i = 0; i <= end; i++) {
+    if (excluded.has(i)) continue;
+    const entry = runners[i];
+    if (!entry) continue;
+    const stamp = runnerStamp(entry);
+    const key = `${stamp.type}|${stamp.model}|${stamp.effort ?? stamp.variant ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(stamp);
+  }
+  return out;
+}
+
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
   // Without a chain the bare engine runs and stamps fall back to the spawn
   // options, which workers never type, so they read `opencode`. A Claude
@@ -298,11 +375,53 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     return ensureEffective(opts, lazy);
   };
 
+  const excludedClean = new Set<number>();
+
+  const noteCleanHop = (
+    hopIndex: number,
+    runnersRef: readonly NamedRunner[],
+    log: ((message: string) => void) | undefined
+  ) => {
+    excludedClean.add(hopIndex);
+    if (log) {
+      const entry = runnersRef[hopIndex];
+      logDiagnostic(log, "provenance", {
+        review: null,
+        narrowing: "clean-hop-excluded",
+        runner: entry?.name ?? null,
+        chain_index: hopIndex,
+      });
+    }
+  };
+
+  const attachNarrowed = (result: EngineResult, upto: number, runnersRef: readonly NamedRunner[]): EngineResult => {
+    if (result.hopDeclined === true) return result;
+    return { ...result, contributors: narrowedContributors(runnersRef, upto, excludedClean) };
+  };
+
+  const attachNarrowedError = (err: unknown, upto: number, runnersRef: readonly NamedRunner[]): void => {
+    if (err === null || typeof err !== "object") return;
+    (err as { contributors?: unknown }).contributors = narrowedContributors(runnersRef, upto, excludedClean);
+  };
+
+  const maybeExcludeCleanHop = async (
+    hopIndex: number,
+    runnersRef: readonly NamedRunner[],
+    workdir: string | undefined,
+    log: ((message: string) => void) | undefined
+  ): Promise<void> => {
+    const dirty = await probeWorktreeDirty(workdir, hop.worktreeDirty);
+    // Only a definitely-clean worktree excludes the hopped runner. Unknown
+    // (undefined) stays conservative and counts it, so ambiguity fails closed.
+    if (dirty === false) noteCleanHop(hopIndex, runnersRef, log);
+  };
+
   return async (opts: EngineRunOptions): Promise<EngineResult> => {
     // Resolve (and, on the fresh job, randomly order) before any hop logic so
     // availability hops can still reach entries that originally preceded the
     // selected start. Chain positions below are in effective attempt order.
     const runners = runnersFor(opts);
+    const logForHop = hop.logger ?? opts.logger;
 
     if (opts.hopFromIncomplete === true) {
       // The hop is always from scratch to the *next* runner, so anything that
@@ -313,6 +432,9 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         // Nothing ran: say so rather than look like a runner that produced nothing.
         return { status: "ok", hopDeclined: true };
       }
+      // The incomplete round produced nothing by definition; when the
+      // worktree is verifiably clean the previous runner did not contribute.
+      await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
       await beginHop(hop, opts, runners[index]!, next);
       index++;
     }
@@ -331,25 +453,29 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         attachRunner(err, runnerStamp(current), index);
         if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) {
           if (next) refuseQuotaHopError(err, current.model, next.model);
+          attachNarrowedError(err, index, runners);
           throw err;
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
           refuseQuotaHopError(err, current.model, next.model);
+          attachNarrowedError(err, index, runners);
           throw err;
         }
+        await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
         await beginHop(hop, opts, current, next);
         index++;
       }
       if (result) {
         if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) {
           settleQuotaSigterm(opts, result, false);
-          return refuseQuotaHop(result, current.model, next?.model);
+          return attachNarrowed(refuseQuotaHop(result, current.model, next?.model), index, runners);
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
           settleQuotaSigterm(opts, result, false);
-          return refuseQuotaHop(result, current.model, next.model);
+          return attachNarrowed(refuseQuotaHop(result, current.model, next.model), index, runners);
         }
         try {
+          await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
           await beginHop(hop, opts, current, next);
         } catch (err) {
           settleQuotaSigterm(opts, result, false);
@@ -376,12 +502,15 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         const next = runners[index + 1];
         if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) {
           if (next) refuseQuotaHopError(err, runner.model, next.model);
+          attachNarrowedError(err, index, runners);
           throw err;
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
           refuseQuotaHopError(err, runner.model, next.model);
+          attachNarrowedError(err, index, runners);
           throw err;
         }
+        await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
         await beginHop(hop, opts, runner, next);
         index++;
         continue;
@@ -390,13 +519,14 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       const next = runners[index + 1];
       if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) {
         settleQuotaSigterm(opts, result, false);
-        return refuseQuotaHop(result, runner.model, next?.model);
+        return attachNarrowed(refuseQuotaHop(result, runner.model, next?.model), index, runners);
       }
       if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
         settleQuotaSigterm(opts, result, false);
-        return refuseQuotaHop(result, runner.model, next.model);
+        return attachNarrowed(refuseQuotaHop(result, runner.model, next.model), index, runners);
       }
       try {
+        await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
         await beginHop(hop, opts, runner, next);
       } catch (err) {
         settleQuotaSigterm(opts, result, false);
