@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
@@ -204,6 +204,64 @@ async function resolveXaiChildCredential(
   }
 }
 
+export const OPENCODE_API_KEY_ENV = "OPENCODE_API_KEY";
+export const OPENCODE_API_KEY_FILE_ENV = "OPENCODE_API_KEY_FILE";
+
+export interface OpenCodeApiKeyResolution {
+  key: string | undefined;
+  filePath: string | undefined;
+  fileError: string | undefined;
+}
+
+/**
+ * Resolve the OpenCode API key for one child spawn, reading the file fresh
+ * every time so a rotated Secret applies to the next spawn with no restart.
+ *
+ * - `OPENCODE_API_KEY_FILE` points at a mounted Secret file. When set and
+ *   readable with non-empty (trimmed) contents, it wins over the env var.
+ * - Otherwise fall back to `OPENCODE_API_KEY` when set.
+ * - When the file path is set but the file is missing, unreadable, or empty
+ *   and no env fallback exists, there is no key: the caller fails closed as
+ *   a provider-auth failure. Never throws, never logs the key.
+ */
+export function resolveOpenCodeApiKey(env: Record<string, string | undefined> = process.env): OpenCodeApiKeyResolution {
+  const rawPath = env[OPENCODE_API_KEY_FILE_ENV]?.trim();
+  const filePath = rawPath ? rawPath : undefined;
+  const rawEnvKey = env[OPENCODE_API_KEY_ENV]?.trim();
+  const envKey = rawEnvKey ? rawEnvKey : undefined;
+  if (!filePath) {
+    return { key: envKey, filePath: undefined, fileError: undefined };
+  }
+  try {
+    const content = readFileSync(filePath, "utf8").trim();
+    if (content) {
+      return { key: content, filePath, fileError: undefined };
+    }
+    if (envKey) {
+      return { key: envKey, filePath, fileError: "empty" };
+    }
+    return { key: undefined, filePath, fileError: "empty" };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    if (envKey) {
+      return { key: envKey, filePath, fileError: reason };
+    }
+    return { key: undefined, filePath, fileError: reason };
+  }
+}
+
+/**
+ * Clear, key-free configuration reason for a spawn that has a key file
+ * configured but no usable key from either source. Contains the provider
+ * auth death phrase so hop and no-kick rules classify it as auth.
+ */
+export function openCodeApiKeyConfigError(filePath: string): string {
+  return (
+    `${OPENCODE_API_KEY_FILE_ENV} is missing, unreadable, or empty (${filePath}) ` +
+    `and ${OPENCODE_API_KEY_ENV} is not set: ${providerAuthDeathMessage()}`
+  );
+}
+
 function buildEnv(
   opts: OpenCodeRunOptions,
   tempRoot: string,
@@ -217,6 +275,10 @@ function buildEnv(
   // offset tracking against the shared `$HOME/.local/share` log is needed.
   const configPath = resolveOpenCodeConfigPath(opts);
   const xdgDataHome = openCodeXdgDataHome(tempRoot);
+  // Read fresh on every spawn so a rotated Secret file applies to the next
+  // child with no restart. The resolved value lives only in this local and
+  // the child env: never written back to process.env, never logged.
+  const apiKey = resolveOpenCodeApiKey();
   if (!opts.sanitizeEnv) {
     const env = {
       ...process.env,
@@ -224,6 +286,11 @@ function buildEnv(
       OPENCODE_DB: openCodeDbPath,
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
+    if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
+    else if (apiKey.filePath) delete env.OPENCODE_API_KEY;
+    if (apiKey.filePath && !apiKey.key) {
+      throw new EngineFailedError(openCodeApiKeyConfigError(apiKey.filePath), false, { auth: true });
+    }
     if (configPath) env.OPENCODE_CONFIG = configPath;
     denyForgeWebfetch(env, opts);
     return env;
@@ -241,7 +308,10 @@ function buildEnv(
   };
   if (opts.variant) env.OPENCODE_VARIANT = opts.variant;
 
-  if (process.env.OPENCODE_API_KEY) env.OPENCODE_API_KEY = process.env.OPENCODE_API_KEY;
+  if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
+  if (apiKey.filePath && !apiKey.key) {
+    throw new EngineFailedError(openCodeApiKeyConfigError(apiKey.filePath), false, { auth: true });
+  }
   if (configPath) env.OPENCODE_CONFIG = configPath;
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
@@ -469,6 +539,27 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   }
 
   try {
+    // Build the child env before spawning so a missing-key configuration
+    // failure keeps its auth classification instead of being wrapped as infra.
+    let childEnv: Record<string, string>;
+    try {
+      const built = buildEnv(opts, tempRoot, dbPath);
+      if (!built) throw new EngineFailedError("opencode spawn refused: no child env", true);
+      childEnv = built;
+    } catch (err) {
+      if (err instanceof EngineFailedError && err.auth) {
+        const message = err.message;
+        log(message);
+        observeEngineRun(opts, {
+          status: "exit",
+          infra: false,
+          auth: true,
+          message: providerAuthDeathMessage(),
+        });
+        throw err;
+      }
+      throw err;
+    }
     const major = getOpenCodeMajor();
     const args = buildOpenCodeArgs(opts, major);
     const proc = (() => {
@@ -478,7 +569,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",
-          env: buildEnv(opts, tempRoot, dbPath),
+          env: childEnv,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

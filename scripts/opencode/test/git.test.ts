@@ -27,6 +27,7 @@ const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
 const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalApiKey = process.env.OPENCODE_API_KEY;
+const originalApiKeyFile = process.env.OPENCODE_API_KEY_FILE;
 const originalHome = process.env.HOME;
 // `runOpenCode` owns the provider auth file under HOME before it spawns, so
 // every test gets a throwaway one: a real developer or CI home must never be
@@ -35,6 +36,7 @@ let isolatedHome = "";
 
 beforeEach(async () => {
   delete process.env.PHOENIX_OTLP_ENDPOINT;
+  delete process.env.OPENCODE_API_KEY_FILE;
   isolatedHome = await mkdtemp(join(tmpdir(), "jumi-opencode-home-"));
   process.env.HOME = isolatedHome;
 });
@@ -52,6 +54,8 @@ afterEach(async () => {
   else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
   if (originalApiKey === undefined) delete process.env.OPENCODE_API_KEY;
   else process.env.OPENCODE_API_KEY = originalApiKey;
+  if (originalApiKeyFile === undefined) delete process.env.OPENCODE_API_KEY_FILE;
+  else process.env.OPENCODE_API_KEY_FILE = originalApiKeyFile;
   resetTokenMetricsForTests();
   setOpenCodeMajorForTests(undefined);
   resetOpenCodeVersionForTests();
@@ -370,6 +374,156 @@ printf 'MODEL=%s KEY=%s\\n' "$OPENCODE_MODEL" "$OPENCODE_API_KEY"
         expect(result.stdout).toContain("KEY=sk-test");
       }
     );
+  });
+
+  test("reads OPENCODE_API_KEY_FILE fresh on each spawn without a restart", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "sk-file-one\n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    delete process.env.OPENCODE_API_KEY;
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+        async (_binDir, workdir) => {
+          const first = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          expect(first.status).toBe("ok");
+          expect(first.stdout).toContain("KEY=sk-file-one");
+
+          await writeFile(keyFile, "sk-file-two\n");
+          const second = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          expect(second.status).toBe("ok");
+          expect(second.stdout).toContain("KEY=sk-file-two");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
+  });
+
+  test("key file wins over the env var", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "sk-from-file\n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    process.env.OPENCODE_API_KEY = "sk-from-env";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("KEY=sk-from-file");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
+  });
+
+  test("key file wins over the env var in the unsanitized child", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "sk-from-file\n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    process.env.OPENCODE_API_KEY = "sk-from-env";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("KEY=sk-from-file");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to the env var when the key file is missing", async () => {
+    process.env.OPENCODE_API_KEY_FILE = join(tmpdir(), `jumi-missing-key-${Date.now()}`);
+    process.env.OPENCODE_API_KEY = "sk-fallback";
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("KEY=sk-fallback");
+      }
+    );
+  });
+
+  test("falls back to the env var when the key file is empty", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "  \n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    process.env.OPENCODE_API_KEY = "sk-fallback";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          expect(result.status).toBe("ok");
+          expect(result.stdout).toContain("KEY=sk-fallback");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
+  });
+
+  test("missing key file without an env fallback fails as provider auth", async () => {
+    process.env.OPENCODE_API_KEY_FILE = join(tmpdir(), `jumi-missing-key-${Date.now()}`);
+    delete process.env.OPENCODE_API_KEY;
+    const logs: string[] = [];
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'should-not-run\\n'
+`,
+      async (_binDir, workdir) => {
+        const run = runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        await expect(run).rejects.toMatchObject({ name: "EngineFailedError", auth: true, infra: false });
+        await expect(run).rejects.toThrow("OPENCODE_API_KEY_FILE");
+        await expect(run).rejects.toThrow(providerAuthDeathMessage());
+        expect(renderRunMetrics()).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
+        expect(logs.some((line) => line.includes("OPENCODE_API_KEY_FILE"))).toBe(true);
+      }
+    );
+  });
+
+  test("empty key file without an env fallback fails as provider auth", async () => {
+    const keyFile = join(await mkdtemp(join(tmpdir(), "jumi-opencode-key-")), "api-key");
+    await writeFile(keyFile, "\n");
+    process.env.OPENCODE_API_KEY_FILE = keyFile;
+    delete process.env.OPENCODE_API_KEY;
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'should-not-run\\n'
+`,
+        async (_binDir, workdir) => {
+          const run = runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          await expect(run).rejects.toMatchObject({ name: "EngineFailedError", auth: true, infra: false });
+          await expect(run).rejects.toThrow("OPENCODE_API_KEY_FILE");
+        }
+      );
+    } finally {
+      await rm(dirname(keyFile), { recursive: true, force: true });
+    }
   });
 
   test("truncates output", async () => {

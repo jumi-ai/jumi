@@ -112,6 +112,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `OPENCODE_WELLKNOWN_URL` | `https://kirmanak.stream` | Remote OpenCode config origin. Override to **your** well-known host. Unset or empty still defaults to `https://kirmanak.stream`. Set `disabled` to turn well-known **off** (no `auth.json` seed, no fetch). Other non-URL values fail closed. `OPENCODE_MODEL` and `OPENCODE_API_KEY` still apply with well-known off. Otherwise the service seeds a `wellknown` auth entry (and rewrites it when key/token rotate) so OpenCode loads `/.well-known/opencode` before the local review policy |
 | `OPENCODE_WELLKNOWN_KEY` | `OPENCODE_WELLKNOWN_TOKEN` | Logical key name recorded in OpenCode auth for the well-known provider |
 | `OPENCODE_WELLKNOWN_TOKEN` | `unused` | Token placeholder for the public well-known config entry |
+| `OPENCODE_API_KEY_FILE` | unset | Optional path to a file holding the OpenCode API key (Kubernetes Secret volume). Read fresh on every OpenCode spawn, so a rotated key applies to the next child with no pod restart. When set and readable with non-empty contents it wins over `OPENCODE_API_KEY`; otherwise the env var is the fallback. A missing, unreadable, or empty file with no env fallback fails the run as a provider-auth failure. Mount the Secret as files, not `subPath`, so kubelet updates it in place |
 | `HOME` | `/data` in the image | Auth storage root (`OpenCode` under `HOME`; Claude Code uses `HOME` and `CLAUDE_CODE_OAUTH_TOKEN` from the parent env, `agy` uses `$HOME/.gemini/antigravity-cli/`, Codex uses `$HOME/.codex`; none of them use OpenCode’s per-run `XDG_CONFIG_HOME`) |
 | `WORKDIR` | `/work` in the image | Temporary workspace root |
 | `QUEUE_CONCURRENCY` | `1` | Review worker concurrency |
@@ -346,6 +347,10 @@ On startup, unless `OPENCODE_WELLKNOWN_URL=disabled`, Jumi preserves the existin
 ```
 
 That makes OpenCode load shared defaults from `<origin>/.well-known/opencode` before this repository's local review policy, without requiring deployment-specific init-container wiring. `disabled` skips that seed (and removes a leftover `disabled` well-known entry) so OpenCode does not fetch any `.well-known/opencode` URL.
+
+### Rotating the OpenCode API key without a restart
+
+Set `OPENCODE_API_KEY_FILE` to a file holding the key (a Kubernetes Secret mounted as a volume). The parent reads that file fresh on every OpenCode spawn, so an operator rotation applies to the next child with no pod restart. When the file is set and readable with non-empty contents it wins over `OPENCODE_API_KEY`; otherwise the env var is the fallback and existing deploys keep working unchanged. A missing, unreadable, or empty file with no env fallback fails the run as a provider-auth failure (hop and no-kick rules apply). The file contents are only copied into the child env: never logged, never written into the workdir, never posted to statuses or the board, and never added to the forge-secret scrub file. Mount the Secret as files, not `subPath`, so kubelet updates it in place (about a minute).
 
 ### The xAI refresh grant belongs to the long-lived process
 
