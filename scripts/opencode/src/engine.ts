@@ -115,6 +115,7 @@ export function throwIfEngineFailed(result: EngineResult): void {
   if (result.runner) err.runner = result.runner;
   if (result.chainIndex != null) err.chainIndex = result.chainIndex;
   if (result.hopRefused) err.hopRefused = true;
+  if (result.contributors) err.contributors = result.contributors;
   throw err;
 }
 
