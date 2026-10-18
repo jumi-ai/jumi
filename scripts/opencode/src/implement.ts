@@ -144,6 +144,8 @@ export interface ImplementOptions extends PickupPolicy {
   runnerSelection?: string;
   /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
   runnerRandom?: () => number;
+  /** Independence groups for sticky writer selection. Unset/disabled keeps ordinary selection. */
+  independentReview?: import("./runners.ts").IndependentReviewConfig;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   home: string;
@@ -515,9 +517,8 @@ async function implementExternalIssue(
       };
       let result: EngineResult;
       try {
-        result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+        result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
           runner = r;
-          provenanceCollector.noteRunner(r, idx);
         });
       } catch (err) {
         provenanceCollector.noteError(err);
@@ -773,9 +774,8 @@ export async function implementIssue(
         const runtime = opts.runtime ?? standingPodRuntime;
         let result: EngineResult;
         try {
-          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r, idx) => {
+          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
             runner = r;
-            provenanceCollector.noteRunner(r, idx);
           });
         } catch (err) {
           provenanceCollector.noteError(err);

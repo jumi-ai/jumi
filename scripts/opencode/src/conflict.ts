@@ -21,7 +21,13 @@ import {
   withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
-import { type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
+import {
+  type EngineResult,
+  type EngineRunOptions,
+  resolveEngine,
+  throwIfEngineFailed,
+  thrownRunner,
+} from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -43,6 +49,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
   appendStuckLatchFingerprint,
   evaluateStuck,
@@ -89,6 +96,8 @@ export interface MergeDefaultResult {
   runner?: RunnerStamp;
   /** Chain position of `runner`; lets provenance include an earlier hopped runner. */
   runnerChainIndex?: number;
+  /** Narrowed writer set for the merge engine call (clean hops excluded). */
+  contributors?: RunnerStamp[];
 }
 
 export interface MergeDefaultIntoWorktreeOpts {
@@ -443,6 +452,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   let openCodeRan = false;
   let runner: RunnerStamp | undefined;
   let runnerChainIndex: number | undefined;
+  let mergeNarrowed: RunnerStamp[] | undefined;
   if (leftoverLocks.length > 0) {
     return { status: "stuck", headSha, baseSha, openCodeRan: false, conflicted: true };
   }
@@ -498,6 +508,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       runnerChainIndex = idx;
       opts.onRunner?.(r, idx);
     });
+    mergeNarrowed = engineResult.contributors;
     throwIfEngineFailed(engineResult);
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
@@ -514,6 +525,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         conflicted: true,
         runner,
         ...(runnerChainIndex != null ? { runnerChainIndex } : {}),
+        ...(mergeNarrowed ? { contributors: mergeNarrowed } : {}),
       };
     }
   }
@@ -531,6 +543,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     conflicted,
     ...(runner ? { runner } : {}),
     ...(runnerChainIndex != null ? { runnerChainIndex } : {}),
+    ...(mergeNarrowed ? { contributors: mergeNarrowed } : {}),
   };
 }
 
@@ -548,14 +561,15 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     forgetTerminal: true,
   });
   if (isClaimedEarlyResult(claimed)) return claimed;
-  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine, now, forgetClaim, claim } = claimed;
+  const { owner, repo, issueNumber, worktree, sanitizeEnv, engine: claimedEngine, now, forgetClaim, claim } = claimed;
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
-  const jobChain = claimed.effectiveChain ?? opts.chain;
+  let jobChain = claimed.effectiveChain ?? opts.chain;
 
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(jobChain);
+  let provenanceCollector = new ProvenanceCollector(jobChain);
+  let activeEngine = claimedEngine;
   const sticky = (body: string, index: number) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner), {
       index,
@@ -598,6 +612,33 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
 
   const loop = openClaimedLoop(claimed, opts);
+
+  {
+    const baseEngine = resolveEngine(opts, registeredEngine);
+    const active = await buildActiveWorkerEngine({
+      baseEngine,
+      baseChain: opts.chain,
+      effectiveChain: claimed.effectiveChain,
+      runnerSelection: opts.runnerSelection,
+      runnerRandom: opts.runnerRandom,
+      independentReview: opts.independentReview,
+      provenance: opts.provenance,
+      provenanceJob: opts.provenanceJob,
+      owner,
+      repo,
+      prNumber: pr.number,
+      headSha: pr.head.sha,
+      branch: pr.head.ref,
+      jobKey: opts.jobId ?? opts.job.delivery,
+      loop,
+      log,
+      remainingLeaseMs: opts.remainingLeaseMs,
+      extendLease: opts.extendLease,
+    });
+    jobChain = active.chain;
+    activeEngine = active.engine;
+    provenanceCollector = active.collector;
+  }
 
   const recordAttempt = async (headSha: string, baseSha: string, increment: boolean) => {
     await writeConflictLatch(latches, latchKey, {
@@ -686,16 +727,15 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
           maxOutputBytes: opts.maxOutputBytes,
           timeoutMs,
-          openCodeRunner: engine,
+          openCodeRunner: activeEngine,
           helmRunner: opts.helmRunner,
           logger: log,
           abortSignal: opts.abortSignal,
           ciMarkdown,
           jobId: opts.jobId ?? opts.job.delivery,
           onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r, idx) => {
+          onRunner: (r) => {
             runner = r;
-            provenanceCollector.noteRunner(r, idx);
           },
         });
       } catch (err: unknown) {
@@ -718,7 +758,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       }
 
       runner = mergeResult.runner;
-      if (mergeResult.runner) provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      if (mergeResult.contributors && mergeResult.contributors.length > 0) {
+        provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
+      } else if (mergeResult.runner) {
+        provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+      }
       await noteProvenanceRunners(opts, provenanceCollector, log);
       if (mergeResult.status === "up-to-date") {
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -772,9 +816,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             const runtime = opts.runtime ?? standingPodRuntime;
             let continued: EngineResult;
             try {
-              continued = await runtime.runRuntimeEngine(loop, engine, continuedOpts, (r, idx) => {
+              continued = await runtime.runRuntimeEngine(loop, activeEngine, continuedOpts, (r) => {
                 runner = r;
-                provenanceCollector.noteRunner(r, idx);
               });
             } catch (err) {
               provenanceCollector.noteError(err);
