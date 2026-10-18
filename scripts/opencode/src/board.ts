@@ -67,6 +67,12 @@ export const PEER_BOARD_MAX_BYTES = 1_048_576;
 /** Forge name of the isolated GitHub factory. Homelab is anything else (gitea). */
 export const PEER_FORGE = "github";
 
+/** Peer kick forward budget: a slow peer must not hang the homelab kick. */
+export const PEER_KICK_TIMEOUT_MS = PEER_BOARD_TIMEOUT_MS;
+
+/** Peer kick response cap: a compromised peer must not spike homelab memory per kick. */
+export const PEER_KICK_MAX_BYTES = PEER_BOARD_MAX_BYTES;
+
 const BOARD_API_PATH = "/api/board";
 const BOARD_KICK_PATH = "/api/board/kick";
 const BOARD_PAGE_PATHS = new Set(["/", "/board"]);
@@ -288,6 +294,7 @@ export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
     ids: SIT_KICK_IDS,
     none: [...NO_KICK_SITS].sort(),
     requeue: REQUEUE_KICK_EFFECT,
+    peerForward: "peer-kick-v1",
   })
 );
 
@@ -541,15 +548,10 @@ export async function fetchPeerBoard(
     // Pin every row to PEER_FORGE. Both the top-level body.forge and each
     // row's own rec.forge are peer-supplied and untrusted for filtering, so
     // a compromised peer cannot tag rows with the local forge name.
-    // Peer sits are read-only from here: strip kick so the page never POSTs
-    // peer coordinates to the homelab kick endpoint (which acts only on the
-    // local sit store and has no forwarding hop).
-    const pinForge = (items: BoardItem[]): BoardItem[] =>
-      items.map((item) => {
-        const copy = { ...item, forge: PEER_FORGE };
-        delete copy.kick;
-        return copy;
-      });
+    // Peer kicks are kept: the page offers the same control as a local row
+    // and the homelab kick endpoint forwards peer-forge kicks to the peer
+    // board listener over the bearer hop (never acting on the local store).
+    const pinForge = (items: BoardItem[]): BoardItem[] => items.map((item) => ({ ...item, forge: PEER_FORGE }));
     const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
     const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
     const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
@@ -570,6 +572,214 @@ export async function fetchPeerBoard(
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Peer-forge kick forwarding (homelab only, one-way).
+ *
+ * The homelab board keeps every existing check before forwarding (edge
+ * identity, Origin, idempotency, catalog) and records the actor, forge, row
+ * coordinates, and result in its kick log. The peer stays the authority: it
+ * re-validates against its own store and its 409/422 come back verbatim.
+ * Forge is pinned server-side to PEER_FORGE and the hop URL is derived from
+ * the server-configured peerUrl plus a fixed path, so a crafted forge or URL
+ * in the request can never redirect the hop. Edge identity headers are never
+ * forwarded; the hop carries only the bearer.
+ */
+function peerForgeFieldOf(body: unknown): string {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return "";
+  const rec = body as Record<string, unknown>;
+  const value = rec.forge;
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function isPeerForgeKick(body: unknown): boolean {
+  return peerForgeFieldOf(body) === PEER_FORGE;
+}
+
+function peerKickUrlOf(peerUrl: string): string | undefined {
+  const trimmed = peerUrl.trim();
+  if (trimmed === "") return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+  try {
+    return new URL(BOARD_KICK_PATH, parsed.toString()).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function strOrEmpty(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function numOrUndefined(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    const n = Number(value);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return undefined;
+}
+
+function extractForwardIdentity(
+  body: unknown
+): { owner: string; repo: string; number: number; commit: string; kick: string } | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
+  const rec = body as Record<string, unknown>;
+  const owner = strOrEmpty(rec.owner).trim();
+  const repo = strOrEmpty(rec.repo).trim();
+  const number =
+    numOrUndefined(rec.number) ??
+    numOrUndefined(rec.prNumber) ??
+    numOrUndefined(rec.pr_number) ??
+    numOrUndefined(rec.issueNumber) ??
+    numOrUndefined(rec.issue_number);
+  if (!owner || !repo || number === undefined) return undefined;
+  const commit = (
+    strOrEmpty(rec.commit) ||
+    strOrEmpty(rec.headSha) ||
+    strOrEmpty(rec.head_sha) ||
+    strOrEmpty(rec.sha)
+  ).trim();
+  const kick = rawKickIdOf(body) || (isSitClearPayload(body) ? "sit-clear" : "");
+  return { owner, repo, number, commit, kick };
+}
+
+function forwardedKickMismatch(
+  input: { owner: string; repo: string; number: number; commit: string; kick: string },
+  prior: { owner: string; repo: string; number: number; commit: string; kick: string }
+): boolean {
+  return (
+    prior.owner !== input.owner ||
+    prior.repo !== input.repo ||
+    prior.number !== input.number ||
+    prior.commit !== input.commit ||
+    prior.kick !== input.kick
+  );
+}
+
+function forwardedMismatchResponse(prior: { owner: string; repo: string; number: number; commit: string }): Response {
+  return json(400, {
+    error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+    code: "bad-request",
+    terminalJobId: null,
+    newJobId: null,
+  });
+}
+
+function replayForwardedPrior(prior: { result: string }): Response {
+  if (prior.result === "peer-ok") {
+    return json(200, { ok: true, deduped: true, forwarded: true, forge: PEER_FORGE });
+  }
+  if (prior.result === "peer-not-found") {
+    return json(404, {
+      error: "already decided: not-found",
+      code: "not-found",
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  if (prior.result === "peer-stale-kick" || prior.result === "peer-conflict") {
+    const code = prior.result === "peer-conflict" ? "conflict" : "stale-kick";
+    return json(409, {
+      error: `already decided: ${prior.result.replace(/^peer-/, "")}`,
+      code,
+      terminalJobId: null,
+      newJobId: null,
+      deduped: true,
+    });
+  }
+  return json(422, {
+    error: `already decided: ${(prior.result || "not-kickable").replace(/^peer-/, "")}`,
+    code: "not-kickable",
+    terminalJobId: null,
+    newJobId: null,
+    deduped: true,
+  });
+}
+
+function peerResultForStatus(status: number, peerBody: unknown): string | undefined {
+  if (status === 200) return "peer-ok";
+  if (status === 404) return "peer-not-found";
+  if (status === 409) {
+    const code =
+      peerBody && typeof peerBody === "object" && !Array.isArray(peerBody)
+        ? (peerBody as Record<string, unknown>).code
+        : undefined;
+    return code === "conflict" ? "peer-conflict" : "peer-stale-kick";
+  }
+  if (status === 422) return "peer-not-kickable";
+  return undefined;
+}
+
+const FORWARD_BODY_FIELDS = new Set([
+  "owner",
+  "repo",
+  "number",
+  "prNumber",
+  "pr_number",
+  "issueNumber",
+  "issue_number",
+  "commit",
+  "headSha",
+  "head_sha",
+  "sha",
+  "kick",
+  "kickId",
+  "kick_id",
+  "id",
+  "reason",
+  "idempotencyKey",
+  "idempotency_key",
+  "idempotency-key",
+]);
+
+function sanitizeForwardBody(body: unknown): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!body || typeof body !== "object" || Array.isArray(body)) return out;
+  const rec = body as Record<string, unknown>;
+  for (const key of FORWARD_BODY_FIELDS) {
+    if (key in rec) out[key] = rec[key];
+  }
+  return out;
+}
+
+async function readCappedPeerKickBody(response: Response): Promise<{ text: string; tooLarge: boolean }> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    try {
+      const text = await response.text();
+      if (text.length > PEER_KICK_MAX_BYTES) return { text: "", tooLarge: true };
+      return { text, tooLarge: false };
+    } catch {
+      return { text: "", tooLarge: true };
+    }
+  }
+  const chunks: Uint8Array[] = [];
+  let seen = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    seen += value.byteLength;
+    if (seen > PEER_KICK_MAX_BYTES) {
+      await reader.cancel().catch(() => {});
+      return { text: "", tooLarge: true };
+    }
+    chunks.push(value);
+  }
+  try {
+    return { text: new TextDecoder().decode(Buffer.concat(chunks)), tooLarge: false };
+  } catch {
+    return { text: "", tooLarge: true };
   }
 }
 
@@ -826,7 +1036,6 @@ function forgeBaseFor(item, data) {
   }
   return "";
 }
-function isLocalRow(item, data) { return forgeOf(item, data) === (data.forge || "gitea"); }
 function forgeHref(item, data) {
   const base = forgeBaseFor(item, data);
   if (!base) return null;
@@ -901,7 +1110,7 @@ function rowItem(item, opts) {
   if (item.commit) subText += " · " + String(item.commit).slice(0, 8);
   sub.textContent = subText;
   li.appendChild(sub);
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "") && isLocalRow(item, state.data);
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "");
   if (opts.section === "sitting" && hasKick && state.catalogOk) {
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -956,7 +1165,7 @@ function selectedItem() {
 }
 function confirmBlock(item, data, confirmIdPrefix) {
   const wrap = document.createElement("div");
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string") && isLocalRow(item, data);
+  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string");
   const kickId = item.kick && typeof item.kick.kick === "string" && item.kick.kick.trim() !== "" ? item.kick.kick.trim() : "";
   const idempotencyKey = (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.floor(Math.random() * 1e9));
   if (hasKick && state.catalogOk) {
@@ -979,7 +1188,7 @@ function confirmBlock(item, data, confirmIdPrefix) {
       }
       msg.textContent = "Working…";
       try {
-        const payload = { owner: item.owner, repo: item.repo, number: item.number };
+        const payload = { owner: item.owner, repo: item.repo, number: item.number, forge: forgeOf(item, data) };
         if (typeof item.commit === "string" && item.commit.trim() !== "") payload.commit = item.commit;
         else if (typeof item.headSha === "string" && item.headSha.trim() !== "") payload.commit = item.headSha;
         if (kickId) payload.kick = kickId;
@@ -993,7 +1202,7 @@ function confirmBlock(item, data, confirmIdPrefix) {
         if (res.ok) {
           closeConfirm();
           await load();
-        } else if (res.status === 409 || res.status === 422) {
+        } else if (res.status === 409 || res.status === 422 || res.status === 503) {
           let detail = "";
           try {
             const data = await res.json();
@@ -1003,6 +1212,8 @@ function confirmBlock(item, data, confirmIdPrefix) {
             msg.textContent = detail;
           } else if (res.status === 409) {
             msg.textContent = "That kick is no longer offered for this row.";
+          } else if (res.status === 503) {
+            msg.textContent = "Peer unavailable. Close and confirm again to try once more.";
           } else {
             msg.textContent = "Kick did not land (422). Close and confirm again to try once more.";
           }
@@ -1596,7 +1807,13 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
       }
       const kickActor = boardUsername(request);
       if (!kickActor) return json(401, { error: "missing edge identity" });
-      return handleKick(request, deps.store, logger, deps.forgeApi, { actor: kickActor });
+      return handleKick(request, deps.store, logger, deps.forgeApi, {
+        actor: kickActor,
+        peerUrl,
+        peerToken,
+        fetchFn,
+        peerTimeoutMs,
+      });
     }
     // Device login for one homelab ordinal (Grok and Codex). Not a kick:
     // distinct paths, fixed per-provider invocation, confirm names the
@@ -1734,7 +1951,14 @@ async function handleKick(
   store: ReviewJobStore,
   logger: (message: string) => void,
   forgeApi?: BoardPullForge,
-  opts?: { actor?: string; peer?: boolean }
+  opts?: {
+    actor?: string;
+    peer?: boolean;
+    peerUrl?: string;
+    peerToken?: string;
+    fetchFn?: BoardFetchFn;
+    peerTimeoutMs?: number;
+  }
 ): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "method not allowed" });
   // Forge-gated auth happens at the call site. Homelab passes the username
@@ -1764,6 +1988,19 @@ async function handleKick(
     body = text.trim() === "" ? {} : (JSON.parse(text) as unknown);
   } catch {
     return json(400, { error: "invalid JSON" });
+  }
+  // Peer-forge forwarding (homelab only, one-way). A peer row the peer marks
+  // kickable is applied to the peer store, never the homelab store. Forge is
+  // pinned server-side: only an exact PEER_FORGE value forwards, and the hop
+  // URL is derived from the server-configured peerUrl plus a fixed path.
+  if (!isPeer && isPeerForgeKick(body)) {
+    return handleForwardedKick(request, body, store, logger, {
+      actor,
+      peerUrl: opts?.peerUrl ?? "",
+      peerToken: opts?.peerToken ?? "",
+      fetchFn: opts?.fetchFn ?? fetch,
+      peerTimeoutMs: opts?.peerTimeoutMs ?? PEER_KICK_TIMEOUT_MS,
+    });
   }
   // Sit-clear kick (default branch): an owner/repo/number-only payload clears
   // a kickable sit. Requeue payloads carry a commit and kick id and fall
@@ -1836,6 +2073,190 @@ async function handleKick(
     logger(`kick failed: ${err instanceof Error ? err.message : String(err)}`);
     return json(503, { error: "queue unavailable" });
   }
+}
+
+/**
+ * Forward a peer-forge kick to the peer board listener.
+ *
+ * Keeps every homelab check (edge identity and Origin already passed at the
+ * call site), then idempotency on the homelab log, then the bearer hop. The
+ * peer re-validates against its own store; its 409/422 come back verbatim.
+ * Never touches the homelab sit/job stores: the only homelab write is the
+ * kick-log record (actor, forge, coordinates, result). Transport failures
+ * and peer auth failures are 503 with a clear error, never a fake success.
+ */
+async function handleForwardedKick(
+  request: Request,
+  body: unknown,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  opts: { actor: string; peerUrl: string; peerToken: string; fetchFn: BoardFetchFn; peerTimeoutMs: number }
+): Promise<Response> {
+  const { actor, peerUrl, peerToken, fetchFn, peerTimeoutMs } = opts;
+  const headerKey = idempotencyKeyOf(request);
+  const identity = extractForwardIdentity(body);
+  if (!identity) return json(400, { error: "invalid kick payload" });
+  const rec = body as Record<string, unknown>;
+  const bodyKey = (
+    strOrEmpty(rec.idempotencyKey) ||
+    strOrEmpty(rec.idempotency_key) ||
+    strOrEmpty(rec["idempotency-key"])
+  ).trim();
+  const idempotencyKey = (headerKey || bodyKey).trim();
+  const coords = `${identity.owner}/${identity.repo}#${identity.number} @ ${identity.commit || "-"}`;
+  const kickLabel = identity.kick || "sit-clear";
+
+  // Homelab idempotency before the hop. Peer results are stored with a peer-
+  // prefix so a local prior can never replay as a peer success (and a peer
+  // prior can never replay as a local success on the peer path).
+  if (idempotencyKey !== "") {
+    let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>> | undefined;
+    try {
+      prior = await store.getKickByIdempotencyKey(idempotencyKey);
+    } catch (err) {
+      logger(
+        `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return json(503, { error: "queue unavailable" });
+    }
+    if (prior) {
+      if (!prior.result.startsWith("peer-")) {
+        return forwardedMismatchResponse(prior);
+      }
+      if (
+        forwardedKickMismatch(identity, {
+          owner: prior.owner,
+          repo: prior.repo,
+          number: prior.number,
+          commit: prior.commit,
+          kick: prior.kick,
+        })
+      ) {
+        return forwardedMismatchResponse(prior);
+      }
+      logger(
+        `kick forward replay actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)} result=${prior.result}`
+      );
+      return replayForwardedPrior(prior);
+    }
+  }
+
+  const kickUrl = peerKickUrlOf(peerUrl);
+  const token = peerToken.trim();
+  if (!kickUrl || token === "") {
+    logger(`kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: peer unavailable`);
+    return json(503, { error: "peer unavailable" });
+  }
+
+  const forwardBody = sanitizeForwardBody(body);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), peerTimeoutMs);
+  let peerResponse: Response;
+  try {
+    peerResponse = await fetchFn(kickUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        Authorization: `Bearer ${token}`,
+        ...(idempotencyKey !== "" ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
+      body: JSON.stringify(forwardBody),
+      signal: controller.signal,
+      redirect: "error",
+    });
+  } catch (err) {
+    logger(
+      `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return json(503, { error: "peer unavailable" });
+  } finally {
+    clearTimeout(timer);
+  }
+
+  // Peer auth failures are homelab misconfig, not an operator auth problem:
+  // surface as unavailable instead of a misleading edge sign-in message.
+  if (peerResponse.status === 401 || peerResponse.status === 403) {
+    logger(
+      `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: peer rejected hop (${peerResponse.status})`
+    );
+    return json(503, { error: "peer unavailable" });
+  }
+
+  const { text, tooLarge } = await readCappedPeerKickBody(peerResponse).catch(() => ({
+    text: "",
+    tooLarge: true as const,
+  }));
+  if (tooLarge) {
+    logger(`kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: peer response too large`);
+    return json(503, { error: "peer unavailable" });
+  }
+  let peerBody: unknown;
+  try {
+    peerBody = text.trim() === "" ? {} : (JSON.parse(text) as unknown);
+  } catch {
+    logger(`kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: peer returned invalid JSON`);
+    return json(503, { error: "peer unavailable" });
+  }
+
+  const status = peerResponse.status;
+  const result = peerResultForStatus(status, peerBody);
+  if (result !== undefined) {
+    try {
+      await store.recordReopenKick({
+        owner: identity.owner,
+        repo: identity.repo,
+        number: identity.number,
+        commit: identity.commit,
+        kick: identity.kick || "sit-clear",
+        actor,
+        idempotencyKey,
+        result,
+      });
+    } catch (err) {
+      if (idempotencyKey !== "" && isUniqueViolation(err)) {
+        let prior: Awaited<ReturnType<ReviewJobStore["getKickByIdempotencyKey"]>> | undefined;
+        try {
+          prior = await store.getKickByIdempotencyKey(idempotencyKey);
+        } catch {
+          return json(503, { error: "queue unavailable" });
+        }
+        if (!prior) return json(503, { error: "queue unavailable" });
+        if (!prior.result.startsWith("peer-")) return forwardedMismatchResponse(prior);
+        if (
+          forwardedKickMismatch(identity, {
+            owner: prior.owner,
+            repo: prior.repo,
+            number: prior.number,
+            commit: prior.commit,
+            kick: prior.kick,
+          })
+        ) {
+          return forwardedMismatchResponse(prior);
+        }
+        return replayForwardedPrior(prior);
+      }
+      logger(
+        `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return json(503, { error: "queue unavailable" });
+    }
+  }
+
+  if (result === "peer-ok") {
+    logger(`kick forward ok actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)}`);
+  } else if (result !== undefined) {
+    const detail =
+      peerBody && typeof peerBody === "object" && !Array.isArray(peerBody)
+        ? String((peerBody as Record<string, unknown>).error ?? result.replace(/^peer-/, ""))
+        : result.replace(/^peer-/, "");
+    logger(
+      `kick forward ${result.replace(/^peer-/, "")} actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)}: ${detail}`
+    );
+  } else {
+    logger(`kick forward pass-through actor=${actor} forge=${PEER_FORGE} ${coords} status=${status}`);
+  }
+  return json(status, peerBody);
 }
 
 function nonEmptyString(value: unknown): boolean {
