@@ -328,9 +328,7 @@ export function stuckIdempotencyMismatch(
 export function isConflictStuckReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   const normalized = reason.trim().toLowerCase();
-  return (
-    normalized.startsWith("stuck: cannot resolve conflicts") || normalized.startsWith("stuck: conflict")
-  );
+  return normalized.startsWith("stuck: cannot resolve conflicts") || normalized.startsWith("stuck: conflict");
 }
 
 /**
