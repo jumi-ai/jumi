@@ -115,10 +115,13 @@ describe("opencode implement config", () => {
 });
 
 describe("implement prompt", () => {
-  test("allows incremental git commit and push, forbids force-push and questions", () => {
-    expect(IMPLEMENT_PROMPT).toContain("commit");
-    expect(IMPLEMENT_PROMPT).toContain("push");
+  test("commits per logical step, never pushes, forbids force-push and questions", () => {
+    expect(IMPLEMENT_PROMPT).toContain("Commit at each coherent logical step");
+    expect(IMPLEMENT_PROMPT).toContain("Do not push");
+    expect(IMPLEMENT_PROMPT).toContain("The parent pushes once after this run exits");
+    expect(IMPLEMENT_PROMPT).not.toContain("push as needed");
     expect(IMPLEMENT_PROMPT).toContain("Do not force-push");
+    expect(IMPLEMENT_PROMPT).toContain("Do not amend or rebase commits already on the remote branch");
     expect(IMPLEMENT_PROMPT).toContain("Do not ask questions");
     expect(IMPLEMENT_PROMPT).not.toContain("Do not run git");
     expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
