@@ -1518,8 +1518,25 @@ describe("worker prompts", () => {
     }
   });
 
-  test("conflict stays on the injected conflicted paths", () => {
-    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
+  test("workers commit per logical step and never push", () => {
+    for (const prompt of prompts) {
+      expect(prompt).toContain("Commit at each coherent logical step");
+      expect(prompt).toContain("Do not push");
+      expect(prompt).toContain("The parent pushes once after this run exits");
+      expect(prompt).toContain("Do not force-push");
+      expect(prompt).toContain("Do not amend or rebase commits already on the remote branch");
+      expect(prompt).toContain("Do not commit JUMI_*.md sentinels");
+      expect(prompt).not.toContain("push as needed");
+    }
+    expect(IMPLEMENT_PROMPT).toContain("a small task can be a single commit");
+    expect(IMPLEMENT_PROMPT).toContain("No `wip`");
+    expect(IMPLEMENT_PROMPT).toContain("Do not commit a broken intermediate state");
+    expect(FOLLOWUP_PROMPT).toContain("a small task can be a single commit");
+    expect(CONFLICT_PROMPT).toContain("a small task can be a single commit");
+    expect(CONFLICT_PROMPT).toContain("Keep the merge commit flow");
+  });
+
+  test("conflict stays on the injected conflicted paths", () => {    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
     expect(CONFLICT_PROMPT).toContain("One adjacent file is allowed only if the resolution truly requires it");
   });
 
