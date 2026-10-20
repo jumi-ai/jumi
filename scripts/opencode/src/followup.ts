@@ -902,10 +902,14 @@ export async function implementFollowUp(
       return { status: "skipped", reason: "CI still pending" };
     }
     if (!ciWake) {
-      await forgetClaim();
-      return { status: "skipped", reason: "no unhandled feedback" };
-    }
-    if (ci.unhandled.every((check) => check.flake)) {
+      // A conflicted pull still needs merge-of-default work below: a
+      // follow-up must not silently skip it with `no unhandled feedback`.
+      // Conflict resolution (including the round-cap check) runs first.
+      if (pr.mergeable !== false) {
+        await forgetClaim();
+        return { status: "skipped", reason: "no unhandled feedback" };
+      }
+    } else if (ci.unhandled.every((check) => check.flake)) {
       await sticky(flakeComment(ci.unhandled), pr.number);
       await recordCiHandled({
         home: opts.home,

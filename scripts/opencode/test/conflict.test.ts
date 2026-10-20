@@ -6,6 +6,7 @@ import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim
 import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflictState } from "../src/conflict.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
+import { issueJobFromRecord, MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -192,6 +193,65 @@ describe("implementConflict", () => {
             args.includes("origin/jumi/issue-12-fix-the-thing")
         )
       ).toBe(true);
+    });
+  });
+
+  test("conflict job queued by a stuck kick runs merge-of-default on a green head", async () => {
+    await withDirs(async (home, workdir) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(
+        makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 127, headSha: "headsha" })
+      );
+      const leased = await store.lease("worker", 60_000, new Date(), ["follow-up"]);
+      if (!leased) throw new Error("expected a follow-up lease");
+      await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: cannot resolve conflicts" });
+      await store.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: cannot resolve conflicts" });
+      await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+      await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+
+      const kicked = await store.stuckKick({
+        owner: "kirmanak",
+        repo: "demo",
+        issueNumber: 12,
+        kick: "stuck",
+        actor: "operator",
+        idempotencyKey: "kick-conflict-1",
+        delivery: "board-kick:test",
+      });
+      expect(kicked.status).toBe("ok");
+      if (kicked.status !== "ok") throw new Error("expected ok");
+      expect(kicked.job.kind).toBe("conflict");
+
+      // Green, finding-free head: the conflict job merges default instead of
+      // skipping with `no unhandled feedback`.
+      const api = makeApi();
+      let mergeBase = false;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor")) mergeBase = true;
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: issueJobFromRecord(kicked.job),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run on an up-to-date head");
+        },
+        logger: () => undefined,
+      });
+      expect(mergeBase).toBe(true);
+      expect(result).not.toEqual({ status: "skipped", reason: "no unhandled feedback" });
+      expect(result).toEqual({ status: "up-to-date" });
     });
   });
 

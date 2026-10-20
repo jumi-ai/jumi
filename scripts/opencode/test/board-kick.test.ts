@@ -661,9 +661,20 @@ describe("board stuck-latch kick contract (#208)", () => {
     await store.enqueueIssue(makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 7, headSha: "abc123" }));
     const leased = await store.lease("worker", 60_000, new Date(), ["follow-up"]);
     if (!leased) throw new Error("expected a follow-up lease");
-    await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: conflict round failed" });
-    await store.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: conflict round failed" });
-    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: conflict round failed");
+    await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: too many follow-up rounds" });
+    await store.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: too many follow-up rounds" });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: too many follow-up rounds");
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+    return leased.id;
+  }
+
+  async function seedConflictStuck(store: MemoryReviewJobStore): Promise<number> {
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-stuck", mode: "follow-up", prNumber: 7, headSha: "abc123" }));
+    const leased = await store.lease("worker", 60_000, new Date(), ["follow-up"]);
+    if (!leased) throw new Error("expected a follow-up lease");
+    await store.saveResult(leased.id, "worker", { kind: "skip", reason: "stuck: cannot resolve conflicts" });
+    await store.markPublished(leased.id, "worker", { state: "skipped", reason: "stuck: cannot resolve conflicts" });
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
     await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
     return leased.id;
   }
@@ -747,9 +758,116 @@ describe("board stuck-latch kick contract (#208)", () => {
     expect(conflict.code).toBe("conflict");
     expect(conflict.terminalId).toBe(terminalId);
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({
-      skipReason: "stuck: conflict round failed",
+      skipReason: "stuck: too many follow-up rounds",
     });
     expect(await store.sits.get("kirmanak", "demo", 12)).toMatchObject({ reason: "implement-latch" });
+  });
+
+  test("conflict-capped latch queues conflict resolution, not follow-up", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedConflictStuck(store);
+
+    const outcome = await store.stuckKick(stuckInput({ idempotencyKey: "stuck-conflict-cap" }));
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.terminalId).toBe(terminalId);
+    expect(outcome.deduped).toBe(false);
+    expect(outcome.job.kind).toBe("conflict");
+    expect(outcome.job.prNumber).toBe(7);
+    expect(outcome.job.jobKey).toBe("conflict:kirmanak/demo#7:abc123");
+    // The terminal row is kept; the latch is cleared and the sit went away
+    // because the conflict enqueue landed.
+    expect((await store.get(terminalId))?.state).toBe("skipped");
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({ skipReason: null });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+  });
+
+  test("unmergeable pull on a follow-up latch queues conflict resolution", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+
+    const outcome = await store.stuckKick(stuckInput({ idempotencyKey: "stuck-unmergeable", mergeable: false }));
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.terminalId).toBe(terminalId);
+    expect(outcome.job.kind).toBe("conflict");
+    expect(outcome.job.jobKey).toBe("conflict:kirmanak/demo#7:abc123");
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({ skipReason: null });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+  });
+
+  test("mergeable pull on a follow-up latch queues follow-up as today", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+
+    const outcome = await store.stuckKick(stuckInput({ idempotencyKey: "stuck-mergeable", mergeable: true }));
+    expect(outcome.status).toBe("ok");
+    if (outcome.status !== "ok") throw new Error("expected ok");
+    expect(outcome.terminalId).toBe(terminalId);
+    expect(outcome.job.kind).toBe("follow-up");
+    expect(outcome.job.jobKey).toBe("follow-up:kirmanak/demo#7:abc123");
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+  });
+
+  test("in-flight worker job on a conflict latch is a 409 with latch and sit untouched", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedConflictStuck(store);
+    await store.enqueueIssue(
+      makeIssueJob({ delivery: "d-inflight", mode: "conflict", prNumber: 7, headSha: "other-sha" })
+    );
+    // The enqueue clears the sit; the board sit is still waiting.
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+
+    const conflict = await store.stuckKick(stuckInput({ idempotencyKey: "stuck-conflict-inflight" }));
+    expect(conflict.status).toBe("rejected");
+    if (conflict.status !== "rejected") throw new Error("expected rejection");
+    expect(conflict.code).toBe("conflict");
+    expect(conflict.terminalId).toBe(terminalId);
+    expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toMatchObject({
+      skipReason: "stuck: cannot resolve conflicts",
+    });
+    expect(await store.sits.get("kirmanak", "demo", 12)).toMatchObject({ reason: "implement-latch" });
+  });
+
+  test("board kick names the queued kind and honors an unmergeable pull", async () => {
+    const store = new MemoryReviewJobStore();
+    const terminalId = await seedStuck(store);
+    const handler = createBoardFetchHandler({ store, getGrantNotice: () => undefined, logger: () => {} });
+
+    const ok = await handler(
+      kickRequest({
+        owner: "kirmanak",
+        repo: "demo",
+        number: 12,
+        kick: "stuck",
+        mergeable: false,
+        idempotencyKey: "board-stuck-unmergeable",
+      })
+    );
+    expect(ok.status).toBe(200);
+    const okBody = (await ok.json()) as Record<string, unknown>;
+    expect(okBody.terminalJobId).toBe(terminalId);
+    expect(okBody.deduped).toBe(false);
+    expect(okBody.kind).toBe("conflict");
+    expect(okBody.key).toBe("conflict:kirmanak/demo#7:abc123");
+    expect(await store.sits.get("kirmanak", "demo", 12)).toBeUndefined();
+
+    // A follow-up latch on a mergeable pull still queues follow-up by name.
+    const followStore = new MemoryReviewJobStore();
+    const followTerminal = await seedStuck(followStore);
+    const followHandler = createBoardFetchHandler({
+      store: followStore,
+      getGrantNotice: () => undefined,
+      logger: () => {},
+    });
+    const follow = await followHandler(
+      kickRequest({ owner: "kirmanak", repo: "demo", number: 12, kick: "stuck", idempotencyKey: "board-stuck-follow" })
+    );
+    expect(follow.status).toBe(200);
+    const followBody = (await follow.json()) as Record<string, unknown>;
+    expect(followBody.terminalJobId).toBe(followTerminal);
+    expect(followBody.kind).toBe("follow-up");
+    expect(followBody.key).toBe("follow-up:kirmanak/demo#7:abc123");
   });
 
   test("owner-only payload never confirms implement-latch; stuck kick id does", async () => {

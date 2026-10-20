@@ -146,6 +146,23 @@ describe("operator board read API", () => {
     expect(groups.sitting.map((item) => item.reason)).toEqual(["no-changes"]);
   });
 
+  test("conflict-capped stuck sit names conflict resolution in its kick effect", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+    await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
+    await store.sits.remember("kirmanak", "demo", 13, "implement-latch");
+    await store.setIssueSkipReason("kirmanak", "demo", 13, "stuck: too many follow-up rounds");
+
+    const groups = await buildBoardGroups(store);
+    const conflicted = groups.needs_kick.find((item) => item.number === 12);
+    const followed = groups.needs_kick.find((item) => item.number === 13);
+    expect(conflicted?.kick?.kick).toBe("stuck");
+    expect(conflicted?.kick?.effect).toContain("conflict resolution");
+    expect(followed?.kick?.kick).toBe("stuck");
+    expect(followed?.kick?.effect).toContain("follow-up");
+    expect(followed?.kick?.effect).not.toContain("conflict resolution");
+  });
+
   test("waits the operator cannot finish are status lines with no button", async () => {
     const store = new MemoryReviewJobStore();
     await store.sits.remember("kirmanak", "demo", 31, "ci-not-completed");

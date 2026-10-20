@@ -23,6 +23,7 @@ import {
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
   implementIdempotencyMismatch,
+  isConflictStuckReason,
   isQueueUnavailable,
   isUniqueViolation,
   reopenIdempotencyMismatch,
@@ -241,16 +242,25 @@ export function sitMessage(reason: RouterSitReason): string {
 
 /**
  * A click that only removes the board row must say it only removes the row.
- * Only the stuck latch queues follow-up; every other kickable sit is a
- * row-only clear, so its effect names just that.
+ * A stuck latch queues a worker job: conflict resolution when the latch is
+ * a conflict cap, follow-up otherwise. The confirm names the job that will
+ * actually run.
  */
+export const STUCK_FOLLOWUP_EFFECT = "Clear the stuck latch and queue follow-up on the open closer";
+export const STUCK_CONFLICT_EFFECT = "Clear the stuck latch and queue conflict resolution on the open closer";
+
 const SIT_KICK_EFFECTS: Record<string, string> = {
   "foreign-branch": "Remove this board row only",
   "no-closer": "Remove this board row only",
-  "implement-latch": "Clear the stuck latch and queue follow-up on the open closer",
+  "implement-latch": STUCK_FOLLOWUP_EFFECT,
   "no-write-access": "Remove this board row only",
   "not-labeled": "Remove this board row only",
 };
+
+/** Effect text for a stuck-latch kick: conflict resolution for a conflict-capped latch, follow-up otherwise. */
+export function stuckKickEffect(stuckReason?: string | null): string {
+  return isConflictStuckReason(stuckReason) ? STUCK_CONFLICT_EFFECT : STUCK_FOLLOWUP_EFFECT;
+}
 
 /** Kick id the page must send for each kickable sit. Owner-only payloads never confirm these. */
 const SIT_KICK_IDS: Record<string, string> = {
@@ -261,9 +271,12 @@ const SIT_KICK_IDS: Record<string, string> = {
   "not-labeled": "sit-clear",
 };
 
-function kickForSit(reason: RouterSitReason): BoardKick | undefined {
+function kickForSit(reason: RouterSitReason, stuckReason?: string | null): BoardKick | undefined {
   if (NO_KICK_SITS.has(reason)) return undefined;
-  const effect = SIT_KICK_EFFECTS[reason] ?? "Remove this board row only";
+  const effect =
+    reason === "implement-latch"
+      ? stuckKickEffect(stuckReason)
+      : (SIT_KICK_EFFECTS[reason] ?? "Remove this board row only");
   const kick = SIT_KICK_IDS[reason] ?? "sit-clear";
   return { effect, kick };
 }
@@ -294,6 +307,7 @@ export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
     ids: SIT_KICK_IDS,
     none: [...NO_KICK_SITS].sort(),
     requeue: REQUEUE_KICK_EFFECT,
+    stuckConflict: STUCK_CONFLICT_EFFECT,
     peerForward: "peer-kick-v1",
   })
 );
@@ -340,7 +354,11 @@ function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
   return item;
 }
 
-function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kickable: boolean } {
+function sitItem(
+  sit: RouterSitRecord,
+  forge?: string,
+  stuckReason?: string | null
+): { item: BoardItem; kickable: boolean } {
   const item: BoardItem = {
     reason: sit.reason,
     message: sitMessage(sit.reason),
@@ -351,7 +369,7 @@ function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kicka
     decidedAt: sit.decidedAt,
   };
   if (forge) item.forge = forge;
-  const kick = kickForSit(sit.reason);
+  const kick = kickForSit(sit.reason, stuckReason);
   if (kick) item.kick = kick;
   return { item, kickable: kick !== undefined };
 }
@@ -359,10 +377,23 @@ function sitItem(sit: RouterSitRecord, forge?: string): { item: BoardItem; kicka
 export interface BoardStore {
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   listTerminalReviews?(limit?: number): Promise<ReviewJobRecord[]>;
+  /** Stuck skip reason per issue, when the ledger tracks it. Lets an implement-latch sit name conflict resolution. */
+  readIssueSkipLatch?(owner: string, repo: string, issueNumber: number): Promise<{ skipReason: string | null }>;
   sits: {
     list(): Promise<RouterSitRecord[]>;
     listClosedPulls?(): Promise<Array<{ owner: string; repo: string; number: number }>>;
   };
+}
+
+/** Best-effort stuck reason for an implement-latch sit. Never fails the board read. */
+async function stuckReasonForSit(store: BoardStore, sit: RouterSitRecord): Promise<string | null> {
+  if (sit.reason !== "implement-latch") return null;
+  try {
+    const latch = await store.readIssueSkipLatch?.(sit.owner, sit.repo, sit.number);
+    return latch?.skipReason ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function requeueMessage(state: string, reason: string): string {
@@ -431,13 +462,24 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     requeueKeys.add(key);
   }
   const sitting: BoardItem[] = [];
+  // Resolve stuck reasons up front so an implement-latch sit on a
+  // conflict-capped latch names conflict resolution in its kick effect.
+  const stuckReasons = new Map<string, string | null>();
+  await Promise.all(
+    sits.map(async (sit) => {
+      stuckReasons.set(
+        `${sit.owner.toLowerCase()}/${sit.repo.toLowerCase()}#${sit.number}`,
+        await stuckReasonForSit(store, sit)
+      );
+    })
+  );
   for (const sit of sits) {
     const key = `${sit.owner.toLowerCase()}/${sit.repo.toLowerCase()}#${sit.number}`;
     if (inflightKeys.has(key)) continue;
     // A requeueable terminal replaces its terminal-result sit: the row is
     // offered as a requeue kick above, never as "Sitting on purpose".
     if (sit.reason === "terminal-result" && requeueKeys.has(key)) continue;
-    const { item, kickable } = sitItem(sit, forge);
+    const { item, kickable } = sitItem(sit, forge, stuckReasons.get(key) ?? null);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
   }
@@ -1088,7 +1130,11 @@ async function load() {
 function headlineOf(item) { return (typeof item.message === "string" && item.message.trim() !== "" ? item.message : item.reason); }
 function kickLabelOf(item) {
   const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
-  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") return "Clear latch and queue follow-up";
+  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") {
+    const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
+    if (/conflict/i.test(effect)) return "Clear latch and queue conflict resolution";
+    return "Clear latch and queue follow-up";
+  }
   const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
   if (effect === REQUEUE_EFFECT) return "Requeue review";
   if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
@@ -2804,7 +2850,7 @@ async function handleSitClear(
   if (!sit) return json(404, { error: "sit not found" });
   // A stuck latch is never confirmed by an owner-only payload: the page
   // sends the stuck kick id so one click clears the latch and queues
-  // follow-up on the open closer in a single transaction.
+  // follow-up (or conflict resolution) on the open closer in a single transaction.
   if (sit.reason === "implement-latch") {
     return json(400, { error: "missing kick" });
   }
@@ -2828,9 +2874,11 @@ async function handleSitClear(
  *
  * Same route and same edge-identity/idempotency rules as the other kicks,
  * but a different kick id (`stuck`, aliases `follow-up`/`followup`/
- * `stuck-latch`). It clears the issue skip latch and inserts a follow-up
- * job for the open closer in one transaction; the sit row goes away
- * because that enqueue landed, never via a bare sit delete. It never opens
+ * `stuck-latch`). It clears the issue skip latch and inserts a worker job
+ * for the open closer in one transaction; the sit row goes away
+ * because that enqueue landed, never via a bare sit delete. A
+ * conflict-capped latch (or a currently unmergeable pull) queues conflict
+ * resolution; any other stuck latch queues follow-up. It never opens
  * a second pull, never unassigns, and never adds a pickup label: the
  * inserted job is the wake. The implement retry path is untouched.
  */
@@ -2867,6 +2915,18 @@ async function handleStuckKick(
   }
 
   const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  // Optional caller-supplied closer state. The page does not send these; a
+  // conflict-capped latch queues conflict resolution without them. When
+  // present, `mergeable: false` queues conflict resolution for a currently
+  // unmergeable pull even when the latch itself is not a conflict cap.
+  const rawBody = body as Record<string, unknown>;
+  const mergeable = typeof rawBody.mergeable === "boolean" ? rawBody.mergeable : undefined;
+  const headSha =
+    typeof rawBody.headSha === "string" && rawBody.headSha.trim() !== ""
+      ? rawBody.headSha.trim()
+      : typeof rawBody.head_sha === "string" && rawBody.head_sha.trim() !== ""
+        ? rawBody.head_sha.trim()
+        : undefined;
   let outcome: Awaited<ReturnType<ReviewJobStore["stuckKick"]>>;
   try {
     outcome = await store.stuckKick({
@@ -2877,6 +2937,8 @@ async function handleStuckKick(
       actor,
       idempotencyKey: parsed.idempotencyKey,
       delivery,
+      ...(mergeable !== undefined ? { mergeable } : {}),
+      ...(headSha !== undefined ? { headSha } : {}),
     });
   } catch (err) {
     if (isQueueUnavailable(err)) {
@@ -2907,13 +2969,14 @@ async function handleStuckKick(
 
   if (outcome.status === "ok") {
     logger(
-      `stuck kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+      `stuck kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)} kind=${outcome.job.kind} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
     );
     return json(200, {
       ok: true,
       jobId: outcome.job.id,
       newJobId: outcome.job.id,
       key: outcome.job.jobKey,
+      kind: outcome.job.kind,
       terminalJobId: outcome.terminalId,
       deduped: outcome.deduped,
     });
@@ -2950,6 +3013,7 @@ async function replayStuckPrior(store: ReviewJobStore, prior: KickLogRecord): Pr
             jobId: prior.newJobId,
             newJobId: prior.newJobId,
             key: job.jobKey,
+            kind: job.kind,
             terminalJobId: prior.terminalJobId,
             deduped: true,
           });
