@@ -149,7 +149,8 @@ export interface ReviewJobStore {
    * the followup/conflict/ci/stuck latch state) and inserts a worker job
    * for the open closer in one transaction; the router sit goes away
    * because that enqueue landed, never via a bare sit delete. A
-   * conflict-capped latch (`stuck: ... conflict ...`) or a currently
+   * conflict-capped latch (`stuck: cannot resolve conflicts`, including
+   * older `stuck: conflict ...` variants) or a currently
    * unmergeable pull queues `conflict` resolution (the same
    * `conflict:<owner>/<repo>#<closer>:<head>` identity the router uses for
    * a conflict wake); any other stuck latch queues `follow-up`. Never opens
@@ -319,11 +320,17 @@ export function stuckIdempotencyMismatch(
  * `conflict` resolution, never `follow-up`: a follow-up job on a green,
  * finding-free head returns `skipped: no unhandled feedback` before any
  * merge-of-default work, so the click would clear the latch and do nothing
- * visible.
+ * visible. Matched as a prefix allowlist (not a `conflict` substring) so a
+ * future non-cap reason that merely mentions conflicts keeps queuing
+ * `follow-up`; the live `mergeable === false` check in `stuckKickJobKind`
+ * remains the forge-state override.
  */
 export function isConflictStuckReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
-  return reason.toLowerCase().includes("conflict");
+  const normalized = reason.trim().toLowerCase();
+  return (
+    normalized.startsWith("stuck: cannot resolve conflicts") || normalized.startsWith("stuck: conflict")
+  );
 }
 
 /**

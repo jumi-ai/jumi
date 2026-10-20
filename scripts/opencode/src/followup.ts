@@ -909,7 +909,10 @@ export async function implementFollowUp(
         await forgetClaim();
         return { status: "skipped", reason: "no unhandled feedback" };
       }
-    } else if (ci.unhandled.every((check) => check.flake)) {
+    } else if (pr.mergeable !== false && ci.unhandled.every((check) => check.flake)) {
+      // Mergeable case only: an unmergeable pull falls through to the
+      // conflict round-cap check and merge-of-default below so conflict
+      // resolution runs first, even when CI is flake-only.
       await sticky(flakeComment(ci.unhandled), pr.number);
       await recordCiHandled({
         home: opts.home,
