@@ -144,11 +144,16 @@ export interface ReviewJobStore {
    */
   implementKick(input: ImplementKickInput): Promise<ImplementKickOutcome>;
   /**
-   * Stuck-latch follow-up kick for an open closer. Clears the issue skip
+   * Stuck-latch kick for an open closer. Clears the issue skip
    * latch (bumping the generation and dropping the stuck skip reason plus
-   * the followup/conflict/ci/stuck latch state) and inserts a follow-up job
+   * the followup/conflict/ci/stuck latch state) and inserts a worker job
    * for the open closer in one transaction; the router sit goes away
-   * because that enqueue landed, never via a bare sit delete. Never opens
+   * because that enqueue landed, never via a bare sit delete. A
+   * conflict-capped latch (`stuck: cannot resolve conflicts`, including
+   * older `stuck: conflict ...` variants) or a currently
+   * unmergeable pull queues `conflict` resolution (the same
+   * `conflict:<owner>/<repo>#<closer>:<head>` identity the router uses for
+   * a conflict wake); any other stuck latch queues `follow-up`. Never opens
    * a pull request, never unassigns, never adds a pickup label: the
    * inserted job is the wake. Shares the review_kicks idempotency key
    * space with requeue/reopen/implement.
@@ -279,6 +284,19 @@ export interface StuckKickInput {
   idempotencyKey: string;
   /** Delivery stamp for the new queued row. */
   delivery: string;
+  /**
+   * Live forge mergeability of the open closer, when the caller looked it up.
+   * `false` means the pull is currently unmergeable and the kick queues a
+   * `conflict` job even when the latch itself is not a conflict cap. Omitted
+   * (or any non-`false` value) keeps the latch-only decision: a conflict-capped
+   * latch still queues `conflict`, any other stuck latch queues `follow-up`.
+   */
+  mergeable?: boolean | null;
+  /**
+   * Current head SHA of the open closer, when the caller looked it up.
+   * Empty/omitted falls back to the terminal row's head SHA for the job key.
+   */
+  headSha?: string;
 }
 
 export type StuckKickOutcome = RequeueKickOutcome;
@@ -293,6 +311,36 @@ export function stuckIdempotencyMismatch(
   // Aliases address the same operation: a replay under a different alias
   // replays the first result instead of failing as a different kick.
   return !(STUCK_KICK_ALIASES.has(prior.kick.trim()) && STUCK_KICK_ALIASES.has(input.kick.trim()));
+}
+
+/**
+ * A conflict-capped stuck latch: the closer stopped because conflict
+ * resolution hit its round cap (`stuck: cannot resolve conflicts`, including
+ * older `stuck: conflict ...` variants). A stuck kick on such a latch queues
+ * `conflict` resolution, never `follow-up`: a follow-up job on a green,
+ * finding-free head returns `skipped: no unhandled feedback` before any
+ * merge-of-default work, so the click would clear the latch and do nothing
+ * visible. Matched as a prefix allowlist (not a `conflict` substring) so a
+ * future non-cap reason that merely mentions conflicts keeps queuing
+ * `follow-up`; the live `mergeable === false` check in `stuckKickJobKind`
+ * remains the forge-state override.
+ */
+export function isConflictStuckReason(reason: string | null | undefined): boolean {
+  if (!reason) return false;
+  const normalized = reason.trim().toLowerCase();
+  return normalized.startsWith("stuck: cannot resolve conflicts") || normalized.startsWith("stuck: conflict");
+}
+
+/**
+ * Which worker job a stuck kick queues. Conflict resolution runs first: a
+ * conflict-capped latch or a currently unmergeable pull queues `conflict`
+ * (the same `conflict:<owner>/<repo>#<closer>:<head>` identity the router
+ * uses for a conflict wake); any other stuck latch queues `follow-up`.
+ */
+export function stuckKickJobKind(input: { mergeable?: boolean | null }, skipReason: string | null): JobKind {
+  if (input.mergeable === false) return "conflict";
+  if (isConflictStuckReason(skipReason)) return "conflict";
+  return "follow-up";
 }
 
 /** Implement kicks share the review_kicks key space; identity is issue-based, commit is always empty. */
@@ -1573,13 +1621,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         };
       }
       const closer = terminal.prNumber;
-      const headSha = terminal.headSha ?? "";
+      const headSha = input.headSha?.trim() ? input.headSha.trim() : (terminal.headSha ?? "");
       if (!closer || closer <= 0) {
         const entry = record(terminal.id, null, "not-kickable");
         return {
           status: "rejected",
           code: "not-kickable",
-          why: "No kick: no open closer to follow up on; not opening a second pull.",
+          why: "No kick: no open closer to queue on; not opening a second pull.",
           terminalId: terminal.id,
           newJobId: null,
           kickLogId: entry.id,
@@ -1591,7 +1639,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         return {
           status: "rejected",
           code: "not-kickable",
-          why: "No kick: terminal row has no payload to follow up on.",
+          why: "No kick: terminal row has no payload to queue.",
           terminalId: terminal.id,
           newJobId: null,
           kickLogId: entry.id,
@@ -1617,7 +1665,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      const key = `follow-up:${input.owner}/${input.repo}#${closer}:${headSha}`;
+      const kind = stuckKickJobKind(input, latch.skipReason);
+      const key = `${kind}:${input.owner}/${input.repo}#${closer}:${headSha}`;
       if (this.rows.some((row) => row.jobKey === key && (row.state === "queued" || row.state === "leased"))) {
         const entry = record(terminal.id, null, "conflict");
         return {
@@ -1630,13 +1679,16 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         };
       }
       // One locked section clears the issue skip latch and inserts the
-      // follow-up job together; the sit row goes away because this enqueue
-      // landed. Never opens a pull request, never unassigns, never labels.
+      // worker job together; the sit row goes away because this enqueue
+      // landed. Conflict-capped latches (and unmergeable pulls) queue
+      // conflict resolution so the click does merge-of-default work instead
+      // of a follow-up that would skip with `no unhandled feedback`.
+      // Never opens a pull request, never unassigns, never labels.
       const generation = (latch.generation ?? 0) + 1;
       const job: ReviewJobRecord = {
         id: this.nextId++,
         jobKey: key,
-        kind: "follow-up",
+        kind,
         owner: terminal.owner,
         repo: terminal.repo,
         prNumber: closer,
@@ -3255,13 +3307,13 @@ export class PgReviewJobStore implements ReviewJobStore {
           } as StuckKickOutcome;
         }
         const closer = terminal.prNumber;
-        const headSha = terminal.headSha ?? "";
+        const headSha = input.headSha?.trim() ? input.headSha.trim() : (terminal.headSha ?? "");
         if (!closer || closer <= 0) {
           const logged = await this.insertImplementKickLog(tx, input, "not-kickable", terminal.id, null);
           return {
             status: "rejected",
             code: "not-kickable",
-            why: "No kick: no open closer to follow up on; not opening a second pull.",
+            why: "No kick: no open closer to queue on; not opening a second pull.",
             terminalId: terminal.id,
             newJobId: null,
             kickLogId: logged.id,
@@ -3272,7 +3324,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           return {
             status: "rejected",
             code: "not-kickable",
-            why: "No kick: terminal row has no payload to follow up on.",
+            why: "No kick: terminal row has no payload to queue.",
             terminalId: terminal.id,
             newJobId: null,
             kickLogId: logged.id,
@@ -3298,9 +3350,13 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as StuckKickOutcome;
         }
-        const key = `follow-up:${input.owner}/${input.repo}#${closer}:${headSha}`;
-        // Clear the issue skip latch and insert the follow-up job in one
+        const kind = stuckKickJobKind(input, skipReason);
+        const key = `${kind}:${input.owner}/${input.repo}#${closer}:${headSha}`;
+        // Clear the issue skip latch and insert the worker job in one
         // transaction; the sit row goes away because this enqueue landed.
+        // Conflict-capped latches (and unmergeable pulls) queue conflict
+        // resolution so the click does merge-of-default work instead of a
+        // follow-up that would skip with `no unhandled feedback`.
         // Never opens a pull request, never unassigns, never labels.
         // The latch is only mutated after the insert succeeds: a job_key
         // conflict must leave the latch (and the sit) untouched.
@@ -3309,12 +3365,13 @@ export class PgReviewJobStore implements ReviewJobStore {
         const inserted = asRows<ReviewJobRow>(
           await tx.unsafe(
             `INSERT INTO review_jobs (job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt)
-             VALUES ($1, 'follow-up', $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', 0)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'queued', 0)
              ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
              DO NOTHING
              RETURNING *`,
             [
               key,
+              kind,
               terminal.owner,
               terminal.repo,
               closer,

@@ -41,11 +41,13 @@ export function isImplementKickId(kick: string | null | undefined): boolean {
 }
 
 /**
- * Stuck-latch follow-up kick ("clear the latch, queue follow-up on the open closer").
+ * Stuck-latch kick ("clear the latch, queue follow-up or conflict resolution on the open closer").
  *
- * A stuck conflict-round (or other stuck) latch on an issue with an already
+ * A stuck latch on an issue with an already
  * open closer is woken by clearing the issue skip latch and inserting a
- * follow-up job for that closer in one transaction. It never opens a pull
+ * worker job for that closer in one transaction. A conflict-capped latch
+ * (or a currently unmergeable pull) queues conflict resolution; any other
+ * stuck latch queues follow-up. It never opens a pull
  * request, never unassigns, and never adds a pickup label; the inserted job
  * is the wake. Distinct from the implement retry, which only retries a
  * no-changes implement and refuses a succeeded implement.

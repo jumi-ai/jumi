@@ -145,7 +145,8 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
 
   // Implement latch (closing issue already owned by the issue job) sits on
   // purpose with no button; a stuck latch sits kickable until the board
-  // clears it with a follow-up kick.
+  // clears it with a stuck kick (follow-up, or conflict resolution on a
+  // conflict-capped latch or unmergeable pull).
   if (text === "closing issue already assigned") return "repo-mutex";
   if (text.startsWith("stuck:")) return "implement-latch";
   if (text === "claim is live") return "repo-mutex";

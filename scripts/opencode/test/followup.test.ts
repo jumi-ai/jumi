@@ -1706,6 +1706,48 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("unmergeable pull with no feedback runs merge-of-default instead of skipping", async () => {
+    await withDirs(async (home, workdir) => {
+      const events: string[] = [];
+      const pr = { ...jumiPr(), mergeable: false as const };
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        listIssueComments: async () => [],
+        listPullReviewComments: async () => [],
+        listPullReviews: async () => [],
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base") events.push("merge-base");
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "assigned", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(events).toContain("merge-base");
+      expect(result).not.toEqual({ status: "skipped", reason: "no unhandled feedback" });
+      expect(openCode).toBe(1);
+    });
+  });
+
   test("merge stuck → no feedback OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       const kinds: string[] = [];
