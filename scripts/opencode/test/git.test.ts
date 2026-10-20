@@ -1536,7 +1536,8 @@ describe("worker prompts", () => {
     expect(CONFLICT_PROMPT).toContain("Keep the merge commit flow");
   });
 
-  test("conflict stays on the injected conflicted paths", () => {    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
+  test("conflict stays on the injected conflicted paths", () => {
+    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
     expect(CONFLICT_PROMPT).toContain("One adjacent file is allowed only if the resolution truly requires it");
   });
 
