@@ -5,7 +5,7 @@ ARG CODEX_SHA256_AMD64
 ARG CODEX_SHA256_ARM64
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
-FROM docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS tools
+FROM docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS tools
 
 ARG BUN_VERSION
 ARG OPENCODE_VERSION
@@ -116,7 +116,7 @@ COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-FROM docker.io/library/debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
+FROM docker.io/library/debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8 AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
