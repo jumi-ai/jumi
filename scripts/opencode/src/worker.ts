@@ -82,6 +82,7 @@ export function createIssueQueue(
           ...pickupPolicyForForge(config.forge, config.botUsername),
           followupIgnoreLogins: config.followupIgnoreLogins,
           trustedSenderLogins: config.trustedSenderLogins,
+          ignoreConflictsLabel: config.ignoreConflictsLabel,
           model: config.model,
           variant: config.variant,
           fallbackModel: config.fallbackModel,
@@ -369,6 +370,7 @@ export async function processWorkerTick(
       ...pickupPolicyForForge(config.forge, config.botUsername),
       followupIgnoreLogins: config.followupIgnoreLogins,
       trustedSenderLogins: config.trustedSenderLogins,
+      ignoreConflictsLabel: config.ignoreConflictsLabel,
       model: config.model,
       variant: config.variant,
       fallbackModel: config.fallbackModel,
@@ -478,7 +480,10 @@ export async function processWorkerTick(
     const prNumber = pushedPrNumber(result);
     if (prNumber !== undefined) {
       try {
-        const conflictJob = await conflictJobIfUnmergeable(api, job, prNumber, logger);
+        const conflictJob = await conflictJobIfUnmergeable(api, job, prNumber, logger, {
+          botUsername: config.botUsername,
+          ignoreConflictsLabel: config.ignoreConflictsLabel,
+        });
         if (conflictJob) {
           const enqueued = await store.enqueueIssue(conflictJob);
           logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after-push mergeable=false`);

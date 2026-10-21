@@ -16,6 +16,7 @@ export type FollowUpWebhookPolicy = WebhookPolicy &
   PickupPolicy & {
     followupIgnoreLogins?: readonly string[];
     trustedSenderLogins?: readonly string[];
+    ignoreConflictsLabel?: string;
   };
 
 export const SENDER_CANNOT_PUSH = "sender lacks write access";

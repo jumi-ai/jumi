@@ -8,6 +8,7 @@ import type {
   InlineComment,
   LinkedIssue,
   Pull,
+  PullCommit,
   PullFile,
   PullReview,
   Repo,
@@ -144,6 +145,35 @@ export function toPullFile(file: GiteaPRFile): PullFile {
     deletions: file.deletions,
     changes: file.changes,
     patch: file.patch,
+  };
+}
+
+function commitPerson(value: unknown): { name?: string; email?: string; login?: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const person = value as { name?: unknown; email?: unknown; login?: unknown; username?: unknown };
+  const name = typeof person.name === "string" ? person.name : undefined;
+  const email = typeof person.email === "string" ? person.email : undefined;
+  const login =
+    typeof person.login === "string" ? person.login : typeof person.username === "string" ? person.username : undefined;
+  if (!name && !email && !login) return undefined;
+  return { ...(name ? { name } : {}), ...(email ? { email } : {}), ...(login ? { login } : {}) };
+}
+
+export function toPullCommit(value: unknown): PullCommit {
+  if (!value || typeof value !== "object") return {};
+  const commit = value as {
+    sha?: unknown;
+    commit?: { author?: unknown; committer?: unknown };
+    author?: unknown;
+    committer?: unknown;
+  };
+  const sha = typeof commit.sha === "string" ? commit.sha : undefined;
+  const author = commitPerson(commit.author) ?? commitPerson(commit.commit?.author);
+  const committer = commitPerson(commit.committer) ?? commitPerson(commit.commit?.committer);
+  return {
+    ...(sha ? { sha } : {}),
+    ...(author ? { author } : {}),
+    ...(committer ? { committer } : {}),
   };
 }
 
@@ -426,6 +456,13 @@ export class GiteaAPI {
   async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {
     const files = await this.getAll<GiteaPRFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
     return files.map(toPullFile);
+  }
+
+  async listPullCommits(owner: string, repo: string, index: number): Promise<PullCommit[]> {
+    const commits = await this.getAll<unknown>(
+      `/repos/${this.repoPath(owner, repo)}/pulls/${index}/commits?verification=false&files=false`
+    );
+    return commits.map(toPullCommit);
   }
 
   // ── Issues / Comments ─────────────────────────────────────────────────────────

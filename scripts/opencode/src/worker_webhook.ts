@@ -32,6 +32,7 @@ export type WorkerWebhookPolicy = WebhookPolicy & {
   botUsername: string;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
+  ignoreConflictsLabel?: string;
 };
 
 export interface WorkerWebhookQueue {
@@ -42,7 +43,13 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
   Partial<
     Pick<
       IssueApi,
-      "getRepo" | "listIssueBlocks" | "listRepoIssues" | "getPR" | "getCollaboratorPermission" | "getAppPermissions"
+      | "getRepo"
+      | "listIssueBlocks"
+      | "listRepoIssues"
+      | "getPR"
+      | "getCollaboratorPermission"
+      | "getAppPermissions"
+      | "listPullCommits"
     >
   > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;

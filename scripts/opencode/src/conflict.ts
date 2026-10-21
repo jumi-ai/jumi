@@ -31,6 +31,7 @@ import {
 import { registeredEngine } from "./engine_dispatch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
   confirmProvenancePublication,
@@ -198,9 +199,14 @@ export async function needsConflict(opts: {
   home: string;
   maxConflictRounds?: number;
   skipLatches?: SkipLatchStore;
+  ignoreConflictsLabel?: string;
+  hasJumiCommit?: boolean;
 }): Promise<boolean> {
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
+  if (opts.hasJumiCommit === false && hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
+    return false;
+  }
   const state = await readConflictLatch(skipLatchesFor(opts), {
     owner: opts.owner,
     repo: opts.repo,
@@ -590,6 +596,20 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   if (!branch || branch === opts.job.defaultBranch) {
     await forgetClaim();
     return { status: "skipped", reason: "refusing to merge on the default branch" };
+  }
+
+  if (
+    await isLeftToAuthor(
+      opts.api,
+      owner,
+      repo,
+      pr,
+      { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+      log
+    )
+  ) {
+    await forgetClaim();
+    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
   }
 
   const state = await readConflictLatch(latches, latchKey);

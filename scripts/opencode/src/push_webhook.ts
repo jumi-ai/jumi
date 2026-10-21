@@ -1,10 +1,17 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
+import { ignoreConflictsReason, isLeftToAuthor, normalizeIgnoreConflictsLabel } from "./ignore_conflicts.ts";
+import type { Pull } from "./ports.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
-export type PushWebhookPolicy = WebhookPolicy & PickupPolicy;
+export type PushWebhookPolicy = WebhookPolicy &
+  PickupPolicy & {
+    ignoreConflictsLabel?: string;
+  };
+
+export type PushConflictApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> & Partial<Pick<IssueApi, "listPullCommits">>;
 
 export type PushWebhookDecision =
   | { type: "enqueue"; jobs: Omit<IssueJob, "delivery" | "receivedAt">[] }
@@ -43,7 +50,7 @@ function pushSender(payload: GiteaPushPayload): string {
 export async function shouldEnqueuePushConflicts(
   payload: GiteaPushPayload,
   policy: PushWebhookPolicy,
-  api: Pick<IssueApi, "listOpenPulls" | "getIssue">,
+  api: PushConflictApi,
   logger?: (message: string) => void
 ): Promise<PushWebhookDecision> {
   const defaultRef = `refs/heads/${payload.repository.default_branch}`;
@@ -69,9 +76,26 @@ export async function shouldEnqueuePushConflicts(
   const pulls = await api.listOpenPulls(owner, repo);
   const jobs: Omit<IssueJob, "delivery" | "receivedAt">[] = [];
   const sender = pushSender(payload);
+  const ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
+  let ignoredByLabel = 0;
+
+  async function leftToAuthor(pr: Pull): Promise<boolean> {
+    return isLeftToAuthor(
+      api,
+      owner,
+      repo,
+      pr,
+      { botUsername: policy.botUsername, ignoreConflictsLabel: ignoreLabel },
+      logger
+    );
+  }
 
   for (const pr of pulls) {
     if (isAssignedForeignPR(pr, owner, repo, policy.botUsername, policy)) {
+      if (await leftToAuthor(pr)) {
+        ignoredByLabel += 1;
+        continue;
+      }
       jobs.push({
         owner,
         repo,
@@ -96,6 +120,10 @@ export async function shouldEnqueuePushConflicts(
     try {
       const issue = await api.getIssue(owner, repo, issueNumber);
       if (issue.state !== "open" || !isIssuePickedUp(issue, policy)) continue;
+      if (await leftToAuthor(pr)) {
+        ignoredByLabel += 1;
+        continue;
+      }
       jobs.push({
         owner,
         repo,
@@ -118,6 +146,9 @@ export async function shouldEnqueuePushConflicts(
     }
   }
 
-  if (jobs.length === 0) return { type: "skip", reason: "no managed jumi PRs" };
+  if (jobs.length === 0) {
+    if (ignoredByLabel > 0) return { type: "skip", reason: ignoreConflictsReason(ignoreLabel) };
+    return { type: "skip", reason: "no managed jumi PRs" };
+  }
   return { type: "enqueue", jobs };
 }

@@ -2,6 +2,7 @@ import { needsCiFollowUp } from "./ci.ts";
 import { type ConflictResult, implementConflict, needsConflict } from "./conflict.ts";
 import { type FollowUpResult, implementFollowUp, needsFollowUp } from "./followup.ts";
 import { extractClosingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
+import { hasIgnoreConflictsLabel, hasJumiCommitOnPull } from "./ignore_conflicts.ts";
 import type { ImplementOptions } from "./implement.ts";
 import type { Forge, IssueApi, Pull } from "./ports.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
@@ -32,6 +33,7 @@ export async function classifyCloserWork(opts: {
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   skipLatches?: SkipLatchStore;
+  ignoreConflictsLabel?: string;
 }): Promise<CloserWorkMode | undefined> {
   const followUp = await needsFollowUp({
     api: opts.api,
@@ -55,6 +57,12 @@ export async function classifyCloserWork(opts: {
     issueNumber: opts.issueNumber,
     skipLatches: opts.skipLatches,
   });
+  let hasJumiCommit: boolean | undefined;
+  if (!followUp && !ci && hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
+    hasJumiCommit = await hasJumiCommitOnPull(opts.api, opts.owner, opts.repo, opts.pr.number, {
+      botUsername: opts.botUsername,
+    });
+  }
   const conflict = await needsConflict({
     pr: opts.pr,
     owner: opts.owner,
@@ -64,6 +72,8 @@ export async function classifyCloserWork(opts: {
     home: opts.home,
     maxConflictRounds: opts.maxConflictRounds,
     skipLatches: opts.skipLatches,
+    ignoreConflictsLabel: opts.ignoreConflictsLabel,
+    ...(hasJumiCommit !== undefined ? { hasJumiCommit } : {}),
   });
   if (conflict && !(followUp || ci)) return "conflict";
   if (followUp || ci || conflict) return "follow-up";
@@ -87,6 +97,7 @@ export async function runCloserWork(
     followupIgnoreLogins: opts.followupIgnoreLogins,
     trustedSenderLogins: opts.trustedSenderLogins,
     skipLatches: opts.skipLatches,
+    ignoreConflictsLabel: opts.ignoreConflictsLabel,
   });
   if (!mode) return { status: "skipped", reason: `open PR already closes #${opts.job.issueNumber}` };
   const job: IssueJob = {
@@ -103,10 +114,11 @@ export async function runCloserWork(
 }
 
 export async function conflictJobIfUnmergeable(
-  api: Pick<Forge, "getPR">,
+  api: Pick<Forge, "getPR"> & Partial<Pick<Forge, "listPullCommits">>,
   job: IssueJob,
   prNumber: number,
-  logger?: (message: string) => void
+  logger?: (message: string) => void,
+  opts?: { botUsername?: string; ignoreConflictsLabel?: string }
 ): Promise<IssueJob | undefined> {
   let pr: Pull;
   try {
@@ -116,6 +128,18 @@ export async function conflictJobIfUnmergeable(
     return undefined;
   }
   if (pr.mergeable !== false) return undefined;
+  if (opts?.botUsername && hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel)) {
+    const committed = await hasJumiCommitOnPull(
+      api,
+      job.owner,
+      job.repo,
+      pr.number,
+      { botUsername: opts.botUsername },
+      logger
+    );
+    if (committed === false) return undefined;
+    if (committed === undefined && !api.listPullCommits) return undefined;
+  }
   return {
     ...job,
     mode: "conflict",
