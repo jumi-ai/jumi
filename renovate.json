@@ -4,6 +4,10 @@
     "config:best-practices",
     "group:allDigest"
   ],
+  "addLabels": [
+    "jumi",
+    "ignore-conflicts"
+  ],
   "customManagers": [
     {
       "description": "Non-Docker tool versions in .gitea/tool-versions.env (no digest handling).",
