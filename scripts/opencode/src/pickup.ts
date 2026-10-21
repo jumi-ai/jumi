@@ -58,7 +58,7 @@ export async function classifyCloserWork(opts: {
     skipLatches: opts.skipLatches,
   });
   let hasJumiCommit: boolean | undefined;
-  if (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
+  if (!followUp && !ci && hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
     hasJumiCommit = await hasJumiCommitOnPull(opts.api, opts.owner, opts.repo, opts.pr.number, {
       botUsername: opts.botUsername,
     });

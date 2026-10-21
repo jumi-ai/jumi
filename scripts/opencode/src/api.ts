@@ -459,7 +459,9 @@ export class GiteaAPI {
   }
 
   async listPullCommits(owner: string, repo: string, index: number): Promise<PullCommit[]> {
-    const commits = await this.getAll<unknown>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/commits`);
+    const commits = await this.getAll<unknown>(
+      `/repos/${this.repoPath(owner, repo)}/pulls/${index}/commits?verification=false&files=false`
+    );
     return commits.map(toPullCommit);
   }
 

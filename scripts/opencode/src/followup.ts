@@ -931,21 +931,20 @@ export async function implementFollowUp(
     }
   }
   const previousConflict = await readConflictLatch(latches, latchKey);
-  const leftToAuthor =
-    pr.mergeable === false &&
-    (await isLeftToAuthor(
-      opts.api,
-      owner,
-      repo,
-      pr,
-      { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
-      log
-    ));
-  if (leftToAuthor && !hasFeedback && !ciWake) {
+  const leftToAuthor = await isLeftToAuthor(
+    opts.api,
+    owner,
+    repo,
+    pr,
+    { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+    log
+  );
+  const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
+  if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
     await forgetClaim();
     return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
   }
-  if (!leftToAuthor && previousConflict.round >= maxConflictRounds) {
+  if (!conflictedLeftToAuthor && previousConflict.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
     return { status: "skipped", reason: "stuck: cannot resolve conflicts" };

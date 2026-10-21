@@ -234,7 +234,7 @@ const SIT_MESSAGES: Record<string, string> = {
   "repo-mutex": "Already working on this pull in another job.",
   "no-write-access": "Sender lacks write access for this pull.",
   "not-labeled": "Pull is not labeled for pickup.",
-  "conflict-ignored": "conflicted, left to author (label `ignore-conflicts`)",
+  "conflict-ignored": "conflicted, left to author (ignore label)",
 };
 
 export function sitMessage(reason: RouterSitReason): string {
