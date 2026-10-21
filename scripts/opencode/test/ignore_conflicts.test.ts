@@ -148,7 +148,7 @@ describe("ignore-conflicts label helpers", () => {
     expect(isIgnoreConflictsSkipReason(reason)).toBe(true);
     expect(normalizeSitReason(reason)).toBe("conflict-ignored");
     expect(sitMessage("conflict-ignored")).toContain("conflicted, left to author");
-    expect(sitMessage("conflict-ignored")).toContain("ignore-conflicts");
+    expect(sitMessage("conflict-ignored")).not.toContain("ignore-conflicts");
   });
 
   test("hasJumiCommit matches forge identity, not other bots", () => {
@@ -366,6 +366,128 @@ for (const forge of ["gitea", "github"] as const) {
           ignoreConflictsLabel: "ignore-conflicts",
         });
         expect(mode).toBe("follow-up");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("labelled mergeable PR with feedback is left to author for the default-merge", async () => {
+      const home = await mkdtemp(join(tmpdir(), "jumi-ignore-"));
+      try {
+        const closer = makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "jumi" }),
+          labels: [{ name: "ignore-conflicts" }],
+          mergeable: true,
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        });
+        // The default-merge skip in follow-up must not depend on mergeable:
+        // a labelled, still-mergeable (behind default) PR stays left to author.
+        expect(
+          await isLeftToAuthor({ listPullCommits: async () => [renovateCommit()] }, "o", "r", closer, {
+            botUsername: "jumi",
+          })
+        ).toBe(true);
+        const api: IssueApi = {
+          getRepo: async () => repo,
+          getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+          getIssue: async () => makeIssue(),
+          getPR: async (_o, _r, n) => ({ ...closer, number: n }),
+          listOpenPulls: async () => [],
+          createPullRequest: async (_o, _r, pull) => makePR({ title: pull.title, body: pull.body }),
+          closePullRequest: async (_o, _r, n) => makePR({ number: n, state: "closed" }),
+          updatePullRequestBody: async (_o, _r, n, body) => makePR({ number: n, body }),
+          findStickyIssueComment: async () => undefined,
+          createIssueComment: async (_o, _r, _i, body) => makeComment({ body }),
+          updateIssueComment: async (_o, _r, _id, body) => makeComment({ body }),
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please fix", user: makeUser({ login: "alice" }) }),
+          ],
+          listPullReviewComments: async () => [],
+          listPullReviews: async () => [],
+          listPullCommits: async () => [renovateCommit()],
+          ...emptyCiMethods(),
+        };
+        const mode = await classifyCloserWork({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: { ...closer, mergeable: true },
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          ignoreConflictsLabel: "ignore-conflicts",
+        });
+        expect(mode).toBe("follow-up");
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    });
+
+    test("follow-up wake skips the commit lookup", async () => {
+      const home = await mkdtemp(join(tmpdir(), "jumi-ignore-"));
+      try {
+        const closer = makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "jumi" }),
+          labels: [{ name: "ignore-conflicts" }],
+          mergeable: false,
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        });
+        let commitLookups = 0;
+        const api: IssueApi = {
+          getRepo: async () => repo,
+          getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+          getIssue: async () => makeIssue(),
+          getPR: async (_o, _r, n) => ({ ...closer, number: n }),
+          listOpenPulls: async () => [],
+          createPullRequest: async (_o, _r, pull) => makePR({ title: pull.title, body: pull.body }),
+          closePullRequest: async (_o, _r, n) => makePR({ number: n, state: "closed" }),
+          updatePullRequestBody: async (_o, _r, n, body) => makePR({ number: n, body }),
+          findStickyIssueComment: async () => undefined,
+          createIssueComment: async (_o, _r, _i, body) => makeComment({ body }),
+          updateIssueComment: async (_o, _r, _id, body) => makeComment({ body }),
+          listIssueComments: async () => [
+            makeComment({ id: 55, body: "please fix", user: makeUser({ login: "alice" }) }),
+          ],
+          listPullReviewComments: async () => [],
+          listPullReviews: async () => [],
+          listPullCommits: async () => {
+            commitLookups += 1;
+            return [renovateCommit()];
+          },
+          ...emptyCiMethods(),
+        };
+        const mode = await classifyCloserWork({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: { ...closer, mergeable: false },
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          ignoreConflictsLabel: "ignore-conflicts",
+        });
+        expect(mode).toBe("follow-up");
+        expect(commitLookups).toBe(0);
       } finally {
         await rm(home, { recursive: true, force: true });
       }
