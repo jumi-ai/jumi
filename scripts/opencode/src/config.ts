@@ -29,6 +29,7 @@ export interface ServiceConfig {
   botUsername: string;
   followupIgnoreLogins: string[];
   trustedSenderLogins: string[];
+  ignoreConflictsLabel: string;
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -232,6 +233,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     botUsername: optionalEnv(resolved, "BOT_USERNAME", "jumi") ?? "jumi",
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     trustedSenderLogins: csvEnv(resolved, "TRUSTED_SENDER_LOGINS"),
+    ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,

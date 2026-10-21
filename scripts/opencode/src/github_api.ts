@@ -11,6 +11,7 @@ import type {
   InlineComment,
   LinkedIssue,
   Pull,
+  PullCommit,
   PullFile,
   PullReview,
   Repo,
@@ -341,6 +342,34 @@ export function toPullFile(file: GithubFile): PullFile {
     deletions: file.deletions ?? 0,
     changes: file.changes ?? 0,
     patch: file.patch,
+  };
+}
+
+function toCommitPerson(value: unknown): { name?: string; email?: string; login?: string } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const person = value as { name?: unknown; email?: unknown; login?: unknown };
+  const name = typeof person.name === "string" ? person.name : undefined;
+  const email = typeof person.email === "string" ? person.email : undefined;
+  const login = typeof person.login === "string" ? person.login : undefined;
+  if (!name && !email && !login) return undefined;
+  return { ...(name ? { name } : {}), ...(email ? { email } : {}), ...(login ? { login } : {}) };
+}
+
+export function toGithubPullCommit(value: unknown): PullCommit {
+  if (!value || typeof value !== "object") return {};
+  const commit = value as {
+    sha?: unknown;
+    commit?: { author?: unknown; committer?: unknown };
+    author?: unknown;
+    committer?: unknown;
+  };
+  const sha = typeof commit.sha === "string" ? commit.sha : undefined;
+  const author = toCommitPerson(commit.author) ?? toCommitPerson(commit.commit?.author);
+  const committer = toCommitPerson(commit.committer) ?? toCommitPerson(commit.commit?.committer);
+  return {
+    ...(sha ? { sha } : {}),
+    ...(author ? { author } : {}),
+    ...(committer ? { committer } : {}),
   };
 }
 
@@ -820,6 +849,11 @@ export class GithubAPI {
   async getPRFiles(owner: string, repo: string, index: number): Promise<PullFile[]> {
     const files = await this.getPages<GithubFile>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/files`);
     return files.map(toPullFile);
+  }
+
+  async listPullCommits(owner: string, repo: string, index: number): Promise<PullCommit[]> {
+    const commits = await this.getPages<unknown>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}/commits`);
+    return commits.map(toGithubPullCommit);
   }
 
   async createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment> {

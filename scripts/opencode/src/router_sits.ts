@@ -28,6 +28,7 @@ export const ROUTER_SIT_REASONS = [
   "repo-mutex",
   "no-write-access",
   "not-labeled",
+  "conflict-ignored",
 ] as const;
 
 export type RouterSitReason = (typeof ROUTER_SIT_REASONS)[number];
@@ -164,6 +165,9 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text === "not assigned to bot") return "not-labeled";
   if (text === "labeled other label") return "not-labeled";
   if (text === "not a jumi pull request") return "not-labeled";
+
+  // Left to the author via the ignore-conflicts label.
+  if (text.toLowerCase().startsWith("conflicted, left to author")) return "conflict-ignored";
 
   return undefined;
 }

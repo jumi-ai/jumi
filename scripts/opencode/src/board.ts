@@ -234,6 +234,7 @@ const SIT_MESSAGES: Record<string, string> = {
   "repo-mutex": "Already working on this pull in another job.",
   "no-write-access": "Sender lacks write access for this pull.",
   "not-labeled": "Pull is not labeled for pickup.",
+  "conflict-ignored": "conflicted, left to author (label `ignore-conflicts`)",
 };
 
 export function sitMessage(reason: RouterSitReason): string {
@@ -255,6 +256,7 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
   "implement-latch": STUCK_FOLLOWUP_EFFECT,
   "no-write-access": "Remove this board row only",
   "not-labeled": "Remove this board row only",
+  "conflict-ignored": "Report conflict left to author (no job queued)",
 };
 
 /** Effect text for a stuck-latch kick: conflict resolution for a conflict-capped latch, follow-up otherwise. */
@@ -269,6 +271,7 @@ const SIT_KICK_IDS: Record<string, string> = {
   "implement-latch": "stuck",
   "no-write-access": "sit-clear",
   "not-labeled": "sit-clear",
+  "conflict-ignored": "sit-clear",
 };
 
 function kickForSit(reason: RouterSitReason, stuckReason?: string | null): BoardKick | undefined {
@@ -2853,6 +2856,13 @@ async function handleSitClear(
   // follow-up (or conflict resolution) on the open closer in a single transaction.
   if (sit.reason === "implement-latch") {
     return json(400, { error: "missing kick" });
+  }
+  // A conflict left to the author stays left: report the waiting reason
+  // instead of clearing the row and appearing to do nothing.
+  if (sit.reason === "conflict-ignored") {
+    if (kickActor) logger(`board kick ${owner}/${repo}#${number} ${sit.reason} by ${kickActor}`);
+    else logger(`board kick ${owner}/${repo}#${number} ${sit.reason}`);
+    return json(409, { error: sitMessage(sit.reason), code: "conflict-ignored" });
   }
   const kick = kickForSit(sit.reason);
   if (!kick) return json(409, { error: "no kick for this row" });

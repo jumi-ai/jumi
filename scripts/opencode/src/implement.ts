@@ -120,6 +120,7 @@ export interface ImplementOptions extends PickupPolicy {
   tracker?: Tracker | BriefTracker | IssueApi;
   /** Forge capability (clone + PR). Defaults to `api`. A git-host adapter satisfies both. */
   forge?: Forge | IssueApi;
+  ignoreConflictsLabel?: string;
   /**
    * The computer this job boots. Core asks the runtime for it; both live
    * factories keep using the standing pod. Test-only docker is never passed

@@ -55,6 +55,7 @@ export type GithubMailboxConfig = {
   botUsername: string;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
+  ignoreConflictsLabel?: string;
 };
 
 export type GithubReviewQueue = {
@@ -162,6 +163,7 @@ export function githubWebhookPolicy(config: GithubMailboxConfig): GithubWebhookP
     botUsername: config.botUsername,
     followupIgnoreLogins: [...ignore],
     trustedSenderLogins: config.trustedSenderLogins,
+    ignoreConflictsLabel: config.ignoreConflictsLabel,
     isPickedUp: hasJumiLabel,
   };
 }

@@ -81,6 +81,18 @@ export interface PullFile {
   patch?: string;
 }
 
+export interface PullCommitIdentity {
+  name?: string;
+  email?: string;
+  login?: string;
+}
+
+export interface PullCommit {
+  sha?: string;
+  author?: PullCommitIdentity;
+  committer?: PullCommitIdentity;
+}
+
 export interface Comment {
   id: number;
   body: string;
@@ -236,6 +248,8 @@ export interface Forge {
   listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string; headSha?: string }): Promise<ActionJob[]>;
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
+  /** Commits unique to the pull head (not on the base). Empty when the forge has none. */
+  listPullCommits?(owner: string, repo: string, index: number): Promise<PullCommit[]>;
 }
 
 export type ReviewApi = Pick<
@@ -281,6 +295,7 @@ export type IssueApi = Tracker &
     | "getActionJobLogs"
     | "getCollaboratorPermission"
     | "getAppPermissions"
+    | "listPullCommits"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {

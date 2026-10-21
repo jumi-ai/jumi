@@ -45,6 +45,7 @@ import { registeredEngine } from "./engine_dispatch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -930,7 +931,21 @@ export async function implementFollowUp(
     }
   }
   const previousConflict = await readConflictLatch(latches, latchKey);
-  if (previousConflict.round >= maxConflictRounds) {
+  const leftToAuthor =
+    pr.mergeable === false &&
+    (await isLeftToAuthor(
+      opts.api,
+      owner,
+      repo,
+      pr,
+      { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+      log
+    ));
+  if (leftToAuthor && !hasFeedback && !ciWake) {
+    await forgetClaim();
+    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
+  }
+  if (!leftToAuthor && previousConflict.round >= maxConflictRounds) {
     await sticky("stuck: cannot resolve conflicts", pr.number);
     await forgetClaim();
     return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
@@ -1104,51 +1119,55 @@ export async function implementFollowUp(
         htmlUrl: currentIssue.html_url,
       };
       let mergeResult: MergeDefaultResult;
-      try {
-        mergeResult = await mergeDefaultIntoWorktree({
-          git: loop.runConfiguredGit,
-          env: loop.env,
-          worktree,
-          runtime,
-          loop,
-          defaultBranch: opts.job.defaultBranch,
-          headRef: branch,
-          job: taskJob,
-          pr,
-          model: opts.model,
-          variant: opts.variant,
-          home: opts.home,
-          sanitizeOpenCodeEnv: sanitizeEnv,
-          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
-          maxOutputBytes: opts.maxOutputBytes,
-          timeoutMs: conflictTimeoutMs,
-          openCodeRunner: activeEngine,
-          helmRunner: opts.helmRunner,
-          logger: log,
-          abortSignal: opts.abortSignal,
-          jobId: opts.jobId ?? opts.job.delivery,
-          ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
-          onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r) => {
-            runner = r;
-          },
-        });
-      } catch (err: unknown) {
-        if (isQuotaError(err)) {
-          throwIfQuotaWait({
-            err,
+      if (leftToAuthor) {
+        mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
+      } else {
+        try {
+          mergeResult = await mergeDefaultIntoWorktree({
+            git: loop.runConfiguredGit,
+            env: loop.env,
+            worktree,
+            runtime,
+            loop,
+            defaultBranch: opts.job.defaultBranch,
+            headRef: branch,
+            job: taskJob,
+            pr,
             model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            chain: jobChain,
-            previousError: opts.previousError,
+            variant: opts.variant,
+            home: opts.home,
+            sanitizeOpenCodeEnv: sanitizeEnv,
+            extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+            maxOutputBytes: opts.maxOutputBytes,
+            timeoutMs: conflictTimeoutMs,
+            openCodeRunner: activeEngine,
+            helmRunner: opts.helmRunner,
+            logger: log,
+            abortSignal: opts.abortSignal,
+            jobId: opts.jobId ?? opts.job.delivery,
+            ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+            onPid: loop.engineOnPid(opts.onPid),
+            onRunner: (r) => {
+              runner = r;
+            },
           });
-          await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+        } catch (err: unknown) {
+          if (isQuotaError(err)) {
+            throwIfQuotaWait({
+              err,
+              model: opts.model,
+              fallbackModel: opts.fallbackModel,
+              chain: jobChain,
+              previousError: opts.previousError,
+            });
+            await sticky(QUOTA_STUCK_TEXT, pr.number);
+            await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          }
+          prefixMergeThrew = true;
+          throw err;
         }
-        prefixMergeThrew = true;
-        throw err;
       }
       runner = mergeResult.runner;
       if (mergeResult.contributors && mergeResult.contributors.length > 0) {
