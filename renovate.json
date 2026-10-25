@@ -138,7 +138,7 @@
     }
   ],
   "constraints": {
-    "bun": "1.4.3"
+    "bun": "1.4.4"
   },
   "minimumReleaseAge": "3 days",
   "prCreation": "immediate",
