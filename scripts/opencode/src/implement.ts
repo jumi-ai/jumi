@@ -1,6 +1,7 @@
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
+import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -32,7 +33,12 @@ import {
 } from "./dependencies.ts";
 import { type Engine, type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
-import { engineScratchTrackedReason, tipTracksEngineScratch } from "./engine_scratch.ts";
+import {
+  attachmentsTrackedReason,
+  engineScratchTrackedReason,
+  tipTracksAttachments,
+  tipTracksEngineScratch,
+} from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
@@ -533,7 +539,14 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
       const validatedSkip = await readValidatedSkip(worktree);
-      await stripSentinels(worktree, [PR_DESCRIPTION_FILE, SKIP_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
+      await stripSentinels(worktree, [
+        PR_DESCRIPTION_FILE,
+        SKIP_FILE,
+        "JUMI_TASK.md",
+        QUEUE_FILE,
+        BLOCKED_BY_FILE,
+        ATTACHMENTS_MANIFEST,
+      ]);
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
         if (validatedSkip) {
@@ -551,6 +564,11 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        return { status: "skipped", reason };
+      }
+      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = attachmentsTrackedReason(branch);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "skipped", reason };
       }
@@ -725,6 +743,17 @@ export async function implementIssue(
         // Every child-written sentinel is dropped before a re-spawn, so a skip
         // artifact can only ever describe the round that just ran.
         await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
+        // Parent-staged issue inputs: same injection point as task/queue, with
+        // the parent's credentials. The child has no forge read access.
+        await stageIssueAttachments({
+          api: opts.api,
+          owner,
+          repo,
+          indexes: [issueNumber],
+          bodies: [job.body],
+          worktree,
+          log,
+        }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
       };
       await writeTaskFiles(opts.job);
       await upsertWorkerComment(
@@ -986,7 +1015,14 @@ export async function implementIssue(
         throwIfAborted(opts.abortSignal);
         prFileContents = await readPullRequestDescription(worktree);
         const validatedSkip = await readValidatedSkip(worktree);
-        await stripSentinels(worktree, [PR_DESCRIPTION_FILE, SKIP_FILE, "JUMI_TASK.md", QUEUE_FILE, BLOCKED_BY_FILE]);
+        await stripSentinels(worktree, [
+          PR_DESCRIPTION_FILE,
+          SKIP_FILE,
+          "JUMI_TASK.md",
+          QUEUE_FILE,
+          BLOCKED_BY_FILE,
+          ATTACHMENTS_MANIFEST,
+        ]);
         porcelain = await worktreePorcelain(loop);
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
           if (validatedSkip) {
@@ -1016,6 +1052,14 @@ export async function implementIssue(
       throwIfAborted(opts.abortSignal);
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
+        await diary(reason);
+        await loop.stopHeartbeat();
+        await loop.stampTerminalClaim(opts.api);
+        await loop.detachWorktree();
+        return { status: "skipped", reason };
+      }
+      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = attachmentsTrackedReason(branch);
         await diary(reason);
         await loop.stopHeartbeat();
         await loop.stampTerminalClaim(opts.api);

@@ -1,5 +1,6 @@
 import { access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
@@ -116,6 +117,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   headRef: string;
   job: IssueJob;
   pr: Pull;
+  /** Parent forge client for attachment staging (parent credentials only). */
+  api?: import("./attachments.ts").AttachmentApi;
   model: string;
   variant?: string;
   home: string;
@@ -486,6 +489,18 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       })
     );
     if (opts.ciMarkdown) await writeFile(join(worktree, CI_LOG_FILE), opts.ciMarkdown);
+    if (opts.api) {
+      const issueNumber = opts.job.issueNumber;
+      await stageIssueAttachments({
+        api: opts.api,
+        owner: opts.job.owner,
+        repo: opts.job.repo,
+        indexes: opts.pr.number === issueNumber ? [issueNumber] : [issueNumber, opts.pr.number],
+        bodies: [opts.job.body, opts.pr.body],
+        worktree,
+        log,
+      }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
     log(`Running OpenCode conflict resolution for ${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`);
     openCodeRan = true;
     const runOpts: EngineRunOptions = {
@@ -519,7 +534,9 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     await rm(join(worktree, "JUMI_TASK.md"), { force: true });
     await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
     await rm(join(worktree, CI_LOG_FILE), { force: true });
+    await rm(join(worktree, ATTACHMENTS_MANIFEST), { force: true });
     await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
+    await stripSentinels(worktree, [ATTACHMENTS_MANIFEST]);
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
     if (remaining.length > 0) {
@@ -740,6 +757,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           skipCleanMerge: true,
           job: taskJob,
           pr,
+          api: opts.api,
           model: opts.model,
           variant: opts.variant,
           home: opts.home,
@@ -809,6 +827,15 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           continueOpenCode: async (issue) => {
             throwIfAborted(opts.abortSignal);
             await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+            await stageIssueAttachments({
+              api: opts.api,
+              owner,
+              repo,
+              indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+              bodies: [issue.body ?? taskJob.body, pr.body],
+              worktree,
+              log,
+            }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
             log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
             const continuedOpts: EngineRunOptions = {
               model: opts.model,
@@ -861,7 +888,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               throw new Error(QUOTA_STUCK_TEXT);
             }
             throwIfEngineFailed(continued);
-            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
+            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", ATTACHMENTS_MANIFEST]);
           },
         });
       } catch (err) {
@@ -885,7 +912,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         return { status: "skipped", reason: gate.reason };
       }
       if (gate.continued) {
-        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md"]);
+        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", ATTACHMENTS_MANIFEST]);
         await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
       }
 

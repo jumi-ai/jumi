@@ -171,7 +171,7 @@ export interface ActionJob {
 }
 
 /** Tracker: brief + pickup + outcome (issue/task identity). */
-export interface Tracker {
+export interface Tracker extends AttachmentSupport {
   getIssue(owner: string, repo: string, index: number): Promise<Task>;
   listIssueComments(owner: string, repo: string, index: number): Promise<Comment[]>;
   findStickyIssueComment(
@@ -203,8 +203,24 @@ export interface CollaboratorPermission {
   role_name?: string;
 }
 
+/** Forge attachment metadata (Gitea issue assets; GitHub has no list API). */
+export interface AttachmentMeta {
+  id?: number;
+  uuid?: string;
+  name: string;
+  size: number;
+  browser_download_url: string;
+}
+
+/** Parent-side attachment reads. Optional so existing fakes keep working. */
+export interface AttachmentSupport {
+  listIssueAttachments?(owner: string, repo: string, index: number): Promise<AttachmentMeta[]>;
+  listIssueCommentAttachments?(owner: string, repo: string, commentId: number): Promise<AttachmentMeta[]>;
+  downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
+}
+
 /** Forge: clone + PR + sticky + status (git host identity). */
-export interface Forge {
+export interface Forge extends AttachmentSupport {
   getRepo(owner: string, repo: string): Promise<Repo>;
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;

@@ -59,7 +59,8 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
-Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, JUMI_CI.md, and JUMI_PR.md at the repository root.
+Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, JUMI_CI.md, JUMI_PR.md, and JUMI_ATTACHMENTS.md at the repository root.
+When JUMI_ATTACHMENTS.md exists, its staged inputs live under .jumi-attachments/ (ignored, never committed); copy a file out explicitly if the task needs to vendor it.
 Verify once at the end, not after every edit.`;
 
 const WORKER_COMMIT = `Commit at each coherent logical step with a descriptive message that says what the step does; a small task can be a single commit. No \`wip\` / \`fix lint\` / \`oops\` commits. Do not commit a broken intermediate state just to save progress.
