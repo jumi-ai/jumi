@@ -87,8 +87,9 @@ describe("attachments staging", () => {
       expect(result.records.length).toBe(3);
       for (const record of result.records) {
         expect(record.staged).toBe(true);
+        expect(record.sha256).toBeDefined();
         const onDisk = await readFile(join(dir, ATTACHMENTS_DIR, record.name));
-        expect(sha256Hex(new Uint8Array(onDisk))).toBe(record.sha256);
+        expect(sha256Hex(new Uint8Array(onDisk))).toBe(record.sha256 as string);
         expect(
           payloads.get(record.url) ?? payloads.get(`https://gitea.example/attachments/${record.name}`) ?? onDisk
         ).toBeDefined();
