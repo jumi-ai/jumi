@@ -277,6 +277,9 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
   const bodies = opts.bodies ?? [];
   const dir = join(opts.worktree, ATTACHMENTS_DIR);
   const manifestPath = join(opts.worktree, ATTACHMENTS_MANIFEST);
+  // Clear any pre-existing stage so a re-stage of a shrunk set cannot leave
+  // stale files on disk that are absent from the fresh manifest.
+  await rm(dir, { recursive: true, force: true }).catch(() => undefined);
 
   const forgeAttachments = await listAllForgeAttachments(opts.api, opts.owner, opts.repo, opts.indexes, log);
   const bodyUrls = extractBodyAttachmentUrls(bodies);
@@ -356,7 +359,7 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
   }
 
   for (const url of githubOnlyUrls) {
-    if (counted >= maxFiles && stagedFiles >= maxFiles) {
+    if (counted >= maxFiles) {
       const fallback = url.split(/[?#]/)[0]?.split("/").pop() || "attachment";
       noteUnstaged(fallback, 0, url, `exceeds count cap (max ${maxFiles} files)`, sources[0]);
       continue;
