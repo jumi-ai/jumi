@@ -1133,6 +1133,7 @@ export async function implementFollowUp(
             headRef: branch,
             job: taskJob,
             pr,
+            api: opts.api,
             model: opts.model,
             variant: opts.variant,
             home: opts.home,
