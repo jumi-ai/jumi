@@ -75,22 +75,6 @@
   ],
   "packageRules": [
     {
-      "matchUpdateTypes": [
-        "digest"
-      ],
-      "automerge": true
-    },
-    {
-      "description": "Automerge patch and digest updates after required checks pass.",
-      "matchUpdateTypes": [
-        "patch",
-        "digest"
-      ],
-      "automerge": true,
-      "platformAutomerge": true,
-      "ignoreTests": false
-    },
-    {
       "description": "Codex numeric version via github-releases: rust-v tags map to CODEX_VERSION, only stable numeric releases, grouped so version and both archive checksums move in one update.",
       "matchDatasources": [
         "github-releases"
@@ -143,5 +127,10 @@
   "minimumReleaseAge": "3 days",
   "prCreation": "immediate",
   "minimumReleaseAgeBehaviour": "timestamp-optional",
-  "ignoreTests": true
+  "automerge": true,
+  "platformAutomerge": true,
+  "ignoreTests": false,
+  "lockFileMaintenance": {
+    "automerge": true
+  }
 }
