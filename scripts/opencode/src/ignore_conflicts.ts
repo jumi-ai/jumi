@@ -122,7 +122,13 @@ export async function isLeftToAuthor(
     // Without commit history we cannot prove Jumi stayed out: fail open to
     // resolving, except when the caller has no commit API at all (push and
     // older test doubles), where leaving to the author avoids wasted work.
-    return !api?.listPullCommits;
+    if (!api?.listPullCommits) {
+      logger?.(
+        `ignore-conflicts lookup unavailable for ${owner}/${repo}#${pr.number}: no listPullCommits; leaving to author`
+      );
+      return true;
+    }
+    return false;
   }
   return !committed;
 }

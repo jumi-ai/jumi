@@ -799,9 +799,9 @@ function engineId(): string {
   return `engine-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
 }
 
-function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
+export function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
   const extra = api as ReviewApi &
-    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues">> & {
+    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits">> & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
   return {
@@ -815,6 +815,9 @@ function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
       ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
       : undefined,
     listRepoIssues: extra.listRepoIssues ? (owner, repo, opts) => extra.listRepoIssues!(owner, repo, opts) : undefined,
+    listPullCommits: extra.listPullCommits
+      ? (owner, repo, index) => extra.listPullCommits!(owner, repo, index)
+      : undefined,
     rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
 }
