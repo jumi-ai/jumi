@@ -435,7 +435,16 @@ export class GiteaAPI {
   }
 
   async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
-    const res = await fetch(url, { headers: { Authorization: `token ${this.token}` } });
+    // Only attach the parent token when the target lives on the configured
+    // forge host. Body-extracted URLs are untrusted input: sending
+    // `Authorization` to an arbitrary host would exfiltrate the token.
+    let sameHost = false;
+    try {
+      sameHost = new URL(url).host.toLowerCase() === new URL(this.base).host.toLowerCase();
+    } catch {
+      sameHost = false;
+    }
+    const res = await fetch(url, sameHost ? { headers: { Authorization: `token ${this.token}` } } : undefined);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       throw new Error(`Gitea attachment GET ${url} → ${res.status}: ${text}`);

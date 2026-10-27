@@ -800,10 +800,19 @@ export class GithubAPI {
 
   /** Parent-side download of a `user-attachments` URL with the parent's token. */
   async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
-    const token = await this.accessToken();
+    // Only attach the parent token when the target lives on the configured
+    // forge host. Body-extracted URLs are untrusted input: sending
+    // `Authorization` to an arbitrary host would exfiltrate the token.
+    let sameHost = false;
+    try {
+      sameHost = new URL(url).host.toLowerCase() === new URL(this.base).host.toLowerCase();
+    } catch {
+      sameHost = false;
+    }
+    const token = sameHost ? await this.accessToken() : undefined;
     const res = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${token}`,
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         Accept: "application/octet-stream",
         "User-Agent": "jumi",
       },
