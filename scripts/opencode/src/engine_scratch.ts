@@ -2,8 +2,10 @@ import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 export const ENGINE_TEMP_DIR = ".jumi-tmp";
+export const ATTACHMENTS_DIR = ".jumi-attachments";
 
 const ENGINE_SCRATCH_EXCLUDE = `${ENGINE_TEMP_DIR}/`;
+const ATTACHMENTS_SCRATCH_EXCLUDE = `${ATTACHMENTS_DIR}/`;
 
 export function engineScratchTrackedReason(ref: string): string {
   return `refusing to open a pull request: ${ref} tracks ${ENGINE_TEMP_DIR}, which holds provider auth and session transcripts`;
@@ -30,6 +32,18 @@ function excludeListsScratch(text: string): boolean {
       trimmed === ENGINE_SCRATCH_EXCLUDE ||
       trimmed === `/${ENGINE_TEMP_DIR}` ||
       trimmed === `/${ENGINE_SCRATCH_EXCLUDE}`
+    );
+  });
+}
+
+function excludeListsAttachments(text: string): boolean {
+  return text.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return (
+      trimmed === ATTACHMENTS_DIR ||
+      trimmed === ATTACHMENTS_SCRATCH_EXCLUDE ||
+      trimmed === `/${ATTACHMENTS_DIR}` ||
+      trimmed === `/${ATTACHMENTS_SCRATCH_EXCLUDE}`
     );
   });
 }
@@ -61,9 +75,23 @@ export async function ensureEngineScratchIgnored(worktree: string): Promise<bool
   } catch (err) {
     if (!isEnoent(err)) throw err;
   }
-  if (excludeListsScratch(existing)) return true;
-  const prefix = existing.length === 0 || existing.endsWith("\n") ? existing : `${existing}\n`;
-  await writeFile(excludePath, `${prefix}${ENGINE_SCRATCH_EXCLUDE}\n`);
+  let next = existing;
+  let changed = false;
+  if (!excludeListsScratch(next)) {
+    const prefix = next.length === 0 || next.endsWith("\n") ? next : `${next}\n`;
+    next = `${prefix}${ENGINE_SCRATCH_EXCLUDE}\n`;
+    changed = true;
+  }
+  // Parent-staged issue attachments are inputs, never commits: keep the
+  // ignored directory out of `git status` noise the same way as the engine
+  // temp dir.
+  if (!excludeListsAttachments(next)) {
+    const prefix = next.length === 0 || next.endsWith("\n") ? next : `${next}\n`;
+    next = `${prefix}${ATTACHMENTS_SCRATCH_EXCLUDE}\n`;
+    changed = true;
+  }
+  if (!changed) return true;
+  await writeFile(excludePath, next);
   return true;
 }
 
@@ -109,4 +137,16 @@ export async function tipTracksEngineScratch(
 ): Promise<boolean> {
   const listed = await git(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ENGINE_TEMP_DIR], opts);
   return listed.split("\0").some((path) => path === ENGINE_TEMP_DIR || path.startsWith(`${ENGINE_TEMP_DIR}/`));
+}
+
+export function attachmentsTrackedReason(ref: string): string {
+  return `refusing to open a pull request: ${ref} tracks ${ATTACHMENTS_DIR}, which holds parent-staged issue inputs`;
+}
+
+export async function tipTracksAttachments(
+  git: (args: string[], opts: { cwd: string; env: Record<string, string | undefined> }) => Promise<string>,
+  opts: { cwd: string; env: Record<string, string | undefined> }
+): Promise<boolean> {
+  const listed = await git(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ATTACHMENTS_DIR], opts);
+  return listed.split("\0").some((path) => path === ATTACHMENTS_DIR || path.startsWith(`${ATTACHMENTS_DIR}/`));
 }

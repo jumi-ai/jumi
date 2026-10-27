@@ -689,6 +689,7 @@ describe("bare cache and attach", () => {
       await attachPrWorktree(loop, { branch: "jumi/issue-12-fix-the-thing", defaultBranch: "main", log: () => {} });
       const exclude = await readFile(join(workdir, "bare.git", "info", "exclude"), "utf8");
       expect(exclude.split("\n").filter((line) => line.trim() === ".jumi-tmp/")).toEqual([".jumi-tmp/"]);
+      expect(exclude).toContain(".jumi-attachments/");
     });
   });
 
@@ -826,7 +827,14 @@ describe("sentinel strip, ship, abort, push-fail", () => {
       const porcelain = await worktreePorcelain(loop);
       expect(porcelain).toBe("M src/demo.ts");
       await commitIfDirty(loop, porcelain, "Implement #12: Fix the thing");
-      expect(gitCalls.find((args) => args[0] === "add")).toEqual(["add", "-A", "--", ".", ":(exclude).jumi-tmp"]);
+      expect(gitCalls.find((args) => args[0] === "add")).toEqual([
+        "add",
+        "-A",
+        "--",
+        ".",
+        ":(exclude).jumi-tmp",
+        ":(exclude).jumi-attachments",
+      ]);
     });
   });
 

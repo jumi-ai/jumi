@@ -1,5 +1,6 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
 import {
   buildCiMarkdown,
   CI_LOG_FILE,
@@ -1194,6 +1195,18 @@ export async function implementFollowUp(
 
       throwIfAborted(opts.abortSignal);
       await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
+      // Parent-staged inputs for the follow-up child: the issue's attachments
+      // as well as any on the PR. Parent credentials only; the child has no
+      // forge read access.
+      await stageIssueAttachments({
+        api: opts.api,
+        owner,
+        repo,
+        indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+        bodies: [taskJob.body, pr.body],
+        worktree,
+        log,
+      }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
       if (hasFeedback) {
         const items = await collectFollowUpItems(
           opts.api,
@@ -1357,6 +1370,15 @@ export async function implementFollowUp(
           closerPrNumber: pr.number,
           continueOpenCode: async (issue) => {
             await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+            await stageIssueAttachments({
+              api: opts.api,
+              owner,
+              repo,
+              indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+              bodies: [issue.body ?? taskJob.body, pr.body],
+              worktree,
+              log,
+            }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
             const quotaContinued = await runEngine(
               `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
               { continueSession: true }
@@ -1387,7 +1409,13 @@ export async function implementFollowUp(
 
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
-      await stripSentinels(worktree, [PR_DESCRIPTION_FILE, "JUMI_TASK.md", "JUMI_FEEDBACK.md", CI_LOG_FILE]);
+      await stripSentinels(worktree, [
+        PR_DESCRIPTION_FILE,
+        "JUMI_TASK.md",
+        "JUMI_FEEDBACK.md",
+        CI_LOG_FILE,
+        ATTACHMENTS_MANIFEST,
+      ]);
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();

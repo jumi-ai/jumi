@@ -5,7 +5,7 @@ import type { ClaimRecord } from "./claim.ts";
 import { acquireClaim, claimFilePath, deleteClaim, isPidAlive, readClaim, writeClaim } from "./claim.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, resolveEngine } from "./engine.ts";
-import { ENGINE_TEMP_DIR, ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { ATTACHMENTS_DIR, ENGINE_TEMP_DIR, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { withEngineChain } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
@@ -211,11 +211,26 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-/** Stage everything except the engine temp dir, which a failed delete can leave behind. */
-export const STAGE_ALL_ARGS: readonly string[] = ["add", "-A", "--", ".", `:(exclude)${ENGINE_TEMP_DIR}`];
+/** Stage everything except scratch dirs, which a failed delete can leave behind. */
+export const STAGE_ALL_ARGS: readonly string[] = [
+  "add",
+  "-A",
+  "--",
+  ".",
+  `:(exclude)${ENGINE_TEMP_DIR}`,
+  `:(exclude)${ATTACHMENTS_DIR}`,
+];
 
 export function isEngineTempPath(path: string): boolean {
   return path === ENGINE_TEMP_DIR || path.startsWith(`${ENGINE_TEMP_DIR}/`);
+}
+
+export function isAttachmentsPath(path: string): boolean {
+  return path === ATTACHMENTS_DIR || path.startsWith(`${ATTACHMENTS_DIR}/`);
+}
+
+export function isScratchIgnoredPath(path: string): boolean {
+  return isEngineTempPath(path) || isAttachmentsPath(path);
 }
 
 function unquotePorcelainPath(path: string): string {
@@ -564,15 +579,17 @@ export async function stripSentinels(worktree: string, files: readonly string[])
     await rm(join(worktree, file), { recursive: true, force: true }).catch(() => undefined);
   }
   // The child may already have pushed; a temp dir that will not go must not
-  // cost that work. Status and staging both ignore what is left.
+  // cost that work. Status and staging both ignore what is left. Attachments
+  // are parent-staged inputs: never committed, even when the child forgets.
   await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
+  await removeTree(join(worktree, ATTACHMENTS_DIR)).catch(() => undefined);
 }
 
-/** `git status --porcelain` output without lines that only touch the engine temp dir. */
+/** `git status --porcelain` output without lines that only touch scratch dirs. */
 export function withoutEngineTempPorcelain(status: string): string {
   return status
     .split(/\r?\n/)
-    .filter((line) => line.trim() && !porcelainPaths(line).every(isEngineTempPath))
+    .filter((line) => line.trim() && !porcelainPaths(line).every(isScratchIgnoredPath))
     .join("\n")
     .trim();
 }

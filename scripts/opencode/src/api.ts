@@ -242,6 +242,16 @@ export function toActionJob(job: GiteaActionJob): ActionJob {
   };
 }
 
+export interface GiteaAttachment {
+  id: number;
+  uuid: string;
+  name: string;
+  size: number;
+  browser_download_url: string;
+  created_at: string;
+  download_count: number;
+}
+
 function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
 }
@@ -396,6 +406,41 @@ export class GiteaAPI {
 
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
     return toTask(await this.get<GiteaIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
+  }
+
+  /**
+   * Parent-side issue attachment reads.
+   * Listing goes through the forge API (`GET /repos/{owner}/{repo}/issues/{index}/assets`);
+   * the binary itself is fetched from the attachment's `browser_download_url`
+   * with the parent's token. The child never sees the forge.
+   */
+  async listIssueAttachments(owner: string, repo: string, index: number): Promise<GiteaAttachment[]> {
+    try {
+      return await this.get<GiteaAttachment[]>(`/repos/${this.repoPath(owner, repo)}/issues/${index}/assets`);
+    } catch (err) {
+      if (isNotFoundError(err)) return [];
+      throw err;
+    }
+  }
+
+  async listIssueCommentAttachments(owner: string, repo: string, commentId: number): Promise<GiteaAttachment[]> {
+    try {
+      return await this.get<GiteaAttachment[]>(
+        `/repos/${this.repoPath(owner, repo)}/issues/comments/${commentId}/assets`
+      );
+    } catch (err) {
+      if (isNotFoundError(err)) return [];
+      throw err;
+    }
+  }
+
+  async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
+    const res = await fetch(url, { headers: { Authorization: `token ${this.token}` } });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Gitea attachment GET ${url} → ${res.status}: ${text}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
