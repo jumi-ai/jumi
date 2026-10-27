@@ -508,12 +508,8 @@ describe("router mailbox push (workerMailboxApi regression)", () => {
       listPullCommits: async () => [renovateCommit(), jumiCommit()],
     };
     const mailboxApi = workerMailboxApi(fullApi as never);
-    expect(mailboxApi.listPullCommits).toBeDefined();
-    const decision = await shouldEnqueuePushConflicts(
-      pushPayload(repo),
-      pushPolicy("gitea"),
-      mailboxApi as never
-    );
+    expect(mailboxApi?.listPullCommits).toBeDefined();
+    const decision = await shouldEnqueuePushConflicts(pushPayload(repo), pushPolicy("gitea"), mailboxApi as never);
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
     expect(decision.jobs).toHaveLength(1);
@@ -532,11 +528,14 @@ describe("router mailbox push (workerMailboxApi regression)", () => {
       listPullCommits: async () => [renovateCommit()],
     };
     const mailboxApi = workerMailboxApi(fullApi as never);
-    expect(mailboxApi.listPullCommits).toBeDefined();
+    expect(mailboxApi?.listPullCommits).toBeDefined();
     const logs: string[] = [];
-    const decision = await shouldEnqueuePushConflicts(pushPayload(repo), pushPolicy("gitea"), mailboxApi as never, (
-      message: string
-    ) => logs.push(message));
+    const decision = await shouldEnqueuePushConflicts(
+      pushPayload(repo),
+      pushPolicy("gitea"),
+      mailboxApi as never,
+      (message: string) => logs.push(message)
+    );
     expect(decision.type).toBe("skip");
     if (decision.type !== "skip") return;
     expect(decision.reason).toContain("conflicted, left to author");
