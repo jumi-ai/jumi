@@ -1,6 +1,14 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import {
+  type ChildGitProxy,
+  childProxyGitConfigEnv,
+  childProxyRequestFrom,
+  extraEnvHasGitToken,
+  isChildStrippedKey,
+  startChildGitProxy,
+} from "./child_git_proxy.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
 import { exportCodexTrace } from "./codex_tracing.ts";
 import { CodexStreamParser, type CodexTokens, codexTokensFrom } from "./codex_usage.ts";
@@ -165,7 +173,7 @@ function redactApiKeys(text: string): string {
   return out;
 }
 
-function buildCodexEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
+function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const base = opts.sanitizeEnv
     ? {
         HOME: opts.home ?? process.env.HOME ?? opts.workdir,
@@ -179,8 +187,21 @@ function buildCodexEnv(opts: EngineRunOptions, tempRoot: string): Record<string,
       if (scrubbedKey(key)) continue;
       if ((API_KEY_ENV as readonly string[]).includes(key)) continue;
       if (key === "CODEX_HOME" || key === "XDG_CONFIG_HOME") continue;
+      // Unconditional: a spawn that cannot proxy must still never see the
+      // token or the old `$GIT_AUTH_TOKEN` credential helper (refused below).
+      if (isChildStrippedKey(key)) continue;
       env[key] = value;
     }
+  }
+  if (proxyUrl && opts.sanitizeEnv) {
+    const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+    Object.assign(
+      env,
+      childProxyGitConfigEnv(proxyUrl, {
+        forgeUrl: request?.forgeUrl ?? "https://localhost/",
+        forgeHost: request?.forgeHost ?? "",
+      })
+    );
   }
   delete env.XDG_CONFIG_HOME;
   delete env.CODEX_HOME;
@@ -255,6 +276,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   await writeFile(tmpPath, prompt);
   const startedAtMs = Date.now();
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
+  let gitProxy: ChildGitProxy | undefined;
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
@@ -268,6 +290,21 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
     const threadId = opts.continueSession ? await readThreadId(opts.workdir) : undefined;
     const args = codexArgv(opts, threadId);
+    if (opts.sanitizeEnv) {
+      const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+      if (request) {
+        try {
+          gitProxy = await startChildGitProxy(request);
+        } catch (err) {
+          throw new EngineFailedError(
+            `codex spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            true
+          );
+        }
+      } else if (extraEnvHasGitToken(opts.extraEnv)) {
+        throw new EngineFailedError("codex spawn refused: git token present but no credential proxy available", true);
+      }
+    }
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -275,7 +312,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",
-          env: buildCodexEnv(opts, tempRoot),
+          env: buildCodexEnv(opts, tempRoot, gitProxy?.url),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -436,6 +473,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     throw err;
   } finally {
     await imageStaging?.cleanup().catch(() => undefined);
+    await gitProxy?.close().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }

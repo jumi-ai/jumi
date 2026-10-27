@@ -784,6 +784,46 @@ export class GithubAPI {
     return toTask(await this.get<GithubIssue>(`/repos/${this.repoPath(owner, repo)}/issues/${index}`));
   }
 
+  /**
+   * GitHub has no issue-asset list API: attachments only appear as
+   * `user-attachments` URLs in the issue/PR body. The parent extracts those
+   * URLs from the body (see `attachments.ts`) instead of listing here.
+   * Documented as not supported for listing; download is attempted below.
+   */
+  async listIssueAttachments(): Promise<never[]> {
+    return [];
+  }
+
+  async listIssueCommentAttachments(): Promise<never[]> {
+    return [];
+  }
+
+  /** Parent-side download of a `user-attachments` URL with the parent's token. */
+  async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
+    // Only attach the parent token when the target lives on the configured
+    // forge host. Body-extracted URLs are untrusted input: sending
+    // `Authorization` to an arbitrary host would exfiltrate the token.
+    let sameHost = false;
+    try {
+      sameHost = new URL(url).host.toLowerCase() === new URL(this.base).host.toLowerCase();
+    } catch {
+      sameHost = false;
+    }
+    const token = sameHost ? await this.accessToken() : undefined;
+    const res = await fetch(url, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        Accept: "application/octet-stream",
+        "User-Agent": "jumi",
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GitHub attachment GET ${url} → ${res.status}: ${text}`);
+    }
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
     return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
   }
