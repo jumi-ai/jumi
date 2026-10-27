@@ -1,6 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage, stripClaudeConfigWarning } from "./auth.ts";
+import {
+  type ChildGitProxy,
+  childProxyGitConfigEnv,
+  childProxyRequestFrom,
+  isChildStrippedKey,
+  startChildGitProxy,
+} from "./child_git_proxy.ts";
 import { stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
@@ -147,7 +154,7 @@ export function scrubbedKey(key: string): boolean {
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
+function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: tempRoot, ...tracing } as Record<string, string>;
@@ -165,8 +172,19 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string): Record<string
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (scrubbedKey(key)) continue;
+      if (proxyUrl && isChildStrippedKey(key)) continue;
       env[key] = value;
     }
+  }
+  if (proxyUrl) {
+    const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+    Object.assign(
+      env,
+      childProxyGitConfigEnv(proxyUrl, {
+        forgeUrl: request?.forgeUrl ?? "https://localhost/",
+        forgeHost: request?.forgeHost ?? "",
+      })
+    );
   }
   // After extraEnv, because the scrub is what this has to survive: a sanitized
   // spawn that reaches the model but not Phoenix is an untraced job.
@@ -243,6 +261,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   const tmpPath = join(tmpDir, "prompt.txt");
   await writeFile(tmpPath, prompt);
   const startedAtMs = Date.now();
+  let gitProxy: ChildGitProxy | undefined;
 
   if (opts.abortSignal?.aborted) {
     const err = new Error("cancelled");
@@ -260,6 +279,19 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         : undefined;
     const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
     const args = claudeArgv(opts, checkoutSkills, imageSkills);
+    if (opts.sanitizeEnv) {
+      const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+      if (request) {
+        try {
+          gitProxy = await startChildGitProxy(request);
+        } catch (err) {
+          throw new EngineFailedError(
+            `claude spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            true
+          );
+        }
+      }
+    }
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -267,7 +299,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",
-          env: buildClaudeEnv(opts, tempRoot),
+          env: buildClaudeEnv(opts, tempRoot, gitProxy?.url),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -408,6 +440,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
   } finally {
+    await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

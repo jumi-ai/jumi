@@ -2,6 +2,13 @@ import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/
 import { join } from "node:path";
 import { AgyStreamParser } from "./agy_usage.ts";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import {
+  type ChildGitProxy,
+  childProxyGitConfigEnv,
+  childProxyRequestFrom,
+  isChildStrippedKey,
+  startChildGitProxy,
+} from "./child_git_proxy.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
@@ -129,7 +136,7 @@ async function restoreAgyProjectAgents(
   }
 }
 
-function agyEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string> {
+function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: tempRoot } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
@@ -144,8 +151,19 @@ function agyEnv(opts: EngineRunOptions, tempRoot: string): Record<string, string
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (scrubbedKey(key)) continue;
+      if (proxyUrl && isChildStrippedKey(key)) continue;
       env[key] = value;
     }
+  }
+  if (proxyUrl) {
+    const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+    Object.assign(
+      env,
+      childProxyGitConfigEnv(proxyUrl, {
+        forgeUrl: request?.forgeUrl ?? "https://localhost/",
+        forgeHost: request?.forgeHost ?? "",
+      })
+    );
   }
   return env;
 }
@@ -319,6 +337,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const stashRoot = join(tmpDir, "project-agents");
   const movedAgents: StashedAgyRoot[] = [];
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
+  let gitProxy: ChildGitProxy | undefined;
 
   if (opts.abortSignal?.aborted) {
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
@@ -333,7 +352,20 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       await writeFile(promptPath, prompt);
       promptArg = `Read ${promptPath} and follow the instructions in it exactly.`;
     }
-    const env = agyEnv(opts, tempRoot);
+    if (opts.sanitizeEnv) {
+      const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+      if (request) {
+        try {
+          gitProxy = await startChildGitProxy(request);
+        } catch (err) {
+          throw new EngineFailedError(
+            `agy spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            true
+          );
+        }
+      }
+    }
+    const env = agyEnv(opts, tempRoot, gitProxy?.url);
     const home = env.HOME;
     if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the forge read_url deny", false);
     await seedAgySettings(home);
@@ -518,6 +550,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   } finally {
     await imageStaging?.cleanup().catch(() => undefined);
     await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents, log);
+    await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

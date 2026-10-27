@@ -2651,12 +2651,15 @@ exit 1
         ).rejects.toThrow("opencode exited with code 1");
         const comment = api.comments.at(-1) ?? "";
         expect(comment).toContain("Jumi failed:");
-        expect(comment).toContain("token=***");
+        // Containment: the child never sees the token, so there is nothing to
+        // redact — the exfiltration attempt prints an empty value. The token
+        // must never appear in the comment, the log, or the workdir.
         expect(comment).not.toContain(token);
+        expect(comment).toContain("token=");
         const stderrLog = logs.find((line) => line.includes("[opencode stderr]"));
         expect(stderrLog).toBeDefined();
-        expect(stderrLog).toContain("token=***");
         expect(stderrLog).not.toContain(token);
+        expect(stderrLog).toContain("token=");
         expect(logs.some((line) => line.includes(token))).toBe(false);
       } finally {
         await rm(binDir, { recursive: true, force: true });
