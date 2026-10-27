@@ -19,6 +19,7 @@ import {
 import { classifyCloserWork, conflictJobIfUnmergeable } from "../src/pickup.ts";
 import { shouldEnqueuePushConflicts } from "../src/push_webhook.ts";
 import { normalizeSitReason } from "../src/router_sits.ts";
+import { workerMailboxApi } from "../src/server.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -494,3 +495,49 @@ for (const forge of ["gitea", "github"] as const) {
     });
   });
 }
+
+describe("router mailbox push (workerMailboxApi regression)", () => {
+  test("labelled PR with a Jumi commit enqueues a conflict job", async () => {
+    const pr = labelledForeignPR("gitea");
+    const fullApi = {
+      getIssue: async () => makeIssue(),
+      getRepo: async () => repo,
+      getPR: async () => pr,
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      listOpenPulls: async () => [pr],
+      listPullCommits: async () => [renovateCommit(), jumiCommit()],
+    };
+    const mailboxApi = workerMailboxApi(fullApi as never);
+    expect(mailboxApi?.listPullCommits).toBeDefined();
+    const decision = await shouldEnqueuePushConflicts(pushPayload(repo), pushPolicy("gitea"), mailboxApi as never);
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs).toHaveLength(1);
+    expect(decision.jobs[0]?.mode).toBe("conflict");
+    expect(decision.jobs[0]?.prNumber).toBe(pr.number);
+  });
+
+  test("labelled PR without a Jumi commit stays skipped", async () => {
+    const pr = labelledForeignPR("gitea");
+    const fullApi = {
+      getIssue: async () => makeIssue(),
+      getRepo: async () => repo,
+      getPR: async () => pr,
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      listOpenPulls: async () => [pr],
+      listPullCommits: async () => [renovateCommit()],
+    };
+    const mailboxApi = workerMailboxApi(fullApi as never);
+    expect(mailboxApi?.listPullCommits).toBeDefined();
+    const logs: string[] = [];
+    const decision = await shouldEnqueuePushConflicts(
+      pushPayload(repo),
+      pushPolicy("gitea"),
+      mailboxApi as never,
+      (message: string) => logs.push(message)
+    );
+    expect(decision.type).toBe("skip");
+    if (decision.type !== "skip") return;
+    expect(decision.reason).toContain("conflicted, left to author");
+  });
+});
