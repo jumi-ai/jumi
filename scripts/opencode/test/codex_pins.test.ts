@@ -28,6 +28,9 @@ const renovate = JSON.parse(renovateRaw) as {
   minimumReleaseAge?: string;
   prCreation?: string;
   ignoreTests?: boolean;
+  automerge?: boolean;
+  platformAutomerge?: boolean;
+  lockFileMaintenance?: { automerge?: boolean };
   postUpgradeTasks?: unknown;
 };
 const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
@@ -146,9 +149,15 @@ describe("codex renovate monitoring", () => {
   test("preserves release-age, scheduling, review, and CI policy", () => {
     expect(renovate.minimumReleaseAge).toBe("3 days");
     expect(renovate.prCreation).toBe("immediate");
-    expect(renovate.ignoreTests).toBe(true);
-    // No codex-specific automerge widening: patch/digest automerge is the
-    // existing global policy, not a new per-package bypass.
+    // Full-automerge pilot: Renovate itself waits for checks, and every
+    // update type automerges via platform automerge once the branch ruleset
+    // (jumi/opencode-review, checks, image builds) is green.
+    expect(renovate.ignoreTests).toBe(false);
+    expect(renovate.automerge).toBe(true);
+    expect(renovate.platformAutomerge).toBe(true);
+    expect(renovate.lockFileMaintenance).toEqual({ automerge: true });
+    // No codex-specific automerge widening: the global policy covers codex,
+    // so the codex rules carry no per-package automerge bypass.
     const rules = codexRule();
     for (const rule of rules ?? []) {
       expect((rule as Record<string, unknown> | undefined)?.automerge).toBeUndefined();
