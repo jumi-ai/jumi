@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   childProxyGitConfigEnv,
   childProxyRequestFrom,
+  extraEnvHasGitToken,
   isChildStrippedKey,
   isGitPathAllowed,
   startChildGitProxy,
@@ -40,16 +41,62 @@ async function collectFileText(root: string, needle: string): Promise<string[]> 
 }
 
 describe("child git proxy allowlist", () => {
-  test("allows only the claimed repo git paths, never the API or attachments", () => {
+  test("allows only the claimed repo git smart-HTTP endpoints, never the web UI, API, or attachments", () => {
     expect(isGitPathAllowed("/o/r.git/info/refs", "o", "r")).toBe(true);
     expect(isGitPathAllowed("/o/r.git/git-upload-pack", "o", "r")).toBe(true);
     expect(isGitPathAllowed("/o/r.git/git-receive-pack", "o", "r")).toBe(true);
     expect(isGitPathAllowed("/o/r.git/HEAD", "o", "r")).toBe(true);
+    expect(isGitPathAllowed("/o/r.git/objects/info/packs", "o", "r")).toBe(true);
+    expect(isGitPathAllowed("/o/r.git/objects/ab/cdef0123456789", "o", "r")).toBe(true);
+    // Bare (`/owner/repo/...`, which Gitea also serves) needs the same suffix.
+    expect(isGitPathAllowed("/o/r/info/refs", "o", "r")).toBe(true);
+    expect(isGitPathAllowed("/o/r/HEAD", "o", "r")).toBe(true);
+    expect(isGitPathAllowed("/o/r/git-upload-pack", "o", "r")).toBe(true);
+    expect(isGitPathAllowed("/o/r/objects/info/packs", "o", "r")).toBe(true);
+    // The repo root and every web-UI page authenticate nothing through the proxy.
+    expect(isGitPathAllowed("/o/r", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r/", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r/issues", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r/pulls/1", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r/raw/branch/README.md", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r/archive/main.zip", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/issues", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/archive/main.zip", "o", "r")).toBe(false);
     expect(isGitPathAllowed("/api/v1/repos/o/r", "o", "r")).toBe(false);
     expect(isGitPathAllowed("/attachments/uuid", "o", "r")).toBe(false);
     expect(isGitPathAllowed("/other/repo.git/info/refs", "o", "r")).toBe(false);
+    expect(isGitPathAllowed("/other/r/info/refs", "o", "r")).toBe(false);
     expect(isGitPathAllowed("/api/v1/repos/o/r")).toBe(false);
     expect(isGitPathAllowed("/attachments/uuid")).toBe(false);
+  });
+
+  test("fails closed without a valid scope: unscoped proxies serve nothing", async () => {
+    expect(isGitPathAllowed("/any/repo.git/info/refs")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/info/refs")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/info/refs", "", "r")).toBe(false);
+    expect(isGitPathAllowed("/o/r.git/info/refs", "o", "")).toBe(false);
+    expect(isGitPathAllowed("/api/v1/repos/o/r")).toBe(false);
+    await expect(
+      startChildGitProxy({ forgeUrl: AUTH.giteaUrl, username: AUTH.username, token: AUTH.token })
+    ).rejects.toThrow(/scope/);
+    await expect(
+      startChildGitProxy({ forgeUrl: AUTH.giteaUrl, username: AUTH.username, token: AUTH.token, owner: "o" })
+    ).rejects.toThrow(/scope/);
+  });
+
+  test("a token without a routable forge origin is a refused spawn, not a direct env leak", () => {
+    const extraEnv = workerOpenCodeChildEnv(AUTH, "/tmp/jumi-no-forge");
+    expect(extraEnvHasGitToken(extraEnv)).toBe(true);
+    expect(extraEnvHasGitToken({})).toBe(false);
+    expect(extraEnvHasGitToken({ GIT_AUTH_TOKEN: "  " })).toBe(false);
+    // Empty host / invalid URL: no proxy request, so every runner must refuse
+    // the spawn instead of handing the child the token (covered by the
+    // `extraEnvHasGitToken` refusal branch in each engine).
+    expect(childProxyRequestFrom({ ...extraEnv, GIT_AUTH_HOST: "" }, { owner: "o", repo: "r" })).toBeUndefined();
+    expect(childProxyRequestFrom({ ...extraEnv, GIT_AUTH_URL: "://bad" }, { owner: "o", repo: "r" })).toBeUndefined();
+    expect(childProxyRequestFrom(extraEnv, { owner: "o", repo: "r" })?.token).toBe(AUTH.token);
   });
 
   test("stripped keys never reach the child", () => {
