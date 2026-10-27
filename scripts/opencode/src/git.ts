@@ -2,6 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import {
+  type ChildGitProxy,
+  childProxyGitConfigEnv,
+  childProxyRequestFrom,
+  extraEnvHasGitToken,
+  isChildStrippedKey,
+  startChildGitProxy,
+} from "./child_git_proxy.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import {
   byteLength,
@@ -274,7 +282,8 @@ export function openCodeApiKeyConfigError(filePath: string): string {
 function buildEnv(
   opts: OpenCodeRunOptions,
   tempRoot: string,
-  openCodeDbPath: string
+  openCodeDbPath: string,
+  proxyUrl?: string
 ): Record<string, string> | undefined {
   // Per-review SQLite path under the workspace temp dir so session DB does not
   // accumulate on HOME across runs (OOM trail: 1.5GiB shared opencode.db).
@@ -328,8 +337,24 @@ function buildEnv(
       // The file-resolved key wins: a caller-supplied key via extraEnv must not
       // silently override it (no current caller does this; latent hardening).
       if (key === OPENCODE_API_KEY_ENV || key === OPENCODE_API_KEY_FILE_ENV) continue;
+      // The write-capable git token never reaches the child process: the parent
+      // holds it and the child's git talks to the loopback proxy instead.
+      // Stripped unconditionally (not only when a proxy started), so a spawn
+      // that cannot proxy never leaks the token or the old `$GIT_AUTH_TOKEN`
+      // credential helper; the spawn itself is refused below.
+      if (isChildStrippedKey(key)) continue;
       env[key] = value;
     }
+  }
+  if (proxyUrl) {
+    const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+    Object.assign(
+      env,
+      childProxyGitConfigEnv(proxyUrl, {
+        forgeUrl: request?.forgeUrl ?? "https://localhost/",
+        forgeHost: request?.forgeHost ?? "",
+      })
+    );
   }
   // After extraEnv: a job-supplied OPENCODE_PERMISSION must not win over the deny.
   denyForgeWebfetch(env, opts);
@@ -543,6 +568,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
 
   let tracker: MemoryPeakState | undefined;
   let finalSample: MemorySample | undefined;
+  let gitProxy: ChildGitProxy | undefined;
 
   if (opts.abortSignal?.aborted) {
     const err = new Error("cancelled");
@@ -551,11 +577,33 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   }
 
   try {
+    // The write-capable git token stays in parent memory: when the spawn
+    // carries one, the child's git talks to a loopback proxy that injects the
+    // token only for git smart-HTTP paths scoped to the claimed repo. The
+    // proxy lives only for this spawn and never writes the token to disk.
+    if (opts.sanitizeEnv) {
+      const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
+      if (request) {
+        try {
+          gitProxy = await startChildGitProxy(request);
+        } catch (err) {
+          throw new EngineFailedError(
+            `opencode spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            true
+          );
+        }
+      } else if (extraEnvHasGitToken(opts.extraEnv)) {
+        throw new EngineFailedError(
+          "opencode spawn refused: git token present but no credential proxy available",
+          true
+        );
+      }
+    }
     // Build the child env before spawning so a missing-key configuration
     // failure keeps its auth classification instead of being wrapped as infra.
     let childEnv: Record<string, string>;
     try {
-      const built = buildEnv(opts, tempRoot, dbPath);
+      const built = buildEnv(opts, tempRoot, dbPath, gitProxy?.url);
       if (!built) throw new EngineFailedError("opencode spawn refused: no child env", true);
       childEnv = built;
     } catch (err) {
@@ -863,6 +911,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     throw err;
   } finally {
     tracker?.stop();
+    await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

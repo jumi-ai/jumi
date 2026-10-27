@@ -178,6 +178,9 @@ echo IGNORED_END
           home,
           sanitizeEnv: true,
           extraEnv: workerOpenCodeChildEnv(auth, worktree),
+          // Production worker spawns always carry the claimed repo, and the
+          // git credential proxy refuses to start without it.
+          trace: { kind: "implement", owner: "acme", repo: "demo" },
         });
         expect(result.status).toBe("ok");
         const stdout = result.stdout ?? "";

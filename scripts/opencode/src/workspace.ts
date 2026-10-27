@@ -213,6 +213,10 @@ export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
     GIT_AUTH_HOST: env.GIT_AUTH_HOST ?? "",
     GIT_AUTH_USERNAME: env.GIT_AUTH_USERNAME ?? "",
     GIT_AUTH_TOKEN: env.GIT_AUTH_TOKEN ?? "",
+    // Non-secret forge origin so the engine spawn can point the child's git at
+    // the parent-held credential proxy (`child_git_proxy.ts`). The final child
+    // process never sees `GIT_AUTH_TOKEN`; the engine strips it before spawn.
+    GIT_AUTH_URL: auth.giteaUrl,
     GIT_AUTHOR_NAME: gitAuthorName(auth),
     GIT_AUTHOR_EMAIL: gitAuthorEmail(auth),
     GIT_COMMITTER_NAME: gitAuthorName(auth),
