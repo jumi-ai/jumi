@@ -6,6 +6,7 @@ import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
   childProxyRequestFrom,
+  extraEnvHasGitToken,
   isChildStrippedKey,
   startChildGitProxy,
 } from "./child_git_proxy.ts";
@@ -337,7 +338,10 @@ function buildEnv(
       if (key === OPENCODE_API_KEY_ENV || key === OPENCODE_API_KEY_FILE_ENV) continue;
       // The write-capable git token never reaches the child process: the parent
       // holds it and the child's git talks to the loopback proxy instead.
-      if (proxyUrl && isChildStrippedKey(key)) continue;
+      // Stripped unconditionally (not only when a proxy started), so a spawn
+      // that cannot proxy never leaks the token or the old `$GIT_AUTH_TOKEN`
+      // credential helper; the spawn itself is refused below.
+      if (isChildStrippedKey(key)) continue;
       env[key] = value;
     }
   }
@@ -587,6 +591,11 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
             true
           );
         }
+      } else if (extraEnvHasGitToken(opts.extraEnv)) {
+        throw new EngineFailedError(
+          "opencode spawn refused: git token present but no credential proxy available",
+          true
+        );
       }
     }
     // Build the child env before spawning so a missing-key configuration

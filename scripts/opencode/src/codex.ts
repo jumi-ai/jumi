@@ -5,6 +5,7 @@ import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
   childProxyRequestFrom,
+  extraEnvHasGitToken,
   isChildStrippedKey,
   startChildGitProxy,
 } from "./child_git_proxy.ts";
@@ -186,7 +187,9 @@ function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: stri
       if (scrubbedKey(key)) continue;
       if ((API_KEY_ENV as readonly string[]).includes(key)) continue;
       if (key === "CODEX_HOME" || key === "XDG_CONFIG_HOME") continue;
-      if (proxyUrl && isChildStrippedKey(key)) continue;
+      // Unconditional: a spawn that cannot proxy must still never see the
+      // token or the old `$GIT_AUTH_TOKEN` credential helper (refused below).
+      if (isChildStrippedKey(key)) continue;
       env[key] = value;
     }
   }
@@ -298,6 +301,8 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
             true
           );
         }
+      } else if (extraEnvHasGitToken(opts.extraEnv)) {
+        throw new EngineFailedError("codex spawn refused: git token present but no credential proxy available", true);
       }
     }
     const proc = (() => {

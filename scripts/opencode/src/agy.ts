@@ -6,6 +6,7 @@ import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
   childProxyRequestFrom,
+  extraEnvHasGitToken,
   isChildStrippedKey,
   startChildGitProxy,
 } from "./child_git_proxy.ts";
@@ -151,7 +152,9 @@ function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Re
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (scrubbedKey(key)) continue;
-      if (proxyUrl && isChildStrippedKey(key)) continue;
+      // Unconditional: a spawn that cannot proxy must still never see the
+      // token or the old `$GIT_AUTH_TOKEN` credential helper (refused below).
+      if (isChildStrippedKey(key)) continue;
       env[key] = value;
     }
   }
@@ -363,6 +366,8 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
             true
           );
         }
+      } else if (extraEnvHasGitToken(opts.extraEnv)) {
+        throw new EngineFailedError("agy spawn refused: git token present but no credential proxy available", true);
       }
     }
     const env = agyEnv(opts, tempRoot, gitProxy?.url);

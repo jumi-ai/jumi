@@ -54,12 +54,30 @@ function stripTrailingSlash(value: string): string {
   return value.endsWith("/") && value.length > 1 ? value.slice(0, -1) : value;
 }
 
-export function proxyAllowPrefixes(owner?: string, repo?: string): string[] {
-  if (!owner || !repo) return [];
-  const o = owner.trim();
-  const r = repo.trim().replace(/\.git$/, "");
-  if (!o || !r || o.includes("/") || r.includes("/") || o === "." || r === ".") return [];
-  return [`/${o}/${r}.git/`, `/${o}/${r}.git`, `/${o}/${r}/`, `/${o}/${r}`];
+function normalizedScope(owner?: string, repo?: string): { o: string; r: string } | undefined {
+  const o = owner?.trim();
+  const r = repo?.trim().replace(/\.git$/, "");
+  if (!o || !r || o.includes("/") || r.includes("/") || o === "." || r === "." || o === ".." || r === "..") {
+    return undefined;
+  }
+  return { o, r };
+}
+
+/**
+ * Git smart-HTTP suffixes the proxy forwards, scoped to the claimed repo.
+ * Both the `.git` and the bare (`/owner/repo/...`, which Gitea also serves)
+ * bases require the same suffix: `info/refs` (ref advertisement),
+ * `HEAD`, `objects/...` (dumb-HTTP object reads), and the two RPC endpoints.
+ * Anything else — the repo root, `/issues`, `/pulls/...`, `/raw/...`,
+ * `/archive/...` — is the forge web UI, not git, and gets 404 without ever
+ * seeing the token.
+ */
+function gitSuffixAllowed(remainder: string): boolean {
+  if (remainder === "info/refs") return true;
+  if (remainder === "HEAD") return true;
+  if (remainder === "git-upload-pack" || remainder === "git-receive-pack") return true;
+  if (remainder.startsWith("objects/") && remainder.length > "objects/".length) return true;
+  return false;
 }
 
 function pathAllowed(pathname: string, owner?: string, repo?: string): boolean {
@@ -73,15 +91,27 @@ function pathAllowed(pathname: string, owner?: string, repo?: string): boolean {
   ) {
     return false;
   }
-  const prefixes = proxyAllowPrefixes(owner, repo);
-  if (prefixes.length > 0) {
-    return prefixes.some((prefix) =>
-      prefix.endsWith("/") ? pathname.startsWith(prefix) : pathname === prefix || pathname.startsWith(`${prefix}/`)
-    );
+  const scope = normalizedScope(owner, repo);
+  // Fail closed without a valid scope: an unscoped proxy serves nothing, so a
+  // missing owner/repo can never turn the parent token into a forge-wide git
+  // reader. `startChildGitProxy` also refuses to start unscoped.
+  if (!scope) return false;
+  const { o, r } = scope;
+  const gitBase = `/${o}/${r}.git/`;
+  const bareBase = `/${o}/${r}/`;
+  let remainder: string | undefined;
+  if (pathname.startsWith(gitBase)) {
+    remainder = pathname.slice(gitBase.length);
+  } else if (pathname.startsWith(bareBase)) {
+    remainder = pathname.slice(bareBase.length);
+    // `/o/r/.git/...` is not a git smart-HTTP endpoint (the endpoint is
+    // `/o/r/HEAD`, not `/o/r/.git/HEAD`), so it stays denied.
+    if (remainder === ".git" || remainder.startsWith(".git/")) return false;
+  } else {
+    return false;
   }
-  // No scope (reviewer-style spawn without owner/repo): allow only git paths,
-  // still never the API or attachments.
-  return pathname.includes(".git/");
+  if (!remainder) return false;
+  return gitSuffixAllowed(remainder);
 }
 
 export function isGitPathAllowed(pathname: string, owner?: string, repo?: string): boolean {
@@ -95,8 +125,11 @@ export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<Ch
   const forgeOrigin = new URL(forgeBase).origin;
   const forgePath = new URL(forgeBase).pathname.replace(/\/$/, "");
   const basic = `Basic ${Buffer.from(`${opts.username}:${opts.token}`).toString("base64")}`;
-  const owner = opts.owner?.trim() || undefined;
-  const repo = opts.repo?.trim().replace(/\.git$/, "") || undefined;
+  // Fail closed without a valid scope: serving any repo's git paths with the
+  // parent token is exactly the forge-wide reader this proxy exists to prevent.
+  const scope = normalizedScope(opts.owner, opts.repo);
+  if (!scope) throw new Error("child git proxy refused: missing or invalid owner/repo scope");
+  const { o: owner, r: repo } = scope;
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -216,6 +249,11 @@ export interface ChildProxyRequest {
   token: string;
   owner?: string;
   repo?: string;
+}
+
+/** Whether the spawn carries a write-capable git token that must never reach the child. */
+export function extraEnvHasGitToken(extraEnv?: Record<string, string>): boolean {
+  return !!extraEnv?.GIT_AUTH_TOKEN?.trim();
 }
 
 /** When the spawn carries a write-capable git token, the parent must proxy it. */
