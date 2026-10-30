@@ -448,6 +448,7 @@ bun run server
 ```text
 AGENTS.md                    # Agent facts for this checkout (keep docs current)
 README.md                    # Human overview
+REVIEW.md                    # This repository's review rules
 .github/
   workflows/
     jumi-reviewer-image.yml  # Reviewer image build/push to GHCR

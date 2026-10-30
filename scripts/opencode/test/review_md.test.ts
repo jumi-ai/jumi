@@ -194,3 +194,44 @@ describe("loadReviewMdSections", () => {
     });
   });
 });
+
+describe("this repository's REVIEW.md", () => {
+  const repoRoot = join(process.cwd(), "../..");
+  const REPO_WIDE_HEADINGS = [
+    "# Jumi review rules",
+    "## What CI already proves",
+    "## Cross-cutting checks",
+    "## Not a finding",
+    "## One root cause, one finding",
+  ];
+  const REPO_WIDE_MAX_BYTES = 4_000;
+
+  const load = async () => {
+    const file = await readReviewMd(repoRoot);
+    if (!file) throw new Error("REVIEW.md is missing from the repository root");
+    return file.text;
+  };
+  const trackedFiles = () => Bun.spawnSync(["git", "ls-files"], { cwd: repoRoot }).stdout.toString().trim().split("\n");
+
+  test("keeps every repo-wide section on a review that matches no path", async () => {
+    const selection = selectReviewMdSections(await load(), files("no/such/file"));
+    for (const heading of REPO_WIDE_HEADINGS) expect(selection.text).toContain(`${heading}\n`);
+    expect(selection.matchedPathSections).toBe(0);
+    expect(selection.bytes).toBeLessThanOrEqual(REPO_WIDE_MAX_BYTES);
+  });
+
+  test("every path glob matches a tracked file", async () => {
+    const tracked = trackedFiles();
+    const headings = (await load()).match(/^##? .+$/gm) ?? [];
+    const globs = headings.flatMap((heading) => headingGlobs(heading.replace(/^#+ /, "")) ?? []);
+    expect(globs.length).toBeGreaterThan(0);
+    const dead = globs.filter((glob) => !tracked.some((path) => globToRegExp(glob).test(path)));
+    expect(dead).toEqual([]);
+  });
+
+  test("a pull touching every tracked file still fits the prompt budget", async () => {
+    const selection = selectReviewMdSections(await load(), files(...trackedFiles()));
+    expect(selection.matchedPathSections).toBe(selection.pathSections);
+    expect(selection.truncated).toBe(false);
+  });
+});
