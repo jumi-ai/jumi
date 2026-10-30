@@ -19,7 +19,12 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, forgeOpenCodeConfigContent, forgeOpenCodePermission, forgeWebfetchPermission } from "./forge_webfetch.ts";
+import {
+  FORGE_DENY_DOMAIN,
+  forgeOpenCodeConfigContent,
+  forgeOpenCodePermission,
+  forgeWebfetchPermission,
+} from "./forge_webfetch.ts";
 import { getOpenCodeMajor } from "./git.ts";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */

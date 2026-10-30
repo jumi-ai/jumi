@@ -643,9 +643,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         try {
           const parentRaw = await readFile(join(home, ".local", "share", "opencode", "auth.json"), "utf8");
           const parent = JSON.parse(parentRaw) as Record<string, unknown>;
-          const entry = (parent as { xai?: unknown }).xai as
-            | { type?: unknown; key?: unknown }
-            | undefined;
+          const entry = (parent as { xai?: unknown }).xai as { type?: unknown; key?: unknown } | undefined;
           if (entry?.type === "api" && typeof entry.key === "string" && entry.key) {
             childEnv.XAI_API_KEY = entry.key;
           } else if (entry?.type === "key" && typeof entry.key === "string" && entry.key) {
