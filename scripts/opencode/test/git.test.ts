@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { FORGE_DENY_DOMAIN, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodeConfigContent, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   buildOpenCodeArgs,
@@ -1333,6 +1333,7 @@ cat
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
+printf 'KIND_CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1344,11 +1345,13 @@ printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain(`KIND_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+        expect(result.stdout).toContain(`KIND_CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
       }
     );
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
+printf 'PATH_CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1360,6 +1363,7 @@ printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain(`PATH_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+        expect(result.stdout).toContain(`PATH_CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
       }
     );
   });
@@ -1368,6 +1372,7 @@ printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+printf 'CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
 `,
       async (_binDir, workdir) => {
         for (const kind of ["implement", "follow-up", "conflict"] as const) {
@@ -1380,7 +1385,8 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
             trace: { kind, owner: "kirmanak", repo: "demo" },
           });
           expect(result.status).toBe("ok");
-          expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+          expect(result.stdout).toContain(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+          expect(result.stdout).toContain(`CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
         }
       }
     );
@@ -1390,6 +1396,7 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
+printf 'CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1399,10 +1406,14 @@ printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
           sanitizeEnv: true,
           configPath: "/app/.gitea/opencode-implement.json",
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
-          extraEnv: { OPENCODE_PERMISSION: JSON.stringify({ webfetch: "allow" }) },
+          extraEnv: {
+            OPENCODE_PERMISSION: JSON.stringify({ webfetch: "allow" }),
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({ permissions: [] }),
+          },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+        expect(result.stdout).toContain(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
+        expect(result.stdout).toContain(forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN).slice(0, 60));
       }
     );
   });

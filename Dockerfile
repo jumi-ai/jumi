@@ -142,7 +142,7 @@ RUN git --version \
   && python3 --version \
   && helm version --short \
   && bun --version \
-  && /usr/local/bin/opencode version \
+  && /usr/local/bin/opencode --version \
   && /usr/local/bin/claude --version \
   && /usr/local/bin/agy --version \
   && /usr/local/bin/codex --version

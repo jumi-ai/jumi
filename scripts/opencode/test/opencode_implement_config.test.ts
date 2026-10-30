@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, forgeDenyHost, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeDenyHost, forgePermissions, forgeWebfetchPermission } from "../src/forge_webfetch.ts";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 interface OpenCodeImplementConfig {
@@ -54,7 +54,8 @@ describe("opencode implement config", () => {
 
   test("denies webfetch of the forge host for the worker, not just the reviewer", () => {
     // The JSON field stays scalar allow (OpenCode types webfetch as Action);
-    // the last-match object arrives via OPENCODE_PERMISSION on every spawn.
+    // the last-match object arrives via OPENCODE_PERMISSION on every spawn,
+    // and as `permissions` via OPENCODE_CONFIG_CONTENT for OpenCode 2.
     const rules = forgeWebfetchPermission(FORGE_DENY_DOMAIN);
     expect(Object.keys(rules)).toEqual(["*", `*${FORGE_DENY_DOMAIN}*`, "*github.com/search*"]);
 
@@ -66,6 +67,13 @@ describe("opencode implement config", () => {
 
     expect(bashPermission(rules, "https://docs.gitea.com/installation")).toBe("allow");
     expect(bashPermission(rules, "https://bun.sh/docs/cli/test")).toBe("allow");
+
+    const v2 = forgePermissions(FORGE_DENY_DOMAIN);
+    expect(v2).toEqual([
+      { action: "webfetch", resource: "*", effect: "allow" },
+      { action: "webfetch", resource: `*${FORGE_DENY_DOMAIN}*`, effect: "deny" },
+      { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
+    ]);
   });
 
   test("denies the configured forge host, not a compile-time one", () => {
