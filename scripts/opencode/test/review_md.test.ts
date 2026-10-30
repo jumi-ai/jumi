@@ -148,6 +148,16 @@ describe("selectReviewMdSections", () => {
     expect(selection.pathSections).toBe(0);
   });
 
+  test("treats a top-level heading as the title, never a path section", () => {
+    const text = "# REVIEW.md\n\nIntro.\n\n## Security\n\nNever log tokens.\n\n## k3s/**\n\nHelm only.\n";
+    const selection = selectReviewMdSections(text, files("src/index.ts"));
+
+    expect(selection.text).toContain("Intro.");
+    expect(selection.text).toContain("## Security\n\nNever log tokens.");
+    expect(selection.text).not.toContain("Helm only.");
+    expect(selection.pathSections).toBe(1);
+  });
+
   test("truncates to the byte budget and says so", () => {
     const long = `## Rules\n\n${"é".repeat(200)}\n`;
     const selection = selectReviewMdSections(long, [], 51);
@@ -204,6 +214,7 @@ describe("this repository's REVIEW.md", () => {
     "## Not a finding",
     "## One root cause, one finding",
   ];
+  const PATH_SECTIONS = 9;
   const REPO_WIDE_MAX_BYTES = 4_000;
 
   const load = async () => {
@@ -213,9 +224,10 @@ describe("this repository's REVIEW.md", () => {
   };
   const trackedFiles = () => Bun.spawnSync(["git", "ls-files"], { cwd: repoRoot }).stdout.toString().trim().split("\n");
 
-  test("keeps every repo-wide section on a review that matches no path", async () => {
+  test("a review that matches no path gets exactly the repo-wide sections", async () => {
     const selection = selectReviewMdSections(await load(), files("no/such/file"));
-    for (const heading of REPO_WIDE_HEADINGS) expect(selection.text).toContain(`${heading}\n`);
+    expect([...selection.text.matchAll(/^##? .+$/gm)].map(([heading]) => heading)).toEqual(REPO_WIDE_HEADINGS);
+    expect(selection.pathSections).toBe(PATH_SECTIONS);
     expect(selection.matchedPathSections).toBe(0);
     expect(selection.bytes).toBeLessThanOrEqual(REPO_WIDE_MAX_BYTES);
   });

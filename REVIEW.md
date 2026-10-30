@@ -13,7 +13,7 @@ Report a CI gap only when this change weakens a check, or when a check stops exe
 - Forge parity: a change to webhooks, statuses, permissions, or pickup is correct on Gitea and on GitHub (#48, #68, #145).
 - Runner parity: a change to hop, quota, auth, redaction, webfetch, usage, or tracing says what happens on all four runners (#78, #135, #137, #262).
 - External evidence: a claim about forge payloads, CLI flags, stream output, or provider errors cites a live capture, upstream source, or upstream docs. A mock or fixture the author wrote proves nothing about them (#85, #109, #202).
-- Fail closed: a lookup error stays distinct from an empty list, a skip stays distinct from success, every wait has a wake, and a kick reports success only after work is queued (#73, #136, #258, #288).
+- Fail closed: a lookup error stays distinct from an empty list, a skip stays distinct from success, every wait has a wake, and a kick reports success only when the side effect its confirm names really happens (#73, #136, #258, #288).
 - Enforcement: a boundary or behavior fix lives in code, config, or a binary permission. Prompt text alone does not count (#79, #131, #187, #314).
 - Redaction: child-written text and engine output are redacted before they reach the forge or a log, and exception text stays out of HTTP bodies (#25, #74, #138).
 - Docs: `README.md`, `AGENTS.md`, and `deploy/contract.md` stay true in the same PR. A new user-visible contract is documented, and a sentence the diff makes false is a finding (#21, #199).
@@ -22,14 +22,14 @@ Report a CI gap only when this change weakens a check, or when a check stops exe
 
 - Pre-existing behavior the diff leaves unchanged.
 - Documentation that was already stale or incomplete before this diff.
-- A limit the PR body discloses with its reason, unless it breaks a stated done condition (#173).
+- A limit the PR body discloses with its reason, when it adds no correctness or security regression and breaks no stated done condition (#173).
 - A ❓ the repository can answer, or whose answer would leave this PR unchanged.
 - A 💡 that removes neither code nor a failure mode. Each 💡 on a success trailer starts a worker follow-up and another review.
 - Hardening with no path reachable from the diff.
 
 ## One root cause, one finding
 
-When several bypasses or symptoms share a mechanism, report the mechanism once with the examples under it, and say when the approach itself is the defect. Patching one case per round cost #202 seven rounds before the approach changed in #201, and #196 four findings against one staging mechanism.
+When several bypasses or symptoms share a mechanism, report the mechanism once with the examples under it, and say when the approach itself is the defect. Patching one case per round took #202 five reviews before the approach changed in #201, and #196 four findings against one staging mechanism.
 
 ## review_jobs.ts, queue.ts, skip_latches.ts, sql_client.ts, stuck.ts, handover.ts
 
@@ -52,7 +52,7 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 ## git.ts, claude.ts, agy.ts, codex.ts, fallback.ts, auth.ts, quota.ts, quota_wait.ts, runners.ts, engine.ts, engine_dispatch.ts, provenance.ts, independent_review.ts
 
 - Error classification is tested with the exact live string or structured error (#85, #248, #262).
-- Exit 0 without the expected artifact or commits is incomplete and hops (#114).
+- A first-run implement that exits 0 with neither commits nor a skip artifact is incomplete and hops. Follow-up and conflict no-ops stay valid (#114).
 - A provider failure leaves the CI failure it was fixing unhandled, so the retry still runs (#258).
 - Provenance records only runners that wrote pushed code, so independent review keeps an eligible reviewer for a pull's whole life, including under `random-start` (#277).
 - Argv and child env match what the pinned binary accepts and keeps, including resume flags and env filtering (#155).
@@ -81,7 +81,7 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 
 - Published text stands alone after `keepReviewFindingLines`: a failure trailer has a published finding, and continuation lines survive (#212, #275).
 - Artifact discovery works when the reviewed repository gitignores `JUMI_REVIEW.md` (#256).
-- A malformed repository file degrades to no rules and never fails the review (#195).
+- A malformed `REVIEW.md` or glob heading never fails the review (#195).
 - A review with no parsed verdict never posts success (#73).
 
 ## /Dockerfile, .gitea/tool-versions.env, scripts/opencode/bun.lock, scripts/opencode/package.json, renovate.json
@@ -92,7 +92,7 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 - A doubt about a security boundary is a 🟡 with the upstream citation, because a ❓ on a success trailer does not stop automerge (#325).
 - Commits beyond Renovate's are code: review them under every other rule (#122, #325).
 - On a bump-only PR, report no 💡, because a Jumi commit stops Renovate rebasing that branch (#291).
-- `bun.lock` stays readable by `BUN_VERSION` (#36), Temurin stays on 21 (#15), pins and checksums move together for both architectures (#250), and CLI build args have no default version (#154).
+- `bun.lock` stays readable by `BUN_VERSION` (#36), Temurin stays on 21 (#15), pins and checksums move together for both architectures (#250), and the OpenCode, Helm, Claude, Bun, and Codex build args have no default version, while `AGY_VERSION` stays pinned in the Dockerfile (#154).
 
 ## deploy/contract.md, config.ts, worker_config.ts, release.ts, gitops_notes.ts, .github/workflows/**
 
