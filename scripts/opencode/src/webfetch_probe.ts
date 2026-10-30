@@ -19,7 +19,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, forgeOpenCodePermission, forgeWebfetchPermission } from "./forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodeConfigContent, forgeOpenCodePermission, forgeWebfetchPermission } from "./forge_webfetch.ts";
 import { getOpenCodeMajor } from "./git.ts";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
@@ -194,6 +194,9 @@ async function runOpenCode(
       ...process.env,
       OPENCODE_CONFIG: configPath,
       OPENCODE_PERMISSION: forgeOpenCodePermission(FORGE_DENY_DOMAIN),
+      // OpenCode 2 ignores OPENCODE_PERMISSION; the same deny arrives as
+      // inline `permissions` config, exactly like production sets it.
+      OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
       OPENCODE_DISABLE_PROJECT_CONFIG: "1",
       OPENCODE_DISABLE_DEFAULT_PLUGINS: "1",
     },

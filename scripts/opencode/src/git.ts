@@ -30,7 +30,7 @@ import {
   redactEngineText,
 } from "./engine.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
-import { forgeDenyHost, forgeOpenCodePermission } from "./forge_webfetch.ts";
+import { forgeDenyHost, forgeOpenCodeConfigContent, forgeOpenCodePermission } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import {
@@ -154,9 +154,32 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
  * the GitHub factory denies `github.com` rather than the Gitea default. Set,
  * never merged, so a loosened `OPENCODE_PERMISSION` in the parent env cannot
  * reopen the host.
+ *
+ * OpenCode 2 ignores `OPENCODE_PERMISSION` and only reads `permissions`
+ * (ordered array) from file config and `OPENCODE_CONFIG_CONTENT`, so the same
+ * deny is also set as inline config for the V2 binary. V1 ignores the unknown
+ * `permissions` field, V2 ignores `OPENCODE_PERMISSION`: setting both keeps
+ * one binary from silently losing the deny during the upgrade.
  */
 function denyForgeWebfetch(env: Record<string, string>, opts: OpenCodeRunOptions): void {
-  env.OPENCODE_PERMISSION = forgeOpenCodePermission(forgeDenyHost(opts.extraEnv));
+  const host = forgeDenyHost(opts.extraEnv);
+  env.OPENCODE_PERMISSION = forgeOpenCodePermission(host);
+  const ours = JSON.parse(forgeOpenCodeConfigContent(host)) as { permissions: unknown[] };
+  const existing = env.OPENCODE_CONFIG_CONTENT;
+  if (!existing) {
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permissions: ours.permissions });
+    return;
+  }
+  try {
+    const parsed = JSON.parse(existing) as { permissions?: unknown[] } & Record<string, unknown>;
+    const base = Array.isArray(parsed.permissions) ? parsed.permissions : [];
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      ...parsed,
+      permissions: [...base, ...(ours.permissions as unknown[])],
+    });
+  } catch {
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permissions: ours.permissions });
+  }
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
@@ -543,7 +566,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const logDir = openCodeLogDir(tempRoot);
   // Isolate the OpenCode log dir (XDG_DATA_HOME) so the live quota poll sees
   // only this child. Seed auth so isolation does not break provider auth.
-  await seedIsolatedAuth(home, tempRoot, await resolveXaiChildCredential(opts, home, log));
+  const xaiChild = await resolveXaiChildCredential(opts, home, log);
+  await seedIsolatedAuth(home, tempRoot, xaiChild);
   const promptBytes = byteLength(prompt);
   const dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);
@@ -606,6 +630,33 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       const built = buildEnv(opts, tempRoot, dbPath, gitProxy?.url);
       if (!built) throw new EngineFailedError("opencode spawn refused: no child env", true);
       childEnv = built;
+      // OpenCode 2 stores credentials in SQLite, not auth.json, and its xAI
+      // provider sends XAI_API_KEY as bearer. The isolated auth file above is
+      // ignored by V2, so hand the V2 child the same refresh-less access token
+      // via env. V1 still uses the file and ignores the env.
+      if (xaiChild && getOpenCodeMajor() >= 2) {
+        const token = xaiChild.type === "api" ? xaiChild.key : xaiChild.access;
+        if (token) childEnv.XAI_API_KEY = token;
+      } else if (!xaiChild && getOpenCodeMajor() >= 2 && isXaiModel(opts.model)) {
+        // API-key parent (no OAuth entry): the file copy above carries the key
+        // for V1, but V2 needs it as env. Best-effort, never throws or logs.
+        try {
+          const parentRaw = await readFile(join(home, ".local", "share", "opencode", "auth.json"), "utf8");
+          const parent = JSON.parse(parentRaw) as Record<string, unknown>;
+          const entry = (parent as { xai?: unknown }).xai as
+            | { type?: unknown; key?: unknown }
+            | undefined;
+          if (entry?.type === "api" && typeof entry.key === "string" && entry.key) {
+            childEnv.XAI_API_KEY = entry.key;
+          } else if (entry?.type === "key" && typeof entry.key === "string" && entry.key) {
+            childEnv.XAI_API_KEY = entry.key;
+          } else if (process.env.XAI_API_KEY) {
+            childEnv.XAI_API_KEY = process.env.XAI_API_KEY;
+          }
+        } catch {
+          if (process.env.XAI_API_KEY) childEnv.XAI_API_KEY = process.env.XAI_API_KEY;
+        }
+      }
     } catch (err) {
       if (err instanceof EngineFailedError && err.auth) {
         const message = err.message;

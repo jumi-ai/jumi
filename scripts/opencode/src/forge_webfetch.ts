@@ -64,6 +64,32 @@ export function forgeOpenCodePermission(host: string): string {
 }
 
 /**
+ * V2 native shape for the same deny. OpenCode 2 ignores `OPENCODE_PERMISSION`
+ * (V1 `permission` overlay) and only reads `permissions` (ordered array) from
+ * file config and `OPENCODE_CONFIG_CONTENT`. The three rules mirror the V1
+ * object above: star allow first, then the forge-host and code-search denies
+ * win by last-match. Resource is the requested URL, `*` matches across `/`.
+ */
+export interface ForgePermissionRule {
+  action: "webfetch";
+  resource: string;
+  effect: "allow" | "ask" | "deny";
+}
+
+export function forgePermissions(host: string): ForgePermissionRule[] {
+  return [
+    { action: "webfetch", resource: "*", effect: "allow" },
+    { action: "webfetch", resource: `*${host}*`, effect: "deny" },
+    { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
+  ];
+}
+
+/** OpenCode 2 reads this via `OPENCODE_CONFIG_CONTENT` as inline config. */
+export function forgeOpenCodeConfigContent(host: string): string {
+  return JSON.stringify({ permissions: forgePermissions(host) });
+}
+
+/**
  * Claude WebFetch rules match the hostname, so the apex and the subdomain
  * wildcard are both needed: `domain:*.host` does not cover `host` itself
  * (and `domain:host` does not cover `api.host`).

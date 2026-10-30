@@ -142,6 +142,11 @@ async function main(): Promise<number> {
         XDG_CONFIG_HOME: join(dir, "xdg-config"),
         OPENCODE_CONFIG: await writeProbeConfig(dir, origin),
         OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        // OpenCode 2 stores credentials in SQLite, not auth.json, and its xAI
+        // provider sends XAI_API_KEY as bearer. The isolated auth file above is
+        // ignored by V2, so hand the V2 child the same refresh-less token via
+        // env, exactly like production does. V1 ignores the env and uses the file.
+        XAI_API_KEY: PROBE_ACCESS,
       },
       workdir
     );
