@@ -21,6 +21,7 @@ Report a CI gap only when this change weakens a check, or when a check stops exe
 ## Not a finding
 
 - Pre-existing behavior the diff leaves unchanged.
+- Documentation that was already stale or incomplete before this diff.
 - A limit the PR body discloses with its reason, unless it breaks a stated done condition (#173).
 - A ❓ the repository can answer, or whose answer would leave this PR unchanged.
 - A 💡 that removes neither code nor a failure mode. Each 💡 on a success trailer starts a worker follow-up and another review.
@@ -48,12 +49,12 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 - A later round reads fresh artifacts and task text, never the previous round's snapshot (#117).
 - `ignore-conflicts` PRs get no default-branch merge from any path until Jumi has committed to them (#293, #317).
 
-## git.ts, claude.ts, agy.ts, codex.ts, fallback.ts, auth.ts, quota.ts, quota_wait.ts, runners.ts, engine.ts, engine_dispatch.ts
+## git.ts, claude.ts, agy.ts, codex.ts, fallback.ts, auth.ts, quota.ts, quota_wait.ts, runners.ts, engine.ts, engine_dispatch.ts, provenance.ts, independent_review.ts
 
 - Error classification is tested with the exact live string or structured error (#85, #248, #262).
 - Exit 0 without the expected artifact or commits is incomplete and hops (#114).
 - A provider failure leaves the CI failure it was fixing unhandled, so the retry still runs (#258).
-- Provenance records only runners that wrote pushed code (#277).
+- Provenance records only runners that wrote pushed code, so independent review keeps an eligible reviewer for a pull's whole life, including under `random-start` (#277).
 - Argv and child env match what the pinned binary accepts and keeps, including resume flags and env filtering (#155).
 - A hop-yes quota abort stays out of the pageable `143` exit class (#66).
 
