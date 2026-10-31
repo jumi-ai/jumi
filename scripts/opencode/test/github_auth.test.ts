@@ -198,6 +198,34 @@ describe("GitHub App installation token cache", () => {
     expect(() => new GithubAppAuth({ appId: APP_ID, privateKey: pem })).not.toThrow();
   });
 
+  test("installation HTTP errors keep the status and drop the JWT", async () => {
+    let jwt = "";
+    const auth = new GithubAppAuth({
+      appId: APP_ID,
+      privateKey: pem,
+      installationId: INSTALLATION_ID,
+      now: () => NOW_MS,
+      fetchImpl: async (_url, init) => {
+        jwt = new Headers(init?.headers).get("Authorization")?.slice("Bearer ".length) ?? "";
+        const body = `bad credentials ${jwt} ${"z".repeat(400)}`;
+        return new Response(body, { status: 401 });
+      },
+    });
+    const err = await auth.getInstallationToken().then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(err).toBeInstanceOf(Error);
+    const message = err instanceof Error ? err.message : "";
+    expect(jwt.length).toBeGreaterThan(20);
+    expect(message).toContain("GitHub API POST");
+    expect(message).toContain("→ 401:");
+    expect(message).toContain("bad credentials");
+    expect(message).not.toContain(jwt);
+    expect(message).toContain("***");
+    expect(message.endsWith("…")).toBe(true);
+  });
+
   test("getInstallationToken without target or hint fails closed", async () => {
     const auth = new GithubAppAuth({
       appId: APP_ID,

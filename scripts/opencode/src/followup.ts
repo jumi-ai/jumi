@@ -43,6 +43,12 @@ import {
   thrownRunner,
 } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
+import {
+  attachmentsTrackedReason,
+  engineScratchTrackedReason,
+  tipTracksAttachments,
+  tipTracksEngineScratch,
+} from "./engine_scratch.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -70,6 +76,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
   appendStuckLatchFingerprint,
@@ -84,7 +91,7 @@ import {
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { parseCheckLine, trailerSuggestionCount } from "./verdict.ts";
-import { redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
+import { workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
 
@@ -1161,7 +1168,8 @@ export async function implementFollowUp(
             });
             await sticky(QUOTA_STUCK_TEXT, pr.number);
             await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            // The stuck outcome is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
             return { status: "skipped", reason: QUOTA_STUCK_TEXT };
           }
           prefixMergeThrew = true;
@@ -1425,6 +1433,19 @@ export async function implementFollowUp(
       }
 
       await commitIfDirty(loop, porcelain, `Address review on #${pr.number}: ${gate.snapshot.title}`);
+      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = engineScratchTrackedReason(branch);
+        await sticky(reason, pr.number);
+        // The refusal is decided; teardown noise must not replace it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+        return { status: "skipped", reason };
+      }
+      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = attachmentsTrackedReason(branch);
+        await sticky(reason, pr.number);
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+        return { status: "skipped", reason };
+      }
       try {
         await pushClaimedBranch(loop, branch);
       } catch (err) {
@@ -1473,10 +1494,7 @@ export async function implementFollowUp(
         });
         return;
       }
-      await sticky(
-        redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token]),
-        pr.number
-      ).catch(() => undefined);
+      await sticky(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`, pr.number).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

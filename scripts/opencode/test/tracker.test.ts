@@ -2,13 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import { implementIssue, issueJobKey } from "../src/implement.ts";
 import type { Forge, Task } from "../src/ports.ts";
 import { type ReviewApi, reviewPullRequest } from "../src/review.ts";
 import { issueJobFromRecord, MemoryReviewJobStore, workerJobKey } from "../src/review_jobs.ts";
+import { standingPodRuntime } from "../src/runtime.ts";
 import {
   type BriefTracker,
   cloneUrlTargetsRepo,
+  externalBranchName,
   MISSING_REPOSITORY_COMMENT,
   makeExternalIssueJob,
   parseRepositoryLines,
@@ -538,6 +541,69 @@ describe("external first-run implement", () => {
       });
       expect(engineRan).toBe(false);
       expect(result).toEqual({ status: "skipped", reason: "missing Repository: owner/repo" });
+      expect(forge.pulls).toHaveLength(0);
+    });
+  });
+
+  test.each([
+    ["engine scratch", ".jumi-tmp", ".jumi-tmp/auth.json\0", engineScratchTrackedReason],
+    ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
+  ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
+    await withDirs(async (home, workdir) => {
+      const tracker = makeFakeTracker();
+      const forge = makeForgeMock();
+      const job = makeExternalIssueJob({
+        tracker: "fake",
+        trackerId: "FAKE-130",
+        trackerUrl: "https://tracker.example/items/FAKE-130",
+        title: "Fix the thing",
+        body: "Please implement this.\n\nRepository: kirmanak/demo\n",
+        owner: "kirmanak",
+        repo: "demo",
+        defaultBranch: "main",
+        cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+      });
+      const branch = externalBranchName("fake", "FAKE-130", "Fix the thing");
+      const gitCalls: string[][] = [];
+      const runtime = {
+        ...standingPodRuntime,
+        destroyRuntimeWorkspace: async () => {
+          throw new Error("destroy boom");
+        },
+      };
+      const result = await implementIssue({
+        api: forge as unknown as Parameters<typeof implementIssue>[0]["api"],
+        tracker: tracker as unknown as Parameters<typeof implementIssue>[0]["tracker"],
+        forge: forge as unknown as Parameters<typeof implementIssue>[0]["forge"],
+        job,
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          gitCalls.push(gitArgs);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "1";
+          if (gitArgs[0] === "ls-tree") return gitArgs.includes(dir) ? listed : "";
+          if (gitArgs[0] === "show-ref") {
+            const ref = gitArgs.at(-1) ?? "";
+            if (ref.endsWith(branch)) throw new Error("missing");
+            return "";
+          }
+          return "";
+        },
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      const reason = reasonFor(branch);
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(forge.pulls).toHaveLength(0);
     });
   });

@@ -1,3 +1,4 @@
+import { forgeRequestError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
@@ -189,6 +190,7 @@ type ReviewThreadConn = { nodes?: ReviewThreadNode[]; pageInfo?: { hasNextPage?:
 type GraphqlError = { message?: string };
 
 const PAGE_SIZE = 50;
+const JOB_PAGE_SIZE = 100;
 const MAX_PAGES = 40;
 const LOG_MAX_BYTES = 1_048_576;
 
@@ -204,6 +206,28 @@ function isActionsDisabledError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (/rate limit/i.test(err.message)) return false;
   return /→ (403|404)\b/.test(err.message);
+}
+
+function incompleteListError(label: string, seen: number, totalCount: number | undefined): Error {
+  const total = typeof totalCount === "number" ? String(totalCount) : "unknown";
+  return new Error(`${label} list is incomplete: fetched ${seen} of ${total}`);
+}
+
+// A short page ends the list. A full page at the cap, or a total_count past the rows fetched, does not.
+function finishForgePage(
+  label: string,
+  seen: number,
+  totalCount: number | undefined,
+  full: boolean,
+  atCap: boolean
+): "done" | "next" {
+  const proven = typeof totalCount === "number" && seen >= totalCount;
+  if (proven || !full) {
+    if (typeof totalCount === "number" && seen < totalCount) throw incompleteListError(label, seen, totalCount);
+    return "done";
+  }
+  if (atCap) throw incompleteListError(label, seen, totalCount);
+  return "next";
 }
 
 function ownerRepoFromUrl(url: string | undefined): { owner: string; repo: string } | undefined {
@@ -586,8 +610,7 @@ export class GithubAPI {
     return this.gitAccessToken(target);
   }
 
-  private async headers(target?: GithubTokenTarget): Promise<Record<string, string>> {
-    const token = await this.accessToken(target);
+  private headerRecord(token: string): Record<string, string> {
     return {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
@@ -599,14 +622,22 @@ export class GithubAPI {
 
   private async request<T>(method: string, path: string, body?: unknown, target?: GithubTokenTarget): Promise<T> {
     const url = `${this.base}${path}`;
+    const token = await this.accessToken(target ?? repoTargetFromPath(path));
     const res = await fetch(url, {
       method,
-      headers: await this.headers(target ?? repoTargetFromPath(path)),
+      headers: this.headerRecord(token),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub API ${method} ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method,
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
@@ -614,24 +645,48 @@ export class GithubAPI {
 
   private async requestText(path: string, maxBytes = LOG_MAX_BYTES): Promise<string> {
     const url = `${this.base}${path}`;
+    const token = await this.accessToken(repoTargetFromPath(path));
     const res = await fetch(url, {
       method: "GET",
-      headers: await this.headers(repoTargetFromPath(path)),
+      headers: this.headerRecord(token),
       redirect: "manual",
     });
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("Location");
-      if (!location) throw new Error(`GitHub API GET ${url} → ${res.status}: missing Location`);
+      if (!location) {
+        throw forgeRequestError({
+          service: "GitHub API",
+          method: "GET",
+          url,
+          status: res.status,
+          body: "missing Location",
+          secrets: [token, this.staticToken],
+        });
+      }
       const signed = await fetch(new URL(location, url).toString(), { method: "GET" });
       if (!signed.ok) {
         const text = await signed.text().catch(() => "");
-        throw new Error(`GitHub API GET ${url} → ${signed.status}: ${text}`);
+        throw forgeRequestError({
+          service: "GitHub API",
+          method: "GET",
+          url,
+          status: signed.status,
+          body: text,
+          secrets: [token, this.staticToken, location.includes("=") ? location : undefined],
+        });
       }
       return decodeTail(new Uint8Array(await signed.arrayBuffer()), maxBytes);
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub API GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     return decodeTail(new Uint8Array(await res.arrayBuffer()), maxBytes);
   }
@@ -809,6 +864,7 @@ export class GithubAPI {
     } catch {
       sameHost = false;
     }
+    // Do not mint or send a token for an off-host URL. A configured static token is still scrubbed.
     const token = sameHost ? await this.accessToken() : undefined;
     const res = await fetch(url, {
       headers: {
@@ -819,7 +875,14 @@ export class GithubAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub attachment GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub attachment",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     return new Uint8Array(await res.arrayBuffer());
   }
@@ -1071,7 +1134,10 @@ export class GithubAPI {
   async listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]> {
     try {
       return await this.listGithubCheckRuns(owner, repo, sha);
-    } catch {
+    } catch (err) {
+      // Checks can be forbidden when Actions is the only CI signal. A 500, a rate limit, or a
+      // truncated check-run page must not be replaced by a partial Actions list.
+      if (!isActionsDisabledError(err)) throw err;
       return this.checkRunsFromActionJobs(owner, repo, sha);
     }
   }
@@ -1079,32 +1145,40 @@ export class GithubAPI {
   private async listGithubCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]> {
     const results: Check[] = [];
     let page = 1;
+    let seen = 0;
+    let totalCount: number | undefined;
     while (page <= MAX_PAGES) {
-      const body = await this.get<{ check_runs?: GithubCheckRun[] }>(
+      const body = await this.get<{ check_runs?: GithubCheckRun[]; total_count?: number }>(
         `/repos/${this.repoPath(owner, repo)}/commits/${encodeURIComponent(sha)}/check-runs?filter=latest&per_page=${PAGE_SIZE}&page=${page}`
       );
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
       const batch = Array.isArray(body?.check_runs) ? body.check_runs : [];
       results.push(...batch.map(toCheckFromCheckRun));
-      if (batch.length !== PAGE_SIZE) break;
+      seen += batch.length;
+      const outcome = finishForgePage(
+        "GitHub check runs",
+        seen,
+        totalCount,
+        batch.length === PAGE_SIZE,
+        page === MAX_PAGES
+      );
+      if (outcome === "done") return results;
       page += 1;
     }
     return results;
   }
 
   private async checkRunsFromActionJobs(owner: string, repo: string, sha: string): Promise<Check[]> {
-    const body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
-      `/repos/${this.repoPath(owner, repo)}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=${PAGE_SIZE}&page=1`
+    const runs = await this.workflowRuns(
+      owner,
+      repo,
+      `head_sha=${encodeURIComponent(sha)}&per_page=${PAGE_SIZE}&page=1`,
+      false
     );
-    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
     const checks: Check[] = [];
     for (const run of runs) {
-      const page = await this.get<{ jobs?: GithubJob[] }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/runs/${run.id}/jobs?per_page=100`
-      );
-      const batch = Array.isArray(page?.jobs) ? page.jobs : [];
-      for (const job of batch) {
-        checks.push(toCheckFromActionJob(job));
-      }
+      const batch = await this.jobsForRun(owner, repo, run.id);
+      for (const job of batch) checks.push(toCheckFromActionJob(job));
     }
     return checks;
   }
@@ -1116,27 +1190,46 @@ export class GithubAPI {
   ): Promise<ActionJob[]> {
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     const shaQ = opts?.headSha ? `&head_sha=${encodeURIComponent(opts.headSha)}` : "";
-    let body: { workflow_runs?: GithubWorkflowRun[] };
-    try {
-      body = await this.get<{ workflow_runs?: GithubWorkflowRun[] }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/runs?per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`
-      );
-    } catch (err) {
-      if (isActionsDisabledError(err)) return [];
-      throw err;
-    }
-    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
+    const runs = await this.workflowRuns(owner, repo, `per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`, true);
     const jobs: ActionJob[] = [];
     for (const run of runs) {
-      const page = await this.get<{ jobs?: GithubJob[] }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/runs/${run.id}/jobs?per_page=100`
-      );
-      const batch = Array.isArray(page?.jobs) ? page.jobs : [];
+      const batch = await this.jobsForRun(owner, repo, run.id);
       for (const job of batch) {
         if (opts?.status && job.status !== opts.status && job.conclusion !== opts.status) continue;
         jobs.push(toActionJob(job, run.head_branch));
       }
     }
+    return jobs;
+  }
+
+  private async workflowRuns(
+    owner: string,
+    repo: string,
+    search: string,
+    emptyOnDisabled: boolean
+  ): Promise<GithubWorkflowRun[]> {
+    let body: { workflow_runs?: GithubWorkflowRun[]; total_count?: number };
+    try {
+      body = await this.get<{ workflow_runs?: GithubWorkflowRun[]; total_count?: number }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/runs?${search}`
+      );
+    } catch (err) {
+      if (emptyOnDisabled && isActionsDisabledError(err)) return [];
+      throw err;
+    }
+    const totalCount = typeof body?.total_count === "number" ? body.total_count : undefined;
+    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
+    finishForgePage("GitHub workflow runs", runs.length, totalCount, runs.length === PAGE_SIZE, true);
+    return runs;
+  }
+
+  private async jobsForRun(owner: string, repo: string, runId: number): Promise<GithubJob[]> {
+    const body = await this.get<{ jobs?: GithubJob[]; total_count?: number }>(
+      `/repos/${this.repoPath(owner, repo)}/actions/runs/${runId}/jobs?per_page=${JOB_PAGE_SIZE}`
+    );
+    const totalCount = typeof body?.total_count === "number" ? body.total_count : undefined;
+    const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
+    finishForgePage("GitHub workflow jobs", jobs.length, totalCount, jobs.length === JOB_PAGE_SIZE, true);
     return jobs;
   }
 

@@ -1,3 +1,4 @@
+import { forgeRequestError } from "./forge_errors.ts";
 import type {
   ActionJob,
   Check,
@@ -262,6 +263,31 @@ function isActionsDisabledError(err: unknown): boolean {
   return /→ (403|404)\b/.test(err.message);
 }
 
+const ACTION_JOB_PAGE_SIZE = 50;
+const ACTION_JOB_MAX_PAGES = 40;
+
+function incompleteListError(label: string, seen: number, totalCount: number | undefined): Error {
+  const total = typeof totalCount === "number" ? String(totalCount) : "unknown";
+  return new Error(`${label} list is incomplete: fetched ${seen} of ${total}`);
+}
+
+// A short page ends the list. A full page at the cap, or a total_count past the jobs fetched, does not.
+function finishForgePage(
+  label: string,
+  seen: number,
+  totalCount: number | undefined,
+  full: boolean,
+  atCap: boolean
+): "done" | "next" {
+  const proven = typeof totalCount === "number" && seen >= totalCount;
+  if (proven || !full) {
+    if (typeof totalCount === "number" && seen < totalCount) throw incompleteListError(label, seen, totalCount);
+    return "done";
+  }
+  if (atCap) throw incompleteListError(label, seen, totalCount);
+  return "next";
+}
+
 /**
  * Minimal Gitea REST API client.
  * All methods throw on non-2xx responses.
@@ -295,7 +321,14 @@ export class GiteaAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea API ${method} ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea API",
+        method,
+        url,
+        status: res.status,
+        body: text,
+        secrets: [this.token],
+      });
     }
     // 204 No Content
     if (res.status === 204) return undefined as T;
@@ -310,7 +343,14 @@ export class GiteaAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea API GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea API",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [this.token],
+      });
     }
     const buf = new Uint8Array(await res.arrayBuffer());
     const slice = buf.byteLength > maxBytes ? buf.subarray(buf.byteLength - maxBytes) : buf;
@@ -447,7 +487,15 @@ export class GiteaAPI {
     const res = await fetch(url, sameHost ? { headers: { Authorization: `token ${this.token}` } } : undefined);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea attachment GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea attachment",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        // The header is host-scoped. The token is still scrubbed when the body or URL echoes it.
+        secrets: [this.token],
+      });
     }
     return new Uint8Array(await res.arrayBuffer());
   }
@@ -687,24 +735,35 @@ export class GiteaAPI {
   ): Promise<ActionJob[]> {
     const results: ActionJob[] = [];
     let page = 1;
+    let seen = 0;
+    let totalCount: number | undefined;
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     const needle = opts?.headSha?.toLowerCase();
-    while (page <= 40) {
-      let body: { jobs?: GiteaActionJob[] };
+    while (page <= ACTION_JOB_MAX_PAGES) {
+      let body: { jobs?: GiteaActionJob[]; total_count?: number };
       try {
-        body = await this.get<{ jobs?: GiteaActionJob[] }>(
-          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}&order=desc${statusQ}`
+        body = await this.get<{ jobs?: GiteaActionJob[]; total_count?: number }>(
+          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=${ACTION_JOB_PAGE_SIZE}&page=${page}&order=desc${statusQ}`
         );
       } catch (err) {
-        if (results.length === 0 && isActionsDisabledError(err)) return [];
+        if (seen === 0 && isActionsDisabledError(err)) return [];
         throw err;
       }
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
       const batch = Array.isArray(body?.jobs) ? body.jobs : [];
       for (const job of batch) {
         if (needle && (job.head_sha ?? "").toLowerCase() !== needle) continue;
         results.push(toActionJob(job));
       }
-      if (batch.length !== 50) break;
+      seen += batch.length;
+      const outcome = finishForgePage(
+        "Gitea actions jobs",
+        seen,
+        totalCount,
+        batch.length === ACTION_JOB_PAGE_SIZE,
+        page === ACTION_JOB_MAX_PAGES
+      );
+      if (outcome === "done") return results;
       page += 1;
     }
     return results;
