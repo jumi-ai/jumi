@@ -7,14 +7,17 @@ import { EngineFailedError } from "../src/engine.ts";
 import { decideQuotaRetry, QUOTA_MESSAGE, QuotaWaitError } from "../src/quota.ts";
 import type { ReviewApi } from "../src/review.ts";
 import {
+  assertLedgerSchema,
   createBunSqlClient,
   isUniqueViolation,
   MAX_ATTEMPTS_REASON,
+  openPgReviewJobStoreForJob,
   PgReviewJobStore,
   RECLAIM_LEASED_BY,
   WORKER_JOB_KINDS,
+  WORKER_MAX_ATTEMPTS_REASON,
 } from "../src/review_jobs.ts";
-import { processEngineTick } from "../src/server.ts";
+import { processEngineTick, reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { processWorkerTick } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -714,5 +717,84 @@ describePg("PgReviewJobStore against real postgres", () => {
       await close();
       await rm(workspace, { recursive: true, force: true });
     }
+  });
+
+  test("router reclaim moves an expired worker lease and publishes max-attempts to the forge", async () => {
+    // Ordinary worker failures call expireLease, leaving state='leased' with
+    // leased_by=NULL. Only reclaim moves such a row on.
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.issueNumber).toBe(12);
+    expect(await store.expireLease(leased!.id, "worker-1")).toBe(true);
+    const stuck = await store.get(leased!.id);
+    expect(stuck?.state).toBe("leased");
+    expect(stuck?.leasedBy).toBeNull();
+
+    // With no worker running this row blocks every job for the issue, dedupes
+    // new enqueues as repo-mutex, and is not counted as queued.
+    expect(await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS)).toBeUndefined();
+    expect(await store.enqueueIssue(makeIssueJob({ delivery: "d-retry" }))).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: false,
+    });
+    expect(await countJobs(`state = 'queued'`)).toBe(0);
+
+    const comments: string[] = [];
+    const api = {
+      getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getIssue: async () => makeIssue(),
+      getPR: async (_owner: string, _repo: string, index: number) => makePR({ number: index }),
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_owner: string, _repo: string, _index: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      updateIssueComment: async (_owner: string, _repo: string, _id: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+    } as unknown as ReviewApi;
+
+    // Only a router is running: its reclaim moves the failed worker row on.
+    const first = await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
+    expect(first.requeued).toBe(1);
+    expect((await store.get(leased!.id))?.state).toBe("queued");
+
+    // A pod can now start the row.
+    const picked = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(picked?.id).toBe(leased!.id);
+    expect(await store.expireLease(picked!.id, "worker-2")).toBe(true);
+
+    // At the attempt cap the router publishes the failure to the forge so the
+    // sticky moves off "Jumi is implementing this issue".
+    const second = await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
+    expect(second.published).toBe(1);
+    const done = await store.get(leased!.id);
+    expect(done?.state).toBe("failed");
+    expect(done?.error).toBe(WORKER_MAX_ATTEMPTS_REASON);
+    expect(comments.some((body) => body.includes("max attempts exceeded"))).toBe(true);
+  });
+
+  test("concurrent migrators do not conflict and job-mode checks instead of migrating", async () => {
+    await Promise.all([store.migrate(), store.migrate(), store.migrate(), store.migrate(), store.migrate()]);
+    expect(await indexExists("review_jobs_leased_worker_issue")).toBe(true);
+
+    // A migrated schema passes the job-mode check and opens without migrating.
+    await assertLedgerSchema(sql);
+    const jobStore = await openPgReviewJobStoreForJob(databaseUrl);
+    expect(await jobStore.enqueueIssue(makeIssueJob({ delivery: "d-job-open" }))).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
+
+    // A schema older than the router fails clearly instead of migrating.
+    await sql.unsafe(`ALTER TABLE review_jobs DROP COLUMN IF EXISTS rewake_requested`);
+    await expect(assertLedgerSchema(sql)).rejects.toThrow("router must migrate");
+    await expect(openPgReviewJobStoreForJob(databaseUrl)).rejects.toThrow("router must migrate");
+
+    // Restore the column for the next test; beforeEach re-migrates anyway.
+    await store.migrate();
+    await assertLedgerSchema(sql);
   });
 });

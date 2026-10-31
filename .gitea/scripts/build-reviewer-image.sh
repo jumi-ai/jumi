@@ -201,6 +201,16 @@ verify_reviewer_runtime() {
     echo "codex override probe failed against the installed codex binary" >&2
     exit 1
   fi
+  # Job pods hold no refresh token: control publishes a token-only auth.json
+  # with `refresh_token: ""`. Only the binary can prove it runs from that file
+  # without refreshing, recovers from a rotated Secret volume after a 401, and
+  # still reports refresh failures in the text the runner hops on.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 600 bun src/codex_token_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex token-only auth probe failed against the installed codex binary" >&2
+    exit 1
+  fi
   # Same idea for Claude: `--version` says nothing about the flags Jumi spawns
   # with. Run the production argv against a loopback stub endpoint (nothing
   # billed, no token in the child env) so a rejected or silently ignored flag
