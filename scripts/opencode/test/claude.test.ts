@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,7 +49,7 @@ afterEach(() => {
 
 async function withFakeClaude(script: string, run: (workdir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-claude-"));
-  const workdir = await mkdtemp(join(tmpdir(), "fake-claude-work-"));
+  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-claude-work-")));
   try {
     const bin = join(dir, "claude");
     await writeFile(bin, script);
@@ -84,7 +84,7 @@ describe("inspectClaudeUsageLimit", () => {
 });
 
 describe("claudeArgv", () => {
-  test("uses -p, user setting-sources, allowlist, and never --bare", () => {
+  test("uses -p, user and project setting-sources, allowlist, and never --bare", () => {
     const args = claudeArgv({ model: "opus", effort: "high", workdir: "/work" });
     expect(args).toEqual([
       "claude",
@@ -110,7 +110,8 @@ describe("claudeArgv", () => {
     // validates, and a rejected value is a generic non-zero exit on every
     // spawn. `src/claude_flag_probe.ts` re-runs the same literals against the
     // installed binary in the image job.
-    expect(CLAUDE_SETTING_SOURCES).toBe("user");
+    expect(CLAUDE_SETTING_SOURCES).toBe("user,project");
+    expect(CLAUDE_ALLOWED_TOOLS.split(",")).toContain("Skill");
     expect(CLAUDE_OUTPUT_FORMAT).toBe("stream-json");
     expect(CLAUDE_PERMISSION_MODE).toBe("dontAsk");
   });
@@ -155,10 +156,9 @@ describe("claudeArgv", () => {
     expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(FORGE_DENY_DOMAIN));
   });
 
-  test("names the image-local tracing plugin instead of loading hooks from the checkout", () => {
+  test("names the image-local tracing plugin", () => {
     // The plugin is how a Claude run reaches Phoenix at all: it has no session
-    // sqlite for the parent to export. Passing it per spawn keeps
-    // `--setting-sources user`, so the untrusted checkout still supplies no hooks.
+    // sqlite for the parent to export.
     setClaudeTracingPluginDirForTests(pluginDir);
     process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.internal:6006";
     const traced = claudeArgv({ model: "opus", workdir: "/work" });
@@ -551,7 +551,7 @@ printf 'dispatched %s\\n' "$*"
           sanitizeEnv: true,
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain("-p --setting-sources user");
+        expect(result.stdout).toContain(`-p --setting-sources ${CLAUDE_SETTING_SOURCES}`);
       }
     );
   });

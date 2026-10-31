@@ -1,24 +1,19 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  checkQuotaDbSchema,
   clampQuotaWaitMs,
   classifyQuotaText,
   decideQuotaRetry,
   encodeQuotaWaitMarker,
-  hasQuotaInEvents,
-  hasQuotaInLogDir,
-  hasQuotaInLogText,
   hasQuotaRetryInDb,
-  inspectQuotaHit,
-  inspectQuotaInEvents,
-  inspectQuotaInLogText,
+  inspectQuotaSleepInDb,
   isHardQuotaText,
   isQuotaError,
   isQuotaLiveText,
-  isQuotaLogLine,
   isQuotaText,
   isQuotaWaitMarker,
   isResettingQuotaText,
@@ -28,6 +23,8 @@ import {
   QUOTA_WAIT_DEFAULT_MS,
   QUOTA_WAIT_MAX_ATTEMPTS,
   QuotaCooldown,
+  quotaSchemaErrors,
+  resetQuotaSchemaErrorsForTests,
 } from "../src/quota.ts";
 import {
   cancelReviewWork,
@@ -38,6 +35,79 @@ import {
   REVIEW_QUOTA_TTL_MS,
   readStuckState,
 } from "../src/stuck.ts";
+
+/** Runs `check` against a DB with OpenCode's `session_message` columns. */
+async function withMessages(rows: Array<[type: string, data: string]>, check: (dbPath: string) => void): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
+  try {
+    const dbPath = join(dir, "opencode-session.db");
+    const db = new Database(dbPath);
+    db.exec(
+      "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)"
+    );
+    rows.forEach(([type, data], index) => {
+      db.query("INSERT INTO session_message VALUES (?, 'ses1', ?, ?, 1, 2, ?)").run(`m${index}`, type, index, data);
+    });
+    db.close();
+    check(dbPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+describe("checkQuotaDbSchema", () => {
+  async function withDb(sql: string | undefined, check: (dbPath: string) => void): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-schema-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      if (sql !== undefined) {
+        const db = new Database(dbPath);
+        db.exec(sql);
+        db.close();
+      }
+      check(dbPath);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+  const columns =
+    "id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT";
+
+  test("accepts the columns the quota reads need", async () => {
+    resetQuotaSchemaErrorsForTests();
+    await withDb(`CREATE TABLE session_message (${columns})`, (dbPath) => {
+      expect(checkQuotaDbSchema(dbPath)).toBeUndefined();
+    });
+    expect(quotaSchemaErrors()).toBe(0);
+  });
+
+  test("names a renamed column and counts it", async () => {
+    resetQuotaSchemaErrorsForTests();
+    const renamed = columns.replace("session_id", "sessionID");
+    await withDb(`CREATE TABLE session_message (${renamed})`, (dbPath) => {
+      expect(checkQuotaDbSchema(dbPath)).toBe("session_message has no session_id column");
+      // The same drift makes the live read fail, and that read swallows it.
+      expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
+    });
+    expect(quotaSchemaErrors()).toBe(1);
+  });
+
+  test("names a missing table once the DB has others", async () => {
+    resetQuotaSchemaErrorsForTests();
+    await withDb("CREATE TABLE session_v3 (id TEXT)", (dbPath) => {
+      expect(checkQuotaDbSchema(dbPath)).toBe("no session_message table");
+    });
+    expect(quotaSchemaErrors()).toBe(1);
+  });
+
+  test("a child that never got as far as the DB is not drift", async () => {
+    resetQuotaSchemaErrorsForTests();
+    await withDb(undefined, (dbPath) => expect(checkQuotaDbSchema(dbPath)).toBeUndefined());
+    await withDb("PRAGMA user_version = 1", (dbPath) => expect(checkQuotaDbSchema(dbPath)).toBeUndefined());
+    expect(checkQuotaDbSchema(undefined)).toBeUndefined();
+    expect(quotaSchemaErrors()).toBe(0);
+  });
+});
 
 describe("isQuotaText", () => {
   test("matches Free/Go quota class", () => {
@@ -80,283 +150,247 @@ describe("hasQuotaRetryInDb", () => {
     expect(hasQuotaRetryInDb(undefined)).toBe(false);
   });
 
-  test("detects quota in part retry payload without loading transcripts", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE session (id TEXT); CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
-      );
-      db.query("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({ role: "assistant", modelID: "m", providerID: "opencode" })
-      );
-      db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({
-          type: "retry",
-          attempt: 3,
-          message: "Free usage exceeded, subscribe to Go",
-          action: { reason: "free_tier_limit", provider: "opencode" },
-        })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  test("ignores ordinary errors and an empty DB", async () => {
+    await withMessages([], (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(false));
+    await withMessages(
+      [["assistant", JSON.stringify({ error: { type: "provider.rate-limit", message: "429 Too Many Requests" } })]],
+      (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(false)
+    );
   });
 
-  test("ignores ordinary retries and empty DB", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
-      );
-      db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({ type: "retry", attempt: 1, message: "429 Too Many Requests" })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("detects persisted RetryPart error shape", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
-      );
-      db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({
-          type: "retry",
-          attempt: 2,
-          error: { name: "FreeUsageLimitError", message: "Free usage exceeded, subscribe to Go" },
-          time: { created: 1 },
-        })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("ignores user-message rows quoting quota strings", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
-      );
-      // Task/feedback text legitimately quotes the error class; it must not
-      // kill a healthy run.
-      db.query("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({ role: "user", content: "Abort when FreeUsageLimitError hits, see Free usage exceeded" })
-      );
-      db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({ type: "text", text: "Handle FreeUsageLimitError in the parent" })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  test("ignores rows that only quote quota strings", async () => {
+    // Task/feedback text and tool output legitimately quote the error class;
+    // neither is the assistant row's own error.
+    await withMessages(
+      [
+        ["user", JSON.stringify({ text: "Abort when FreeUsageLimitError hits", error: "Free usage exceeded" })],
+        ["assistant", JSON.stringify({ content: [{ type: "text", text: '"error": "FreeUsageLimitError"' }] })],
+        [
+          "assistant",
+          JSON.stringify({
+            content: [{ type: "tool", state: { status: "error", error: { message: "grep Go limit reached" } } }],
+          }),
+        ],
+      ],
+      (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(false)
+    );
   });
 
   test("ignores bare usage-limit text without a Free/Go distinguisher", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
+    await withMessages(
+      [["assistant", JSON.stringify({ error: { message: "my-model usage limit reached" } })]],
+      (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(false)
+    );
+  });
+
+  test("detects assistant error records", async () => {
+    await withMessages(
+      [["assistant", JSON.stringify({ error: { type: "GoUsageLimitError", message: "Go limit reached" } })]],
+      (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(true)
+    );
+  });
+
+  test("a malformed row does not hide a real quota error", async () => {
+    await withMessages(
+      [
+        ["assistant", '{"error": "Free usage exceeded", not json'],
+        ["assistant", JSON.stringify({ error: { message: "Free usage exceeded, subscribe to Go" } })],
+      ],
+      (dbPath) => expect(hasQuotaRetryInDb(dbPath)).toBe(true)
+    );
+  });
+
+  test("sees an assistant sleeping on a quota retry-after while the child is alive", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-sleep-"));
     try {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
-        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)"
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
       );
-      db.query("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "msg1",
-        "ses1",
-        1,
-        2,
-        JSON.stringify({ type: "retry", attempt: 1, message: "my-model usage limit reached, retry in 5s" })
-      );
+      const insert = db.query("INSERT INTO session_message VALUES (?, 'ses1', ?, ?, 1000, ?)");
+      insert.run("m1", "user", 1, JSON.stringify({ text: "quote: account_rate_limit" }));
       db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
+      expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
 
-  test("detects assistant error records in message", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)");
-      db.query("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
-        "msg1",
-        "ses1",
-        1,
+      const writer = new Database(dbPath);
+      writer.query("INSERT INTO session_message VALUES (?, 'ses1', ?, ?, 1000, ?)").run(
+        "m2",
+        "assistant",
         2,
-        JSON.stringify({ role: "assistant", error: { name: "GoUsageLimitError", message: "Go limit reached" } })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("detects quota in V2 session_message retry and error records", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
-      );
-      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-        "msg1",
-        "ses1",
-        1,
-        2,
-        "message",
-        1,
         JSON.stringify({
-          role: "assistant",
-          error: { message: "Free usage exceeded, subscribe to Go" },
+          content: [],
+          retry: {
+            attempt: 2,
+            at: 1_793_429_821_499,
+            error: {
+              type: "provider.rate-limit",
+              message: "Rate limit exceeded. Please try again later.",
+              status: 429,
+              response: { body: '{"error":{"code":"account_rate_limit"}}' },
+              retryAfterMs: 7_200_000,
+            },
+          },
+        })
+      );
+      writer.close();
+      const hit = inspectQuotaSleepInDb(dbPath, 0);
+      expect(hit?.kind).toBe("resetting");
+      expect(hit?.retryAfterMs).toBe(7_200_000);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed row does not hide a sibling session's sleep", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-schema-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const writer = new Database(dbPath);
+      writer.exec(
+        "CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      const insert = writer.query("INSERT INTO session_message VALUES (?, 'assistant', 1, 1000, ?)");
+      insert.run("corrupt", "{not json");
+      insert.run(
+        "sleeping",
+        JSON.stringify({
+          retry: { error: { type: "provider.rate-limit", status: 429, response: { body: "account_rate_limit" } } },
+        })
+      );
+      writer.close();
+      expect(inspectQuotaSleepInDb(dbPath, 0)?.kind).toBe("resetting");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("sees a sleeping session behind an older session with higher seq numbers", async () => {
+    // OpenCode numbers `seq` per session, so a subagent or a resumed run starts
+    // low again while the session before it sits at a high number.
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-sessions-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      const insert = db.query("INSERT INTO session_message VALUES (?, ?, 'assistant', ?, 1000, ?)");
+      for (let seq = 20; seq < 48; seq += 4) insert.run(`old${seq}`, "ses_old", seq, JSON.stringify({ content: [] }));
+      insert.run(
+        "live",
+        "ses_new",
+        5,
+        JSON.stringify({
+          retry: {
+            attempt: 1,
+            at: 1,
+            error: { type: "provider.rate-limit", status: 429, response: { body: "account_rate_limit" } },
+          },
         })
       );
       db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(true);
+      expect(inspectQuotaSleepInDb(dbPath, 0)?.kind).toBe("resetting");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("detects quota in V2 session_message part retry payload", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-part-"));
+  test("a retry the same session has moved past is not a quota sleep", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-moved-on-"));
     try {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
-        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
       );
-      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-        "p1",
-        "ses1",
+      const insert = db.query("INSERT INTO session_message VALUES (?, 'ses1', 'assistant', ?, 1000, ?)");
+      insert.run(
+        "m1",
         1,
-        2,
-        "part",
-        2,
+        JSON.stringify({ retry: { attempt: 1, at: 1, error: { status: 429, message: "account_rate_limit" } } })
+      );
+      insert.run("m2", 2, JSON.stringify({ content: [] }));
+      db.close();
+      expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a retry left behind by a killed child does not read as this child's sleep", async () => {
+    // A hard kill of the whole process tree (OOM) leaves `retry` on the row, in
+    // a DB the next `--continue` run reuses. Only `sinceMs` tells them apart.
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-stale-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES ('m1', 'ses_sub', 'assistant', 3, 1000, ?)").run(
+        JSON.stringify({ retry: { attempt: 2, at: 9, error: { status: 429, message: "account_rate_limit" } } })
+      );
+      db.close();
+      expect(inspectQuotaSleepInDb(dbPath, 1001)).toBeUndefined();
+      expect(inspectQuotaSleepInDb(dbPath, 1000)?.kind).toBe("resetting");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a retry on an ordinary short rate limit is not a quota sleep", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-short-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES (?, 'ses1', ?, ?, 1000, ?)").run(
+        "m1",
+        "assistant",
+        1,
         JSON.stringify({
-          type: "retry",
-          attempt: 2,
-          message: "Go limit reached",
-          action: { reason: "account_rate_limit" },
+          retry: {
+            attempt: 2,
+            at: 1,
+            error: { type: "provider.rate-limit", message: "Too many requests", status: 429 },
+          },
         })
       );
       db.close();
+      expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a persisted quota error from an earlier run does not read as a live sleep", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-old-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const db = new Database(dbPath);
+      db.exec(
+        "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      db.query("INSERT INTO session_message VALUES (?, 'ses1', ?, ?, 1000, ?)").run(
+        "m1",
+        "assistant",
+        1,
+        JSON.stringify({ error: { message: "Free usage exceeded" } })
+      );
+      db.close();
+      expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
       expect(hasQuotaRetryInDb(dbPath)).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("ignores user-message in V2 session_message quoting quota strings", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-v2-user-"));
-    try {
-      const dbPath = join(dir, "opencode-session.db");
-      const db = new Database(dbPath);
-      db.exec(
-        "CREATE TABLE session_v2 (id TEXT); CREATE TABLE session_message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, type TEXT, seq INTEGER, data TEXT)"
-      );
-      db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-        "msg1",
-        "ses1",
-        1,
-        2,
-        "message",
-        1,
-        JSON.stringify({ role: "user", content: "Abort on FreeUsageLimitError" })
-      );
-      db.close();
-      expect(hasQuotaRetryInDb(dbPath)).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("inspectQuotaInEvents", () => {
-  test("detects quota from JSON events array and JSONL stream", () => {
-    const events = [
-      { type: "step_start" },
-      { type: "step_finish", part: { error: "Free usage exceeded, subscribe to Go retry-after: 3600" } },
-    ];
-    const hit = inspectQuotaInEvents(events);
-    expect(hit).toBeDefined();
-    expect(hit?.kind).toBe("resetting");
-    expect(hit?.retryAfterMs).toBe(3_600_000);
-
-    const jsonl = [
-      JSON.stringify({ type: "step_start" }),
-      JSON.stringify({ type: "error", error: "Go limit reached" }),
-    ].join("\n");
-    const jsonlHit = inspectQuotaInEvents(jsonl);
-    expect(jsonlHit).toBeDefined();
-    expect(jsonlHit?.kind).toBe("hard");
-  });
-
-  test("returns undefined for events without quota", () => {
-    const events = [
-      { type: "step_start" },
-      { type: "tool_use", name: "shell", input: { command: "ls" } },
-      { type: "step_finish" },
-    ];
-    expect(inspectQuotaInEvents(events)).toBeUndefined();
-    expect(hasQuotaInEvents(events)).toBe(false);
-  });
-
-  test("inspectQuotaHit prioritizes events when provided", () => {
-    const events = [{ type: "step_finish", part: { error: "Free usage exceeded, subscribe to Go" } }];
-    const hit = inspectQuotaHit("/nonexistent.db", "/nonexistent", events);
-    expect(hit).toBeDefined();
-    expect(hit?.kind).toBe("resetting");
+  test("reads OpenCode's retryAfterMs as milliseconds", () => {
+    expect(parseRetryAfterMs('{"status":429,"retryAfterMs":90000}')).toBe(90_000);
+    expect(parseRetryAfterMs('{"retry-after":"90"}')).toBe(90_000);
   });
 });
 
@@ -377,7 +411,7 @@ describe("quota stuck state", () => {
 });
 
 describe("live quota pattern", () => {
-  test("drops the parent stuck dialect from the stream scan", () => {
+  test("drops the parent stuck dialect from the retry poll", () => {
     expect(isQuotaLiveText(QUOTA_STUCK_TEXT)).toBe(false);
     expect(isQuotaLiveText("FreeUsageLimitError")).toBe(true);
     expect(isQuotaLiveText("Free usage exceeded, subscribe to Go")).toBe(true);
@@ -386,70 +420,6 @@ describe("live quota pattern", () => {
     expect(isQuotaLiveText("my-model usage limit reached")).toBe(false);
     expect(isQuotaLiveText("429 Too Many Requests")).toBe(false);
     expect(isQuotaLiveText("Rate limit exceeded")).toBe(false);
-  });
-
-  test("requires stream-error retry context in log lines", () => {
-    expect(
-      isQuotaLogLine(
-        'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"'
-      )
-    ).toBe(true);
-    // Permission lines echoing the tool command must not match.
-    expect(
-      isQuotaLogLine(
-        'timestamp=2026-09-14T00:00:00.000Z level=INFO run=abc message="evaluated permission=bash" pattern="grep FreeUsageLimitError"'
-      )
-    ).toBe(false);
-    // Quota string without retry context must not match.
-    expect(isQuotaLogLine("FreeUsageLimitError")).toBe(false);
-    expect(isQuotaLogLine("stream error: 429 Too Many Requests")).toBe(false);
-    expect(isQuotaLogLine('message="stream error" error.error="Rate limit exceeded"')).toBe(false);
-  });
-
-  test("matches captured Zen stream-error log lines", () => {
-    const insufficient =
-      'message="stream error" providerID=opencode modelID=gpt-5.4-nano small=true agent=title error.error="AI_APICallError: Insufficient balance. Manage your billing here: https://opencode.ai/workspace/example/billing"';
-    const rateLimit =
-      'message="stream error" providerID=opencode modelID=muse-spark-1.3-contributor-free small=false agent=build error.error="AI_APICallError: Rate limit exceeded. Please try again later."';
-    expect(isQuotaLogLine(insufficient)).toBe(true);
-    expect(isQuotaLogLine(rateLimit)).toBe(true);
-    expect(hasQuotaInLogText(`${insufficient}\n`)).toBe(true);
-    expect(hasQuotaInLogText(`${rateLimit}\n`)).toBe(true);
-  });
-
-  test("scans log text line-wise", () => {
-    expect(
-      hasQuotaInLogText(
-        'level=INFO message="evaluated permission=bash" pattern="grep FreeUsageLimitError"\nlevel=ERROR message="stream error" error="FreeUsageLimitError"\n'
-      )
-    ).toBe(true);
-    expect(hasQuotaInLogText('level=INFO pattern="grep FreeUsageLimitError"\n')).toBe(false);
-    expect(hasQuotaInLogText(null)).toBe(false);
-  });
-
-  test("scans the isolated log dir in both layouts", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-log-"));
-    try {
-      const logDir = join(dir, "log");
-      const { mkdir } = await import("node:fs/promises");
-      await mkdir(logDir, { recursive: true });
-      expect(hasQuotaInLogDir(logDir)).toBe(false);
-      expect(hasQuotaInLogDir(join(dir, "missing"))).toBe(false);
-      await writeFile(
-        join(logDir, "opencode.log"),
-        'level=INFO ok\nlevel=ERROR run=abc message="stream error" error="GoUsageLimitError"\n'
-      );
-      expect(hasQuotaInLogDir(logDir)).toBe(true);
-      await rm(join(logDir, "opencode.log"));
-      expect(hasQuotaInLogDir(logDir)).toBe(false);
-      await writeFile(
-        join(logDir, "2026-09-14T000000.log"),
-        'level=ERROR run=abc message="stream error" error="free_tier_limit"\n'
-      );
-      expect(hasQuotaInLogDir(logDir)).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -508,19 +478,6 @@ describe("resetting vs hard quota", () => {
     expect(isResettingQuotaText(QUOTA_STUCK_TEXT)).toBe(false);
     expect(classifyQuotaText("FreeUsageLimitError")).toBe("resetting");
     expect(classifyQuotaText("Insufficient balance")).toBe("hard");
-  });
-
-  test("inspectQuotaInLogText classifies the matching stream-error line", () => {
-    const hit = inspectQuotaInLogText(
-      'level=ERROR message="stream error" error.error="AI_APICallError: Free usage exceeded" retry-after=3600\n'
-    );
-    expect(hit?.kind).toBe("resetting");
-    expect(hit?.retryAfterMs).toBe(3_600_000);
-    expect(
-      inspectQuotaInLogText(
-        'message="stream error" error.error="AI_APICallError: Insufficient balance. Manage your billing"\n'
-      )?.kind
-    ).toBe("hard");
   });
 });
 

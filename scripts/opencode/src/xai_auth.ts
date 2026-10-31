@@ -216,9 +216,9 @@ function asXaiGrantEntry(value: unknown): XaiOAuthCredential | undefined {
  * On the homelab the path the process reads is a symlink onto a Retain volume,
  * and init deletes and recreates that symlink on every start — a write that
  * replaces the symlink with a regular file is gone after restart. Resolving it
- * first keeps the symlink intact, so a human `/connect` (exec, HOME on the
- * ephemeral volume) still updates the same file. On the GitHub factory HOME is
- * already the Retain volume and this resolves to itself.
+ * first keeps the symlink intact, so the copy of a human login (exec, HOME on
+ * the ephemeral volume) still lands on the same file. On the GitHub factory HOME
+ * is already the Retain volume and this resolves to itself.
  */
 export async function durableAuthPath(home: string): Promise<string> {
   const path = opencodeAuthPath(home);

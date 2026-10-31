@@ -53,10 +53,10 @@ describe("device login parsing", () => {
       "opencode",
       "auth",
       "login",
-      "--provider",
       "xai",
       "--method",
       "SuperGrok Subscription",
+      "--standalone",
     ]);
     expect(OPENCODE_DEVICE_LOGIN_CMD.join(" ")).not.toContain("localhost");
     expect(OPENCODE_DEVICE_LOGIN_CMD.join(" ")).not.toContain("api-key");
@@ -272,6 +272,56 @@ describe("device login manager", () => {
     const dumped = JSON.stringify({ logs, records });
     expect(dumped).not.toContain("SECRET-1");
     expect(dumped).not.toContain("https://auth.x.ai/activate");
+  });
+
+  test("copies the new grant into the durable auth file before reporting signed-in", async () => {
+    const adopted: string[] = [];
+    const manager = new DeviceLoginManager({
+      ordinal: "worker-0",
+      role: "worker",
+      home: "/data",
+      hasXaiRunner: true,
+      isLeased: () => false,
+      adoptCredentials: async (home) => {
+        await Bun.sleep(5);
+        adopted.push(home);
+      },
+      spawnLogin: (opts) => {
+        queueMicrotask(() => opts.onStdout("Go to: https://auth.x.ai/activate\nEnter code: SECRET-1\n"));
+        queueMicrotask(() => opts.onExit(0, null));
+        return { kill: () => {} };
+      },
+    });
+    await manager.start("alice");
+    await Bun.sleep(1);
+    expect(manager.getState().state).toBe("waiting");
+    await Bun.sleep(20);
+    expect(adopted).toEqual(["/data"]);
+    expect(manager.getState().state).toBe("signed-in");
+  });
+
+  test("a grant that cannot reach the durable file is a failed login, not signed-in", async () => {
+    const records: { result: string }[] = [];
+    const manager = new DeviceLoginManager({
+      ordinal: "worker-0",
+      role: "worker",
+      home: "/data",
+      hasXaiRunner: true,
+      isLeased: () => false,
+      onResult: (e) => void records.push({ ...e }),
+      adoptCredentials: async () => {
+        throw new Error("read-only volume");
+      },
+      spawnLogin: (opts) => {
+        queueMicrotask(() => opts.onStdout("Go to: https://auth.x.ai/activate\nEnter code: SECRET-1\n"));
+        queueMicrotask(() => opts.onExit(0, null));
+        return { kill: () => {} };
+      },
+    });
+    await manager.start("alice");
+    await Bun.sleep(20);
+    expect(manager.getState().state).toBe("error");
+    expect(records.map((r) => r.result)).toEqual(["started", "error"]);
   });
 
   test("denied and expired map from CLI tail without logging it", async () => {

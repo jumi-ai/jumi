@@ -1,25 +1,17 @@
-/** Quota abort: Free/Go usage-limit retry classification. Live abort polls
- * the per-run isolated OpenCode log file (see git.ts); the DB check below is
- * the post-hoc classifier only.
- *
- * Why the log file: pinned OpenCode 1.15.5 keeps retry status in memory
- * (SessionStatus) and never writes a per-attempt row to the session DB while
- * sleeping on a multi-hour retry-after, and `opencode run` without
- * `--print-logs` emits only the `> build · <model>` banner to stderr (0 bytes
- * on both streams with `--format json`). The fully-formed quota error only
- * reaches OpenCode's own log file (`llm` service `stream error`, ~170ms after
- * stream start) before the child sleeps. Tailing that file needs no
- * `--print-logs`, no transcript dump to Loki, and no Phoenix. */
+/** Quota abort: Free/Go usage-limit retry classification. The live abort polls
+ * the per-run OpenCode session DB for a sleeping retry (see git.ts); the
+ * persisted-error check below is the post-hoc classifier only. `opencode run`
+ * without `--print-logs` emits only the `> build · <model>` banner to stderr,
+ * so the DB needs no transcript dump to Loki and no Phoenix. */
 
 import { Database } from "bun:sqlite";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
 
 export const QUOTA_STUCK_TEXT = "stuck: usage limit exceeded";
 
 export const QUOTA_MESSAGE = "opencode stuck: usage limit exceeded";
 
-/** Interval for the live log-file poll (see git.ts). Independent of the RSS sampler. */
+/** Interval for the live session DB poll (see git.ts). Independent of the RSS sampler. */
 export const QUOTA_POLL_INTERVAL_MS = 5_000;
 
 // Free/Go usage-limit class only. Bare "usage limit reached" is intentionally
@@ -40,7 +32,7 @@ const QUOTA_PATTERNS = [
 export const QUOTA_ERROR_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded/i;
 
-/** Narrow live pattern for stream/log scans. Drops the parent's own
+/** Narrow live pattern for the retry poll. Drops the parent's own
  * `stuck:` dialect (which OpenCode never emits) so tool traces or echoed file
  * content containing that literal cannot kill a healthy run. Kept in
  * `QUOTA_ERROR_RE`/`isQuotaText` for thrown errors and stuck comments. */
@@ -65,12 +57,6 @@ export interface QuotaHit {
   retryAfterMs?: number;
   text: string;
 }
-
-/** Retry context required around a live match. The quota failure is logged by
- * the `llm` service as `message="stream error"` with the provider error
- * inline; permission-evaluation lines that merely echo a tool command
- * containing a quota string never contain this marker. */
-const LOG_RETRY_RE = /stream error/i;
 
 export function isQuotaText(text: string | null | undefined): boolean {
   if (!text) return false;
@@ -108,6 +94,8 @@ export function classifyQuotaText(text: string | null | undefined): QuotaClass |
 
 export function parseRetryAfterMs(text: string | null | undefined, nowMs = Date.now()): number | undefined {
   if (!text) return undefined;
+  const millis = /retryAfterMs["'\s:=]+(\d+)/.exec(text);
+  if (millis) return Number(millis[1]) || undefined;
   const header = /retry[-_\s]*after["'\s:=]+(\d+(?:\.\d+)?)/i.exec(text);
   if (header) {
     const n = Number(header[1]);
@@ -155,180 +143,30 @@ function quotaHitFromText(text: string): QuotaHit {
 }
 
 /**
- * True when a single log line carries a quota failure in retry context:
- * a `stream error` line containing a Free/Go quota string. Line-scoped so a
- * permission line echoing `FreeUsageLimitError` from a tool command (no
- * `stream error` marker) never matches, and the parent's own `stuck:` dialect
- * (absent from `QUOTA_LIVE_RE`) never matches.
+ * Assistant rows only, and only their `error` field: a row that quotes
+ * `FreeUsageLimitError` in task text or tool output never matches.
  */
-export function isQuotaLogLine(line: string | null | undefined): boolean {
-  if (!line) return false;
-  if (!LOG_RETRY_RE.test(line)) return false;
-  return QUOTA_LIVE_RE.test(line);
-}
-
-/**
- * Scan free-form log text for a quota retry line. Splits into lines so the
- * retry marker and the quota string must share one log line. Never throws;
- * tests only the regex, never logs the transcript.
- */
-export function inspectQuotaInLogText(text: string | null | undefined): QuotaHit | undefined {
-  if (!text) return undefined;
-  const capped = text.length > 10_000_000 ? text.slice(0, 10_000_000) : text;
-  for (const line of capped.split(/\r?\n/)) {
-    if (isQuotaLogLine(line)) return quotaHitFromText(line);
-  }
-  return undefined;
-}
-
-export function hasQuotaInLogText(text: string | null | undefined): boolean {
-  return inspectQuotaInLogText(text) != null;
-}
-
-const MAX_LOG_FILES = 20;
-const MAX_LOG_BYTES_PER_FILE = 10_000_000;
-
-/**
- * Best-effort live/post-hoc scan of the per-run isolated OpenCode log dir
- * (`<xdg-data>/opencode/log`, fresh per run so any hit belongs to this
- * child). Handles both layouts: the single `opencode.log` (1.18.x) and the
- * timestamped `*.log` rotation (1.15.5, keeps last 10). Returns false when the
- * dir is missing, empty, or unreadable. Never throws; never logs content.
- */
-export function inspectQuotaInLogDir(logDir: string | null | undefined): QuotaHit | undefined {
-  if (!logDir) return undefined;
-  let entries: string[];
+function rowHasQuotaError(data: string): boolean {
+  let error: unknown;
   try {
-    if (!existsSync(logDir)) return undefined;
-    entries = readdirSync(logDir);
-  } catch {
-    return undefined;
-  }
-  let checked = 0;
-  for (const entry of entries) {
-    if (checked >= MAX_LOG_FILES) break;
-    if (entry.startsWith(".")) continue;
-    const abs = join(logDir, entry);
-    let size = 0;
-    try {
-      const st = statSync(abs);
-      if (!st.isFile()) continue;
-      size = st.size;
-      if (size <= 0) continue;
-    } catch {
-      continue;
-    }
-    checked += 1;
-    try {
-      const capped = Math.min(size, MAX_LOG_BYTES_PER_FILE);
-      const buf = readFileSync(abs);
-      const text = buf.length > capped ? buf.subarray(0, capped).toString("utf8") : buf.toString("utf8");
-      const head = inspectQuotaInLogText(text);
-      if (head) return head;
-      if (buf.length > capped) {
-        const tail = buf.subarray(buf.length - Math.min(buf.length, 1_000_000)).toString("utf8");
-        const late = inspectQuotaInLogText(tail);
-        if (late) return late;
-      }
-    } catch {}
-  }
-  return undefined;
-}
-
-export function hasQuotaInLogDir(logDir: string | null | undefined): boolean {
-  return inspectQuotaInLogDir(logDir) != null;
-}
-
-function tableNames(db: Database): Set<string> {
-  try {
-    const rows = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
-    return new Set(rows.map((row) => row.name));
-  } catch {
-    return new Set();
-  }
-}
-
-function inspectTableQuota(db: Database, table: string): QuotaHit | undefined {
-  const scope =
-    table === "part"
-      ? `data LIKE '%"type"%retry%'`
-      : table === "message"
-        ? `data LIKE '%"error"%'`
-        : `(data LIKE '%"type"%retry%' OR data LIKE '%"error"%')`;
-  const where = QUOTA_PATTERNS.map(() => `data LIKE ?`).join(" OR ");
-  const params = QUOTA_PATTERNS.map((pattern) => `%${pattern}%`);
-  try {
-    const rows = db
-      .query(`SELECT data AS data FROM "${table}" WHERE ${scope} AND (${where}) LIMIT 10`)
-      .all(...params) as Array<{ data: unknown }>;
-    for (const row of rows) {
-      if (typeof row?.data !== "string") continue;
-      if (!rowIsQuotaData(row.data, table)) continue;
-      return quotaHitFromText(row.data);
-    }
-    return undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Verify a candidate row really is a retry/error record before matching
- * quota strings. `part` requires `type === "retry"` (both the live
- * SessionStatus shape and the persisted RetryPart shape); `message` /
- * `session_message` require an `error` field. Only error-related fields are
- * tested so quoted task text elsewhere in the row cannot match.
- */
-function rowIsQuotaData(data: string, table: string): boolean {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(data);
+    error = (JSON.parse(data) as { error?: unknown }).error;
   } catch {
     return false;
   }
-  if (!parsed || typeof parsed !== "object") return false;
-  const rec = parsed as Record<string, unknown>;
-  if (table === "part") {
-    if (rec.type !== "retry") return false;
-    // Retry shape varies by layer (SessionStatus: message/action vs
-    // persisted RetryPart: error). Check the error-carrying fields only.
-    const candidates: unknown[] = [rec.message, rec.error, rec.action];
-    for (const candidate of candidates) {
-      if (typeof candidate === "string" && isQuotaText(candidate)) return true;
-      if (candidate && typeof candidate === "object" && isQuotaText(JSON.stringify(candidate))) return true;
-    }
-    return false;
-  }
-  // message / session_message: assistant error records only. A user message
-  // carrying the task/feedback text has no `error` field and never matches,
-  // even when it quotes `FreeUsageLimitError`.
-  if (rec.type === "retry") {
-    const candidates: unknown[] = [rec.message, rec.error, (rec as Record<string, unknown>).action];
-    for (const candidate of candidates) {
-      if (typeof candidate === "string" && isQuotaText(candidate)) return true;
-      if (candidate && typeof candidate === "object" && isQuotaText(JSON.stringify(candidate))) return true;
-    }
-    return false;
-  }
-  if ("error" in rec) {
-    const err = rec.error;
-    if (typeof err === "string" && isQuotaText(err)) return true;
-    if (err && typeof err === "object") return isQuotaText(JSON.stringify(err));
-  }
-  if ("state" in rec && rec.state && typeof rec.state === "object") {
-    const stateErr = (rec.state as Record<string, unknown>).error;
-    if (typeof stateErr === "string" && isQuotaText(stateErr)) return true;
-    if (stateErr && typeof stateErr === "object" && isQuotaText(JSON.stringify(stateErr))) return true;
-  }
-  return false;
+  if (typeof error === "string") return isQuotaText(error);
+  return Boolean(error) && typeof error === "object" && isQuotaText(JSON.stringify(error));
 }
 
 function inspectQuotaInOpenDb(db: Database): QuotaHit | undefined {
-  const tables = tableNames(db);
-  for (const table of ["message", "part", "session_message"] as const) {
-    if (!tables.has(table)) continue;
-    const hit = inspectTableQuota(db, table);
-    if (hit) return hit;
+  const where = QUOTA_PATTERNS.map(() => `data LIKE ?`).join(" OR ");
+  const params = QUOTA_PATTERNS.map((pattern) => `%${pattern}%`);
+  const rows = db
+    .query(
+      `SELECT data FROM session_message WHERE type = 'assistant' AND data LIKE '%"error"%' AND (${where}) LIMIT 10`
+    )
+    .all(...params) as Array<{ data: unknown }>;
+  for (const row of rows) {
+    if (typeof row?.data === "string" && rowHasQuotaError(row.data)) return quotaHitFromText(row.data);
   }
   return undefined;
 }
@@ -356,13 +194,57 @@ function withQuotaDb(dbPath: string, read: (db: Database) => QuotaHit | undefine
   }
 }
 
+function rowRetryError(data: string): unknown {
+  try {
+    return (JSON.parse(data) as { retry?: { error?: unknown } }).retry?.error;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The live signal: a sleeping assistant row carries
+ * `retry: { attempt, at, error }` until the attempt runs. OpenCode clears it on
+ * a kill it outlives, but a kill of the whole process tree (OOM) leaves it, in a
+ * DB the next `--continue` run reuses, and that run only cleans its own session.
+ * So a row counts only if it was written at or after `sinceMs`, this child's
+ * start. Unlike a persisted `error`, this field then cannot be left over from an
+ * earlier run, so only it may abort a child.
+ *
+ * Any session can be the one sleeping, a subagent's included, and `seq` restarts
+ * in each, so this reads every session's own newest assistant row.
+ *
+ * Returns undefined when the DB is missing, not yet initialized, or locked.
+ * Never throws.
+ */
+export function inspectQuotaSleepInDb(dbPath: string | null | undefined, sinceMs: number): QuotaHit | undefined {
+  if (!dbPath || !existsSync(dbPath)) return undefined;
+  return withQuotaDb(dbPath, (db) => {
+    const rows = db
+      .query(
+        `SELECT data FROM (
+           SELECT data, time_updated, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY seq DESC) AS newest
+           FROM session_message WHERE type = 'assistant'
+         ) WHERE newest = 1 AND time_updated >= ?`
+      )
+      .all(sinceMs) as Array<{ data: unknown }>;
+    for (const row of rows) {
+      if (typeof row.data !== "string") continue;
+      const error = rowRetryError(row.data);
+      if (error === undefined) continue;
+      const text = JSON.stringify(error);
+      if (isQuotaLiveText(text)) return quotaHitFromText(text);
+    }
+    return undefined;
+  });
+}
+
 /**
  * Best-effort post-hoc quota classifier against the per-run OpenCode session
  * DB the parent already knows about (`OPENCODE_DB` under
- * `.jumi-tmp/opencode-session.db`). The live abort signal is the per-run
- * isolated log file (`hasQuotaInLogDir`); the pinned OpenCode never persists
- * a per-attempt retry row while it sleeps on a multi-hour retry-after, so
- * this must not be polled as the abort trigger.
+ * `.jumi-tmp/opencode-session.db`). It reads persisted errors, which a resumed
+ * session can carry over from an earlier run, so it must not be polled as the
+ * abort trigger: that is {@link inspectQuotaSleepInDb}.
  *
  * Returns undefined when the DB is missing, not yet initialized, locked, or
  * contains no quota/retry record. Never throws.
@@ -373,68 +255,51 @@ export function inspectQuotaRetryInDb(dbPath: string | null | undefined): QuotaH
   return withQuotaDb(dbPath, inspectQuotaInOpenDb);
 }
 
-export function hasQuotaRetryInDb(dbPath: string | null | undefined): boolean {
-  return inspectQuotaRetryInDb(dbPath) != null;
+/** Columns the two quota reads above depend on. */
+const QUOTA_DB_COLUMNS = ["session_id", "type", "seq", "time_updated", "data"];
+
+let schemaErrors = 0;
+
+export function quotaSchemaErrors(): number {
+  return schemaErrors;
+}
+
+export function resetQuotaSchemaErrorsForTests(): void {
+  schemaErrors = 0;
 }
 
 /**
- * Scan OpenCode JSON events (both V1 and V2) for quota retry records.
+ * The quota reads swallow every SQLite error, because a poll can land on a DB
+ * that is locked or not created yet. That also makes an OpenCode schema change
+ * look like "no quota hit", and the child then sleeps until the job times out.
+ * So once a run is over, when neither excuse applies, name what is missing.
+ * Counted in `ai_quota_db_schema_errors`. Never throws.
  */
-export function inspectQuotaInEvents(events: unknown[] | string | null | undefined): QuotaHit | undefined {
-  if (!events) return undefined;
-  let list: unknown[];
-  if (typeof events === "string") {
-    const hit = inspectQuotaInLogText(events);
-    if (hit) return hit;
-    list = [];
-    for (const line of events.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        list.push(JSON.parse(trimmed));
-      } catch {
-        // ignore
-      }
+export function checkQuotaDbSchema(dbPath: string | null | undefined): string | undefined {
+  if (!dbPath || !existsSync(dbPath)) return undefined;
+  let problem: string | undefined;
+  try {
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const tables = db.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+      const columns = db.query("SELECT name FROM pragma_table_info('session_message')").all() as Array<{
+        name: string;
+      }>;
+      if (tables.length > 0 && columns.length === 0) problem = "no session_message table";
+      const missing = QUOTA_DB_COLUMNS.find((name) => !columns.some((column) => column.name === name));
+      if (columns.length > 0 && missing) problem = `session_message has no ${missing} column`;
+    } finally {
+      db.close();
     }
-  } else if (Array.isArray(events)) {
-    list = events;
-  } else {
+  } catch {
     return undefined;
   }
-
-  for (const item of list) {
-    if (!item || typeof item !== "object") continue;
-    const ev = item as Record<string, unknown>;
-    const part = (ev.part && typeof ev.part === "object" ? ev.part : ev) as Record<string, unknown>;
-    const candidates: unknown[] = [
-      ev.error,
-      ev.message,
-      part.error,
-      part.message,
-      (part.state as Record<string, unknown> | undefined)?.error,
-      (ev.state as Record<string, unknown> | undefined)?.error,
-      (part.action as Record<string, unknown> | undefined)?.reason,
-    ];
-    for (const c of candidates) {
-      if (typeof c === "string" && isQuotaText(c)) return quotaHitFromText(c);
-      if (c && typeof c === "object" && isQuotaText(JSON.stringify(c))) return quotaHitFromText(JSON.stringify(c));
-    }
-  }
-  return undefined;
+  if (problem) schemaErrors += 1;
+  return problem;
 }
 
-export function hasQuotaInEvents(events: unknown[] | string | null | undefined): boolean {
-  return inspectQuotaInEvents(events) != null;
-}
-
-export function inspectQuotaHit(
-  logDir: string | null | undefined,
-  dbPath?: string | null,
-  events?: unknown[] | string | null
-): QuotaHit | undefined {
-  return (
-    inspectQuotaInLogDir(logDir) ?? (events ? inspectQuotaInEvents(events) : undefined) ?? inspectQuotaRetryInDb(dbPath)
-  );
+export function hasQuotaRetryInDb(dbPath: string | null | undefined): boolean {
+  return inspectQuotaRetryInDb(dbPath) != null;
 }
 
 export function isQuotaWaitMarker(error: string | null | undefined): boolean {

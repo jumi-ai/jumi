@@ -1,6 +1,5 @@
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
-import { hooklessSkillMarkdown } from "./claude_checkout_skills.ts";
 import type { TraceKind } from "./engine.ts";
 
 /** Shared pack in the image. Reviewer and worker skills stay separate files. */
@@ -8,7 +7,7 @@ export const IMAGE_SKILLS_ROOT = "/app/review-skills";
 export const REVIEW_PROOF_SKILL = "review-proof";
 export const WORKER_PROOF_SKILL = "worker-proof";
 
-/** Claude plugin name for staged image skills. Checkout stays `checkout:<name>`. */
+/** Claude plugin name for staged image skills, seen as `shared:<name>`. */
 export const IMAGE_SKILLS_PLUGIN = "shared";
 
 /** Workdir root Agy and Codex both scan for repo skills. */
@@ -40,7 +39,7 @@ async function copyTree(src: string, dest: string): Promise<void> {
 }
 
 /**
- * Stage the image skills for `kind` as a hook-free Claude plugin under `dest`.
+ * Stage the image skills for `kind` as a Claude plugin under `dest`.
  * Returns `dest` to pass as `--plugin-dir`, or undefined when there is nothing
  * to stage. Never throws: a missing pack stages nothing, it does not refuse.
  */
@@ -57,33 +56,13 @@ export async function stageImageSkillsForClaude(
     let staged = 0;
     for (const name of names) {
       const src = join(root, name);
-      let info: Awaited<ReturnType<typeof stat>>;
       try {
         const real = await realpath(src);
-        if (!inside(root, real)) continue;
-        info = await stat(real);
-        if (!info.isDirectory()) continue;
+        if (!inside(root, real) || !(await stat(join(real, "SKILL.md"))).isFile()) continue;
       } catch {
         continue;
       }
-      const outDir = join(dest, "skills", name);
-      await mkdir(outDir, { recursive: true });
-      // Copy references and other supporting files verbatim, then write a
-      // hook-free SKILL.md the same way checkout skills are staged.
-      for (const entry of await readdir(src)) {
-        if (entry.toLowerCase() === "skill.md") continue;
-        const from = join(src, entry);
-        const entryInfo = await lstat(from);
-        if (entryInfo.isDirectory()) {
-          await copyTree(from, join(outDir, entry));
-        } else if (entryInfo.isFile()) {
-          await writeFile(join(outDir, entry), await readFile(from));
-        }
-      }
-      const raw = await readFile(join(src, "SKILL.md"), "utf8");
-      const skill = hooklessSkillMarkdown(raw, name);
-      if (skill === undefined) continue;
-      await writeFile(join(outDir, "SKILL.md"), skill);
+      await copyTree(src, join(dest, "skills", name));
       staged += 1;
     }
     if (staged === 0) return undefined;

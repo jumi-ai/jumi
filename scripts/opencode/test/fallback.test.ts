@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { observeEngineRun, renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
@@ -10,13 +10,11 @@ import {
   hasResumableSession,
   isProviderUnavailableResult,
   looksLikeProviderUnavailable,
-  openCodeLogDirPath,
   openCodeSessionDbPath,
   shouldHopInsteadOfQuotaStuck,
   withEngineChain,
   withModelHop,
 } from "../src/fallback.ts";
-import { resetOpenCodeVersionForTests, runOpenCode, setOpenCodeMajorForTests } from "../src/git.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
@@ -33,7 +31,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   resetXaiAuthStateForTests();
-  resetOpenCodeVersionForTests();
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (isolatedHome) await rm(isolatedHome, { recursive: true, force: true });
@@ -405,36 +402,6 @@ describe("withModelHop", () => {
       { model: "opencode/big-pickle", continueSession: undefined, hop: undefined },
       { model: "anthropic/claude-sonnet-4-6", continueSession: false, hop: true },
     ]);
-  });
-
-  test("hop does not classify leftover primary quota logs as fallback stuck", async () => {
-    const originalPath = process.env.PATH;
-    const binDir = await mkdtemp(join(tmpdir(), "jumi-hop-bin-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-hop-work-"));
-    try {
-      await writeFile(join(binDir, "opencode"), "#!/bin/sh\nprintf 'ok\\n'\n");
-      await chmod(join(binDir, "opencode"), 0o755);
-      process.env.PATH = `${binDir}:${originalPath ?? ""}`;
-      setOpenCodeMajorForTests(1);
-      const logDir = openCodeLogDirPath(workdir);
-      await mkdir(logDir, { recursive: true });
-      await writeFile(
-        join(logDir, "opencode.log"),
-        'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: FreeUsageLimitError"\n'
-      );
-      const result = await withModelHop(runOpenCode, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
-        model: "opencode/big-pickle",
-        workdir,
-        sanitizeEnv: true,
-        quotaPollIntervalMs: 0,
-      });
-      expect(result.status).toBe("ok");
-      expect(result.stdout).toContain("ok");
-    } finally {
-      process.env.PATH = originalPath;
-      await rm(binDir, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
   });
 
   test("quota stuck does not hop when fallback is the same provider", async () => {
@@ -1232,16 +1199,14 @@ describe("hasResumableSession", () => {
 });
 
 describe("clearOpenCodeSession", () => {
-  test("removes the session db and isolated log dir", async () => {
+  test("removes the session db and its WAL files", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-session-"));
     try {
-      const logDir = openCodeLogDirPath(dir);
-      await mkdir(logDir, { recursive: true });
-      await writeFile(openCodeSessionDbPath(dir), "db");
-      await writeFile(join(logDir, "opencode.log"), 'message="stream error" error="FreeUsageLimitError"\n');
+      const db = openCodeSessionDbPath(dir);
+      await mkdir(join(dir, ".jumi-tmp"), { recursive: true });
+      await Promise.all([db, `${db}-wal`, `${db}-shm`].map((path) => writeFile(path, "db")));
       await clearOpenCodeSession(dir);
-      expect(await Bun.file(openCodeSessionDbPath(dir)).exists()).toBe(false);
-      expect(await Bun.file(join(logDir, "opencode.log")).exists()).toBe(false);
+      for (const path of [db, `${db}-wal`, `${db}-shm`]) expect(await Bun.file(path).exists()).toBe(false);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

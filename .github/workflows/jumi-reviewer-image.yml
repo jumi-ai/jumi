@@ -135,11 +135,11 @@ jobs:
           # run in production. Help output can only prove flag presence;
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
           codex_exec_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/gitops-apply-review/SKILL.md
@@ -156,6 +156,15 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
 
+      - name: Verify quota reads against the opencode binary
+        if: ${{ env.VERSION != '' }}
+        # The quota reads swallow SQLite errors, so an opencode bump that changes
+        # the session DB would otherwise show up only as children timing out.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'
+
       - name: Verify agy forge read_url deny against the installed binary
         if: ${{ env.VERSION != '' }}
         # Same probe as the pull_request image job: the installed agy binary
@@ -164,6 +173,15 @@ jobs:
           set -euo pipefail
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+
+      - name: Verify codex overrides against a hostile checkout
+        if: ${{ env.VERSION != '' }}
+        # Same probe as the pull_request image job: `-c` has to keep outranking
+        # a repository's `.codex` config on the installed binary.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
       - name: Verify claude production flags against the installed binary
         if: ${{ env.VERSION != '' }}

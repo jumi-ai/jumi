@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { isCodexChatGptPresent } from "./codex_auth.ts";
+import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE, type RunnerConfig } from "./runners.ts";
 import { durableAuthPath, isXaiModel, readAuthFile, readXaiCredential } from "./xai_auth.ts";
 
@@ -46,10 +47,11 @@ export const OPENCODE_DEVICE_LOGIN_CMD = [
   "opencode",
   "auth",
   "login",
-  "--provider",
   "xai",
   "--method",
   SUPERGROK_SUBSCRIPTION_METHOD,
+  // Without this the CLI starts a background service that outlives the login.
+  "--standalone",
 ] as const;
 /** Stock CLI headless device-code flow. No API-key/access-token stdin flags, no browser callback. */
 export const CODEX_DEVICE_LOGIN_CMD = ["codex", "login", "--device-auth"] as const;
@@ -223,6 +225,9 @@ export const defaultSpawnLogin: SpawnLoginFn = (opts) => {
   // so the credential lands at `$HOME/.codex/auth.json` on this ordinal.
   delete env.CODEX_HOME;
   delete env.XDG_CONFIG_HOME;
+  // The grant must land in HOME's store, which the parent copies from.
+  delete env.XDG_DATA_HOME;
+  delete env.OPENCODE_DB;
   const child = spawn(opts.cmd[0], opts.cmd.slice(1), {
     env,
     stdio: ["ignore", "pipe", "pipe"],
@@ -243,6 +248,8 @@ export interface DeviceLoginManagerOptions {
   hasCodexRunner?: boolean;
   isLeased: () => boolean | Promise<boolean>;
   spawnLogin?: SpawnLoginFn;
+  /** Runs after a clean xAI login. OpenCode 2 wrote the grant to SQLite; the parent owns it in `auth.json`. */
+  adoptCredentials?: (home: string, logger?: (message: string) => void) => Promise<unknown>;
   logger?: (msg: string) => void;
   onResult?: (entry: DeviceLoginRecord) => Promise<void> | void;
   now?: () => number;
@@ -468,12 +475,29 @@ export class DeviceLoginManager {
               return;
             }
             if (code === 0) {
-              this.state = { state: "signed-in" };
-              this.recordTerminalOnce("succeeded");
-              if (!resolved) {
-                resolved = true;
-                resolve({ refused: false, provider, state: "signed-in" });
-              }
+              const adopt =
+                provider === XAI_PROVIDER ? (this.options.adoptCredentials ?? adoptOpenCodeDbCredentials) : undefined;
+              void Promise.resolve()
+                .then(() => adopt?.(this.options.home, this.options.logger))
+                .then(
+                  () => {
+                    this.state = { state: "signed-in" };
+                    this.recordTerminalOnce("succeeded");
+                  },
+                  (err) => {
+                    this.state = { state: "error", error: "Login failed" };
+                    this.recordTerminalOnce("error");
+                    this.options.logger?.(
+                      `device login credential copy failed ordinal=${this.options.ordinal}: ${err instanceof Error ? err.message : String(err)}`
+                    );
+                  }
+                )
+                .finally(() => {
+                  if (!resolved) {
+                    resolved = true;
+                    resolve({ refused: false, provider, state: this.state.state });
+                  }
+                });
               return;
             }
             if (tail.includes("denied") || tail.includes("authorization_denied") || tail.includes("access_denied")) {

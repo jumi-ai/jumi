@@ -134,11 +134,11 @@ jobs:
           # run in production. Help output can only prove flag presence;
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
           codex_exec_help="$(docker run --rm jumi-reviewer:ci codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm jumi-reviewer:ci codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
@@ -150,7 +150,7 @@ jobs:
           # that drops the flag must fail here, not silently stop tracing.
           docker run --rm jumi-reviewer:ci claude --help | grep -F -- '--plugin-dir' >/dev/null
           # Plugin root may also carry bin/, agents/, skills/, .mcp.json,
-          # monitors/ and settings.json — any of those reach the untrusted-checkout
+          # monitors/ and settings.json — any of those reach every traced
           # child. A re-sync that adds one must fail the build, not ship.
           plugin_top="$(docker run --rm jumi-reviewer:ci sh -c 'ls -1A /app/claude-plugins/claude-code-tracing' | sort)"
           plugin_want="$(printf '%s\n' '.claude-plugin' 'LICENSE' 'UPSTREAM.md' 'hooks' | sort)"
@@ -173,6 +173,14 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
 
+      - name: Verify quota reads against the opencode binary
+        # The quota reads swallow SQLite errors, so an opencode bump that changes
+        # the session DB would otherwise show up only as children timing out.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'
+
       - name: Verify agy forge read_url deny against the installed binary
         # `agy --version` proves the binary exists, not that a child is refused
         # a fetch of the forge host it was given credentials for. The probe
@@ -183,6 +191,14 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+
+      - name: Verify codex overrides against a hostile checkout
+        # Jumi loads a repository's `.codex` config on purpose. What keeps web
+        # search off is that `-c` outranks it, and only the binary can prove that.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
       - name: Verify claude production flags against the installed binary
         # `claude --version` proves the binary exists, not that it accepts the
@@ -255,15 +271,17 @@ jobs:
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm jumi-worker:ci codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
           docker run --rm jumi-worker:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"

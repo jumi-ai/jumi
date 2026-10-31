@@ -101,9 +101,9 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 - Publish jobs keep the `github.repository` guard (#18).
 - A version the release flow skips is never published as an image tag (#19).
 
-## forge_webfetch.ts, child_git_proxy.ts, claude_checkout_skills.ts, opencode-*.json, attachments.ts
+## forge_webfetch.ts, child_git_proxy.ts, opencode-*.json, attachments.ts
 
 - Each runner's forge-host deny is proven against its installed binary, including subagents and agent-level overrides where the runner has them (#112, #135, #325).
-- Checkout-controlled names, frontmatter, and bodies stay inert on load for every field the binary expands (#196), and checkout hooks and plugins stay out of reviewer spawns (#109).
+- Checkouts are trusted, so their hooks, plugins, skills, and config load on every runner. A repository still cannot lift the forge-host deny.
 - The child environment holds no forge credential (#314).
 - Parent credentials go only to the configured forge origin, and count and byte caps hold at the exact limit (#315).

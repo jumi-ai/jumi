@@ -103,7 +103,11 @@ describe("codexArgv", () => {
     // flags, so the argv must carry that posture via `-c` overrides only.
     expect(args).not.toContain("--ask-for-approval");
     expect(args).not.toContain("--disable");
-    expect(args).toContain("features.hooks=false");
+    // The repository's own setup loads: these are what kept it out.
+    expect(args).toContain("--dangerously-bypass-hook-trust");
+    expect(args).not.toContain("features.hooks=false");
+    expect(args).not.toContain("--ignore-rules");
+    expect(args).not.toContain("--ignore-user-config");
     expect(args).toContain("features.multi_agent=false");
     expect(args).toContain("features.apps=false");
     expect(args).toContain(`model_reasoning_effort="${CODEX_DEFAULT_EFFORT}"`);
@@ -162,13 +166,13 @@ describe("codexArgv", () => {
     expect(resumed.slice(resumeIdx + 2)).not.toContain("--color");
     expect(resumed.slice(resumeIdx + 2)).not.toContain("--json");
     expect(resumed.indexOf("--skip-git-repo-check")).toBeLessThan(resumeIdx);
-    expect(resumed.indexOf("--ignore-rules")).toBeLessThan(resumeIdx);
-    expect(resumed.indexOf("--ignore-user-config")).toBeLessThan(resumeIdx);
+    expect(resumed.indexOf("--dangerously-bypass-hook-trust")).toBeLessThan(resumeIdx);
+    expect(resumed).not.toContain("--ignore-rules");
+    expect(resumed).not.toContain("--ignore-user-config");
     // `-c` is global so it travels after the thread id; every turn-1
     // hardening override is per-invocation config and must be repeated.
     expect(resumed).toContain(`sandbox_mode="${CODEX_SANDBOX}"`);
     expect(resumed).toContain(`approval_policy="${CODEX_APPROVAL}"`);
-    expect(resumed).toContain("features.hooks=false");
     expect(resumed).toContain("features.multi_agent=false");
     expect(resumed).toContain("features.apps=false");
     expect(resumed).toContain("agents.enabled=false");
@@ -869,7 +873,7 @@ describe("codex dispatch and chain", () => {
           workdir,
           home,
           sanitizeEnv: true,
-          timeoutMs: 300,
+          timeoutMs: 2_000,
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("timeout");

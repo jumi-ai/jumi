@@ -19,6 +19,7 @@ import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError } from "./quota.ts";
@@ -896,6 +897,9 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
   if (shouldSeedOpenCodeAuth(config.role)) {
     await adoptOrphanXaiSibling(config.home, logger).catch((err) =>
       logger(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+    );
+    await adoptOpenCodeDbCredentials(config.home, logger).catch((err) =>
+      logger(`OpenCode credential adoption failed: ${err instanceof Error ? err.message : String(err)}`)
     );
     await (deps.ensureAuth ?? ensureOpenCodeWellKnownAuth)({
       home: config.home,

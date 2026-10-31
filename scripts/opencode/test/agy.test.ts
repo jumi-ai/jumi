@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -42,7 +42,7 @@ interface FakeEnv {
 /** Fake binaries append one line of argv per call to `$ARGS_LOG`. */
 async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-agy-"));
-  const workdir = await mkdtemp(join(tmpdir(), "fake-agy-work-"));
+  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-agy-work-")));
   const home = await mkdtemp(join(tmpdir(), "fake-agy-home-"));
   try {
     for (const [name, script] of Object.entries(bins)) {
@@ -409,35 +409,18 @@ describe("runAgy", () => {
     });
   });
 
-  test("reviewer spawn keeps checkout skills and stashes checkout hooks, then restores them", async () => {
-    // What the child can see, one line per path: skills in every root stay,
-    // hooks.json, plugins (which bundle hooks), and non-directory roots go.
-    const probe = [
-      ".agents/skills/checkout-skill/SKILL.md",
-      "_agents/skills/underscore-skill/SKILL.md",
-      ".agents/hooks.json",
-      ".agents/plugins/p/hooks.json",
-      "_agents/hooks.json",
-      "_agent/hooks.json",
-      ".agent",
-    ]
-      .map((path) => `if [ -e ${path} ]; then echo "yes ${path}"; else echo "no ${path}"; fi >> "$ARGS_LOG.seen"`)
-      .join("\n");
+  test("reviewer spawn leaves the checkout's customization roots in place", async () => {
+    const seen = `for path in .agents/hooks.json .agents/plugins/p/hooks.json _agents/hooks.json; do
+  if [ -e "$path" ]; then echo "yes $path"; else echo "no $path"; fi >> "$ARGS_LOG.seen"
+done`;
     await withFakeBins(
-      { agy: fakeBin("agy", `${probe}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
+      { agy: fakeBin("agy", `${seen}\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
       async ({ workdir, argsLog }) => {
-        const skill = "---\nname: checkout-skill\ndescription: d\n---\nbody\n";
-        await mkdir(join(workdir, ".agents", "skills", "checkout-skill"), { recursive: true });
-        await writeFile(join(workdir, ".agents", "skills", "checkout-skill", "SKILL.md"), skill);
-        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
         await mkdir(join(workdir, ".agents", "plugins", "p"), { recursive: true });
+        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
         await writeFile(join(workdir, ".agents", "plugins", "p", "hooks.json"), '{"hooks":[]}');
-        await mkdir(join(workdir, "_agents", "skills", "underscore-skill"), { recursive: true });
-        await writeFile(join(workdir, "_agents", "skills", "underscore-skill", "SKILL.md"), skill);
+        await mkdir(join(workdir, "_agents"), { recursive: true });
         await writeFile(join(workdir, "_agents", "hooks.json"), '{"hooks":[]}');
-        await mkdir(join(workdir, "_agent"), { recursive: true });
-        await writeFile(join(workdir, "_agent", "hooks.json"), '{"hooks":[]}');
-        await writeFile(join(workdir, ".agent"), "plugin");
         const result = await runAgy({
           prompt: "p",
           model: "m",
@@ -448,74 +431,10 @@ describe("runAgy", () => {
         });
         expect(result.status).toBe("ok");
         expect((await readFile(`${argsLog}.seen`, "utf8")).trim().split("\n")).toEqual([
-          "yes .agents/skills/checkout-skill/SKILL.md",
-          "yes _agents/skills/underscore-skill/SKILL.md",
-          "no .agents/hooks.json",
-          "no .agents/plugins/p/hooks.json",
-          "no _agents/hooks.json",
-          "no _agent/hooks.json",
-          "no .agent",
+          "yes .agents/hooks.json",
+          "yes .agents/plugins/p/hooks.json",
+          "yes _agents/hooks.json",
         ]);
-        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-        expect(await readFile(join(workdir, ".agents", "plugins", "p", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-        expect(await readFile(join(workdir, ".agents", "skills", "checkout-skill", "SKILL.md"), "utf8")).toBe(skill);
-        expect(await readFile(join(workdir, "_agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-        expect(await readFile(join(workdir, "_agents", "skills", "underscore-skill", "SKILL.md"), "utf8")).toBe(skill);
-        expect(await readFile(join(workdir, "_agent", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-        expect(await readFile(join(workdir, ".agent"), "utf8")).toBe("plugin");
-      }
-    );
-  });
-
-  test("reviewer restore drops whatever the child wrote into the skills-only root", async () => {
-    await withFakeBins(
-      {
-        agy: fakeBin(
-          "agy",
-          `echo '{"x":1}' > .agents/hooks.json\nmkdir -p .agents/skills/new && echo new > .agents/skills/new/SKILL.md\nprintf '%s\\n' '${SUCCESS_RESULT}'`
-        ),
-      },
-      async ({ workdir, argsLog }) => {
-        await mkdir(join(workdir, ".agents", "skills", "s"), { recursive: true });
-        await writeFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "s");
-        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
-        const result = await runAgy({
-          prompt: "p",
-          model: "m",
-          workdir,
-          sanitizeEnv: true,
-          extraEnv: { ARGS_LOG: argsLog },
-          trace: { kind: "review", owner: "o", repo: "r" },
-        });
-        expect(result.status).toBe("ok");
-        // The checkout's own hooks.json is back; the one the child wrote is gone.
-        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-        expect(await readFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "utf8")).toBe("s");
-      }
-    );
-  });
-
-  test("reviewer restore that cannot take the skills back says what it left behind", async () => {
-    await withFakeBins(
-      { agy: fakeBin("agy", `rm -rf .agents && echo child > .agents\nprintf '%s\\n' '${SUCCESS_RESULT}'`) },
-      async ({ workdir, argsLog }) => {
-        await mkdir(join(workdir, ".agents", "skills", "s"), { recursive: true });
-        await writeFile(join(workdir, ".agents", "skills", "s", "SKILL.md"), "s");
-        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
-        const logs: string[] = [];
-        const result = await runAgy({
-          prompt: "p",
-          model: "m",
-          workdir,
-          sanitizeEnv: true,
-          extraEnv: { ARGS_LOG: argsLog },
-          trace: { kind: "review", owner: "o", repo: "r" },
-          logger: (message) => logs.push(message),
-        });
-        expect(result.status).toBe("ok");
-        // The child's node is left alone, and the lost hooks.json is not silent.
-        expect(await readFile(join(workdir, ".agents"), "utf8")).toBe("child\n");
-        expect(logs.filter((line) => line.startsWith("[agy] .agents not restored"))).toHaveLength(1);
       }
     );
   });
@@ -537,28 +456,6 @@ describe("runAgy", () => {
         });
         expect(result.status).toBe("ok");
         expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("yes\n");
-        expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
-      }
-    );
-  });
-
-  test("reviewer restore happens after a failed spawn", async () => {
-    const seen = 'if [ -e .agents ]; then echo yes >> "$ARGS_LOG.seen"; else echo no >> "$ARGS_LOG.seen"; fi';
-    await withFakeBins(
-      { agy: fakeBin("agy", `${seen}\nprintf 'Please sign in to continue\\n' >&2\nexit 1`) },
-      async ({ workdir, argsLog }) => {
-        await mkdir(join(workdir, ".agents"), { recursive: true });
-        await writeFile(join(workdir, ".agents", "hooks.json"), '{"hooks":[]}');
-        const result = await runAgy({
-          prompt: "p",
-          model: "m",
-          workdir,
-          sanitizeEnv: true,
-          extraEnv: { ARGS_LOG: argsLog },
-          trace: { kind: "review", owner: "o", repo: "r" },
-        });
-        expect(result.auth).toBe(true);
-        expect(await readFile(`${argsLog}.seen`, "utf8")).toBe("no\n");
         expect(await readFile(join(workdir, ".agents", "hooks.json"), "utf8")).toBe('{"hooks":[]}');
       }
     );

@@ -7,9 +7,8 @@
  * Claude Code hook plugin that posts OpenInference spans to Phoenix.
  *
  * The plugin is passed per spawn with `--plugin-dir`, never installed into the
- * checkout or discovered from it, so `--setting-sources user` keeps standing:
- * an untrusted repository still cannot supply hooks. Nothing here is installed
- * at run time either — the plugin is vendored into the image.
+ * checkout or discovered from it. Nothing here is installed at run time either
+ * — the plugin is vendored into the image.
  *
  * Everything is fail-open. No endpoint, an endpoint that is not an in-cluster
  * URL, or a missing plugin directory means the child runs untraced; a Phoenix

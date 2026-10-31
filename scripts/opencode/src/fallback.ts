@@ -86,10 +86,6 @@ export function openCodeSessionDbPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", OPENCODE_SESSION_DB);
 }
 
-export function openCodeLogDirPath(workdir: string): string {
-  return join(workdir, ".jumi-tmp", "xdg-data", "opencode", "log");
-}
-
 export function agyConversationPath(workdir: string): string {
   return join(workdir, ".jumi-tmp", AGY_CONVERSATION_FILE);
 }
@@ -119,11 +115,11 @@ export async function hasResumableSession(workdir: string): Promise<boolean> {
 }
 
 export async function clearOpenCodeSession(workdir: string): Promise<void> {
-  await rm(openCodeSessionDbPath(workdir), { force: true });
+  const db = openCodeSessionDbPath(workdir);
+  await Promise.all([db, `${db}-wal`, `${db}-shm`].map((path) => rm(path, { force: true })));
   await rm(agyConversationPath(workdir), { force: true });
   await rm(codexThreadPath(workdir), { force: true });
   await rm(codexThreadUsagePath(workdir), { force: true });
-  await rm(openCodeLogDirPath(workdir), { recursive: true, force: true });
 }
 
 async function remainingCoversTimeout(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {

@@ -143,7 +143,7 @@ describe("plugin manifest", () => {
     expect(new Set(onDisk)).toEqual(wired);
 
     // bin/, agents/, skills/, .mcp.json, monitors/, settings.json would all
-    // reach the untrusted-checkout child. A re-sync that adds any of those
+    // reach every traced child. A re-sync that adds any of those
     // must fail here instead of shipping.
     expect(new Set(await readdir(pluginDir))).toEqual(new Set([".claude-plugin", "hooks", "LICENSE", "UPSTREAM.md"]));
   });
@@ -166,6 +166,8 @@ async function withPluginRun(
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
+      // The hooks only POST; another local process probing a fresh port is not a span.
+      if (req.method !== "POST") return new Response(null, { status: 404 });
       captured.push({ url: new URL(req.url).pathname, body: await req.json() });
       return Response.json({ total_received: 1, total_queued: 1 }, { status: 202 });
     },
@@ -414,7 +416,9 @@ describe.if(hasShellTools)("vendored claude-code-tracing hooks", () => {
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      async fetch() {
+      async fetch(req) {
+        // Same as withPluginRun: only the hooks' POSTs count toward the breaker.
+        if (req.method !== "POST") return new Response(null, { status: 404 });
         posts += 1;
         // Accept and never reply: the failure mode that costs ARIZE_HTTP_TIMEOUT
         // per tool, not the refused 127.0.0.1:9 path that returns in microseconds.

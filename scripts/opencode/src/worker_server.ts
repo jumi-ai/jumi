@@ -11,6 +11,7 @@ import {
 import { createForge } from "./forge.ts";
 import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
+import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
@@ -161,6 +162,9 @@ async function main() {
   installProcessShutdown(shutdown, log);
   await adoptOrphanXaiSibling(config.home, log).catch((err) =>
     log(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+  );
+  await adoptOpenCodeDbCredentials(config.home, log).catch((err) =>
+    log(`OpenCode credential adoption failed: ${err instanceof Error ? err.message : String(err)}`)
   );
   await ensureOpenCodeWellKnownAuth({
     home: config.home,

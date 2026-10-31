@@ -6,9 +6,9 @@ at commit `20e97e85c22d1dee20e1d4275ac50b5360198976`, path
 `plugins/claude-code-tracing/`. Upstream licence is in `LICENSE`.
 
 The copy is vendored rather than installed because the Claude child runs with a
-sanitized env, no network install onto `HOME`, and `--setting-sources user`. The
-parent passes this directory with `--plugin-dir` per spawn, so the untrusted
-checkout still cannot supply hooks. See `scripts/opencode/src/claude_tracing.ts`.
+sanitized env and no network install onto `HOME`. The parent passes this
+directory with `--plugin-dir` per spawn. See
+`scripts/opencode/src/claude_tracing.ts`.
 
 ## What Jumi changed
 
