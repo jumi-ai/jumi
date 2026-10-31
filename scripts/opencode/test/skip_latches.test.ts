@@ -36,7 +36,7 @@ describe("MemorySkipLatchStore", () => {
     expect((await shared.get(key)).followup).toEqual({ round: 3 });
     expect((await new MemorySkipLatchStore().get(key)).followup).toEqual({});
     await shared.delete(key);
-    expect(await shared.get(key)).toEqual({ followup: {}, conflict: {}, ci: {}, stuck: {} });
+    expect(await shared.get(key)).toEqual({ followup: {}, conflict: {}, ci: {}, stuck: {}, reviewStuck: {} });
   });
 });
 
@@ -103,7 +103,13 @@ describe("kill switch deletes skip latches", () => {
       issueNumber: key.issueNumber,
       botUsername: "jumi",
     });
-    expect(await store.skipLatches.get(key)).toEqual({ followup: {}, conflict: {}, ci: {}, stuck: {} });
+    expect(await store.skipLatches.get(key)).toEqual({
+      followup: {},
+      conflict: {},
+      ci: {},
+      stuck: {},
+      reviewStuck: {},
+    });
     expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
       generation: 1,
       skipReason: null,

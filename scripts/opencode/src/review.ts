@@ -52,21 +52,21 @@ import {
   orderChainForJob,
   resolveRunnerSelection,
 } from "./runners.ts";
+import type { SkipLatchStore } from "./skip_latches.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
   omitOpenCodeStderr,
   truncateStatusDescription,
 } from "./status_description.ts";
 import {
-  appendStuckFingerprint,
-  clearQuotaStuck,
+  appendReviewStuckState,
+  clearReviewQuotaStuckState,
   evaluateStuck,
   fingerprintError,
   fingerprintReviewArtifact,
   isReviewQuotaStuck,
-  markQuotaStuck,
-  readStuckState,
-  reviewStuckStatePath,
+  markReviewQuotaStuckState,
+  readReviewStuckState,
   stuckComment,
   upsertStuckComment,
   upsertStuckText,
@@ -158,6 +158,11 @@ export interface ReviewOptions {
   botUsername: string;
   gitAuthResolver?: GitAuthResolver;
   home?: string;
+  /** Postgres ledger for review stuck state. When present (production always
+   * passes the engine store), stuck reads/writes use the ledger and never
+   * touch the HOME file, so a fresh HOME keeps the same-finding, ping-pong,
+   * and quota stops. Absent keeps the legacy HOME file for local/dev. */
+  skipLatches?: SkipLatchStore;
   sanitizeOpenCodeEnv?: boolean;
   timeoutMs?: number;
   maxFiles?: number;
@@ -1089,14 +1094,20 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
   if (initialSkipReason) return { status: "skipped", reason: initialSkipReason };
 
-  if (opts.home) {
-    const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
-    const stuckState = await readStuckState(stuckPath);
+  if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+    const stuckRef = {
+      home: opts.home,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: opts.prNumber,
+      ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+    };
+    const stuckState = await readReviewStuckState(stuckRef);
     // Reviewer quota uses a TTL (not permanent like the worker flag): quota
-    // resets in hours/days, and nothing else clears this per-PR file, so an
+    // resets in hours/days, and nothing else clears this per-PR latch, so an
     // expired flag re-checks instead of blocking the PR forever. Use
-    // `cancelReviewWork` (deleteReviewStuckState) as the human kill-switch
-    // equivalent to the worker cancel path.
+    // `cancelReviewWork` as the human kill-switch equivalent to the worker
+    // cancel path.
     if (isReviewQuotaStuck(stuckState)) {
       await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
       await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
@@ -1104,7 +1115,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
     if (stuckState.quota) {
       // Expired quota: clear the stale flag so the next run starts clean.
-      await clearQuotaStuck(stuckPath).catch(() => undefined);
+      await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
     }
     const stuckReason = evaluateStuck(stuckState.fingerprints);
     if (stuckReason) {
@@ -1510,9 +1521,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           chain: effectiveChain,
           previousError: opts.previousError,
         });
-        if (opts.home) {
-          await markQuotaStuck(
-            reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+        if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+          await markReviewQuotaStuckState(
+            {
+              home: opts.home,
+              owner: opts.owner,
+              repo: opts.repo,
+              prNumber: opts.prNumber,
+              ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+            },
             QUOTA_STUCK_TEXT
           ).catch(() => undefined);
         }
@@ -1605,13 +1622,19 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           }
           if (!blankFailure) {
             await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
-            if (opts.home) {
-              const stuckPath = reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber);
+            if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+              const stuckRef = {
+                home: opts.home,
+                owner: opts.owner,
+                repo: opts.repo,
+                prNumber: opts.prNumber,
+                ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+              };
               // A successful run clears any stale (TTL-expired) quota flag.
-              await clearQuotaStuck(stuckPath).catch(() => undefined);
+              await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
               const actionHash = fingerprintReviewArtifact(markdown);
               if (actionHash) {
-                await appendStuckFingerprint(stuckPath, {
+                await appendReviewStuckState(stuckRef, {
                   kind: "action",
                   hash: actionHash,
                 });
@@ -1686,9 +1709,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         chain: effectiveChain,
         previousError: opts.previousError,
       });
-      if (opts.home) {
-        await markQuotaStuck(
-          reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber),
+      if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+        await markReviewQuotaStuckState(
+          {
+            home: opts.home,
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: opts.prNumber,
+            ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+          },
           QUOTA_STUCK_TEXT
         ).catch(() => undefined);
       }
@@ -1708,13 +1737,22 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         failureSecrets
       );
       await opts.persistResult?.({ kind: "error", error: message });
-      if (opts.home) {
+      if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         const errorHash = fingerprintError(message);
         if (errorHash) {
-          await appendStuckFingerprint(reviewStuckStatePath(opts.home, opts.owner, opts.repo, opts.prNumber), {
-            kind: "error",
-            hash: errorHash,
-          }).catch(() => undefined);
+          await appendReviewStuckState(
+            {
+              home: opts.home,
+              owner: opts.owner,
+              repo: opts.repo,
+              prNumber: opts.prNumber,
+              ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+            },
+            {
+              kind: "error",
+              hash: errorHash,
+            }
+          ).catch(() => undefined);
         }
       }
       await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", message, pr.html_url);

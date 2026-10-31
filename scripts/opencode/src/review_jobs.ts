@@ -1,5 +1,5 @@
 import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
-import { isInfraRetryMarker } from "./infra.ts";
+import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
 import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -172,7 +172,8 @@ export interface ReviewJobStore {
   /**
    * Stuck-latch kick for an open closer. Clears the issue skip
    * latch (bumping the generation and dropping the stuck skip reason plus
-   * the followup/conflict/ci/stuck latch state) and inserts a worker job
+   * the worker followup/conflict/ci/stuck latch state, preserving review
+   * stuck) and inserts a worker job
    * for the open closer in one transaction; the router sit goes away
    * because that enqueue landed, never via a bare sit delete. A
    * conflict-capped latch (`stuck: cannot resolve conflicts`, including
@@ -202,6 +203,20 @@ export interface ReviewJobStore {
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
+  /**
+   * Ledger-backed share of the infra breaker and quota cooldown, per role.
+   * One row per role (`engine`|`worker`); each deployment owns its database.
+   * Thresholds match `infra.ts`: 3 consecutive failures open a 60s window,
+   * reset when a model is reached. Quota `until` only moves forward.
+   * The dispatcher in #359 uses `checkRoleGate` before spawning a one-shot
+   * Job; the long-running ticks check it before leasing.
+   */
+  checkRoleGate(role: RoleGateRole, now?: Date): Promise<RoleGateStatus>;
+  /** True when `checkRoleGate` says the role may start work. */
+  mayStartWork(role: RoleGateRole, now?: Date): Promise<boolean>;
+  recordRoleInfra(role: RoleGateRole, now?: Date): Promise<void>;
+  recordRoleSuccess(role: RoleGateRole): Promise<void>;
+  recordRoleQuotaWait(role: RoleGateRole, until: Date | number): Promise<void>;
 }
 
 export interface IssueSkipLatch {
@@ -523,6 +538,60 @@ CREATE UNIQUE INDEX IF NOT EXISTS review_kicks_idempotency_key
   WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
 `;
 
+export const ROLE_GATES_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS role_gates (
+  role TEXT PRIMARY KEY,
+  infra_consecutive INTEGER NOT NULL DEFAULT 0,
+  infra_open_until TIMESTAMPTZ,
+  quota_until TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`;
+
+export type RoleGateRole = "engine" | "worker";
+
+export interface RoleGateStatus {
+  role: RoleGateRole;
+  mayStart: boolean;
+  infraBlocked: boolean;
+  quotaBlocked: boolean;
+  infraConsecutive: number;
+  infraOpenUntil: number | null;
+  quotaUntil: number | null;
+}
+
+export function emptyRoleGateStatus(role: RoleGateRole): RoleGateStatus {
+  return {
+    role,
+    mayStart: true,
+    infraBlocked: false,
+    quotaBlocked: false,
+    infraConsecutive: 0,
+    infraOpenUntil: null,
+    quotaUntil: null,
+  };
+}
+
+export function roleGateStatusFromMs(input: {
+  role: RoleGateRole;
+  infraConsecutive: number;
+  infraOpenUntil: number | null;
+  quotaUntil: number | null;
+  nowMs: number;
+}): RoleGateStatus {
+  const infraBlocked = input.infraOpenUntil != null && input.nowMs < input.infraOpenUntil;
+  const quotaBlocked = input.quotaUntil != null && input.nowMs < input.quotaUntil;
+  return {
+    role: input.role,
+    mayStart: !infraBlocked && !quotaBlocked,
+    infraBlocked,
+    quotaBlocked,
+    infraConsecutive: input.infraConsecutive,
+    infraOpenUntil: input.infraOpenUntil,
+    quotaUntil: input.quotaUntil,
+  };
+}
+
 const BACKOFF_ERROR_PREDICATE =
   "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%')";
 
@@ -765,6 +834,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
+  private readonly roleGates = new Map<
+    RoleGateRole,
+    { infraConsecutive: number; infraOpenUntil: number | null; quotaUntil: number | null }
+  >();
   private readonly kickLog: KickLogRecord[] = [];
   private nextKickId = 1;
   private nextRunUsageId = 1;
@@ -1816,7 +1889,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       };
       this.rows.push(job);
       this.issueSkipLatches.set(latchKey, { generation, skipReason: null });
-      await this.skipLatches.delete({ owner: input.owner, repo: input.repo, issueNumber: input.issueNumber });
+      // Worker kick clears only worker latch cells; review stuck lives in
+      // review_stuck on the same row and must survive.
+      await this.skipLatches.put(
+        { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber },
+        { followup: {}, conflict: {}, ci: {}, stuck: {} }
+      );
       await this.sits.clear(input.owner, input.repo, input.issueNumber);
       const entry = record(terminal.id, job.id, "ok");
       return { status: "ok", job: { ...job }, terminalId: terminal.id, deduped: false, kickLogId: entry.id };
@@ -1920,7 +1998,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const current = this.issueSkipLatches.get(key);
       const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
       this.issueSkipLatches.set(key, next);
-      await this.skipLatches.delete({ owner, repo, issueNumber });
+      // Worker kill-switch clears only worker latch cells; review stuck lives
+      // in review_stuck on the same row and must survive.
+      await this.skipLatches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
       await this.sits.clear(owner, repo, issueNumber);
       return { ...next };
     });
@@ -1931,6 +2011,62 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const key = issueSkipLatchKey(owner, repo, issueNumber);
       const current = this.issueSkipLatches.get(key);
       this.issueSkipLatches.set(key, { generation: current?.generation ?? 0, skipReason: reason });
+    });
+  }
+
+  checkRoleGate(role: RoleGateRole, now = new Date()): Promise<RoleGateStatus> {
+    return this.locked(() => {
+      const gate = this.roleGates.get(role);
+      return roleGateStatusFromMs({
+        role,
+        infraConsecutive: gate?.infraConsecutive ?? 0,
+        infraOpenUntil: gate?.infraOpenUntil ?? null,
+        quotaUntil: gate?.quotaUntil ?? null,
+        nowMs: now.getTime(),
+      });
+    });
+  }
+
+  mayStartWork(role: RoleGateRole, now = new Date()): Promise<boolean> {
+    return this.checkRoleGate(role, now).then((status) => status.mayStart);
+  }
+
+  recordRoleInfra(role: RoleGateRole, now = new Date()): Promise<void> {
+    return this.locked(() => {
+      const nowMs = now.getTime();
+      const gate = this.roleGates.get(role) ?? { infraConsecutive: 0, infraOpenUntil: null, quotaUntil: null };
+      const consecutive = gate.infraConsecutive + 1;
+      const halfOpen = gate.infraOpenUntil != null && gate.infraOpenUntil <= nowMs;
+      const shouldOpen = halfOpen || consecutive >= INFRA_BREAKER_CONSECUTIVE;
+      this.roleGates.set(role, {
+        infraConsecutive: consecutive,
+        infraOpenUntil: shouldOpen ? nowMs + INFRA_BREAKER_COOLDOWN_MS : gate.infraOpenUntil,
+        quotaUntil: gate.quotaUntil,
+      });
+    });
+  }
+
+  recordRoleSuccess(role: RoleGateRole): Promise<void> {
+    return this.locked(() => {
+      const gate = this.roleGates.get(role);
+      this.roleGates.set(role, {
+        infraConsecutive: 0,
+        infraOpenUntil: null,
+        quotaUntil: gate?.quotaUntil ?? null,
+      });
+    });
+  }
+
+  recordRoleQuotaWait(role: RoleGateRole, until: Date | number): Promise<void> {
+    return this.locked(() => {
+      const untilMs = until instanceof Date ? until.getTime() : until;
+      if (!Number.isFinite(untilMs)) return;
+      const gate = this.roleGates.get(role) ?? { infraConsecutive: 0, infraOpenUntil: null, quotaUntil: null };
+      this.roleGates.set(role, {
+        infraConsecutive: gate.infraConsecutive,
+        infraOpenUntil: gate.infraOpenUntil,
+        quotaUntil: gate.quotaUntil == null ? untilMs : Math.max(gate.quotaUntil, untilMs),
+      });
     });
   }
 }
@@ -2072,6 +2208,7 @@ const REQUIRED_LEDGER_TABLES = [
   "pr_writer_provenance",
   "pr_publication_intents",
   "jumi_run_usage",
+  "role_gates",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -2138,6 +2275,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(REVIEW_KICKS_SCHEMA_SQL);
         await tx.unsafe(PROVENANCE_SCHEMA_SQL);
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
+        await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);
@@ -2879,6 +3017,74 @@ export class PgReviewJobStore implements ReviewJobStore {
        ON CONFLICT (owner, repo, issue_number)
        DO UPDATE SET skip_reason = EXCLUDED.skip_reason, updated_at = NOW()`,
       [owner, repo, issueNumber, reason]
+    );
+  }
+
+  async checkRoleGate(role: RoleGateRole, now = new Date()): Promise<RoleGateStatus> {
+    const rows = asRows<{ infra_consecutive: unknown; infra_open_until: unknown; quota_until: unknown }>(
+      await this.sql.unsafe(`SELECT infra_consecutive, infra_open_until, quota_until FROM role_gates WHERE role = $1`, [
+        role,
+      ])
+    );
+    const row = rows[0];
+    if (!row) return emptyRoleGateStatus(role);
+    return roleGateStatusFromMs({
+      role,
+      infraConsecutive: num(row.infra_consecutive),
+      infraOpenUntil: epoch(row.infra_open_until),
+      quotaUntil: epoch(row.quota_until),
+      nowMs: now.getTime(),
+    });
+  }
+
+  async mayStartWork(role: RoleGateRole, now = new Date()): Promise<boolean> {
+    return (await this.checkRoleGate(role, now)).mayStart;
+  }
+
+  async recordRoleInfra(role: RoleGateRole, now = new Date()): Promise<void> {
+    const nowIso = now.toISOString();
+    const openUntilIso = new Date(now.getTime() + INFRA_BREAKER_COOLDOWN_MS).toISOString();
+    await this.sql.unsafe(
+      `INSERT INTO role_gates (role, infra_consecutive, infra_open_until, updated_at)
+       VALUES ($1, 1,
+         CASE WHEN 1 >= $4 THEN $3::timestamptz ELSE NULL END,
+         NOW())
+       ON CONFLICT (role) DO UPDATE SET
+         infra_consecutive = role_gates.infra_consecutive + 1,
+         infra_open_until = CASE
+           WHEN role_gates.infra_open_until IS NOT NULL AND role_gates.infra_open_until <= $2::timestamptz
+             THEN $3::timestamptz
+           WHEN role_gates.infra_consecutive + 1 >= $4 THEN $3::timestamptz
+           ELSE role_gates.infra_open_until
+         END,
+         updated_at = NOW()`,
+      [role, nowIso, openUntilIso, INFRA_BREAKER_CONSECUTIVE]
+    );
+  }
+
+  async recordRoleSuccess(role: RoleGateRole): Promise<void> {
+    await this.sql.unsafe(
+      `INSERT INTO role_gates (role, infra_consecutive, infra_open_until, updated_at)
+       VALUES ($1, 0, NULL, NOW())
+       ON CONFLICT (role) DO UPDATE SET infra_consecutive = 0, infra_open_until = NULL, updated_at = NOW()`,
+      [role]
+    );
+  }
+
+  async recordRoleQuotaWait(role: RoleGateRole, until: Date | number): Promise<void> {
+    const untilMs = until instanceof Date ? until.getTime() : until;
+    if (!Number.isFinite(untilMs)) return;
+    await this.sql.unsafe(
+      `INSERT INTO role_gates (role, quota_until, updated_at)
+       VALUES ($1, $2::timestamptz, NOW())
+       ON CONFLICT (role) DO UPDATE SET
+         quota_until = CASE
+           WHEN role_gates.quota_until IS NULL THEN EXCLUDED.quota_until
+           WHEN EXCLUDED.quota_until > role_gates.quota_until THEN EXCLUDED.quota_until
+           ELSE role_gates.quota_until
+         END,
+         updated_at = NOW()`,
+      [role, new Date(untilMs).toISOString()]
     );
   }
 

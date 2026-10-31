@@ -17,10 +17,10 @@ import { createForge } from "./forge.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
-import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure, workerInfraBreaker } from "./infra.ts";
+import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
-import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
+import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
@@ -47,6 +47,7 @@ export interface RunWorkerJobExtras {
   abortSignal?: AbortSignal;
   breaker?: InfraCircuitBreaker;
   quotaCooldown?: QuotaCooldown;
+  now?: () => number;
 }
 
 function log(message: string) {
@@ -193,7 +194,9 @@ export async function handleIssueCancel(
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
-    await latches.delete({ owner, repo, issueNumber });
+    // Worker cancel clears only worker cells; review stuck lives in
+    // review_stuck on the same row and must survive.
+    await latches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
   }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
@@ -306,17 +309,28 @@ export async function processWorkerTick(
   pids?: Map<string, number>
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
-  const breaker = extras.breaker ?? workerInfraBreaker;
-  if (!breaker.canLease()) {
+  const nowMs = extras.now?.() ?? Date.now();
+  const needsLedger = !extras.breaker || !extras.quotaCooldown;
+  const gate = needsLedger ? await store.checkRoleGate("worker", new Date(nowMs)) : undefined;
+  if (extras.breaker) {
+    if (!extras.breaker.canLease()) {
+      logger("breaker open");
+      return "idle";
+    }
+  } else if (gate?.infraBlocked) {
     logger("breaker open");
     return "idle";
   }
-  const quotaCooldown = extras.quotaCooldown ?? workerQuotaCooldown;
-  if (!quotaCooldown.canLease()) {
-    if (quotaCooldown.takeLog()) logger("quota cooldown");
+  if (extras.quotaCooldown) {
+    if (!extras.quotaCooldown.canLease()) {
+      if (extras.quotaCooldown.takeLog()) logger("quota cooldown");
+      return "idle";
+    }
+  } else if (gate?.quotaBlocked) {
+    logger("quota cooldown");
     return "idle";
   }
-  const row = await store.lease(leasedBy, config.leaseMs, undefined, WORKER_JOB_KINDS);
+  const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), WORKER_JOB_KINDS);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
@@ -498,7 +512,8 @@ export async function processWorkerTick(
     if (latchReason) {
       await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latchReason, logger);
     }
-    breaker.recordModelReached();
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else await store.recordRoleSuccess("worker");
     const prNumber = pushedPrNumber(result);
     if (prNumber !== undefined) {
       try {
@@ -533,7 +548,8 @@ export async function processWorkerTick(
       try {
         const now = Date.now();
         await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
-        quotaCooldown.recordWaitUntil(now + err.backoffMs);
+        if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(now + err.backoffMs);
+        else await store.recordRoleQuotaWait("worker", now + err.backoffMs);
         logDiagnostic(logger, "opencode_quota_wait", {
           count: err.count,
           next_at: new Date(now + err.backoffMs).toISOString(),
@@ -555,7 +571,8 @@ export async function processWorkerTick(
       return "processed";
     }
     if (isInfraFailure(err)) {
-      breaker.recordInfra();
+      if (extras.breaker) extras.breaker.recordInfra();
+      else await store.recordRoleInfra("worker");
       try {
         const decision = decideInfraRetry(row.error, Date.now());
         if (decision.action === "exhaust") {
@@ -581,7 +598,8 @@ export async function processWorkerTick(
       }
       return "processed";
     }
-    breaker.recordModelReached();
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else await store.recordRoleSuccess("worker");
     try {
       await store.expireLease(row.id, leasedBy);
     } catch (expireErr) {
