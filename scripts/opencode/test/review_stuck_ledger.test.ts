@@ -3,6 +3,7 @@ import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { reviewStuckStatePath } from "../src/claim.ts";
+import type { IssueApi } from "../src/gitea_issues.ts";
 import { QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
@@ -21,7 +22,8 @@ import {
   readStuckState,
   writeStuckState,
 } from "../src/stuck.ts";
-import { emptyCiMethods, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { handleIssueCancel } from "../src/worker.ts";
+import { emptyCiMethods, makeComment, makeFile, makeIssue, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
 
 function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   const defaults: ReviewApi = {
@@ -368,5 +370,47 @@ describe("review and worker stuck cells are isolated", () => {
     expect(await readReviewStuckLatch(store, "kirmanak", "demo", 7)).toMatchObject({
       fingerprints: [{ kind: "action", hash: reviewHash }],
     });
+  });
+
+  test("worker cancel without a store clears worker cells but preserves review stuck", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-nostore-"));
+    try {
+      const shared = new MemorySkipLatchStore();
+      const workerHash = fingerprintReviewArtifact("worker finding\n<!-- jumi-check: failure -->")!;
+      const reviewHash = fingerprintReviewArtifact("review finding\n<!-- jumi-check: failure -->")!;
+      await shared.put(key, {
+        followup: { round: 3 },
+        conflict: { round: 1 },
+        ci: { pending: true },
+        stuck: { fingerprints: [{ kind: "action", hash: workerHash }] },
+      });
+      await appendReviewStuckLatch(shared, "kirmanak", "demo", 7, { kind: "action", hash: reviewHash });
+      await handleIssueCancel(
+        makeWorkerConfig({ home }),
+        {} as IssueApi,
+        "kirmanak",
+        "demo",
+        7,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        shared
+      );
+      expect((await readStuckLatch(shared, key)).fingerprints).toHaveLength(0);
+      const after = await shared.get(key);
+      expect(after.followup).toEqual({});
+      expect(after.conflict).toEqual({});
+      expect(after.ci).toEqual({});
+      expect(after.stuck).toEqual({});
+      expect(after.reviewStuck).toMatchObject({
+        fingerprints: [{ kind: "action", hash: reviewHash }],
+      });
+      expect(await readReviewStuckLatch(shared, "kirmanak", "demo", 7)).toMatchObject({
+        fingerprints: [{ kind: "action", hash: reviewHash }],
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
