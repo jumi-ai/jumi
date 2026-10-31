@@ -148,6 +148,16 @@ describe("selectReviewMdSections", () => {
     expect(selection.pathSections).toBe(0);
   });
 
+  test("treats a top-level heading as the title, never a path section", () => {
+    const text = "# REVIEW.md\n\nIntro.\n\n## Security\n\nNever log tokens.\n\n## k3s/**\n\nHelm only.\n";
+    const selection = selectReviewMdSections(text, files("src/index.ts"));
+
+    expect(selection.text).toContain("Intro.");
+    expect(selection.text).toContain("## Security\n\nNever log tokens.");
+    expect(selection.text).not.toContain("Helm only.");
+    expect(selection.pathSections).toBe(1);
+  });
+
   test("truncates to the byte budget and says so", () => {
     const long = `## Rules\n\n${"é".repeat(200)}\n`;
     const selection = selectReviewMdSections(long, [], 51);
@@ -192,5 +202,48 @@ describe("loadReviewMdSections", () => {
       expect(selection?.truncated).toBe(true);
       expect(selection?.text.length).toBe(1_000);
     });
+  });
+});
+
+describe("this repository's REVIEW.md", () => {
+  const repoRoot = join(process.cwd(), "../..");
+  const REPO_WIDE_HEADINGS = [
+    "# Jumi review rules",
+    "## What CI already proves",
+    "## Cross-cutting checks",
+    "## Not a finding",
+    "## One root cause, one finding",
+  ];
+  const PATH_SECTIONS = 9;
+  const REPO_WIDE_MAX_BYTES = 4_000;
+
+  const load = async () => {
+    const file = await readReviewMd(repoRoot);
+    if (!file) throw new Error("REVIEW.md is missing from the repository root");
+    return file.text;
+  };
+  const trackedFiles = () => Bun.spawnSync(["git", "ls-files"], { cwd: repoRoot }).stdout.toString().trim().split("\n");
+
+  test("a review that matches no path gets exactly the repo-wide sections", async () => {
+    const selection = selectReviewMdSections(await load(), files("no/such/file"));
+    expect([...selection.text.matchAll(/^##? .+$/gm)].map(([heading]) => heading)).toEqual(REPO_WIDE_HEADINGS);
+    expect(selection.pathSections).toBe(PATH_SECTIONS);
+    expect(selection.matchedPathSections).toBe(0);
+    expect(selection.bytes).toBeLessThanOrEqual(REPO_WIDE_MAX_BYTES);
+  });
+
+  test("every path glob matches a tracked file", async () => {
+    const tracked = trackedFiles();
+    const headings = (await load()).match(/^##? .+$/gm) ?? [];
+    const globs = headings.flatMap((heading) => headingGlobs(heading.replace(/^#+ /, "")) ?? []);
+    expect(globs.length).toBeGreaterThan(0);
+    const dead = globs.filter((glob) => !tracked.some((path) => globToRegExp(glob).test(path)));
+    expect(dead).toEqual([]);
+  });
+
+  test("a pull touching every tracked file still fits the prompt budget", async () => {
+    const selection = selectReviewMdSections(await load(), files(...trackedFiles()));
+    expect(selection.matchedPathSections).toBe(selection.pathSections);
+    expect(selection.truncated).toBe(false);
   });
 });

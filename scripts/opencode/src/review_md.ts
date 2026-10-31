@@ -5,8 +5,8 @@ import type { PullFile } from "./ports.ts";
 /**
  * Repo-owned review rules: `REVIEW.md` at the root of the pull request head.
  *
- * A heading that is only a comma-separated list of gitignore-style globs is a
- * path section and applies when a changed file matches one of them. Any other
+ * A subheading that is only a comma-separated list of gitignore-style globs is
+ * a path section and applies when a changed file matches one of them. Any other
  * heading is repo-wide and always applies. The parent pastes the applicable
  * sections into the review prompt so the child never has to discover the file.
  */
@@ -133,7 +133,9 @@ function parseSections(text: string): Section {
     const level = heading[1].length;
     const title = (heading[2] ?? "").replace(/(?:^|[ \t]+)#+$/, "").trim();
     while (stack[stack.length - 1].level >= level) stack.pop();
-    const globs = headingGlobs(title);
+    // A top-level heading is the file's title. As a path section it would take
+    // every `##` section with it: `# REVIEW.md` would drop the whole file.
+    const globs = level === 1 ? undefined : headingGlobs(title);
     // A repo-owned heading must never break the review: an invalid character
     // class (e.g. `## [z-a].ts`) fails to compile, so fall back to repo-wide.
     let compiled: RegExp[] | undefined;
