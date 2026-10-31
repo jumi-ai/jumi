@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { GiteaAPI, toInlineComment, toPullReview } from "../src/api.ts";
+import { stickyFailureDetail } from "../src/sticky_failure.ts";
 import { makeUser } from "./fixtures.ts";
 
 const originalFetch = globalThis.fetch;
@@ -616,6 +617,75 @@ describe("GiteaAPI", () => {
     await expect(new GiteaAPI("https://gitea.example.test", "token-1").getPR("owner", "repo", 1)).rejects.toThrow(
       "500: nope"
     );
+  });
+
+  test("keeps the status, a short body, and scrubs the parent token", async () => {
+    const token = "gitea_parent_secret_value";
+    globalThis.fetch = (async () =>
+      new Response(`denied ${token} ${"y".repeat(400)}`, { status: 502 })) as unknown as typeof fetch;
+
+    const err = await new GiteaAPI(`https://gitea.example.test/${token}`, token).getPR("owner", "repo", 1).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(err).toBeInstanceOf(Error);
+    const message = err instanceof Error ? err.message : "";
+    expect(message).toContain("Gitea API GET");
+    expect(message).toContain("→ 502:");
+    expect(message).toContain("denied");
+    expect(message).toContain("https://gitea.example.test/***/api/v1/");
+    expect(message).not.toContain(token);
+    expect(message.endsWith("…")).toBe(true);
+  });
+
+  test("off-host attachment failure scrubs the parent token without sending it", async () => {
+    const token = "gitea_parent_secret_value";
+    let authorization: string | undefined = "unset";
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      return new Response(`echo ${token}`, { status: 403 });
+    }) as unknown as typeof fetch;
+
+    const err = await new GiteaAPI("https://gitea.example.test", token)
+      .downloadAttachmentBytes("https://files.example/a")
+      .then(
+        () => undefined,
+        (caught: unknown) => caught
+      );
+    expect(authorization).toBeUndefined();
+    expect(err).toBeInstanceOf(Error);
+    const message = err instanceof Error ? err.message : "";
+    expect(message).toContain("Gitea attachment GET");
+    expect(message).toContain("→ 403:");
+    expect(message).not.toContain(token);
+  });
+
+  test("same-host attachment still sends the parent token", async () => {
+    let authorization: string | undefined;
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      return new Response(new Uint8Array([1, 2, 3]));
+    }) as unknown as typeof fetch;
+
+    const bytes = await new GiteaAPI("https://gitea.example.test", "token-1").downloadAttachmentBytes(
+      "https://gitea.example.test/attachments/1"
+    );
+    expect(authorization).toBe("token token-1");
+    expect(bytes).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  test("a base URL with a space still suppresses the sticky request string", async () => {
+    const token = "gitea_parent_secret_value";
+    globalThis.fetch = (async () => new Response(`leaked ${token}`, { status: 500 })) as unknown as typeof fetch;
+    const err = await new GiteaAPI("https://gitea.example/proxy path", token).getPR("owner", "repo", 1).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(stickyFailureDetail(err, [token])).toBe("forge API request failed");
+    const message = err instanceof Error ? err.message : "";
+    expect(message).toContain("→ 500:");
+    expect(message).toContain("proxy path");
+    expect(message).not.toContain(token);
   });
 
   test("maps Gitea JSON to host-agnostic Task and Pull refs", async () => {

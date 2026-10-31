@@ -1130,6 +1130,67 @@ describe("GithubAPI", () => {
     await expect(api().getPR("owner", "repo", 1)).rejects.toThrow("500: nope");
   });
 
+  test("keeps the status, a short body, and scrubs the parent token", async () => {
+    const token = "ghs_parent_secret_value";
+    const encoded = encodeURIComponent(token);
+    globalThis.fetch = (async () =>
+      new Response(`denied ${token} ${encoded} ${"x".repeat(400)}`, { status: 401 })) as unknown as typeof fetch;
+
+    const client = new GithubAPI({ token, apiUrl: `https://example.test/${token}` });
+    const err = await client.getPR("owner", "repo", 1).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(err).toBeInstanceOf(Error);
+    const message = err instanceof Error ? err.message : "";
+    expect(message).toContain("GitHub API GET");
+    expect(message).toContain("→ 401:");
+    expect(message).toContain("denied");
+    expect(message).toContain("https://example.test/***");
+    expect(message).not.toContain(token);
+    expect(message).not.toContain(encoded);
+    expect(message.endsWith("…")).toBe(true);
+    const excerpt = message.split("→ 401: ")[1] ?? "";
+    expect(Array.from(excerpt).length).toBeLessThanOrEqual(241);
+  });
+
+  test("off-host attachment failure scrubs the static token without sending it", async () => {
+    const token = "plainparenttokenvalue123";
+    const otherPat = `ghp_${"c".repeat(36)}`;
+    let authorization: string | undefined = "unset";
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      return new Response(`echo ${token} ${otherPat}`, { status: 403 });
+    }) as unknown as typeof fetch;
+
+    const client = new GithubAPI({ token, apiUrl: "https://api.github.com" });
+    const err = await client.downloadAttachmentBytes("https://objects.example/file").then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(authorization).toBeUndefined();
+    expect(err).toBeInstanceOf(Error);
+    const message = err instanceof Error ? err.message : "";
+    expect(message).toContain("GitHub attachment GET");
+    expect(message).toContain("→ 403:");
+    expect(message).not.toContain(token);
+    expect(message).not.toContain(otherPat);
+  });
+
+  test("same-host attachment still sends the bearer token", async () => {
+    let authorization: string | undefined;
+    globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+      authorization = (init?.headers as Record<string, string> | undefined)?.Authorization;
+      return new Response(new Uint8Array([1]));
+    }) as unknown as typeof fetch;
+
+    const bytes = await new GithubAPI({ token: "token-1", apiUrl: "https://api.github.com" }).downloadAttachmentBytes(
+      "https://api.github.com/attachments/1"
+    );
+    expect(authorization).toBe("Bearer token-1");
+    expect(bytes).toEqual(new Uint8Array([1]));
+  });
+
   test("maps GitHub JSON to host-agnostic Task and Pull refs", async () => {
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       if (String(url).includes("/issues/12")) {

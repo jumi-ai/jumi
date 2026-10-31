@@ -51,6 +51,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
+import { stickyFailureDetail } from "./sticky_failure.ts";
 import {
   appendStuckLatchFingerprint,
   evaluateStuck,
@@ -887,8 +888,8 @@ export async function implementIssue(
         }
       };
 
-      const skipBlocked = async (reason: string) => {
-        await diary(reason);
+      const skipBlocked = async (reason: string, comment = reason) => {
+        await diary(comment);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
         return { status: "skipped" as const, reason };
       };
@@ -906,7 +907,12 @@ export async function implementIssue(
           });
         } catch (err) {
           await deletePushedIssueBranch().catch(() => undefined);
-          return skipBlocked(`failed to set dependency: ${err instanceof Error ? err.message : String(err)}`);
+          const raw = err instanceof Error ? err.message : String(err);
+          const secrets = [loop.auth.token];
+          return skipBlocked(
+            `failed to set dependency: ${redactGitSecrets(raw, secrets)}`,
+            `failed to set dependency: ${stickyFailureDetail(err, secrets)}`
+          );
         }
         await deletePushedIssueBranch().catch(() => undefined);
         return skipBlocked(blockedOnComment([blocker], owner, repo));
@@ -1120,9 +1126,7 @@ export async function implementIssue(
         });
         return;
       }
-      await diary(
-        redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token])
-      ).catch(() => undefined);
+      await diary(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

@@ -1,4 +1,5 @@
 import { createPrivateKey, type KeyObject, sign } from "node:crypto";
+import { forgeRequestError } from "./forge_errors.ts";
 
 const JWT_IAT_SKEW_SEC = 60;
 const JWT_LIFETIME_SEC = 10 * 60;
@@ -213,32 +214,48 @@ export class GithubAppAuth {
 
   private async fetchRepoInstallation(owner: string, repo: string): Promise<string> {
     const url = `${this.apiUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/installation`;
+    const jwt = this.createJwt();
     const res = await this.fetchImpl(url, {
       method: "GET",
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.createJwt()}`,
+        Authorization: `Bearer ${jwt}`,
       },
     });
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      throw new Error(`GitHub API GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [jwt],
+      });
     }
     return readRepositoryInstallationId(text);
   }
 
   private async mintInstallationToken(installationId: string): Promise<string> {
     const url = `${this.apiUrl}/app/installations/${encodeURIComponent(installationId)}/access_tokens`;
+    const jwt = this.createJwt();
     const res = await this.fetchImpl(url, {
       method: "POST",
       headers: {
         Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${this.createJwt()}`,
+        Authorization: `Bearer ${jwt}`,
       },
     });
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      throw new Error(`GitHub API POST ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method: "POST",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [jwt],
+      });
     }
     const minted = readInstallationToken(text);
     this.tokens.set(installationId, minted);
