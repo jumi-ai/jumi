@@ -19,9 +19,13 @@
  * The same runs prove the rest of what a repo brings: its `AGENTS.md` reaches the
  * model, its plugin loads, and its skills load without running their commands.
  *
+ * A web search runs under each shipped config too. With no provider selected,
+ * OpenCode 2 cancels the search headless and `run` exits 1 after a finished
+ * session, which discards the review.
+ *
  * Exit 0 when every case matches its expectation, 1 otherwise.
  */
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -50,6 +54,15 @@ const RUN_TIMEOUT_MS = 60_000;
 /** The checkout roots OpenCode 2 scans on its own. */
 const CHECKOUT_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/skills"];
 const SKILL_BODY_MARKER = "JUMI-SKILL-PROBE-BODY";
+
+const SHIPPED_CONFIGS = ["opencode-review.json", "opencode-implement.json"];
+/** Keeps the search off the network: a failed search must leave the run alive. */
+const SEARCH_OFFLINE_ENV = {
+  HTTPS_PROXY: "http://127.0.0.1:9",
+  HTTP_PROXY: "http://127.0.0.1:9",
+  ALL_PROXY: "http://127.0.0.1:9",
+  NO_PROXY: "127.0.0.1",
+};
 
 type Expectation = "allow" | "deny";
 
@@ -105,10 +118,18 @@ interface RunState {
   instructionsSeen: boolean;
   /** Skill the stub's model loads instead of calling `webfetch`, when set. */
   skillId?: string;
+  /** True when the stub's model calls `websearch` instead of `webfetch`. */
+  search?: boolean;
 }
 
 function sse(chunks: readonly unknown[]): string {
   return `${chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("")}data: [DONE]\n\n`;
+}
+
+function toolCall(state: RunState): { name: string; arguments: string } {
+  if (state.search) return { name: "websearch", arguments: JSON.stringify({ query: "jumi probe" }) };
+  if (state.skillId) return { name: "skill", arguments: JSON.stringify({ id: state.skillId }) };
+  return { name: "webfetch", arguments: JSON.stringify({ url: state.url, format: "text" }) };
 }
 
 /**
@@ -140,9 +161,7 @@ function startProbeServer(state: RunState) {
                 index: 0,
                 id: "call_probe",
                 type: "function",
-                function: state.skillId
-                  ? { name: "skill", arguments: JSON.stringify({ id: state.skillId }) }
-                  : { name: "webfetch", arguments: JSON.stringify({ url: state.url, format: "text" }) },
+                function: toolCall(state),
               },
             ],
           };
@@ -188,7 +207,7 @@ export default { id: "jumi-probe", setup: async () => writeFileSync(${JSON.strin
   );
 }
 
-async function writeProbeConfig(dir: string, origin: string): Promise<string> {
+async function writeProbeConfig(dir: string, origin: string, websearch?: unknown): Promise<string> {
   const path = join(dir, "opencode-probe.json");
   await writeFile(
     path,
@@ -197,6 +216,7 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
       share: "disabled",
       update: "disable",
       snapshots: false,
+      websearch,
       providers: {
         [PROVIDER_ID]: {
           name: "jumi webfetch probe",
@@ -209,6 +229,7 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
       // at run time, exactly the way production delivers them.
       permissions: [
         { action: "webfetch", resource: "*", effect: "allow" },
+        { action: "websearch", resource: "*", effect: "allow" },
         { action: "skill", resource: "*", effect: "allow" },
         { action: "edit", resource: "*", effect: "deny" },
         { action: "subagent", resource: "*", effect: "deny" },
@@ -222,7 +243,8 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
 
 async function runOpenCode(
   workdir: string,
-  configPath: string
+  configPath: string,
+  extraEnv: Record<string, string> = {}
 ): Promise<{ code: number; output: string; timedOut: boolean }> {
   const proc = Bun.spawn(
     ["opencode", "run", "--standalone", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url"],
@@ -239,6 +261,7 @@ async function runOpenCode(
         OPENCODE_CONFIG: configPath,
         OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
         XDG_CONFIG_HOME: join(workdir, "..", "xdg-config"),
+        ...extraEnv,
       },
     }
   );
@@ -290,6 +313,7 @@ async function main(): Promise<number> {
   const dir = await mkdtemp(join(tmpdir(), "jumi-webfetch-probe-"));
   const results: CaseResult[] = [];
   const skillChecks: { ok: boolean; line: string }[] = [];
+  const searchChecks: { ok: boolean; line: string }[] = [];
   let pluginRan = false;
   try {
     const workdir = join(dir, "workspace");
@@ -334,6 +358,20 @@ async function main(): Promise<number> {
         line: `checkout ${root} skill ${loaded ? "loads" : "DID NOT LOAD"}, its hook and inline shell ${ran ? "RAN" : "did not run"}`,
       });
     }
+
+    state.skillId = undefined;
+    state.search = true;
+    for (const name of SHIPPED_CONFIGS) {
+      const shipped = JSON.parse(await readFile(join(import.meta.dir, "../../../.gitea", name), "utf8"));
+      const searchConfig = await writeProbeConfig(dir, origin, shipped.websearch);
+      state.toolResult = undefined;
+      const { code, timedOut } = await runOpenCode(workdir, searchConfig, SEARCH_OFFLINE_ENV);
+      const result = state.toolResult ?? "";
+      searchChecks.push({
+        ok: !timedOut && code === 0 && result.includes("Unable to search the web"),
+        line: `${name}: a failed web search leaves the run alive (exit ${code}, ${result.slice(0, 120) || "no tool result"})`,
+      });
+    }
   } finally {
     server.stop(true);
     await rm(dir, { recursive: true, force: true });
@@ -344,9 +382,9 @@ async function main(): Promise<number> {
   }
   console.log(`${state.instructionsSeen ? "ok  " : "FAIL"} the repository's AGENTS.md reaches the model`);
   console.log(`${pluginRan ? "ok  " : "FAIL"} the repository's plugin loads`);
-  for (const { ok, line } of skillChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
+  for (const { ok, line } of [...skillChecks, ...searchChecks]) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
   const failures = results.filter((r) => !r.ok).length;
-  if (!state.instructionsSeen || !pluginRan || skillChecks.some((check) => !check.ok)) return 1;
+  if (!state.instructionsSeen || !pluginRan || [...skillChecks, ...searchChecks].some((check) => !check.ok)) return 1;
   if (failures > 0) {
     console.error(
       `webfetch permission probe: ${failures}/${results.length} case(s) failed against the OpenCode binary`

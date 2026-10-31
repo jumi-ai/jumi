@@ -9,6 +9,7 @@ type Effect = "allow" | "ask" | "deny";
 interface OpenCodeImplementConfig {
   experimental?: { todo?: boolean };
   skills?: string[];
+  websearch?: unknown;
   permissions: { action: string; resource: string; effect: Effect }[];
 }
 
@@ -40,6 +41,10 @@ describe("opencode implement config", () => {
     readFileSync(join(process.cwd(), "../../.gitea/opencode-implement.json"), "utf8")
   ) as OpenCodeImplementConfig;
   const rulesFor = (action: string) => resourceRules(config.permissions.filter((rule) => rule.action === action));
+
+  test("names a web search provider, because a headless run exits 1 without one", () => {
+    expect(config.websearch).toEqual({ provider: "exa" });
+  });
 
   test("allows skills, tasks, and edits for the implement worker", () => {
     expect(config.skills).toEqual(["/app/review-skills"]);

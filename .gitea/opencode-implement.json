@@ -3,6 +3,7 @@
   "update": "disable",
   "share": "disabled",
   "snapshots": false,
+  "websearch": {"provider": "exa"},
   "skills": [
     "/app/review-skills"
   ],

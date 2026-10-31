@@ -25,6 +25,7 @@ interface OpenCodeReviewConfig {
     };
   };
   skills?: string[];
+  websearch?: unknown;
   permissions: { action: string; resource: string; effect: Effect }[];
 }
 
@@ -56,6 +57,10 @@ describe("opencode review config", () => {
   test("uses only OpenCode 2 config keys", () => {
     const keys = Object.keys(config);
     for (const v1 of ["autoupdate", "snapshot", "provider", "permission", "plugin"]) expect(keys).not.toContain(v1);
+  });
+
+  test("names a web search provider, because a headless run exits 1 without one", () => {
+    expect(config.websearch).toEqual({ provider: "exa" });
   });
 
   test("allows edit for JUMI_REVIEW.md while keeping other mutation-oriented tools denied", () => {
