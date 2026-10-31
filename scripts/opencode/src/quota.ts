@@ -446,3 +446,4 @@ export class QuotaCooldown {
 }
 
 export const workerQuotaCooldown = new QuotaCooldown();
+export const engineQuotaCooldown = new QuotaCooldown();

@@ -18,12 +18,12 @@ import type { IssueApi } from "./gitea_issues.ts";
 import { upsertWorkerComment } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
-import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
+import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { isQuotaWaitError } from "./quota.ts";
+import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
@@ -107,6 +107,7 @@ export interface RunReviewJobExtras {
   heartbeatMs?: number;
   jobId?: string;
   breaker?: InfraCircuitBreaker;
+  quotaCooldown?: QuotaCooldown;
   ciRelistDelayMs?: number;
   /** Lookup budget expired with no checks. Review, and say the repository has no CI. */
   assumeNoCi?: boolean;
@@ -635,12 +636,29 @@ export async function processEngineTick(
   logger: (message: string) => void = log
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
-  const breaker = extras.breaker ?? engineInfraBreaker;
-  if (!breaker.canLease()) {
+  const nowMs = extras.now?.() ?? Date.now();
+  // Injected gates are test seams: when present they own the check, otherwise
+  // the ledger gate owns it so fresh processes share the same breaker/cooldown.
+  const needsLedger = !extras.breaker || !extras.quotaCooldown;
+  const gate = needsLedger ? await store.checkRoleGate("engine", new Date(nowMs)) : undefined;
+  if (extras.breaker) {
+    if (!extras.breaker.canLease()) {
+      logger("breaker open");
+      return "idle";
+    }
+  } else if (gate?.infraBlocked) {
     logger("breaker open");
     return "idle";
   }
-  const nowMs = extras.now?.() ?? Date.now();
+  if (extras.quotaCooldown) {
+    if (!extras.quotaCooldown.canLease()) {
+      if (extras.quotaCooldown.takeLog()) logger("quota cooldown");
+      return "idle";
+    }
+  } else if (gate?.quotaBlocked) {
+    logger("quota cooldown");
+    return "idle";
+  }
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -742,7 +760,8 @@ export async function processEngineTick(
       await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
     }
     await handoverFollowUp(store, api, config, row, result, logger);
-    breaker.recordModelReached();
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else await store.recordRoleSuccess("engine");
     return "processed";
   } catch (err) {
     const shutdown = Boolean(extras.abortSignal?.aborted);
@@ -757,6 +776,9 @@ export async function processEngineTick(
     if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
       try {
         const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        const quotaUntil = Date.now() + err.backoffMs;
+        if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(quotaUntil);
+        else await store.recordRoleQuotaWait("engine", quotaUntil);
         if (!ok) {
           logger(`engine quota requeue failed ${row.jobKey}: lease lost or result persisted`);
           try {
@@ -789,7 +811,8 @@ export async function processEngineTick(
       return "processed";
     }
     if (!shutdown && !abort.signal.aborted && isInfraFailure(err)) {
-      breaker.recordInfra();
+      if (extras.breaker) extras.breaker.recordInfra();
+      else await store.recordRoleInfra("engine");
       try {
         const decision = decideInfraRetry(row.error, Date.now());
         if (decision.action === "exhaust") {
@@ -818,7 +841,10 @@ export async function processEngineTick(
       }
       return "processed";
     }
-    if (!shutdown && !abort.signal.aborted) breaker.recordModelReached();
+    if (!shutdown && !abort.signal.aborted) {
+      if (extras.breaker) extras.breaker.recordModelReached();
+      else await store.recordRoleSuccess("engine");
+    }
     let published = false;
     try {
       const current = await store.get(row.id);
