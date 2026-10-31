@@ -373,6 +373,7 @@ describe("POST /webhooks/github", () => {
       conflict: {},
       ci: {},
       stuck: {},
+      reviewStuck: {},
     });
   });
 

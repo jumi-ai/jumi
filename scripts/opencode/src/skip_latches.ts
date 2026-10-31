@@ -11,6 +11,7 @@ export interface IssueSkipLatchRecord {
   conflict: unknown;
   ci: unknown;
   stuck: unknown;
+  reviewStuck: unknown;
 }
 
 export interface SkipLatchStore {
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS issue_skip_latches (
   conflict JSONB NOT NULL DEFAULT '{}'::jsonb,
   ci JSONB NOT NULL DEFAULT '{}'::jsonb,
   stuck JSONB NOT NULL DEFAULT '{}'::jsonb,
+  review_stuck JSONB NOT NULL DEFAULT '{}'::jsonb,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (owner, repo, issue_number)
 );
@@ -40,6 +42,7 @@ ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS followup JSONB NOT NULL 
 ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS conflict JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS ci JSONB NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS stuck JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS review_stuck JSONB NOT NULL DEFAULT '{}'::jsonb;
 `;
 
 const memoryByHome = new Map<string, MemorySkipLatchStore>();
@@ -53,7 +56,7 @@ export function latchMapKey(key: SkipLatchKey): string {
 }
 
 export function emptySkipLatchRecord(): IssueSkipLatchRecord {
-  return { followup: {}, conflict: {}, ci: {}, stuck: {} };
+  return { followup: {}, conflict: {}, ci: {}, stuck: {}, reviewStuck: {} };
 }
 
 export function parseWorkerLatchPath(
@@ -95,6 +98,7 @@ function cloneRecord(record: IssueSkipLatchRecord): IssueSkipLatchRecord {
     conflict: structuredClone(record.conflict),
     ci: structuredClone(record.ci),
     stuck: structuredClone(record.stuck),
+    reviewStuck: structuredClone(record.reviewStuck),
   };
 }
 
@@ -113,6 +117,7 @@ export class MemorySkipLatchStore implements SkipLatchStore {
       conflict: patch.conflict !== undefined ? structuredClone(patch.conflict) : current.conflict,
       ci: patch.ci !== undefined ? structuredClone(patch.ci) : current.ci,
       stuck: patch.stuck !== undefined ? structuredClone(patch.stuck) : current.stuck,
+      reviewStuck: patch.reviewStuck !== undefined ? structuredClone(patch.reviewStuck) : current.reviewStuck,
     };
     this.rows.set(latchMapKey(key), next);
   }
@@ -159,9 +164,9 @@ export class PgSkipLatchStore implements SkipLatchStore {
   }
 
   async get(key: SkipLatchKey): Promise<IssueSkipLatchRecord> {
-    const rows = asRows<{ followup: unknown; conflict: unknown; ci: unknown; stuck: unknown }>(
+    const rows = asRows<{ followup: unknown; conflict: unknown; ci: unknown; stuck: unknown; review_stuck: unknown }>(
       await this.sql.unsafe(
-        `SELECT followup, conflict, ci, stuck FROM issue_skip_latches
+        `SELECT followup, conflict, ci, stuck, review_stuck FROM issue_skip_latches
          WHERE owner = $1 AND repo = $2 AND issue_number = $3`,
         [key.owner, key.repo, key.issueNumber]
       )
@@ -173,6 +178,7 @@ export class PgSkipLatchStore implements SkipLatchStore {
       conflict: asJson(row.conflict),
       ci: asJson(row.ci),
       stuck: asJson(row.stuck),
+      reviewStuck: asJson(row.review_stuck),
     };
   }
 
@@ -181,22 +187,25 @@ export class PgSkipLatchStore implements SkipLatchStore {
     const conflict = jsonParam(patch.conflict);
     const ci = jsonParam(patch.ci);
     const stuck = jsonParam(patch.stuck);
+    const reviewStuck = jsonParam(patch.reviewStuck);
     await this.sql.unsafe(
-      `INSERT INTO issue_skip_latches (owner, repo, issue_number, followup, conflict, ci, stuck)
+      `INSERT INTO issue_skip_latches (owner, repo, issue_number, followup, conflict, ci, stuck, review_stuck)
        VALUES (
          $1, $2, $3,
          COALESCE($4::jsonb, '{}'::jsonb),
          COALESCE($5::jsonb, '{}'::jsonb),
          COALESCE($6::jsonb, '{}'::jsonb),
-         COALESCE($7::jsonb, '{}'::jsonb)
+         COALESCE($7::jsonb, '{}'::jsonb),
+         COALESCE($8::jsonb, '{}'::jsonb)
        )
        ON CONFLICT (owner, repo, issue_number) DO UPDATE SET
          followup = COALESCE($4::jsonb, issue_skip_latches.followup),
          conflict = COALESCE($5::jsonb, issue_skip_latches.conflict),
          ci = COALESCE($6::jsonb, issue_skip_latches.ci),
          stuck = COALESCE($7::jsonb, issue_skip_latches.stuck),
+         review_stuck = COALESCE($8::jsonb, issue_skip_latches.review_stuck),
          updated_at = NOW()`,
-      [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck]
+      [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck, reviewStuck]
     );
   }
 

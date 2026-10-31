@@ -192,7 +192,9 @@ export async function handleIssueCancel(
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
-    await latches.delete({ owner, repo, issueNumber });
+    // Worker cancel clears only worker cells; review stuck lives in
+    // review_stuck on the same row and must survive.
+    await latches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
   }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);

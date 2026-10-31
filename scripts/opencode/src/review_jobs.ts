@@ -149,7 +149,8 @@ export interface ReviewJobStore {
   /**
    * Stuck-latch kick for an open closer. Clears the issue skip
    * latch (bumping the generation and dropping the stuck skip reason plus
-   * the followup/conflict/ci/stuck latch state) and inserts a worker job
+   * the worker followup/conflict/ci/stuck latch state, preserving review
+   * stuck) and inserts a worker job
    * for the open closer in one transaction; the router sit goes away
    * because that enqueue landed, never via a bare sit delete. A
    * conflict-capped latch (`stuck: cannot resolve conflicts`, including
@@ -1724,7 +1725,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       };
       this.rows.push(job);
       this.issueSkipLatches.set(latchKey, { generation, skipReason: null });
-      await this.skipLatches.delete({ owner: input.owner, repo: input.repo, issueNumber: input.issueNumber });
+      // Worker kick clears only worker latch cells; review stuck lives in
+      // review_stuck on the same row and must survive.
+      await this.skipLatches.put(
+        { owner: input.owner, repo: input.repo, issueNumber: input.issueNumber },
+        { followup: {}, conflict: {}, ci: {}, stuck: {} }
+      );
       await this.sits.clear(input.owner, input.repo, input.issueNumber);
       const entry = record(terminal.id, job.id, "ok");
       return { status: "ok", job: { ...job }, terminalId: terminal.id, deduped: false, kickLogId: entry.id };
@@ -1828,7 +1834,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const current = this.issueSkipLatches.get(key);
       const next: IssueSkipLatch = { generation: (current?.generation ?? 0) + 1, skipReason: null };
       this.issueSkipLatches.set(key, next);
-      await this.skipLatches.delete({ owner, repo, issueNumber });
+      // Worker kill-switch clears only worker latch cells; review stuck lives
+      // in review_stuck on the same row and must survive.
+      await this.skipLatches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
       await this.sits.clear(owner, repo, issueNumber);
       return { ...next };
     });
