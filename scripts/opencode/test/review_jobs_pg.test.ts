@@ -141,13 +141,13 @@ describePg("PgReviewJobStore against real postgres", () => {
     store = new PgReviewJobStore(sql);
     // Start from an empty database so `migrate()` is exercised from scratch, not against
     // whatever a previous run left behind.
-    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, role_gates`);
+    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
     await store.migrate();
   });
 
   beforeEach(async () => {
     if (!databaseUrl) return;
-    await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
     await sql.unsafe(`TRUNCATE role_gates`);
     // Re-assert the schema: the migrate test drops an index on purpose.
     await store.migrate();
@@ -436,6 +436,78 @@ describePg("PgReviewJobStore against real postgres", () => {
     } finally {
       await rm(workspace, { recursive: true, force: true });
     }
+  });
+
+  test("run usage rows round-trip through postgres aggregates", async () => {
+    await store.enqueue(makeJob());
+    const leased = (await store.lease("engine-1", 60_000))!;
+    await store.recordRunUsageRows([
+      {
+        jobId: leased.id,
+        jobKey: leased.jobKey,
+        kind: "review",
+        runner: "opencode",
+        model: "xai/grok-4.6",
+        agentInstance: "jumi",
+        tokensInput: 15,
+        tokensCacheRead: 120,
+        tokensOutput: 4,
+        tokensCacheWrite: 1,
+        tokensReasoning: 6,
+        sessions: 2,
+        exitClass: "ok",
+        startedAt: new Date(1_000_000),
+        endedAt: new Date(1_090_000),
+        durationSeconds: 90,
+      },
+      {
+        jobId: leased.id,
+        jobKey: leased.jobKey,
+        kind: "review",
+        runner: "claude",
+        model: "claude-opus-5",
+        agentInstance: "jumi",
+        tokensInput: 0,
+        tokensCacheRead: 0,
+        tokensOutput: 0,
+        tokensCacheWrite: 0,
+        tokensReasoning: 0,
+        sessions: 0,
+        exitClass: "auth",
+        startedAt: new Date(2_000_000),
+        endedAt: new Date(2_008_000),
+        durationSeconds: 8,
+      },
+    ]);
+    // Empty batches are a no-op, never an INSERT with zero tuples.
+    await store.recordRunUsageRows([]);
+    const tokens = await store.getRunUsageTokenTotals();
+    expect(tokens).toContainEqual({
+      agentInstance: "jumi",
+      source: "opencode",
+      model: "xai/grok-4.6",
+      tokenType: "input",
+      value: 15,
+    });
+    expect(tokens).toContainEqual({
+      agentInstance: "jumi",
+      source: "claude",
+      model: "claude-opus-5",
+      tokenType: "output",
+      value: 0,
+    });
+    expect(await store.getRunUsageSessionTotals()).toContainEqual({
+      agentInstance: "jumi",
+      source: "opencode",
+      model: "xai/grok-4.6",
+      value: 2,
+    });
+    const exits = await store.getRunExitCounts();
+    expect(exits).toContainEqual({ kind: "review", exitClass: "ok", count: 1 });
+    expect(exits).toContainEqual({ kind: "review", exitClass: "auth", count: 1 });
+    const durations = await store.getRunDurations();
+    expect(durations).toContainEqual({ kind: "review", exitClass: "ok", durationSeconds: 90 });
+    expect(await indexExists("jumi_run_usage_job_key")).toBe(true);
   });
 
   function makeReviewApi(): ReviewApi {

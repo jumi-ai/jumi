@@ -13,6 +13,14 @@ import {
   type RouterSitStore,
 } from "./router_sits.ts";
 import {
+  type DurationRow,
+  type ExitCountRow,
+  type NewRunUsageRow,
+  RUN_USAGE_SCHEMA_SQL,
+  type SessionTotalRow,
+  type TokenTotalRow,
+} from "./run_usage.ts";
+import {
   ISSUE_SKIP_LATCHES_SCHEMA_SQL,
   MemorySkipLatchStore,
   PgSkipLatchStore,
@@ -118,6 +126,21 @@ export interface ReviewJobStore {
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
   ): Promise<void>;
+  /**
+   * Durable per-run usage: one row per (runner spawn, model). Called by the
+   * engine wrapper before the job completes, so a pod that exits after one
+   * job does not take its counters with it. Fail-open: callers swallow errors
+   * and never fail the job when this write fails.
+   */
+  recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void>;
+  /** Ledger token sums by (agent_instance, source, model, token_type). */
+  getRunUsageTokenTotals(): Promise<TokenTotalRow[]>;
+  /** Ledger session sums by (agent_instance, source, model). */
+  getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
+  /** Ledger run counts by (kind, exit class). */
+  getRunExitCounts(): Promise<ExitCountRow[]>;
+  /** Ledger run durations by (kind, exit class), for the duration histogram. */
+  getRunDurations(): Promise<DurationRow[]>;
   reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number, kinds?: readonly JobKind[]): Promise<ReclaimResult>;
   cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number>;
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
@@ -817,6 +840,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   >();
   private readonly kickLog: KickLogRecord[] = [];
   private nextKickId = 1;
+  private nextRunUsageId = 1;
+  readonly runUsage: Array<NewRunUsageRow & { id: number }> = [];
 
   private locked<T>(fn: () => T | Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
@@ -1152,6 +1177,73 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       }
       return { requeued, publish };
     });
+  }
+
+  recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
+    return this.locked(() => {
+      for (const row of rows) this.runUsage.push({ ...row, id: this.nextRunUsageId++ });
+    });
+  }
+
+  getRunUsageTokenTotals(): Promise<TokenTotalRow[]> {
+    return this.locked(() => {
+      const sums = new Map<string, TokenTotalRow>();
+      for (const row of this.runUsage) {
+        const cells: Array<[TokenTotalRow["tokenType"], number]> = [
+          ["input", row.tokensInput],
+          ["cached_input", row.tokensCacheRead],
+          ["output", row.tokensOutput],
+          ["cache_write", row.tokensCacheWrite],
+          ["reasoning", row.tokensReasoning],
+        ];
+        for (const [tokenType, value] of cells) {
+          const key = `${row.agentInstance}\0${row.runner}\0${row.model}\0${tokenType}`;
+          const existing = sums.get(key);
+          if (existing) existing.value += value;
+          else
+            sums.set(key, { agentInstance: row.agentInstance, source: row.runner, model: row.model, tokenType, value });
+        }
+      }
+      return [...sums.values()];
+    });
+  }
+
+  getRunUsageSessionTotals(): Promise<SessionTotalRow[]> {
+    return this.locked(() => {
+      const sums = new Map<string, SessionTotalRow>();
+      for (const row of this.runUsage) {
+        const key = `${row.agentInstance}\0${row.runner}\0${row.model}`;
+        const existing = sums.get(key);
+        if (existing) existing.value += row.sessions;
+        else
+          sums.set(key, {
+            agentInstance: row.agentInstance,
+            source: row.runner,
+            model: row.model,
+            value: row.sessions,
+          });
+      }
+      return [...sums.values()];
+    });
+  }
+
+  getRunExitCounts(): Promise<ExitCountRow[]> {
+    return this.locked(() => {
+      const counts = new Map<string, ExitCountRow>();
+      for (const row of this.runUsage) {
+        const key = `${row.kind}\0${row.exitClass}`;
+        const existing = counts.get(key);
+        if (existing) existing.count += 1;
+        else counts.set(key, { kind: row.kind, exitClass: row.exitClass, count: 1 });
+      }
+      return [...counts.values()];
+    });
+  }
+
+  getRunDurations(): Promise<DurationRow[]> {
+    return this.locked(() =>
+      this.runUsage.map((row) => ({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds }))
+    );
   }
 
   countByState(): Promise<Record<ReviewJobState, number>> {
@@ -2115,6 +2207,7 @@ const REQUIRED_LEDGER_TABLES = [
   "review_kicks",
   "pr_writer_provenance",
   "pr_publication_intents",
+  "jumi_run_usage",
   "role_gates",
 ] as const;
 
@@ -2181,6 +2274,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(CLOSED_PULLS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_KICKS_SCHEMA_SQL);
         await tx.unsafe(PROVENANCE_SCHEMA_SQL);
+        await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
       });
     } catch (err) {
@@ -2769,6 +2863,124 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows[0] ? num(rows[0].n) : 0;
+  }
+
+  async recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    const columns =
+      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, started_at, ended_at, duration_seconds)";
+    const values: unknown[] = [];
+    const tuples = rows.map((row, index) => {
+      const base = index * 16;
+      values.push(
+        row.jobId,
+        row.jobKey,
+        row.kind,
+        row.runner,
+        row.model,
+        row.agentInstance,
+        Math.max(0, Math.floor(row.tokensInput)),
+        Math.max(0, Math.floor(row.tokensCacheRead)),
+        Math.max(0, Math.floor(row.tokensOutput)),
+        Math.max(0, Math.floor(row.tokensCacheWrite)),
+        Math.max(0, Math.floor(row.tokensReasoning)),
+        Math.max(0, Math.floor(row.sessions)),
+        row.exitClass,
+        row.startedAt.toISOString(),
+        row.endedAt.toISOString(),
+        row.durationSeconds
+      );
+      const refs = Array.from({ length: 16 }, (_, offset) => {
+        // started_at/ended_at ride as ISO strings with an explicit cast, the
+        // same way review_jobs timestamps do.
+        if (offset === 13 || offset === 14) return `$${base + offset + 1}::timestamptz`;
+        return `$${base + offset + 1}`;
+      });
+      return `(${refs.join(", ")})`;
+    });
+    try {
+      await this.sql.unsafe(`INSERT INTO jumi_run_usage ${columns} VALUES ${tuples.join(", ")}`, values);
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async getRunUsageTokenTotals(): Promise<TokenTotalRow[]> {
+    const rows = asRows<{
+      agent_instance: unknown;
+      source: unknown;
+      model: unknown;
+      input: unknown;
+      cached_input: unknown;
+      output: unknown;
+      cache_write: unknown;
+      reasoning: unknown;
+    }>(
+      await this.sql.unsafe(
+        `SELECT agent_instance, runner AS source, model,
+           COALESCE(SUM(tokens_input), 0)::bigint AS input,
+           COALESCE(SUM(tokens_cache_read), 0)::bigint AS cached_input,
+           COALESCE(SUM(tokens_output), 0)::bigint AS output,
+           COALESCE(SUM(tokens_cache_write), 0)::bigint AS cache_write,
+           COALESCE(SUM(tokens_reasoning), 0)::bigint AS reasoning
+         FROM jumi_run_usage GROUP BY agent_instance, runner, model`
+      )
+    );
+    const totals: TokenTotalRow[] = [];
+    for (const row of rows) {
+      const cells: Array<[TokenTotalRow["tokenType"], unknown]> = [
+        ["input", row.input],
+        ["cached_input", row.cached_input],
+        ["output", row.output],
+        ["cache_write", row.cache_write],
+        ["reasoning", row.reasoning],
+      ];
+      for (const [tokenType, value] of cells) {
+        totals.push({
+          agentInstance: str(row.agent_instance),
+          source: str(row.source),
+          model: str(row.model),
+          tokenType,
+          value: num(value),
+        });
+      }
+    }
+    return totals;
+  }
+
+  async getRunUsageSessionTotals(): Promise<SessionTotalRow[]> {
+    const rows = asRows<{ agent_instance: unknown; source: unknown; model: unknown; sessions: unknown }>(
+      await this.sql.unsafe(
+        `SELECT agent_instance, runner AS source, model, COALESCE(SUM(sessions), 0)::bigint AS sessions
+         FROM jumi_run_usage GROUP BY agent_instance, runner, model`
+      )
+    );
+    return rows.map((row) => ({
+      agentInstance: str(row.agent_instance),
+      source: str(row.source),
+      model: str(row.model),
+      value: num(row.sessions),
+    }));
+  }
+
+  async getRunExitCounts(): Promise<ExitCountRow[]> {
+    const rows = asRows<{ kind: unknown; exit_class: unknown; n: unknown }>(
+      await this.sql.unsafe(
+        `SELECT kind, exit_class, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, exit_class`
+      )
+    );
+    return rows.map((row) => ({ kind: str(row.kind), exitClass: str(row.exit_class), count: num(row.n) }));
+  }
+
+  async getRunDurations(): Promise<DurationRow[]> {
+    const rows = asRows<{ kind: unknown; exit_class: unknown; duration_seconds: unknown }>(
+      await this.sql.unsafe(`SELECT kind, exit_class, duration_seconds FROM jumi_run_usage`)
+    );
+    return rows.map((row) => ({
+      kind: str(row.kind),
+      exitClass: str(row.exit_class),
+      durationSeconds: Number(row.duration_seconds) || 0,
+    }));
   }
 
   async readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch> {

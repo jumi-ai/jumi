@@ -3,7 +3,7 @@ import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./boar
 import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
-import { meterWebhook, recordJobCompleted, renderProcessMetrics, renderWebhookMetrics } from "./control_metrics.ts";
+import { meterWebhook, recordJobCompleted, renderEphemeralMetrics, renderWebhookMetrics } from "./control_metrics.ts";
 import {
   chainHasCodex,
   chainHasOpenCodeXai,
@@ -49,6 +49,7 @@ import {
   WORKER_JOB_KINDS,
 } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
+import { renderLedgerMetrics, setActiveRunUsageRecording } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import type { ReviewJob } from "./types.ts";
@@ -270,7 +271,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (url.pathname === "/metrics") {
       if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
-      const body = await (deps.renderMetrics ?? renderProcessMetrics)();
+      // Health gauges only by default: durable totals come from the router's
+      // ledger export, and re-exporting the same names here would double them.
+      const body = await (deps.renderMetrics ?? renderEphemeralMetrics)();
       return new Response(body, {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
@@ -665,6 +668,14 @@ export async function processEngineTick(
     await store.releaseLease(row.id, leasedBy);
     return "idle";
   }
+  // Ambient ledger recorder for this tick: engine spawns record per-run usage
+  // (tokens, exit class, start/end) against this row before the tick ends, so
+  // the router keeps serving totals after this pod is gone. Single-flight: the
+  // tick loop awaits each job before leasing the next.
+  setActiveRunUsageRecording({
+    context: { jobId: row.id, jobKey: row.jobKey, kind: row.kind },
+    recordRunUsageRows: (rows) => store.recordRunUsageRows(rows),
+  });
 
   const abort = new AbortController();
   bindAbort(extras.abortSignal, () => abort.abort());
@@ -875,6 +886,7 @@ export async function processEngineTick(
     }
     return "processed";
   } finally {
+    setActiveRunUsageRecording(undefined);
     untrack();
     stopHeartbeat();
   }
@@ -1003,7 +1015,8 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       createFetchHandler(config, {
         queue: store,
         logger,
-        renderMetrics: async () => `${await renderQueueMetrics(store)}${renderWebhookMetrics()}`,
+        renderMetrics: async () =>
+          `${await renderQueueMetrics(store)}${renderWebhookMetrics()}${await renderLedgerMetrics(store)}`,
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
@@ -1101,7 +1114,9 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
       },
       logger,
       webhookEnabled: false,
-      renderMetrics: renderProcessMetrics,
+      // Health gauges only: durable totals come from the router's ledger
+      // export, and re-exporting the same names here would double them.
+      renderMetrics: renderEphemeralMetrics,
     }),
     logger,
     deps

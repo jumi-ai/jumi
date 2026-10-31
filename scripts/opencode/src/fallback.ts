@@ -4,6 +4,7 @@ import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
 import { isQuotaError, isQuotaText } from "./quota.ts";
+import { withLedgerRunUsage } from "./run_usage.ts";
 import {
   describeAttemptOrder,
   type NamedRunner,
@@ -313,13 +314,19 @@ function narrowedContributors(
 }
 
 export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine {
+  // Ledger recording wraps the base engine, not the chain: every spawn of any
+  // harness (`opencode` / `claude` / `agy` / `codex`) writes one ledger row per
+  // model, including hops, retries, and artifact-recovery rounds. One edit
+  // here covers the review and worker flows alike; callers only set the
+  // ambient recorder for the leased job (server/worker ticks).
+  const recording = withLedgerRunUsage(engine);
   // Without a chain the bare engine runs and stamps fall back to the spawn
   // options, which workers never type, so they read `opencode`. A Claude
   // primary must therefore arrive through `chain` (a 1-entry one is fine).
   if (!hop.chain?.length && !hop.fallbackModel) {
     // There is no next runner to hop to, so refuse rather than re-spawn the same one.
     return async (opts: EngineRunOptions): Promise<EngineResult> =>
-      opts.hopFromIncomplete === true ? { status: "ok", hopDeclined: true } : engine(opts);
+      opts.hopFromIncomplete === true ? { status: "ok", hopDeclined: true } : recording(opts);
   }
   // Validate early so an invalid mode fails clearly instead of silently
   // running ordered. File load already rejects it at process start.
@@ -441,7 +448,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       let result: EngineResult | undefined;
       try {
         result = stampRunner(
-          await engine(engineOptsForRunner(opts, current, { deferQuotaExit: true })),
+          await recording(engineOptsForRunner(opts, current, { deferQuotaExit: true })),
           current,
           index
         );
@@ -492,7 +499,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
 
       let result: EngineResult;
       try {
-        result = stampRunner(await engine(runOpts), runner, index);
+        result = stampRunner(await recording(runOpts), runner, index);
       } catch (err) {
         attachRunner(err, runnerStamp(runner), index);
         const next = runners[index + 1];

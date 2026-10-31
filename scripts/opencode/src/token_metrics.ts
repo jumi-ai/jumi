@@ -153,20 +153,68 @@ function recordCliUsage(source: TokenSource, usage: ModelTokenUsage | undefined)
   }
 }
 
-function seriesLabels(source: TokenSource, model: string, tokenType?: TokenType): string {
-  const parts = [
-    `agent_instance="${escapeLabel(agentInstance())}"`,
-    `source="${source}"`,
-    'profile="default"',
-    `model="${escapeLabel(model)}"`,
-  ];
-  if (tokenType) parts.push(`token_type="${escapeLabel(tokenType)}"`);
-  return parts.join(",");
+export interface TokenMetricsSnapshot {
+  counters: ReadonlyMap<string, number>;
+  sessions: ReadonlyMap<string, number>;
 }
 
-export function renderTokenMetrics(): string {
+/** Point-in-time copy of the in-process counters for per-spawn attribution. */
+export function snapshotTokenMetrics(): TokenMetricsSnapshot {
+  return { counters: new Map(counters), sessions: new Map(sessions) };
+}
+
+export interface TokenDelta {
+  source: TokenSource;
+  model: string;
+  tokens: Record<TokenType, number>;
+  sessions: number;
+}
+
+/**
+ * Per-(source, model) deltas between two snapshots. Only entries that moved
+ * are returned; each token count is clamped at zero (a reset between the
+ * snapshots must not write negative ledger rows).
+ */
+export function diffTokenMetrics(before: TokenMetricsSnapshot, after: TokenMetricsSnapshot): TokenDelta[] {
+  const models = new Map<string, { source: TokenSource; model: string }>();
+  for (const key of [
+    ...before.counters.keys(),
+    ...after.counters.keys(),
+    ...before.sessions.keys(),
+    ...after.sessions.keys(),
+  ]) {
+    const [source, model] = key.split("\0") as [TokenSource, string];
+    const id = `${source}\0${model}`;
+    if (!models.has(id)) models.set(id, { source, model });
+  }
+  const deltas: TokenDelta[] = [];
+  for (const { source, model } of [...models.values()].sort((a, b) =>
+    `${a.source}\0${a.model}`.localeCompare(`${b.source}\0${b.model}`)
+  )) {
+    const tokens = Object.fromEntries(
+      TOKEN_TYPES.map((tokenType) => [
+        tokenType,
+        Math.max(
+          0,
+          (after.counters.get(tokenKey(source, model, tokenType)) ?? 0) -
+            (before.counters.get(tokenKey(source, model, tokenType)) ?? 0)
+        ),
+      ])
+    ) as Record<TokenType, number>;
+    const sessionDelta = Math.max(
+      0,
+      (after.sessions.get(sessionKey(source, model)) ?? 0) - (before.sessions.get(sessionKey(source, model)) ?? 0)
+    );
+    if (sessionDelta === 0 && TOKEN_TYPES.every((tokenType) => tokens[tokenType] === 0)) continue;
+    deltas.push({ source, model, tokens, sessions: sessionDelta });
+  }
+  return deltas;
+}
+
+/** Exporter health gauges only: no token series, safe to serve from any pod. */
+export function renderTokenExporterHealth(): string {
   const agent = escapeLabel(agentInstance());
-  const lines: string[] = [
+  return [
     "# HELP ai_token_exporter_up 1 if the process can serve token series",
     "# TYPE ai_token_exporter_up gauge",
     `ai_token_exporter_up{agent_instance="${agent}"} 1`,
@@ -182,6 +230,24 @@ export function renderTokenMetrics(): string {
     "# HELP ai_quota_db_schema_errors OpenCode session DBs the quota reads could not understand",
     "# TYPE ai_quota_db_schema_errors counter",
     `ai_quota_db_schema_errors{agent_instance="${agent}"} ${quotaSchemaErrors()}`,
+    "",
+  ].join("\n");
+}
+
+function seriesLabels(source: TokenSource, model: string, tokenType?: TokenType): string {
+  const parts = [
+    `agent_instance="${escapeLabel(agentInstance())}"`,
+    `source="${source}"`,
+    'profile="default"',
+    `model="${escapeLabel(model)}"`,
+  ];
+  if (tokenType) parts.push(`token_type="${escapeLabel(tokenType)}"`);
+  return parts.join(",");
+}
+
+export function renderTokenMetrics(): string {
+  const lines: string[] = [
+    renderTokenExporterHealth().trimEnd(),
     "# HELP ai_tokens_total Cumulative AI tokens observed by this process",
     "# TYPE ai_tokens_total counter",
   ];
