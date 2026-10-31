@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
@@ -299,6 +299,128 @@ export async function createReviewWorkspace(root: string, job: ReviewJob): Promi
   return mkdtemp(join(root, `jumi-${job.owner}-${job.repo}-${job.prNumber}-`));
 }
 
+/** Bare mirror kept on the workspace root. Not the worker cache at `_cache`. */
+export const REVIEW_MIRROR_DIR = "_review-mirrors";
+
+const reviewMirrorWaits = new Map<string, Promise<void>>();
+
+function assertSafeSegment(value: string, label: string): string {
+  if (!value || value === "." || value === ".." || /[\\/\0]/.test(value)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return value;
+}
+
+export function reviewMirrorPath(workspace: string, owner: string, repo: string): string {
+  return join(
+    dirname(workspace),
+    REVIEW_MIRROR_DIR,
+    assertSafeSegment(owner, "owner"),
+    `${assertSafeSegment(repo, "repo")}.git`
+  );
+}
+
+/**
+ * `lstat` does not follow the last component. `mkdir` and a later `lstat` of
+ * `<repo>.git` do follow a symlink at `_review-mirrors` or the owner directory,
+ * which would send the mirror into another store. `rm` of a symlink removes the link.
+ */
+async function removeIfNotRealDirectory(path: string): Promise<void> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info || (info.isDirectory() && !info.isSymbolicLink())) return;
+  await rm(path, { force: true });
+}
+
+async function removeTree(path: string): Promise<void> {
+  const info = await lstat(path).catch(() => undefined);
+  if (!info) return;
+  if (info.isSymbolicLink()) {
+    await rm(path, { force: true });
+    return;
+  }
+  await rm(path, { recursive: true, force: true });
+}
+
+/** A directory left by a killed `clone --bare` is not a repository yet. */
+async function isUsableBareMirror(path: string): Promise<boolean> {
+  const head = await lstat(join(path, "HEAD")).catch(() => undefined);
+  const configInfo = await lstat(join(path, "config")).catch(() => undefined);
+  const objects = await lstat(join(path, "objects")).catch(() => undefined);
+  if (!head?.isFile() || !configInfo?.isFile() || !objects?.isDirectory()) return false;
+  const config = await readFile(join(path, "config"), "utf8").catch(() => "");
+  return /(^|\n)\s*bare\s*=\s*true\s*(\n|$)/.test(config);
+}
+
+function withReviewMirrorLock<T>(mirrorPath: string, fn: () => Promise<T>): Promise<T> {
+  const previous = reviewMirrorWaits.get(mirrorPath) ?? Promise.resolve();
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => gate);
+  reviewMirrorWaits.set(mirrorPath, tail);
+  return previous.then(fn, fn).finally(() => {
+    release();
+    if (reviewMirrorWaits.get(mirrorPath) === tail) reviewMirrorWaits.delete(mirrorPath);
+  });
+}
+
+/**
+ * Parent-owned bare mirror, one per owner/repo, next to the throwaway checkouts.
+ * The review child runs the pull request. A worktree of the worker cache at
+ * `_cache` would share a writable object store with later implement clones, so
+ * this mirror is separate and the throwaway is `clone --reference`: new objects
+ * land in the checkout, which is deleted with the review. No `--depth`:
+ * merge-base and git log need the history. `gc.auto=0` so a later fetch does
+ * not prune objects an in-flight checkout still borrows.
+ */
+async function ensureReviewMirror(opts: {
+  mirrorPath: string;
+  cloneUrl: string;
+  auth: GitAuth;
+  run: (args: string[], cwd: string) => Promise<string>;
+  logger?: (message: string) => void;
+  label: string;
+}): Promise<void> {
+  await withReviewMirrorLock(opts.mirrorPath, async () => {
+    const ownerDir = dirname(opts.mirrorPath);
+    const mirrorRoot = dirname(ownerDir);
+    await removeIfNotRealDirectory(mirrorRoot);
+    await mkdir(mirrorRoot, { recursive: true });
+    await removeIfNotRealDirectory(ownerDir);
+    await mkdir(ownerDir, { recursive: true });
+
+    const incoming = `${opts.mirrorPath}.incoming`;
+    await removeTree(incoming);
+
+    const info = await lstat(opts.mirrorPath).catch(() => undefined);
+    let ready = false;
+    if (info?.isSymbolicLink() || (info && !info.isDirectory())) {
+      await rm(opts.mirrorPath, { force: true });
+    } else if (info?.isDirectory()) {
+      ready = await isUsableBareMirror(opts.mirrorPath);
+      if (!ready) await removeTree(opts.mirrorPath);
+    }
+
+    const gcOff = ["-c", "gc.auto=0"];
+    if (ready) {
+      opts.logger?.(`Fetching ${opts.label} review mirror`);
+    } else {
+      opts.logger?.(`Cloning ${opts.label} into review mirror`);
+      await opts.run(
+        [...gcOff, "clone", "--bare", gitRemoteUrl(opts.cloneUrl, opts.auth), incoming],
+        dirname(opts.mirrorPath)
+      );
+      await rename(incoming, opts.mirrorPath);
+    }
+    if (opts.auth.embedTokenInUrl) {
+      await opts.run(["remote", "set-url", "origin", opts.cloneUrl], opts.mirrorPath);
+    }
+    await opts.run(["config", "gc.auto", "0"], opts.mirrorPath);
+    await opts.run([...gcOff, "fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], opts.mirrorPath);
+  });
+}
+
 export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWorkspaceOptions): Promise<void> {
   const git = opts.gitRunner ?? runGit;
   const configArgs = gitConfigArgs();
@@ -319,14 +441,25 @@ export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWork
   const remotePrRef = `refs/remotes/origin/pr/${opts.pr.number}/head`;
   const targetBranch = "jumi/target";
   const baseCloneUrl = validateCloneUrl(opts.repo.clone_url, opts.giteaUrl);
+  const mirrorPath = reviewMirrorPath(opts.workdir, opts.repo.owner.login, opts.repo.name);
+  const runAt = (args: string[], cwd: string) => runConfiguredGit(args, { cwd, env });
+
+  await ensureReviewMirror({
+    mirrorPath,
+    cloneUrl: baseCloneUrl,
+    auth,
+    run: runAt,
+    logger: opts.logger,
+    label: opts.repo.full_name,
+  });
 
   opts.logger?.(`Cloning ${opts.repo.full_name} into review workspace`);
-  await runConfiguredGit(["clone", gitRemoteUrl(baseCloneUrl, auth), opts.workdir], {
-    cwd: dirname(opts.workdir),
-    env,
-  });
+  await runAt(
+    ["clone", "--reference", mirrorPath, gitRemoteUrl(baseCloneUrl, auth), opts.workdir],
+    dirname(opts.workdir)
+  );
   if (auth.embedTokenInUrl) {
-    await runConfiguredGit(["remote", "set-url", "origin", baseCloneUrl], { cwd: opts.workdir, env });
+    await runAt(["remote", "set-url", "origin", baseCloneUrl], opts.workdir);
   }
 
   opts.logger?.(`Fetching target branch ${opts.pr.base.ref}`);
