@@ -16,7 +16,7 @@ Reviewers: a stale line here, or a README sentence this diff makes false or leav
 
 ## Layout
 
-Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/opencode/test`. Tool pins are `.gitea/tool-versions.env` (`agy` version and SHA-512 live as `ARG`s in `Dockerfile`, not in that env file). There is no Helm chart and no Compose file here. Cluster GitOps lives in another repository. Do not copy another deploy's hostnames, owner names, or secrets into this tree.
+Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/opencode/test`. `REVIEW.md` is this repository's review rules. `README.md` documents its heading syntax, and `review_md.test.ts` pins its shape. Tool pins are `.gitea/tool-versions.env` (`agy` version and SHA-512 live as `ARG`s in `Dockerfile`, not in that env file). There is no Helm chart and no Compose file here. Cluster GitOps lives in another repository. Do not copy another deploy's hostnames, owner names, or secrets into this tree.
 
 The worker image ships Temurin 21 (`JAVA_HOME=/opt/java/openjdk`). The reviewer image has no JVM. Do not add one. `type: agy` is refused unless `FORGE=github`.
 
@@ -37,7 +37,7 @@ A new or removed required or gitops env key, required constraint, UID, probe, co
 
 Read the parent-injected `JUMI_*.md` files. Do not inventory the repo first. Do not call the forge API or `tea`. Do not ask questions. Do not force-push. Do not open the pull request.
 
-You may commit and push the task branch. Do not commit `JUMI_PR.md`, `JUMI_SKIP.md`, `JUMI_BLOCKED.md`, or `JUMI_TASK.md`. When finished, write `JUMI_PR.md` at the repo root: what changed, why, and what you ran to verify. If there is nothing to change, write `JUMI_SKIP.md` with a short reason and do not commit it.
+You may commit and push the task branch. Do not commit `JUMI_PR.md`, `JUMI_SKIP.md`, `JUMI_BLOCKED.md`, or `JUMI_TASK.md`. Change `REVIEW.md` only when the task names it: reviews read that file from the pull request head, so an edit would change the rules judging your own branch. When finished, write `JUMI_PR.md` at the repo root: what changed, why, and what you ran to verify. If there is nothing to change, write `JUMI_SKIP.md` with a short reason and do not commit it.
 
 Verify once at the end. For a TypeScript change, that is `bun run ci` in `scripts/opencode`. Run `bun run test:pg` only if you touched queue or lease SQL and Postgres is available.
 
