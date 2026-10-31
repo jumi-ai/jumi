@@ -37,7 +37,10 @@
  *     `AGENTS.md` arrives in a model request, a fleet skill under
  *     `~/.claude/skills` and a checkout `.claude/skills` skill are both in the
  *     init event's skill list, and the stub has the model load the checkout
- *     skill through the `Skill` tool.
+ *     skill through the `Skill` tool;
+ *   - the forge deny holds against the checkout: its `.claude/settings.json`
+ *     allows `WebFetch` everywhere, the stub asks for a forge URL, and the
+ *     binary has to refuse it.
  *
  * Then each flag value the binary is able to reject is re-run with a nonsense
  * value and must draw an objection. That is what keeps the positive case
@@ -52,6 +55,7 @@ import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
+import { FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
 
 /** Text the stub answers with; seeing it means the session really completed. */
@@ -84,6 +88,8 @@ export const PROBE_FLEET_SKILL = "jumi-probe-fleet-skill";
 export const PROBE_CHECKOUT_SKILL = "jumi-probe-checkout-skill";
 /** Line in the checkout's `AGENTS.md`; a model request carrying it proves the file loaded. */
 const PROBE_INSTRUCTIONS_MARKER = "JUMI-CLAUDE-AGENTS-MD-PROBE-REACHED";
+/** A forge URL the checkout's settings try to reopen. Never fetched: the deny is the point. */
+export const PROBE_FORGE_HOST = `gitea.${FORGE_DENY_DOMAIN}`;
 
 /**
  * Production flags whose *value* the installed binary validates. Everything
@@ -168,8 +174,8 @@ export function flagObjection(
 interface StubState {
   /** Paths the binary asked the stub endpoint for, for the failure report. */
   readonly paths: string[];
-  /** Skill the stub's model loads before it answers, when set. */
-  loadSkill?: string;
+  /** Tool the stub's model calls before it answers, when set. */
+  toolCall?: { name: string; input: Record<string, unknown> };
   /** A model request carried the marker from the checkout's `AGENTS.md`. */
   instructionsSeen: boolean;
 }
@@ -180,7 +186,7 @@ function sse(events: readonly { event: string; data: unknown }[]): string {
 
 /**
  * Just enough of `POST /v1/messages` for one streamed text turn, preceded by
- * one `Skill` tool call when `state.loadSkill` is set. Usage numbers are
+ * one tool call when `state.toolCall` is set. Usage numbers are
  * non-zero on purpose: the probe asserts the parent can still account tokens
  * from this flag combination.
  */
@@ -202,16 +208,16 @@ function startStubAnthropic(state: StubState) {
         stop_sequence: null,
         usage: { input_tokens: 11, output_tokens: 0 },
       };
-      // The skill is asked for once: the request that carries its tool result
-      // gets the text turn.
+      // The tool is called once: the request that carries its result gets the
+      // text turn.
       const body = await req.text();
       if (body.includes(PROBE_INSTRUCTIONS_MARKER)) state.instructionsSeen = true;
-      const callSkill = state.loadSkill !== undefined && !body.includes('"tool_result"');
-      const block = callSkill
-        ? { type: "tool_use", id: "toolu_jumi_probe", name: "Skill", input: {} }
+      const call = body.includes('"tool_result"') ? undefined : state.toolCall;
+      const block = call
+        ? { type: "tool_use", id: "toolu_jumi_probe", name: call.name, input: {} }
         : { type: "text", text: "" };
-      const delta = callSkill
-        ? { type: "input_json_delta", partial_json: JSON.stringify({ skill: state.loadSkill }) }
+      const delta = call
+        ? { type: "input_json_delta", partial_json: JSON.stringify(call.input) }
         : { type: "text_delta", text: PROBE_MARKER };
       return new Response(
         sse([
@@ -223,7 +229,7 @@ function startStubAnthropic(state: StubState) {
             event: "message_delta",
             data: {
               type: "message_delta",
-              delta: { stop_reason: callSkill ? "tool_use" : "end_turn", stop_sequence: null },
+              delta: { stop_reason: call ? "tool_use" : "end_turn", stop_sequence: null },
               usage: { output_tokens: 7 },
             },
           },
@@ -299,7 +305,7 @@ function probeSkill(name: string): string {
   return `---\nname: ${name}\ndescription: "Jumi claude flag probe skill"\n---\nProbe skill body.\n`;
 }
 
-/** A fleet skill in HOME, and a checkout that carries a skill and an `AGENTS.md`. */
+/** A fleet skill in HOME, and a checkout with a skill, an `AGENTS.md`, and settings that reopen the forge. */
 async function seedCheckoutProbe(home: string, workdir: string): Promise<void> {
   await mkdir(join(home, ".claude", "skills", PROBE_FLEET_SKILL), { recursive: true });
   await writeFile(join(home, ".claude", "skills", PROBE_FLEET_SKILL, "SKILL.md"), probeSkill(PROBE_FLEET_SKILL));
@@ -309,6 +315,21 @@ async function seedCheckoutProbe(home: string, workdir: string): Promise<void> {
     probeSkill(PROBE_CHECKOUT_SKILL)
   );
   await writeFile(join(workdir, "AGENTS.md"), `${PROBE_INSTRUCTIONS_MARKER}\n`);
+  await writeFile(
+    join(workdir, ".claude", "settings.json"),
+    JSON.stringify({ permissions: { allow: ["WebFetch", `WebFetch(domain:${PROBE_FORGE_HOST})`], deny: [] } })
+  );
+}
+
+/** Keyed on the binary's own refusal: an offline fetch fails too, without proving any deny. */
+export function judgeForgeDeny(run: RunResult): CaseResult {
+  const refusal = `denied access to domain:${PROBE_FORGE_HOST}`;
+  const ok = !run.timedOut && run.stdout.includes(refusal);
+  return {
+    name: "the forge WebFetch deny holds against the checkout's settings",
+    ok,
+    observed: ok ? refusal : `no refusal for ${PROBE_FORGE_HOST}: ${run.stdout.slice(-300)}`,
+  };
 }
 
 /** The `Skill` tool reported it loaded the checkout skill. */
@@ -580,13 +601,19 @@ async function main(): Promise<number> {
       });
     }
 
-    // Only the production run has the model load the checkout skill; every
-    // later run is the plain one-turn answer.
-    state.loadSkill = PROBE_CHECKOUT_SKILL;
+    // Only the production run loads the checkout skill, and only the run after
+    // it asks for the forge; every later run is the plain one-turn answer.
+    state.toolCall = { name: "Skill", input: { skill: PROBE_CHECKOUT_SKILL } };
     const production = await runClaudeArgv(argv, origin, home, workdir, tracing);
-    state.loadSkill = undefined;
+    state.toolCall = {
+      name: "WebFetch",
+      input: { url: `https://${PROBE_FORGE_HOST}/personal/jumi/pulls/1`, prompt: "summarize" },
+    };
+    const forgeFetch = await runClaudeArgv(argv, origin, home, workdir);
+    state.toolCall = undefined;
     results.push(...judgeProductionRun(argv, production));
     results.push(...judgeCheckoutContext(production, state.instructionsSeen));
+    results.push(judgeForgeDeny(forgeFetch));
     // Only the production run is traced; the effort and negative-control runs
     // below keep the plain env, so the spans collected are unambiguously that
     // one run's.

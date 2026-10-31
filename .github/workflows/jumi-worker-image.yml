@@ -169,6 +169,9 @@ jobs:
           # agy must refuse a fetch of that host.
           docker run --rm "${TEST_TAG}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+          # `-c` has to keep outranking a repository's `.codex` config.
+          docker run --rm "${TEST_TAG}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
           docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
           echo "Verified gitea-pull-review skill"
 

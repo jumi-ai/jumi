@@ -242,6 +242,29 @@ describe("hasQuotaRetryInDb", () => {
     }
   });
 
+  test("a malformed row does not hide a sibling session's sleep", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-schema-"));
+    try {
+      const dbPath = join(dir, "opencode-session.db");
+      const writer = new Database(dbPath);
+      writer.exec(
+        "CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+      );
+      const insert = writer.query("INSERT INTO session_message VALUES (?, 'assistant', 1, 1000, ?)");
+      insert.run("corrupt", "{not json");
+      insert.run(
+        "sleeping",
+        JSON.stringify({
+          retry: { error: { type: "provider.rate-limit", status: 429, response: { body: "account_rate_limit" } } },
+        })
+      );
+      writer.close();
+      expect(inspectQuotaSleepInDb(dbPath, 0)?.kind).toBe("resetting");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("sees a sleeping session behind an older session with higher seq numbers", async () => {
     // OpenCode numbers `seq` per session, so a subagent or a resumed run starts
     // low again while the session before it sits at a high number.

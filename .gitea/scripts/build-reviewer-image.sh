@@ -193,6 +193,14 @@ verify_reviewer_runtime() {
     echo "agy forge read_url deny probe failed against the installed agy binary" >&2
     exit 1
   fi
+  # Jumi loads a repository's `.codex` config on purpose. What keeps web search
+  # off is that `-c` outranks it, and only the binary can prove that.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex override probe failed against the installed codex binary" >&2
+    exit 1
+  fi
   # Same idea for Claude: `--version` says nothing about the flags Jumi spawns
   # with. Run the production argv against a loopback stub endpoint (nothing
   # billed, no token in the child env) so a rejected or silently ignored flag

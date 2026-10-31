@@ -192,6 +192,14 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
 
+      - name: Verify codex overrides against a hostile checkout
+        # Jumi loads a repository's `.codex` config on purpose. What keeps web
+        # search off is that `-c` outranks it, and only the binary can prove that.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
+
       - name: Verify claude production flags against the installed binary
         # `claude --version` proves the binary exists, not that it accepts the
         # argv Jumi spawns: a rejected flag is a generic non-zero exit on every
@@ -272,6 +280,8 @@ jobs:
           done
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
           docker run --rm jumi-worker:ci test -f /app/review-skills/gitea-pull-review/SKILL.md
           docker run --rm jumi-worker:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 jumi-worker:ci sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"

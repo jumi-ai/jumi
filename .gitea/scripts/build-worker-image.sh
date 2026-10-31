@@ -199,6 +199,14 @@ verify_worker_skills() {
     echo "agy forge read_url deny probe failed against the installed agy binary" >&2
     exit 1
   fi
+  # Jumi loads a repository's `.codex` config on purpose. What keeps web search
+  # off is that `-c` outranks it, and only the binary can prove that.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "codex override probe failed against the installed codex binary" >&2
+    exit 1
+  fi
   # `--version` only proves the binary is there. Run the argv `claudeArgv()`
   # emits against a loopback stub endpoint (nothing billed, no token in the
   # child env) so a flag this Claude release rejects — or silently ignores —

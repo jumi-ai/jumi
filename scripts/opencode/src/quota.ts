@@ -194,6 +194,14 @@ function withQuotaDb(dbPath: string, read: (db: Database) => QuotaHit | undefine
   }
 }
 
+function rowRetryError(data: string): unknown {
+  try {
+    return (JSON.parse(data) as { retry?: { error?: unknown } }).retry?.error;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The live signal: a sleeping assistant row carries
  * `retry: { attempt, at, error }` until the attempt runs. OpenCode clears it on
@@ -222,7 +230,7 @@ export function inspectQuotaSleepInDb(dbPath: string | null | undefined, sinceMs
       .all(sinceMs) as Array<{ data: unknown }>;
     for (const row of rows) {
       if (typeof row.data !== "string") continue;
-      const error = (JSON.parse(row.data) as { retry?: { error?: unknown } }).retry?.error;
+      const error = rowRetryError(row.data);
       if (error === undefined) continue;
       const text = JSON.stringify(error);
       if (isQuotaLiveText(text)) return quotaHitFromText(text);

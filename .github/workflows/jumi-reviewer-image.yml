@@ -174,6 +174,15 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
 
+      - name: Verify codex overrides against a hostile checkout
+        if: ${{ env.VERSION != '' }}
+        # Same probe as the pull_request image job: `-c` has to keep outranking
+        # a repository's `.codex` config on the installed binary.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
+
       - name: Verify claude production flags against the installed binary
         if: ${{ env.VERSION != '' }}
         # Runs the argv `claudeArgv()` emits against a loopback stub endpoint,

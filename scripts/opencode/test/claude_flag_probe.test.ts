@@ -8,10 +8,12 @@ import {
   flagObjection,
   judgeCheckoutContext,
   judgeEffortLevel,
+  judgeForgeDeny,
   judgeNegativeRun,
   nonsenseValue,
   PROBE_CHECKOUT_SKILL,
   PROBE_FLEET_SKILL,
+  PROBE_FORGE_HOST,
   pinnedFlagValues,
   withFlagValue,
 } from "../src/claude_flag_probe.ts";
@@ -225,6 +227,16 @@ describe("image verification paths", () => {
     // ship `claude`, so both have to prove the flags, not just the first.
     const checks = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
     expect(checks.split("bun src/claude_flag_probe.ts").length - 1).toBe(2);
+  });
+});
+
+describe("judgeForgeDeny", () => {
+  const run = (stdout: string, timedOut = false) => ({ code: 0, stdout, stderr: "", timedOut });
+
+  test("needs the binary's own refusal, not just a failed fetch", () => {
+    expect(judgeForgeDeny(run(`WebFetch denied access to domain:${PROBE_FORGE_HOST}.`)).ok).toBe(true);
+    expect(judgeForgeDeny(run("Unable to verify if domain is safe to fetch")).ok).toBe(false);
+    expect(judgeForgeDeny(run(`denied access to domain:${PROBE_FORGE_HOST}`, true)).ok).toBe(false);
   });
 });
 
