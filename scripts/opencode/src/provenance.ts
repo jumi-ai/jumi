@@ -395,7 +395,7 @@ function parseRunnerObject(value: unknown): RunnerStamp | null {
   );
 }
 
-function intentMatchesReview(
+function intentTargetsReview(
   intent: IntentRecord,
   owner: string,
   repo: string,
@@ -403,10 +403,55 @@ function intentMatchesReview(
   branch: string
 ): boolean {
   if (intent.owner !== owner || intent.repo !== repo) return false;
-  if (intent.status !== "pending") return false;
   if (intent.prNumber !== 0 && intent.prNumber === prNumber) return true;
   if (intent.branch && branch && intent.branch === branch) return true;
   return false;
+}
+
+// Earliest pending intent wins; otherwise the earliest failed intent.
+// The choice is the lowest intent id, independent of scan order, with no row
+// cap. Capping before the PR or branch match turns a real failure into unknown.
+function chooseIntentForReview(
+  intents: Iterable<IntentRecord>,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  branch: string
+): IntentRecord | undefined {
+  let pending: IntentRecord | undefined;
+  let failed: IntentRecord | undefined;
+  for (const intent of intents) {
+    if (intent.status !== "pending" && intent.status !== "failed") continue;
+    if (!intentTargetsReview(intent, owner, repo, prNumber, branch)) continue;
+    if (intent.status === "pending") {
+      if (!pending || intent.id < pending.id) pending = intent;
+    } else if (!failed || intent.id < failed.id) {
+      failed = intent;
+    }
+  }
+  return pending ?? failed;
+}
+
+function lookupFromIntent(
+  intent: IntentRecord,
+  status: "pending" | "failed",
+  headSha: string,
+  prNumber: number,
+  branch: string
+): ProvenanceLookup {
+  return {
+    status,
+    forge: intent.forge,
+    owner: intent.owner,
+    repo: intent.repo,
+    prNumber: intent.prNumber || prNumber,
+    branch: intent.branch || branch,
+    headSha,
+    contributors: [...intent.contributors],
+    publisher: intent.publisher,
+    jobId: intent.jobId,
+    jobKey: intent.jobKey,
+  };
 }
 
 export class MemoryProvenanceStore implements ProvenanceStore {
@@ -610,43 +655,9 @@ export class MemoryProvenanceStore implements ProvenanceStore {
         jobKey: known.jobKey,
       };
     }
-    let failed: IntentRecord | undefined;
-    for (const intent of this.intents.values()) {
-      if (intent.owner !== input.owner || intent.repo !== input.repo) continue;
-      const samePr = intent.prNumber !== 0 && intent.prNumber === input.prNumber;
-      const sameBranch = Boolean(intent.branch && branch && intent.branch === branch);
-      if (!samePr && !sameBranch) continue;
-      if (intent.status === "pending" && intentMatchesReview(intent, input.owner, input.repo, input.prNumber, branch)) {
-        return {
-          status: "pending",
-          forge: intent.forge,
-          owner: intent.owner,
-          repo: intent.repo,
-          prNumber: intent.prNumber || input.prNumber,
-          branch: intent.branch || branch,
-          headSha: head,
-          contributors: [...intent.contributors],
-          publisher: intent.publisher,
-          jobId: intent.jobId,
-          jobKey: intent.jobKey,
-        };
-      }
-      if (intent.status === "failed" && !failed) failed = intent;
-    }
-    if (failed) {
-      return {
-        status: "failed",
-        forge: failed.forge,
-        owner: failed.owner,
-        repo: failed.repo,
-        prNumber: failed.prNumber || input.prNumber,
-        branch: failed.branch || branch,
-        headSha: head,
-        contributors: [...failed.contributors],
-        publisher: failed.publisher,
-        jobId: failed.jobId,
-        jobKey: failed.jobKey,
-      };
+    const chosen = chooseIntentForReview(this.intents.values(), input.owner, input.repo, input.prNumber, branch);
+    if (chosen && (chosen.status === "pending" || chosen.status === "failed")) {
+      return lookupFromIntent(chosen, chosen.status, head, input.prNumber, branch);
     }
     return unknownLookup({
       forge: norm,
@@ -1095,53 +1106,15 @@ export class PgProvenanceStore implements ProvenanceStore {
     }
     const intents = asRows<IntentRow>(
       await this.sql.unsafe(
-        `SELECT * FROM pr_publication_intents WHERE owner = $1 AND repo = $2 AND status = 'pending' ORDER BY id ASC`,
+        `SELECT * FROM pr_publication_intents
+         WHERE owner = $1 AND repo = $2 AND status IN ('pending', 'failed')
+         ORDER BY id ASC`,
         [input.owner, input.repo]
       )
     );
-    for (const raw of intents) {
-      const intent = mapIntentRow(raw);
-      if (intentMatchesReview(intent, input.owner, input.repo, input.prNumber, branch)) {
-        return {
-          status: "pending",
-          forge: intent.forge,
-          owner: intent.owner,
-          repo: intent.repo,
-          prNumber: intent.prNumber || input.prNumber,
-          branch: intent.branch || branch,
-          headSha: head,
-          contributors: intent.contributors,
-          publisher: intent.publisher,
-          jobId: intent.jobId,
-          jobKey: intent.jobKey,
-        };
-      }
-    }
-    const failedRows = asRows<IntentRow>(
-      await this.sql.unsafe(
-        `SELECT * FROM pr_publication_intents WHERE owner = $1 AND repo = $2 AND status = 'failed' ORDER BY id DESC LIMIT 20`,
-        [input.owner, input.repo]
-      )
-    );
-    for (const raw of failedRows) {
-      const intent = mapIntentRow(raw);
-      const samePr = intent.prNumber !== 0 && intent.prNumber === input.prNumber;
-      const sameBranch = Boolean(intent.branch && branch && intent.branch === branch);
-      if (samePr || sameBranch) {
-        return {
-          status: "failed",
-          forge: intent.forge,
-          owner: intent.owner,
-          repo: intent.repo,
-          prNumber: intent.prNumber || input.prNumber,
-          branch: intent.branch || branch,
-          headSha: head,
-          contributors: intent.contributors,
-          publisher: intent.publisher,
-          jobId: intent.jobId,
-          jobKey: intent.jobKey,
-        };
-      }
+    const chosen = chooseIntentForReview(intents.map(mapIntentRow), input.owner, input.repo, input.prNumber, branch);
+    if (chosen && (chosen.status === "pending" || chosen.status === "failed")) {
+      return lookupFromIntent(chosen, chosen.status, head, input.prNumber, branch);
     }
     return unknownLookup({
       forge: norm,

@@ -229,4 +229,152 @@ describePg("PgProvenanceStore against real postgres", () => {
     ).toBe("failed");
     expect(await countProvenance()).toBe(0);
   });
+
+  test("two failed intents resolve to the earliest match", async () => {
+    await reset();
+    await store.ensureIntent({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 7,
+      branch: "jumi/issue-12-a",
+      jobId: 41,
+      jobKey: "follow-up:kirmanak/demo#7:old",
+      jobKind: "follow-up",
+      delivery: "d41",
+    });
+    await store.noteIntentRunners(41, [{ type: "claude", model: "claude-opus-5", effort: "high" }], {
+      type: "claude",
+      model: "claude-opus-5",
+      effort: "high",
+    });
+    await store.markIntentFailed(41, "push rejected", "head-old");
+    await store.ensureIntent({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 7,
+      branch: "jumi/issue-12-a",
+      jobId: 42,
+      jobKey: "follow-up:kirmanak/demo#7:new",
+      jobKind: "follow-up",
+      delivery: "d42",
+    });
+    await store.noteIntentRunners(42, [{ type: "opencode", model: "xai/grok-4.6", variant: "high" }], {
+      type: "opencode",
+      model: "xai/grok-4.6",
+      variant: "high",
+    });
+    await store.markIntentFailed(42, "push rejected again", "head-new");
+    const review = await reopen().lookupForReview({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      headSha: "head-missing",
+      branch: "jumi/issue-12-a",
+    });
+    expect(review.status).toBe("failed");
+    expect(review.jobId).toBe(41);
+    expect(review.contributors).toEqual([{ type: "claude", model: "claude-opus-5", effort: "high" }]);
+    expect(review.publisher).toEqual({ type: "claude", model: "claude-opus-5", effort: "high" });
+    expect(await countProvenance()).toBe(0);
+  });
+
+  test("an older failed intent stays failed behind newer unrelated failures", async () => {
+    await reset();
+    await store.ensureIntent({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 7,
+      branch: "jumi/issue-12-a",
+      jobId: 51,
+      jobKey: "follow-up:kirmanak/demo#7:buried",
+      jobKind: "follow-up",
+      delivery: "d51",
+    });
+    await store.noteIntentRunners(51, [{ type: "claude", model: "claude-opus-5", effort: "high" }], {
+      type: "claude",
+      model: "claude-opus-5",
+      effort: "high",
+    });
+    await store.markIntentFailed(51, "push rejected", "head-buried");
+    for (let i = 0; i < 21; i++) {
+      const jobId = 200 + i;
+      await store.ensureIntent({
+        forge: "gitea",
+        owner: "kirmanak",
+        repo: "demo",
+        issueNumber: 80 + i,
+        prNumber: 80 + i,
+        branch: `jumi/other-${i}`,
+        jobId,
+        jobKey: `follow-up:other-${i}`,
+        jobKind: "follow-up",
+        delivery: `d${jobId}`,
+      });
+      await store.markIntentFailed(jobId, "other push rejected", `other-head-${i}`);
+    }
+    const review = await reopen().lookupForReview({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      headSha: "head-missing",
+      branch: "jumi/issue-12-a",
+    });
+    expect(review.status).toBe("failed");
+    expect(review.jobId).toBe(51);
+    expect(review.contributors).toEqual([{ type: "claude", model: "claude-opus-5", effort: "high" }]);
+    expect(await countProvenance()).toBe(0);
+  });
+
+  test("a later pending intent wins over an earlier failure", async () => {
+    await reset();
+    await store.ensureIntent({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 7,
+      branch: "jumi/issue-12-a",
+      jobId: 61,
+      jobKey: "follow-up:kirmanak/demo#7:failed",
+      jobKind: "follow-up",
+      delivery: "d61",
+    });
+    await store.markIntentFailed(61, "push rejected", "head-failed");
+    await store.ensureIntent({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 7,
+      branch: "jumi/issue-12-a",
+      jobId: 62,
+      jobKey: "follow-up:kirmanak/demo#7:pending",
+      jobKind: "follow-up",
+      delivery: "d62",
+    });
+    await store.noteIntentRunners(62, [{ type: "opencode", model: "xai/grok-4.6", variant: "high" }], {
+      type: "opencode",
+      model: "xai/grok-4.6",
+      variant: "high",
+    });
+    const review = await reopen().lookupForReview({
+      forge: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      headSha: "head-missing",
+      branch: "jumi/issue-12-a",
+    });
+    expect(review.status).toBe("pending");
+    expect(review.jobId).toBe(62);
+    expect(review.contributors).toEqual([{ type: "opencode", model: "xai/grok-4.6", variant: "high" }]);
+  });
 });
