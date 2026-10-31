@@ -860,6 +860,84 @@ describe("GithubAPI", () => {
     await expect(api().listActionJobs("owner", "repo")).rejects.toThrow("500");
   });
 
+  test("listActionJobs throws when workflow run total_count exceeds the page", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 51 });
+      }
+      return Response.json({
+        jobs: [{ id: 9, name: "build", status: "completed", conclusion: "success", run_id: 44 }],
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
+    expect(urls.some((url) => url.includes("/jobs"))).toBe(false);
+  });
+
+  test("listActionJobs throws when a full run page has no total_count", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/actions/runs/") && String(url).includes("/jobs")) {
+        return Response.json({ jobs: [{ id: 9, name: "build", status: "completed", conclusion: "success" }] });
+      }
+      if (String(url).includes("/actions/runs")) {
+        return Response.json({
+          workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_branch: "main" })),
+        });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
+  });
+
+  test("listActionJobs throws when a run has more jobs than the page", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/actions/runs/") && String(url).includes("/jobs")) {
+        return Response.json({
+          total_count: 101,
+          jobs: Array.from({ length: 100 }, (_, i) => ({
+            id: i + 1,
+            name: "build",
+            status: "completed",
+            conclusion: "success",
+            run_id: 44,
+          })),
+        });
+      }
+      if (String(url).includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 1 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
+  });
+
+  test("listActionJobs keeps a job page that matches total_count", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/actions/runs/") && String(url).includes("/jobs")) {
+        return Response.json({
+          total_count: 100,
+          jobs: Array.from({ length: 100 }, (_, i) => ({
+            id: i + 1,
+            name: "build",
+            status: "completed",
+            conclusion: "success",
+            run_id: 44,
+          })),
+        });
+      }
+      if (String(url).includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 1 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).resolves.toHaveLength(100);
+  });
+
   test("lists check-runs for a SHA and maps conclusions", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
@@ -961,6 +1039,89 @@ describe("GithubAPI", () => {
     expect(urls[0]).toContain("/check-runs");
     expect(urls[1]).toContain("/actions/runs?head_sha=sha%2F1");
     expect(urls[2]).toContain("/actions/runs/9/jobs");
+  });
+
+  test("listCheckRuns throws a check-run 500 instead of substituting action jobs", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/check-runs")) return new Response("boom", { status: 500 });
+      return Response.json({ workflow_runs: [{ id: 9, head_sha: "sha/1" }], total_count: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow("500");
+    expect(urls.some((url) => url.includes("/actions/runs"))).toBe(false);
+  });
+
+  test("listCheckRuns throws a check-run rate limit instead of substituting action jobs", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/check-runs")) return new Response("API rate limit exceeded", { status: 403 });
+      return Response.json({
+        jobs: [{ id: 4, name: "checks", status: "completed", conclusion: "failure" }],
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow(/rate limit/i);
+    expect(urls.some((url) => url.includes("/actions/runs"))).toBe(false);
+  });
+
+  test("listCheckRuns throws when check-run total_count exceeds the fetched page", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("/check-runs")) {
+        return Response.json({
+          total_count: 80,
+          check_runs: [{ id: 4, name: "checks", status: "completed", conclusion: "success" }],
+        });
+      }
+      return Response.json({ workflow_runs: [], total_count: 0 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow(/incomplete/);
+    expect(urls.some((url) => url.includes("/actions/runs"))).toBe(false);
+  });
+
+  test("listCheckRuns throws when check-run paging hits a full cap", async () => {
+    let pages = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/check-runs")) {
+        pages += 1;
+        const page = Number(new URL(href).searchParams.get("page"));
+        return Response.json({
+          total_count: 2001,
+          check_runs: Array.from({ length: 50 }, (_, i) => ({
+            id: (page - 1) * 50 + i + 1,
+            name: "checks",
+            status: "completed",
+            conclusion: "success",
+          })),
+        });
+      }
+      return Response.json({ workflow_runs: [], total_count: 0 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow(/incomplete/);
+    expect(pages).toBe(40);
+  });
+
+  test("listCheckRuns throws when the action-job fallback is a partial run list", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/check-runs")) return new Response("nope", { status: 403 });
+      if (href.includes("/actions/runs")) {
+        return Response.json({
+          workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_sha: "sha/1" })),
+          total_count: 80,
+        });
+      }
+      return Response.json({ jobs: [] });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow(/incomplete/);
   });
 
   test("throws useful errors for non-2xx responses", async () => {
