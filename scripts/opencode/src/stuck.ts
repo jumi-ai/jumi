@@ -307,6 +307,140 @@ export async function clearQuotaStuck(path: string, now = () => new Date()): Pro
   });
 }
 
+export function reviewLatchKey(owner: string, repo: string, prNumber: number): SkipLatchKey {
+  return { owner, repo, issueNumber: prNumber };
+}
+
+export async function readReviewStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<StuckState> {
+  return readStuckLatch(store, reviewLatchKey(owner, repo, prNumber));
+}
+
+export async function appendReviewStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  fingerprint: StuckFingerprint,
+  now = () => new Date()
+): Promise<void> {
+  await appendStuckLatchFingerprint(store, reviewLatchKey(owner, repo, prNumber), fingerprint, now);
+}
+
+export async function markReviewQuotaStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  reason: string,
+  now = () => new Date()
+): Promise<void> {
+  await markQuotaStuckLatch(store, reviewLatchKey(owner, repo, prNumber), reason, now);
+}
+
+export async function clearReviewQuotaStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  now = () => new Date()
+): Promise<void> {
+  const key = reviewLatchKey(owner, repo, prNumber);
+  const state = await readStuckLatch(store, key);
+  if (!state.quota) return;
+  await writeStuckLatch(store, key, {
+    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+    updatedAt: now().toISOString(),
+  });
+}
+
+export async function deleteReviewStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number
+): Promise<void> {
+  await writeStuckLatch(store, reviewLatchKey(owner, repo, prNumber), { fingerprints: [], updatedAt: "" });
+}
+
+function reviewLedgerMode(): boolean {
+  return Boolean(process.env.DATABASE_URL?.trim());
+}
+
+export interface ReviewStuckRef {
+  home?: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  skipLatches?: SkipLatchStore;
+}
+
+export async function readReviewStuckState(ref: ReviewStuckRef): Promise<StuckState> {
+  if (reviewLedgerMode()) {
+    if (!ref.skipLatches) return { fingerprints: [], updatedAt: "" };
+    return readReviewStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber);
+  }
+  if (ref.skipLatches) {
+    return readReviewStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber);
+  }
+  if (!ref.home) return { fingerprints: [], updatedAt: "" };
+  return readStuckState(reviewStuckStatePath(ref.home, ref.owner, ref.repo, ref.prNumber));
+}
+
+export async function appendReviewStuckState(
+  ref: ReviewStuckRef,
+  fingerprint: StuckFingerprint,
+  now = () => new Date()
+): Promise<void> {
+  if (reviewLedgerMode()) {
+    if (!ref.skipLatches) return;
+    await appendReviewStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, fingerprint, now);
+    return;
+  }
+  if (ref.skipLatches) {
+    await appendReviewStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, fingerprint, now);
+    return;
+  }
+  if (!ref.home) return;
+  await appendStuckFingerprint(reviewStuckStatePath(ref.home, ref.owner, ref.repo, ref.prNumber), fingerprint, now);
+}
+
+export async function markReviewQuotaStuckState(
+  ref: ReviewStuckRef,
+  reason: string,
+  now = () => new Date()
+): Promise<void> {
+  if (reviewLedgerMode()) {
+    if (!ref.skipLatches) return;
+    await markReviewQuotaStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, reason, now);
+    return;
+  }
+  if (ref.skipLatches) {
+    await markReviewQuotaStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, reason, now);
+    return;
+  }
+  if (!ref.home) return;
+  await markQuotaStuck(reviewStuckStatePath(ref.home, ref.owner, ref.repo, ref.prNumber), reason, now);
+}
+
+export async function clearReviewQuotaStuckState(ref: ReviewStuckRef, now = () => new Date()): Promise<void> {
+  if (reviewLedgerMode()) {
+    if (!ref.skipLatches) return;
+    await clearReviewQuotaStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, now);
+    return;
+  }
+  if (ref.skipLatches) {
+    await clearReviewQuotaStuckLatch(ref.skipLatches, ref.owner, ref.repo, ref.prNumber, now);
+    return;
+  }
+  if (!ref.home) return;
+  await clearQuotaStuck(reviewStuckStatePath(ref.home, ref.owner, ref.repo, ref.prNumber), now);
+}
+
 /** Reviewer-side kill-switch: delete the per-PR quota/fingerprint file so the
  * next run re-checks instead of skipping forever. Human equivalent of the
  * worker `cancelIssueWork` clear path. */
@@ -314,8 +448,18 @@ export async function deleteReviewStuckState(
   home: string,
   owner: string,
   repo: string,
-  prNumber: number
+  prNumber: number,
+  skipLatches?: SkipLatchStore
 ): Promise<void> {
+  if (reviewLedgerMode()) {
+    if (skipLatches) {
+      await deleteReviewStuckLatch(skipLatches, owner, repo, prNumber);
+    }
+    return;
+  }
+  if (skipLatches) {
+    await deleteReviewStuckLatch(skipLatches, owner, repo, prNumber);
+  }
   await deleteClaim(reviewStuckStatePath(home, owner, repo, prNumber));
 }
 
@@ -327,8 +471,9 @@ export async function cancelReviewWork(opts: {
   owner: string;
   repo: string;
   prNumber: number;
+  skipLatches?: SkipLatchStore;
 }): Promise<void> {
-  await deleteReviewStuckState(opts.home, opts.owner, opts.repo, opts.prNumber);
+  await deleteReviewStuckState(opts.home, opts.owner, opts.repo, opts.prNumber, opts.skipLatches);
 }
 
 type StuckCommentApi = {

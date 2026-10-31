@@ -114,6 +114,8 @@ export interface RunReviewJobExtras {
   previousError?: string | null;
   /** Durable writer provenance. ProcessEngineTick wires `store.provenance`; unset fails closed only when the policy is enabled. */
   provenance?: import("./provenance.ts").ProvenanceStore;
+  /** Postgres ledger for review stuck state. ProcessEngineTick wires `store.skipLatches`; without it review falls back to the HOME file. */
+  skipLatches?: import("./skip_latches.ts").SkipLatchStore;
 }
 
 export async function runReviewJob(
@@ -199,6 +201,7 @@ export async function runReviewJob(
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
       botUsername: config.botUsername,
       home: config.home,
+      ...(extras.skipLatches ? { skipLatches: extras.skipLatches } : {}),
       sanitizeOpenCodeEnv: true,
       timeoutMs: config.opencodeTimeoutMs,
       maxFiles: config.maxFiles,
@@ -633,6 +636,7 @@ export async function processEngineTick(
       jobId: String(row.id),
       previousError: row.error ?? extras.previousError ?? null,
       provenance: extras.provenance ?? store.provenance,
+      skipLatches: extras.skipLatches ?? store.skipLatches,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
