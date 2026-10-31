@@ -732,6 +732,7 @@ export async function skipReasonForOtherChecks(
     sha,
     home: opts.home ?? "",
     issueNumber: opts.prNumber,
+    log,
   };
   try {
     let ci = await inspectCi(inspectOpts);
