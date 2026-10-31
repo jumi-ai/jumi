@@ -13,7 +13,7 @@ import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import type { ReviewQueue } from "./queue.ts";
-import { createPgReviewJobStore, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
+import { createPgReviewJobStore, isJobMode, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
@@ -176,7 +176,7 @@ async function main() {
   });
   const api = createForge(config);
   const store: ReviewJobStore | undefined = config.databaseUrl
-    ? await createPgReviewJobStore(config.databaseUrl)
+    ? await createPgReviewJobStore(config.databaseUrl, { migrate: !isJobMode() })
     : undefined;
   const skipLatches = store?.skipLatches;
   const ramQueue: ReviewQueue<IssueJob> | undefined = store
@@ -250,7 +250,10 @@ async function main() {
     const run = async () => {
       while (!shutdown.signal.aborted) {
         try {
-          await reclaimExpiredWorkerJobs(store, config.maxJobAttempts, log);
+          await reclaimExpiredWorkerJobs(store, config.maxJobAttempts, log, {
+            api,
+            botUsername: config.botUsername,
+          });
           const result = await processWorkerTick(
             store,
             config,

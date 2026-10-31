@@ -14,7 +14,7 @@ import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
-import type { IssueApi } from "./gitea_issues.ts";
+import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure, workerInfraBreaker } from "./infra.ts";
@@ -252,7 +252,11 @@ function skipLatchReasonFromResult(result: { status: string; reason?: string }):
 export async function reclaimExpiredWorkerJobs(
   store: ReviewJobStore,
   maxAttempts: number,
-  logger: (message: string) => void = log
+  logger: (message: string) => void = log,
+  opts?: {
+    api?: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">;
+    botUsername?: string;
+  }
 ): Promise<{ requeued: number; published: number }> {
   const { requeued, publish } = await store.reclaimExpired(maxAttempts, undefined, HEARTBEAT_MS, WORKER_JOB_KINDS);
   for (const row of requeued) {
@@ -261,10 +265,20 @@ export async function reclaimExpiredWorkerJobs(
   for (const row of publish) {
     try {
       if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
-      await store.markPublished(row.id, row.leasedBy, {
-        state: "failed",
-        reason: row.error ?? row.resultReason ?? undefined,
-      });
+      // Max-attempts rows previously got `markPublished` with no forge comment,
+      // leaving the sticky at "Jumi is implementing this issue". Publish the
+      // failure when the forge is available so the router-only path and the
+      // long-running worker path behave the same.
+      if (opts?.api && row.issueNumber != null) {
+        const reason = row.error ?? row.resultReason ?? "Jumi failed: max attempts exceeded";
+        await upsertWorkerComment(opts.api, row.owner, row.repo, row.issueNumber, opts.botUsername ?? "jumi", reason);
+        await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+      } else {
+        await store.markPublished(row.id, row.leasedBy, {
+          state: "failed",
+          reason: row.error ?? row.resultReason ?? undefined,
+        });
+      }
       logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
     } catch (err) {
       logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);

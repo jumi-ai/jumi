@@ -62,6 +62,7 @@ export interface IssueJobPayload {
 }
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
+export const WORKER_MAX_ATTEMPTS_REASON = "Jumi failed: max attempts exceeded";
 export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
@@ -104,6 +105,8 @@ export interface ReclaimResult {
 
 export interface ReviewJobStore {
   migrate(): Promise<void>;
+  /** Job-mode check: fail clearly when the schema is too old. Never migrates. */
+  assertSchema?(): Promise<void>;
   enqueue(job: ReviewJob): Promise<EnqueueResult>;
   enqueueIssue(job: IssueJob): Promise<EnqueueResult>;
   drop(key: string): Promise<boolean>;
@@ -532,6 +535,10 @@ export function hasPersistedResult(row: ReviewJobRecord): boolean {
   return Boolean(row.error && !isBackoffMarker(row.error));
 }
 
+export function maxAttemptsReasonFor(kind: JobKind): string {
+  return isWorkerKind(kind) ? WORKER_MAX_ATTEMPTS_REASON : MAX_ATTEMPTS_REASON;
+}
+
 function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefined): boolean {
   return state === "succeeded" || (state === "skipped" && isTerminalSkipReason(reason));
 }
@@ -774,6 +781,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   async migrate(): Promise<void> {
     await this.sits.migrate();
+  }
+
+  async assertSchema(): Promise<void> {
+    // Memory ledger is always current.
   }
 
   enqueue(job: ReviewJob): Promise<EnqueueResult> {
@@ -1078,8 +1089,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         row.updatedAt = ts;
         if (isInfraRetryMarker(row.error)) row.error = null;
         if (row.attempt >= maxAttempts) {
-          row.error = MAX_ATTEMPTS_REASON;
-          row.resultReason = MAX_ATTEMPTS_REASON;
+          const reason = maxAttemptsReasonFor(rowKind(row));
+          row.error = reason;
+          row.resultReason = reason;
           row.leasedBy = RECLAIM_LEASED_BY;
           row.leasedUntil = claimedUntil;
           publish.push({ ...row });
@@ -2037,6 +2049,73 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
   };
 }
 
+/**
+ * Router-only migration lock. One process per job would otherwise take a
+ * table lock on every pod start (`ALTER TABLE ... IF NOT EXISTS`). The router
+ * holds this advisory xact lock for the whole migration so concurrent
+ * migrators serialize instead of conflicting. `SKIP LOCKED` on the reclaim
+ * and lease paths keeps the worker safe alongside the router.
+ */
+export async function withLedgerMigrationLock(sql: SqlClient, fn: (tx: SqlClient) => Promise<void>): Promise<void> {
+  await sql.begin(async (tx) => {
+    await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, ["jumi_ledger_migrate"]);
+    await fn(tx);
+  });
+}
+
+const REQUIRED_LEDGER_TABLES = [
+  "review_jobs",
+  "issue_skip_latches",
+  "router_sits",
+  "closed_pulls",
+  "review_kicks",
+  "pr_writer_provenance",
+  "pr_publication_intents",
+] as const;
+
+const REQUIRED_REVIEW_JOB_COLUMNS = [
+  "job_key",
+  "kind",
+  "issue_number",
+  "payload",
+  "result_runner",
+  "rewake_requested",
+] as const;
+
+/**
+ * Job-mode schema check. Never migrates: a job pod on the old image can run
+ * for hours after a rollout, so schema changes stay compatible and the job
+ * fails clearly when the router has not migrated yet.
+ */
+export async function assertLedgerSchema(sql: SqlClient): Promise<void> {
+  const tables = asRows<{ name: unknown }>(
+    await sql.unsafe(
+      `SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+      [pgTextArrayLiteral([...REQUIRED_LEDGER_TABLES])]
+    )
+  );
+  const present = new Set(tables.map((row) => str(row.name)));
+  const missingTables = [...REQUIRED_LEDGER_TABLES].filter((table) => !present.has(table));
+  if (missingTables.length > 0) {
+    throw new Error(
+      `ledger schema is outdated (missing tables: ${missingTables.join(", ")}); router must migrate first`
+    );
+  }
+  const columns = asRows<{ name: unknown }>(
+    await sql.unsafe(
+      `SELECT column_name AS name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'review_jobs' AND column_name = ANY($1::text[])`,
+      [pgTextArrayLiteral([...REQUIRED_REVIEW_JOB_COLUMNS])]
+    )
+  );
+  const presentColumns = new Set(columns.map((row) => str(row.name)));
+  const missingColumns = [...REQUIRED_REVIEW_JOB_COLUMNS].filter((col) => !presentColumns.has(col));
+  if (missingColumns.length > 0) {
+    throw new Error(
+      `ledger schema is outdated (review_jobs missing columns: ${missingColumns.join(", ")}); router must migrate first`
+    );
+  }
+}
+
 export class PgReviewJobStore implements ReviewJobStore {
   readonly skipLatches: PgSkipLatchStore;
   readonly sits: PgRouterSitStore;
@@ -2050,13 +2129,24 @@ export class PgReviewJobStore implements ReviewJobStore {
 
   async migrate(): Promise<void> {
     try {
-      await this.sql.unsafe(REVIEW_JOBS_SCHEMA_SQL);
-      await this.sql.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
-      await this.sql.unsafe(ROUTER_SITS_SCHEMA_SQL);
-      await this.sql.unsafe(CLOSED_PULLS_SCHEMA_SQL);
-      await this.sql.unsafe(REVIEW_KICKS_SCHEMA_SQL);
-      await this.sql.unsafe(PROVENANCE_SCHEMA_SQL);
-      await this.sql.unsafe(RUN_USAGE_SCHEMA_SQL);
+      await withLedgerMigrationLock(this.sql, async (tx) => {
+        await tx.unsafe(REVIEW_JOBS_SCHEMA_SQL);
+        await tx.unsafe(ISSUE_SKIP_LATCHES_SCHEMA_SQL);
+        await tx.unsafe(ROUTER_SITS_SCHEMA_SQL);
+        await tx.unsafe(CLOSED_PULLS_SCHEMA_SQL);
+        await tx.unsafe(REVIEW_KICKS_SCHEMA_SQL);
+        await tx.unsafe(PROVENANCE_SCHEMA_SQL);
+        await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  /** Job-mode check: fail clearly when the router has not migrated yet. Never migrates. */
+  async assertSchema(): Promise<void> {
+    try {
+      await assertLedgerSchema(this.sql);
     } catch (err) {
       wrapSqlError(err);
     }
@@ -2499,6 +2589,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           continue;
         }
         if (row.attempt + 1 >= maxAttempts) {
+          const reason = maxAttemptsReasonFor(rowKind(row));
           const updated = asRows<ReviewJobRow>(
             await tx.unsafe(
               `UPDATE review_jobs
@@ -2510,7 +2601,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    updated_at = NOW()
                WHERE id = $1
                RETURNING *`,
-              [row.id, MAX_ATTEMPTS_REASON, RECLAIM_LEASED_BY, claimedUntil]
+              [row.id, reason, RECLAIM_LEASED_BY, claimedUntil]
             )
           );
           if (updated[0]) publish.push(mapRow(updated[0]));
@@ -3763,10 +3854,27 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 }
 
-export async function createPgReviewJobStore(databaseUrl: string): Promise<PgReviewJobStore> {
+export async function createPgReviewJobStore(
+  databaseUrl: string,
+  opts?: { migrate?: boolean }
+): Promise<PgReviewJobStore> {
   const store = new PgReviewJobStore(createBunSqlClient(databaseUrl));
-  await store.migrate();
+  if (opts?.migrate === false) {
+    await store.assertSchema();
+  } else {
+    await store.migrate();
+  }
   return store;
+}
+
+/** Job-mode opener: never migrates, fails clearly when the router has not migrated yet. */
+export async function openPgReviewJobStoreForJob(databaseUrl: string): Promise<PgReviewJobStore> {
+  return createPgReviewJobStore(databaseUrl, { migrate: false });
+}
+
+/** One process per ledger row sets `JUMI_JOB_MODE=1` so pod start never takes a migration table lock. */
+export function isJobMode(env: Record<string, string | undefined> = process.env): boolean {
+  return env.JUMI_JOB_MODE === "1";
 }
 
 export async function renderQueueMetrics(store: ReviewJobStore, now = new Date()): Promise<string> {
