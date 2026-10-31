@@ -564,12 +564,13 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        // The refusal is decided; teardown noise must not replace it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
       }
       if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = attachmentsTrackedReason(branch);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
       }
       try {
