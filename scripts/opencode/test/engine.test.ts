@@ -10,6 +10,7 @@ import {
   CI_LOOKUP_FAILED_REASON,
   CI_PENDING_REASON,
 } from "../src/ci.ts";
+import { reviewStuckStatePath } from "../src/claim.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
@@ -22,7 +23,7 @@ import {
 } from "../src/review.ts";
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
-import { stuckMarker } from "../src/stuck.ts";
+import { isQuotaStuck, readStuckState, stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
   emptyCiMethods,
@@ -1329,6 +1330,35 @@ describe("processEngineTick", () => {
       expect(logs.some((line) => line.includes("quota-wait") && line.includes("n=1"))).toBe(true);
       expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
       expect(api.statuses.map((status) => status.state)).toEqual(["pending"]);
+    });
+  });
+
+  test("ordinary exit with quota words in stderr fails instead of quota-waiting", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const logs: string[] = [];
+      const api = makeApi();
+      const message = `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`;
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        api,
+        "engine-1",
+        {
+          gitRunner: frozenGit(),
+          workspacePreparer: async () => undefined,
+          breaker: new InfraCircuitBreaker(),
+          openCodeRunner: async () => ({ status: "exit", exitCode: 1, message }),
+        },
+        (messageLine) => logs.push(messageLine)
+      );
+      expect(store.rows[0]?.state).toBe("failed");
+      expect(store.rows[0]?.error).toContain("opencode exited");
+      expect((store.rows[0]?.error ?? "").startsWith(QUOTA_WAIT_PREFIX)).toBe(false);
+      expect(logs.some((line) => line.includes("quota-wait"))).toBe(false);
+      expect(api.comments.some((body) => body.includes(QUOTA_STUCK_TEXT))).toBe(false);
+      expect(isQuotaStuck(await readStuckState(reviewStuckStatePath(workspace, "kirmanak", "demo", 7)))).toBe(false);
     });
   });
 

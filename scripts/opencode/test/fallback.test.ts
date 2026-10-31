@@ -388,6 +388,56 @@ describe("withModelHop", () => {
     expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
   });
 
+  test("exit 1 with quota words only in stderr does not take the quota hop", async () => {
+    const message = `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`;
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === "openai/gpt-5.5") return { status: "exit", exitCode: 1, message };
+      return ok(opts.model);
+    };
+    const result = await withModelHop(engine, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+      model: "openai/gpt-5.5",
+      workdir: "/tmp",
+    });
+    expect(result.status).toBe("exit");
+    expect(result.message).toBe(message);
+    expect(models).toEqual(["openai/gpt-5.5"]);
+  });
+
+  test("thrown exit with quota words only in stderr does not take the quota hop", async () => {
+    const message = `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`;
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === "openai/gpt-5.5") throw new EngineFailedError(message, false);
+      return ok(opts.model);
+    };
+    await expect(
+      withModelHop(engine, { fallbackModel: "anthropic/claude-sonnet-4-6" })({
+        model: "openai/gpt-5.5",
+        workdir: "/tmp",
+      })
+    ).rejects.toMatchObject({ name: "EngineFailedError", message });
+    expect(models).toEqual(["openai/gpt-5.5"]);
+  });
+
+  test("stderr quota words still leave a same-provider unavailable hop in place", async () => {
+    const message = "opencode exited with code 1:\nFree usage exceeded\n502 bad gateway";
+    const models: string[] = [];
+    const engine: Engine = async (opts) => {
+      models.push(opts.model);
+      if (opts.model === "opencode/big-pickle") throw new EngineFailedError(message, false);
+      return ok(opts.model);
+    };
+    const result = await withModelHop(engine, { fallbackModel: "opencode/gpt-5.5" })({
+      model: "opencode/big-pickle",
+      workdir: "/tmp",
+    });
+    expect(result).toMatchObject(ok("opencode/gpt-5.5"));
+    expect(models).toEqual(["opencode/big-pickle", "opencode/gpt-5.5"]);
+  });
+
   test("quota stuck hops from scratch when fallback is a different provider", async () => {
     const quotaStuck: EngineResult = { status: "stuck", message: QUOTA_MESSAGE };
     const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean }> = [];
