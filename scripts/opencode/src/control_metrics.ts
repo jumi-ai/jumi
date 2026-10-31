@@ -1,6 +1,6 @@
 import type { EngineResult } from "./engine.ts";
 import type { JobKind } from "./review_jobs.ts";
-import { renderTokenMetrics } from "./token_metrics.ts";
+import { renderTokenExporterHealth, renderTokenMetrics } from "./token_metrics.ts";
 
 export const WEBHOOK_RESULTS = ["accepted", "skipped", "hmac", "too large", "unavailable", "ping"] as const;
 export type WebhookResult = (typeof WEBHOOK_RESULTS)[number];
@@ -229,4 +229,15 @@ export function renderRunMetrics(): string {
 
 export function renderProcessMetrics(): string {
   return `${renderTokenMetrics()}${renderRunMetrics()}`;
+}
+
+/**
+ * What engine/worker pods serve on `/metrics`. Exporter health gauges only:
+ * the durable `ai_tokens_*` / `ai_sessions` / `jumi_jobs_completed_total` /
+ * `jumi_job_duration_seconds_*` / `jumi_opencode_exits_total` series now come
+ * from the router's ledger export, and serving the same names here would
+ * double totals for anyone scraping every pod. Scrape the router for totals.
+ */
+export function renderEphemeralMetrics(): string {
+  return renderTokenExporterHealth();
 }

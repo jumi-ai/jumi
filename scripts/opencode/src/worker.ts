@@ -23,6 +23,7 @@ import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown, workerQuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
+import { setActiveRunUsageRecording } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
@@ -307,6 +308,13 @@ export async function processWorkerTick(
     await store.releaseLease(row.id, leasedBy);
     return "idle";
   }
+  // Same ambient ledger recorder as the engine tick: runner spawns record
+  // per-run usage against this row before the tick ends. A failed metric
+  // write never fails the job (the wrapper swallows it).
+  setActiveRunUsageRecording({
+    context: { jobId: row.id, jobKey: row.jobKey, kind: row.kind },
+    recordRunUsageRows: (rows) => store.recordRunUsageRows(rows),
+  });
 
   const key = issueJobKey({
     owner: row.owner,
@@ -569,6 +577,7 @@ export async function processWorkerTick(
     }
     return "processed";
   } finally {
+    setActiveRunUsageRecording(undefined);
     untrack();
     aborts?.delete(key);
     pids?.delete(key);

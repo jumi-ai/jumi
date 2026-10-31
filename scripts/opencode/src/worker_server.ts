@@ -1,6 +1,6 @@
 import { hostname } from "node:os";
 import { scrubSecretEnv } from "./config.ts";
-import { meterWebhook, renderProcessMetrics } from "./control_metrics.ts";
+import { meterWebhook, renderEphemeralMetrics } from "./control_metrics.ts";
 import {
   chainHasCodex,
   chainHasOpenCodeXai,
@@ -66,7 +66,8 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (url.pathname === "/metrics") {
       if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
-      return new Response(renderProcessMetrics(), {
+      // Health gauges only: durable totals come from the router's ledger export.
+      return new Response(renderEphemeralMetrics(), {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
       });

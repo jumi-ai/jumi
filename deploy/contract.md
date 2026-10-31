@@ -167,3 +167,10 @@ Notes (not keys): `JUMI_ROLE` is required (`router` or `engine`; unset, empty, o
 #### volumes
 - `/data`
 - `/work`
+
+## Metrics
+
+No new env, ports, or volumes. `GET /metrics` sources:
+
+- Router: `jumi_review_jobs*`, `jumi_webhooks_total`, plus ledger-backed `ai_tokens_total`, `ai_tokens`, `ai_sessions`, `jumi_jobs_completed_total`, `jumi_job_duration_seconds_*`, and `jumi_opencode_exits_total` (from `jumi_run_usage` per-run rows and terminal `review_jobs` rows). Scrape the router for these names.
+- Engine/worker: exporter-health gauges only (`ai_token_exporter_*`, `ai_trace_exporter_errors`, `ai_quota_db_schema_errors`). They must not export the same counter names or totals double.

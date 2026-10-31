@@ -76,15 +76,18 @@ describe("createFetchHandler", () => {
     expect((await handler(new Request("https://reviewer.test/webhooks/gitea", { method: "POST" }))).status).toBe(415);
   });
 
-  test("serves Prometheus token metrics without auth", async () => {
+  test("serves Prometheus exporter health without durable totals", async () => {
     const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
     const response = await handler(new Request("https://reviewer.test/metrics"));
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/plain");
     const body = await response.text();
     expect(body).toContain('ai_token_exporter_up{agent_instance="jumi"} 1');
-    expect(body).toContain("jumi_jobs_completed_total");
-    expect(body).toContain("jumi_opencode_exits_total");
+    // Durable totals come from the router's ledger export; serving the same
+    // names here would double them for anyone scraping every pod.
+    expect(body).not.toContain("ai_tokens_total{");
+    expect(body).not.toContain("jumi_jobs_completed_total");
+    expect(body).not.toContain("jumi_opencode_exits_total");
     expect(body).not.toContain("jumi_review_jobs");
     expect(body).not.toContain("jumi_webhooks_total");
     expect((await handler(new Request("https://reviewer.test/metrics", { method: "POST" }))).status).toBe(405);
