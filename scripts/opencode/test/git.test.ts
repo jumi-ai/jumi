@@ -5,6 +5,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
 import { FORGE_DENY_DOMAIN, forgePermissions } from "../src/forge_webfetch.ts";
 import {
@@ -1506,6 +1507,25 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
           infra: true,
         }
       );
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("opencode binary", () => {
+  test("refuses the spawn when the opencode binary is missing", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-binary-missing-"));
+    process.env.PATH = "/nonexistent";
+    try {
+      let caught: unknown;
+      try {
+        await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(EngineFailedError);
+      expect(caught).toMatchObject({ infra: true, auth: false });
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }

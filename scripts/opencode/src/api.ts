@@ -262,6 +262,31 @@ function isActionsDisabledError(err: unknown): boolean {
   return /→ (403|404)\b/.test(err.message);
 }
 
+const ACTION_JOB_PAGE_SIZE = 50;
+const ACTION_JOB_MAX_PAGES = 40;
+
+function incompleteListError(label: string, seen: number, totalCount: number | undefined): Error {
+  const total = typeof totalCount === "number" ? String(totalCount) : "unknown";
+  return new Error(`${label} list is incomplete: fetched ${seen} of ${total}`);
+}
+
+// A short page ends the list. A full page at the cap, or a total_count past the jobs fetched, does not.
+function finishForgePage(
+  label: string,
+  seen: number,
+  totalCount: number | undefined,
+  full: boolean,
+  atCap: boolean
+): "done" | "next" {
+  const proven = typeof totalCount === "number" && seen >= totalCount;
+  if (proven || !full) {
+    if (typeof totalCount === "number" && seen < totalCount) throw incompleteListError(label, seen, totalCount);
+    return "done";
+  }
+  if (atCap) throw incompleteListError(label, seen, totalCount);
+  return "next";
+}
+
 /**
  * Minimal Gitea REST API client.
  * All methods throw on non-2xx responses.
@@ -687,24 +712,35 @@ export class GiteaAPI {
   ): Promise<ActionJob[]> {
     const results: ActionJob[] = [];
     let page = 1;
+    let seen = 0;
+    let totalCount: number | undefined;
     const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
     const needle = opts?.headSha?.toLowerCase();
-    while (page <= 40) {
-      let body: { jobs?: GiteaActionJob[] };
+    while (page <= ACTION_JOB_MAX_PAGES) {
+      let body: { jobs?: GiteaActionJob[]; total_count?: number };
       try {
-        body = await this.get<{ jobs?: GiteaActionJob[] }>(
-          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=50&page=${page}&order=desc${statusQ}`
+        body = await this.get<{ jobs?: GiteaActionJob[]; total_count?: number }>(
+          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=${ACTION_JOB_PAGE_SIZE}&page=${page}&order=desc${statusQ}`
         );
       } catch (err) {
-        if (results.length === 0 && isActionsDisabledError(err)) return [];
+        if (seen === 0 && isActionsDisabledError(err)) return [];
         throw err;
       }
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
       const batch = Array.isArray(body?.jobs) ? body.jobs : [];
       for (const job of batch) {
         if (needle && (job.head_sha ?? "").toLowerCase() !== needle) continue;
         results.push(toActionJob(job));
       }
-      if (batch.length !== 50) break;
+      seen += batch.length;
+      const outcome = finishForgePage(
+        "Gitea actions jobs",
+        seen,
+        totalCount,
+        batch.length === ACTION_JOB_PAGE_SIZE,
+        page === ACTION_JOB_MAX_PAGES
+      );
+      if (outcome === "done") return results;
       page += 1;
     }
     return results;
