@@ -2071,6 +2071,7 @@ const REQUIRED_LEDGER_TABLES = [
   "review_kicks",
   "pr_writer_provenance",
   "pr_publication_intents",
+  "jumi_run_usage",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
