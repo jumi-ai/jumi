@@ -7,6 +7,7 @@ import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflic
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
+import { standingPodRuntime } from "../src/runtime.ts";
 import { issueJobFromRecord, MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -457,6 +458,48 @@ describe("implementConflict", () => {
       expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "ls-tree" && args.includes(dir))).toBe(true);
       expect(api.comments.at(-1)).toContain(reason);
+    });
+  });
+
+  test.each([
+    ["engine scratch", ".jumi-tmp", ".jumi-tmp/auth.json\0", engineScratchTrackedReason],
+    ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
+  ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const runtime = {
+        ...standingPodRuntime,
+        destroyRuntimeWorkspace: async () => {
+          throw new Error("destroy boom");
+        },
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime,
+        gitRunner: conflictThenResolvedGit(async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          gitCalls.push(gitArgs);
+          if (gitArgs[0] === "ls-tree") return gitArgs.includes(dir) ? listed : "";
+          return "";
+        }),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      const reason = reasonFor("jumi/issue-12-fix-the-thing");
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(reason);
+      expect((await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12))).round).toBe(0);
     });
   });
 

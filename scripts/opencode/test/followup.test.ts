@@ -766,6 +766,51 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test.each([
+    ["engine scratch", ".jumi-tmp", ".jumi-tmp/auth.json\0", engineScratchTrackedReason],
+    ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
+  ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const runtime = {
+        ...standingPodRuntime,
+        destroyRuntimeWorkspace: async () => {
+          throw new Error("destroy boom");
+        },
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          gitCalls.push(gitArgs);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "1";
+          if (gitArgs[0] === "ls-tree") return gitArgs.includes(dir) ? listed : "";
+          return "";
+        },
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      const reason = reasonFor("jumi/issue-12-fix-the-thing");
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(reason);
+      expect((await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12))).round).toBe(0);
+    });
+  });
+
   test("closes the existing closer and does not push when the issue is closed after OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;

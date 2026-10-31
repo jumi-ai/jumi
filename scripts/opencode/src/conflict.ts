@@ -925,13 +925,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
         await sticky(reason, pr.number);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        // The refusal is decided; teardown noise must not replace it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
       }
       if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = attachmentsTrackedReason(branch);
         await sticky(reason, pr.number);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
       }
 
