@@ -177,11 +177,16 @@ function toRow(
 /**
  * Wrap the base engine so every spawn writes its ledger rows before the caller
  * observes the result. A failed write never fails the job: it is swallowed.
- * Aborted (lease-lost) runs are skipped, mirroring `observeEngineRun`.
- * Note: a deferred quota SIGTERM (a hop is coming) is recorded here with its
- * pre-hop class, while the in-process counter takes the hopped `quota` class
- * in the fallback. Counts and durations still match; only that rare class
- * label differs.
+ * Lease-lost (aborted) runs still write their token/session cells with exit
+ * class `incomplete` and the measured wall-clock duration: every harness
+ * records usage before its abort check, so skipping them would systematically
+ * undercount `ai_tokens_total`/`ai_sessions` versus the old exporter
+ * (long-running engine, heartbeat loss, shutdown race). Only the pod-dies-
+ * outright case loses tokens, and runs with no token/session delta write
+ * nothing. Note: a deferred quota SIGTERM (a hop is coming) is recorded here
+ * with its pre-hop class, while the in-process counter takes the hopped
+ * `quota` class in the fallback. Counts and durations still match; only that
+ * rare class label differs.
  */
 export function withLedgerRunUsage(engine: Engine): Engine {
   return async (opts) => {
@@ -199,12 +204,20 @@ export function withLedgerRunUsage(engine: Engine): Engine {
       thrown = err;
     }
     try {
-      if (!opts.abortSignal?.aborted) {
-        const after = snapshotTokenMetrics();
-        const deltas = diffTokenMetrics(before, after);
-        const endedAt = new Date();
-        const durationSeconds = Math.max(0, (Date.now() - startMs) / 1000);
-        const exitClass = result ? classifyOpenCodeExit(result) : classifyThrown(thrown);
+      const aborted = Boolean(opts.abortSignal?.aborted);
+      const after = snapshotTokenMetrics();
+      const deltas = diffTokenMetrics(before, after);
+      const endedAt = new Date();
+      const durationSeconds = Math.max(0, (Date.now() - startMs) / 1000);
+      // Lease lost: tokens were already recorded in-process before the harness
+      // abort check, so the ledger must keep them. Attribute the run as
+      // `incomplete`; a run with no delta writes nothing.
+      if (!(aborted && deltas.length === 0)) {
+        const exitClass: OpenCodeExitClass = aborted
+          ? "incomplete"
+          : result
+            ? classifyOpenCodeExit(result)
+            : classifyThrown(thrown);
         const rows =
           deltas.length > 0
             ? deltas.map((delta) =>

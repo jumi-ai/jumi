@@ -107,7 +107,7 @@ describe("withLedgerRunUsage", () => {
     expect(result.status).toBe("ok");
   });
 
-  test("aborted runs are skipped like observeEngineRun skips them", async () => {
+  test("aborted runs with no usage write nothing", async () => {
     const recorded: NewRunUsageRow[] = [];
     setActiveRunUsageRecording({
       context: { jobId: 1, jobKey: "k", kind: "review" },
@@ -120,6 +120,52 @@ describe("withLedgerRunUsage", () => {
     const engine = withLedgerRunUsage(okEngine());
     await engine({ model: "m", workdir: "/work/x", abortSignal: abort.signal });
     expect(recorded).toHaveLength(0);
+  });
+
+  test("aborted runs still record token/session cells as incomplete", async () => {
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "k", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+      },
+    });
+    const abort = new AbortController();
+    abort.abort();
+    const engine = withLedgerRunUsage(okEngine(() => recordClaudeUsage(usage({ input: 10, output: 3 }))));
+    const result = await engine({ type: "claude", model: "m", workdir: "/work/x", abortSignal: abort.signal });
+    expect(result.status).toBe("ok");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      runner: "claude",
+      tokensInput: 10,
+      tokensOutput: 3,
+      sessions: 1,
+      exitClass: "incomplete",
+    });
+  });
+
+  test("aborted throws still record tokens and rethrow", async () => {
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "k", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+      },
+    });
+    const abort = new AbortController();
+    abort.abort();
+    const engine = withLedgerRunUsage(async () => {
+      recordClaudeUsage(usage({ input: 7 }));
+      const err = new Error("cancelled");
+      err.name = "AbortError";
+      throw err;
+    });
+    await expect(engine({ type: "claude", model: "m", workdir: "/work/x", abortSignal: abort.signal })).rejects.toThrow(
+      "cancelled"
+    );
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ runner: "claude", tokensInput: 7, exitClass: "incomplete" });
   });
 
   test("thrown engine failures record an exit class and rethrow", async () => {
