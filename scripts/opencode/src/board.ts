@@ -1350,206 +1350,232 @@ $("refresh").addEventListener("click", load);
 $("sheet-backdrop").addEventListener("click", closeConfirm);
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeConfirm(); });
 window.addEventListener("resize", () => { if (!narrow()) closeConfirm(); });
-const grok = { role: "worker", ordinal: "", status: null, pollTimer: 0, starting: false };
-function grokEls() {
-  return {
-    section: $("grok"),
-    role: $("grok-role"),
-    ordinal: $("grok-ordinal"),
-    check: $("grok-check"),
-    start: $("grok-start"),
-    cancel: $("grok-cancel"),
-    note: $("grok-note"),
-    result: $("grok-result"),
-    link: $("grok-link"),
-    code: $("grok-code"),
-    expiry: $("grok-expiry"),
-    state: $("grok-state"),
-  };
-}
-function grokOrdinal() {
-  const els = grokEls();
-  const role = els.role ? els.role.value === "engine" ? "engine" : "worker" : "worker";
-  const ordinal = els.ordinal ? els.ordinal.value.trim() : "";
-  return { role, ordinal };
-}
-function grokNote(text) {
-  const els = grokEls();
-  if (!els.note) return;
-  els.note.textContent = text;
-}
-function renderGrokStatus(status) {
-  const els = grokEls();
-  grok.status = status || null;
-  if (!els.result) return;
-  if (!status || status.available === false) {
-    els.result.hidden = true;
-    return;
+const DEVICE_LOGIN_STOP = ["signed-in", "expired", "denied", "error", "cancelled"];
+function mountDeviceLogin(cfg) {
+  const client = { status: null, pollTimer: 0, starting: false };
+  function els() {
+    return {
+      section: $(cfg.id),
+      role: $(cfg.id + "-role"),
+      ordinal: $(cfg.id + "-ordinal"),
+      check: $(cfg.id + "-check"),
+      start: $(cfg.id + "-start"),
+      cancel: $(cfg.id + "-cancel"),
+      note: $(cfg.id + "-note"),
+      result: $(cfg.id + "-result"),
+      link: $(cfg.id + "-link"),
+      code: $(cfg.id + "-code"),
+      expiry: $(cfg.id + "-expiry"),
+      state: $(cfg.id + "-state"),
+    };
   }
-  const hasRunner = status.hasXaiRunner === true;
-  if (els.start) els.start.style.display = hasRunner ? "" : "none";
-  if (!hasRunner) {
-    grokNote("Grok sign-in is unavailable on this ordinal (no OpenCode xAI runner in its chain).");
-    els.result.hidden = true;
-    return;
+  function ordinalOf() {
+    const box = els();
+    const role = box.role ? (box.role.value === "engine" ? "engine" : "worker") : "worker";
+    const ordinal = box.ordinal ? box.ordinal.value.trim() : "";
+    return { role, ordinal };
   }
-  if (status.leased === true) {
-    grokNote("That ordinal holds a leased job; sign-in is refused until the job finishes.");
-  } else if (status.authPresent === true) {
-    grokNote("That ordinal already holds an xAI oauth entry (presence is not a healthy grant).");
-  } else if (status.state === "idle" || status.state === "cancelled") {
-    grokNote("");
+  function note(text) {
+    const box = els();
+    if (!box.note) return;
+    box.note.textContent = text;
   }
-  if (!status.url || !status.userCode) {
-    els.result.hidden = true;
-    if (els.state) {
-      els.state.textContent = "State: " + (status.state || "idle");
-      els.result.hidden = false;
-      if (els.link) els.link.style.display = "none";
-      if (els.code) els.code.style.display = "none";
-      if (els.expiry) els.expiry.textContent = "";
+  function renderStatus(status) {
+    const box = els();
+    client.status = status || null;
+    if (!box.result) return;
+    if (!status || status.available === false) {
+      box.result.hidden = true;
+      return;
     }
-    return;
-  }
-  els.result.hidden = false;
-  if (els.link) {
-    els.link.style.display = "";
-    els.link.href = status.url;
-    els.link.textContent = "Open provider page";
-  }
-  if (els.code) {
-    els.code.style.display = "";
-    els.code.textContent = status.userCode;
-  }
-  if (els.expiry) {
-    els.expiry.textContent = typeof status.expiresAt === "number"
-      ? "Code expires " + new Date(status.expiresAt).toLocaleTimeString()
-      : "";
-  }
-  if (els.state) els.state.textContent = "State: " + (status.state || "waiting");
-}
-async function fetchGrokStatus(showErrors) {
-  const { role, ordinal } = grokOrdinal();
-  if (!ordinal) {
-    if (showErrors) grokNote("Enter the ordinal host (for example jumi-worker-0).");
-    return null;
-  }
-  try {
-    const res = await fetch("/api/board/device-login/status?ordinal=" + encodeURIComponent(ordinal) + "&role=" + encodeURIComponent(role), { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
-    if (res.status === 401) {
-      if (showErrors) grokNote("Sign in via the edge proxy, then check again.");
-      return null;
+    const hasRunner = status[cfg.runnerField] === true;
+    if (box.start) box.start.style.display = hasRunner ? "" : "none";
+    if (!hasRunner) {
+      note(cfg.unavailableNote);
+      box.result.hidden = true;
+      return;
     }
-    if (!res.ok) {
-      if (showErrors) grokNote("Ordinal unavailable (" + res.status + "). The router reaches it once the chart change lands.");
-      renderGrokStatus({ available: false });
-      return null;
+    if (status.leased === true) {
+      note("That ordinal holds a leased job; sign-in is refused until the job finishes.");
+    } else if (status[cfg.authField] === true) {
+      note(cfg.authPresentNote);
+    } else if (status.state === "idle" || status.state === "cancelled") {
+      note("");
     }
-    const status = await res.json();
-    renderGrokStatus(status);
-    if (status && (status.state === "signed-in" || status.state === "expired" || status.state === "denied" || status.state === "error" || status.state === "cancelled")) stopGrokPoll();
-    return status;
-  } catch (err) {
-    if (showErrors) grokNote("Ordinal unavailable. The router reaches it once the chart change lands.");
-    renderGrokStatus({ available: false });
-    return null;
-  }
-}
-function stopGrokPoll() {
-  if (grok.pollTimer) {
-    clearInterval(grok.pollTimer);
-    grok.pollTimer = 0;
-  }
-}
-function startGrokPoll() {
-  stopGrokPoll();
-  grok.pollTimer = setInterval(() => { fetchGrokStatus(false); }, 5000);
-}
-function openGrokConfirm(role, ordinal) {
-  const wrap = $("sheet-wrap");
-  const sheet = $("sheet");
-  if (!wrap || !sheet) return;
-  sheet.textContent = "";
-  const title = document.createElement("h2");
-  title.textContent = "Start Grok sign-in on " + ordinal + "?";
-  sheet.appendChild(title);
-  const sub = document.createElement("div");
-  sub.className = "sub";
-  sub.textContent = role + " ordinal " + ordinal;
-  sheet.appendChild(sub);
-  const note = document.createElement("p");
-  note.className = "consequence";
-  note.textContent = "This will: run a Grok device login on that pod and write that pod's Grok auth file.";
-  sheet.appendChild(note);
-  const primary = document.createElement("button");
-  primary.type = "button";
-  primary.className = "primary";
-  primary.textContent = "Start Grok sign-in on " + ordinal;
-  const msg = document.createElement("div");
-  msg.className = "sub";
-  primary.addEventListener("click", async () => {
-    if (grok.starting) return;
-    grok.starting = true;
-    primary.disabled = true;
-    msg.textContent = "Working…";
-    try {
-      const res = await fetch("/api/board/device-login/start", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ ordinal, role })
-      });
-      if (res.ok) {
-        const status = await res.json();
-        closeConfirm();
-        renderGrokStatus({ ordinal, role, hasXaiRunner: true, authPresent: false, leased: false, available: true, state: status.state || "waiting", url: status.url, userCode: status.userCode, expiresAt: status.expiresAt });
-        startGrokPoll();
-      } else if (res.status === 409) {
-        msg.textContent = "That ordinal holds a leased job; sign-in is refused until the job finishes.";
-      } else if (res.status === 422) {
-        msg.textContent = "Grok sign-in is unavailable on this ordinal (no OpenCode xAI runner in its chain).";
-      } else if (res.status === 401) {
-        msg.textContent = "Sign in via the edge proxy, then try again.";
-      } else if (res.status === 403) {
-        msg.textContent = "Forbidden origin.";
-      } else {
-        msg.textContent = "Sign-in did not start (" + res.status + ").";
+    if (!status.url || !status.userCode) {
+      box.result.hidden = true;
+      if (box.state) {
+        box.state.textContent = "State: " + (status.state || "idle");
+        box.result.hidden = false;
+        if (box.link) box.link.style.display = "none";
+        if (box.code) box.code.style.display = "none";
+        if (box.expiry) box.expiry.textContent = "";
       }
-    } catch (err) {
-      msg.textContent = "Sign-in did not start.";
-    } finally {
-      grok.starting = false;
-      primary.disabled = false;
+      return;
     }
-  });
-  sheet.appendChild(primary);
-  sheet.appendChild(document.createTextNode(" "));
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "secondary";
-  close.textContent = "Close";
-  close.addEventListener("click", closeConfirm);
-  sheet.appendChild(close);
-  sheet.appendChild(msg);
-  wrap.hidden = false;
-}
-function updateGrokVisibility() {
-  const els = grokEls();
-  if (!els.section) return;
-  const data = state.data;
-  const forge = (data && data.forge) || state.forge || "gitea";
-  const isGithub = forge === "github" || state.forge === "github";
-  els.section.style.display = isGithub ? "none" : "";
-}
-(function initGrok() {
-  const els = grokEls();
-  if (!els.role || !els.ordinal || !els.start) return;
-  els.role.addEventListener("change", () => { fetchGrokStatus(false); });
-  if (els.check) els.check.addEventListener("click", () => { fetchGrokStatus(true); });
-  if (els.cancel) els.cancel.addEventListener("click", async () => {
-    const { role, ordinal } = grokOrdinal();
-    if (!ordinal) {
-      grokNote("Enter the ordinal host first.");
+    box.result.hidden = false;
+    if (box.link) {
+      box.link.style.display = "";
+      box.link.href = status.url;
+      box.link.textContent = "Open provider page";
+    }
+    if (box.code) {
+      box.code.style.display = "";
+      box.code.textContent = status.userCode;
+    }
+    if (box.expiry) {
+      box.expiry.textContent = typeof status.expiresAt === "number"
+        ? "Code expires " + new Date(status.expiresAt).toLocaleTimeString()
+        : "";
+    }
+    if (box.state) box.state.textContent = "State: " + (status.state || "waiting");
+  }
+  function statusUrl(role, ordinal) {
+    let url = "/api/board/device-login/status?ordinal=" + encodeURIComponent(ordinal) + "&role=" + encodeURIComponent(role);
+    if (cfg.provider) url += "&provider=" + encodeURIComponent(cfg.provider);
+    return url;
+  }
+  function writeBody(role, ordinal) {
+    const body = { ordinal: ordinal, role: role };
+    if (cfg.provider) body.provider = cfg.provider;
+    return body;
+  }
+  async function fetchStatus(showErrors) {
+    const picked = ordinalOf();
+    if (!picked.ordinal) {
+      if (showErrors) note("Enter the ordinal host (for example jumi-worker-0).");
+      return null;
+    }
+    try {
+      const res = await fetch(statusUrl(picked.role, picked.ordinal), { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (res.status === 401) {
+        if (showErrors) note("Sign in via the edge proxy, then check again.");
+        return null;
+      }
+      if (!res.ok) {
+        if (showErrors) note("Ordinal unavailable (" + res.status + "). The router reaches it once the chart change lands.");
+        renderStatus({ available: false });
+        return null;
+      }
+      const status = await res.json();
+      renderStatus(status);
+      if (status && DEVICE_LOGIN_STOP.includes(status.state)) stopPoll();
+      return status;
+    } catch (err) {
+      if (showErrors) note("Ordinal unavailable. The router reaches it once the chart change lands.");
+      renderStatus({ available: false });
+      return null;
+    }
+  }
+  function stopPoll() {
+    if (client.pollTimer) {
+      clearInterval(client.pollTimer);
+      client.pollTimer = 0;
+    }
+  }
+  function startPoll() {
+    stopPoll();
+    client.pollTimer = setInterval(() => { fetchStatus(false); }, 5000);
+  }
+  function startedStatus(role, ordinal, status) {
+    const next = {
+      ordinal: ordinal,
+      role: role,
+      leased: false,
+      available: true,
+      state: status.state || "waiting",
+      url: status.url,
+      userCode: status.userCode,
+      expiresAt: status.expiresAt,
+    };
+    next[cfg.runnerField] = true;
+    next[cfg.authField] = false;
+    return next;
+  }
+  function openConfirm(role, ordinal) {
+    const wrap = $("sheet-wrap");
+    const sheet = $("sheet");
+    if (!wrap || !sheet) return;
+    sheet.textContent = "";
+    const title = document.createElement("h2");
+    title.textContent = cfg.confirmPrompt + ordinal + "?";
+    sheet.appendChild(title);
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = role + " ordinal " + ordinal;
+    sheet.appendChild(sub);
+    const consequence = document.createElement("p");
+    consequence.className = "consequence";
+    consequence.textContent = cfg.confirmEffect;
+    sheet.appendChild(consequence);
+    const primary = document.createElement("button");
+    primary.type = "button";
+    primary.className = "primary";
+    primary.textContent = cfg.confirmPrompt + ordinal;
+    const msg = document.createElement("div");
+    msg.className = "sub";
+    primary.addEventListener("click", async () => {
+      if (client.starting) return;
+      client.starting = true;
+      primary.disabled = true;
+      msg.textContent = "Working…";
+      try {
+        const res = await fetch("/api/board/device-login/start", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(writeBody(role, ordinal))
+        });
+        if (res.ok) {
+          const status = await res.json();
+          closeConfirm();
+          renderStatus(startedStatus(role, ordinal, status));
+          startPoll();
+        } else if (res.status === 409) {
+          msg.textContent = "That ordinal holds a leased job; sign-in is refused until the job finishes.";
+        } else if (res.status === 422) {
+          msg.textContent = cfg.unavailableNote;
+        } else if (res.status === 401) {
+          msg.textContent = "Sign in via the edge proxy, then try again.";
+        } else if (res.status === 403) {
+          msg.textContent = "Forbidden origin.";
+        } else {
+          msg.textContent = "Sign-in did not start (" + res.status + ").";
+        }
+      } catch (err) {
+        msg.textContent = "Sign-in did not start.";
+      } finally {
+        client.starting = false;
+        primary.disabled = false;
+      }
+    });
+    sheet.appendChild(primary);
+    sheet.appendChild(document.createTextNode(" "));
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "secondary";
+    close.textContent = "Close";
+    close.addEventListener("click", closeConfirm);
+    sheet.appendChild(close);
+    sheet.appendChild(msg);
+    wrap.hidden = false;
+  }
+  function updateVisibility() {
+    const box = els();
+    if (!box.section) return;
+    const data = state.data;
+    const forge = (data && data.forge) || state.forge || "gitea";
+    const isGithub = forge === "github" || state.forge === "github";
+    box.section.style.display = isGithub ? "none" : "";
+  }
+  const box = els();
+  if (!box.role || !box.ordinal || !box.start) return;
+  box.role.addEventListener("change", () => { fetchStatus(false); });
+  if (box.check) box.check.addEventListener("click", () => { fetchStatus(true); });
+  if (box.cancel) box.cancel.addEventListener("click", async () => {
+    const picked = ordinalOf();
+    if (!picked.ordinal) {
+      note("Enter the ordinal host first.");
       return;
     }
     try {
@@ -1557,267 +1583,52 @@ function updateGrokVisibility() {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ ordinal, role })
+        body: JSON.stringify(writeBody(picked.role, picked.ordinal))
       });
       if (res.ok) {
-        stopGrokPoll();
-        grokNote("Sign-in cancelled.");
-        fetchGrokStatus(false);
+        stopPoll();
+        note("Sign-in cancelled.");
+        fetchStatus(false);
       } else {
-        grokNote("Cancel did not land (" + res.status + ").");
+        note("Cancel did not land (" + res.status + ").");
       }
     } catch (err) {
-      grokNote("Cancel did not land.");
+      note("Cancel did not land.");
     }
   });
-  if (els.start) els.start.addEventListener("click", () => {
-    const { role, ordinal } = grokOrdinal();
-    if (!ordinal) {
-      grokNote("Enter the ordinal host (for example jumi-worker-0).");
+  box.start.addEventListener("click", () => {
+    const picked = ordinalOf();
+    if (!picked.ordinal) {
+      note("Enter the ordinal host (for example jumi-worker-0).");
       return;
     }
-    openGrokConfirm(role, ordinal);
+    openConfirm(picked.role, picked.ordinal);
   });
   const switchEl = $("forge-switch");
-  if (switchEl) switchEl.addEventListener("change", updateGrokVisibility);
-  const origRender = render;
-  render = function () { origRender(); updateGrokVisibility(); updateCodexVisibility(); };
-  updateGrokVisibility();
-})();
-const codex = { role: "worker", ordinal: "", status: null, pollTimer: 0, starting: false };
-function codexEls() {
-  return {
-    section: $("codex"),
-    role: $("codex-role"),
-    ordinal: $("codex-ordinal"),
-    check: $("codex-check"),
-    start: $("codex-start"),
-    cancel: $("codex-cancel"),
-    note: $("codex-note"),
-    result: $("codex-result"),
-    link: $("codex-link"),
-    code: $("codex-code"),
-    expiry: $("codex-expiry"),
-    state: $("codex-state"),
-  };
+  if (switchEl) switchEl.addEventListener("change", updateVisibility);
+  const previousRender = render;
+  render = function () { previousRender(); updateVisibility(); };
+  updateVisibility();
 }
-function codexOrdinal() {
-  const els = codexEls();
-  const role = els.role ? els.role.value === "engine" ? "engine" : "worker" : "worker";
-  const ordinal = els.ordinal ? els.ordinal.value.trim() : "";
-  return { role, ordinal };
-}
-function codexNote(text) {
-  const els = codexEls();
-  if (!els.note) return;
-  els.note.textContent = text;
-}
-function renderCodexStatus(status) {
-  const els = codexEls();
-  codex.status = status || null;
-  if (!els.result) return;
-  if (!status || status.available === false) {
-    els.result.hidden = true;
-    return;
-  }
-  const hasRunner = status.hasCodexRunner === true;
-  if (els.start) els.start.style.display = hasRunner ? "" : "none";
-  if (!hasRunner) {
-    codexNote("Codex sign-in is unavailable on this ordinal (no codex runner in its chain).");
-    els.result.hidden = true;
-    return;
-  }
-  if (status.leased === true) {
-    codexNote("That ordinal holds a leased job; sign-in is refused until the job finishes.");
-  } else if (status.codexAuthPresent === true) {
-    codexNote("That ordinal already holds a Codex ChatGPT credential (presence is not a healthy grant).");
-  } else if (status.state === "idle" || status.state === "cancelled") {
-    codexNote("");
-  }
-  if (!status.url || !status.userCode) {
-    els.result.hidden = true;
-    if (els.state) {
-      els.state.textContent = "State: " + (status.state || "idle");
-      els.result.hidden = false;
-      if (els.link) els.link.style.display = "none";
-      if (els.code) els.code.style.display = "none";
-      if (els.expiry) els.expiry.textContent = "";
-    }
-    return;
-  }
-  els.result.hidden = false;
-  if (els.link) {
-    els.link.style.display = "";
-    els.link.href = status.url;
-    els.link.textContent = "Open provider page";
-  }
-  if (els.code) {
-    els.code.style.display = "";
-    els.code.textContent = status.userCode;
-  }
-  if (els.expiry) {
-    els.expiry.textContent = typeof status.expiresAt === "number"
-      ? "Code expires " + new Date(status.expiresAt).toLocaleTimeString()
-      : "";
-  }
-  if (els.state) els.state.textContent = "State: " + (status.state || "waiting");
-}
-async function fetchCodexStatus(showErrors) {
-  const { role, ordinal } = codexOrdinal();
-  if (!ordinal) {
-    if (showErrors) codexNote("Enter the ordinal host (for example jumi-worker-0).");
-    return null;
-  }
-  try {
-    const res = await fetch("/api/board/device-login/status?ordinal=" + encodeURIComponent(ordinal) + "&role=" + encodeURIComponent(role) + "&provider=codex", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
-    if (res.status === 401) {
-      if (showErrors) codexNote("Sign in via the edge proxy, then check again.");
-      return null;
-    }
-    if (!res.ok) {
-      if (showErrors) codexNote("Ordinal unavailable (" + res.status + "). The router reaches it once the chart change lands.");
-      renderCodexStatus({ available: false });
-      return null;
-    }
-    const status = await res.json();
-    renderCodexStatus(status);
-    if (status && (status.state === "signed-in" || status.state === "expired" || status.state === "denied" || status.state === "error" || status.state === "cancelled")) stopCodexPoll();
-    return status;
-  } catch (err) {
-    if (showErrors) codexNote("Ordinal unavailable. The router reaches it once the chart change lands.");
-    renderCodexStatus({ available: false });
-    return null;
-  }
-}
-function stopCodexPoll() {
-  if (codex.pollTimer) {
-    clearInterval(codex.pollTimer);
-    codex.pollTimer = 0;
-  }
-}
-function startCodexPoll() {
-  stopCodexPoll();
-  codex.pollTimer = setInterval(() => { fetchCodexStatus(false); }, 5000);
-}
-function openCodexConfirm(role, ordinal) {
-  const wrap = $("sheet-wrap");
-  const sheet = $("sheet");
-  if (!wrap || !sheet) return;
-  sheet.textContent = "";
-  const title = document.createElement("h2");
-  title.textContent = "Start Codex sign-in on " + ordinal + "?";
-  sheet.appendChild(title);
-  const sub = document.createElement("div");
-  sub.className = "sub";
-  sub.textContent = role + " ordinal " + ordinal;
-  sheet.appendChild(sub);
-  const note = document.createElement("p");
-  note.className = "consequence";
-  note.textContent = "This will: run a Codex device login on that pod and write that pod's Codex auth file.";
-  sheet.appendChild(note);
-  const primary = document.createElement("button");
-  primary.type = "button";
-  primary.className = "primary";
-  primary.textContent = "Start Codex sign-in on " + ordinal;
-  const msg = document.createElement("div");
-  msg.className = "sub";
-  primary.addEventListener("click", async () => {
-    if (codex.starting) return;
-    codex.starting = true;
-    primary.disabled = true;
-    msg.textContent = "Working…";
-    try {
-      const res = await fetch("/api/board/device-login/start", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ ordinal, role, provider: "codex" })
-      });
-      if (res.ok) {
-        const status = await res.json();
-        closeConfirm();
-        renderCodexStatus({ ordinal, role, hasCodexRunner: true, codexAuthPresent: false, leased: false, available: true, state: status.state || "waiting", url: status.url, userCode: status.userCode, expiresAt: status.expiresAt });
-        startCodexPoll();
-      } else if (res.status === 409) {
-        msg.textContent = "That ordinal holds a leased job; sign-in is refused until the job finishes.";
-      } else if (res.status === 422) {
-        msg.textContent = "Codex sign-in is unavailable on this ordinal (no codex runner in its chain).";
-      } else if (res.status === 401) {
-        msg.textContent = "Sign in via the edge proxy, then try again.";
-      } else if (res.status === 403) {
-        msg.textContent = "Forbidden origin.";
-      } else {
-        msg.textContent = "Sign-in did not start (" + res.status + ").";
-      }
-    } catch (err) {
-      msg.textContent = "Sign-in did not start.";
-    } finally {
-      codex.starting = false;
-      primary.disabled = false;
-    }
-  });
-  sheet.appendChild(primary);
-  sheet.appendChild(document.createTextNode(" "));
-  const close = document.createElement("button");
-  close.type = "button";
-  close.className = "secondary";
-  close.textContent = "Close";
-  close.addEventListener("click", closeConfirm);
-  sheet.appendChild(close);
-  sheet.appendChild(msg);
-  wrap.hidden = false;
-}
-function updateCodexVisibility() {
-  const els = codexEls();
-  if (!els.section) return;
-  const data = state.data;
-  const forge = (data && data.forge) || state.forge || "gitea";
-  const isGithub = forge === "github" || state.forge === "github";
-  els.section.style.display = isGithub ? "none" : "";
-}
-(function initCodex() {
-  const els = codexEls();
-  if (!els.role || !els.ordinal || !els.start) return;
-  els.role.addEventListener("change", () => { fetchCodexStatus(false); });
-  if (els.check) els.check.addEventListener("click", () => { fetchCodexStatus(true); });
-  if (els.cancel) els.cancel.addEventListener("click", async () => {
-    const { role, ordinal } = codexOrdinal();
-    if (!ordinal) {
-      codexNote("Enter the ordinal host first.");
-      return;
-    }
-    try {
-      const res = await fetch("/api/board/device-login/cancel", {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({ ordinal, role, provider: "codex" })
-      });
-      if (res.ok) {
-        stopCodexPoll();
-        codexNote("Sign-in cancelled.");
-        fetchCodexStatus(false);
-      } else {
-        codexNote("Cancel did not land (" + res.status + ").");
-      }
-    } catch (err) {
-      codexNote("Cancel did not land.");
-    }
-  });
-  if (els.start) els.start.addEventListener("click", () => {
-    const { role, ordinal } = codexOrdinal();
-    if (!ordinal) {
-      codexNote("Enter the ordinal host (for example jumi-worker-0).");
-      return;
-    }
-    openCodexConfirm(role, ordinal);
-  });
-  const switchEl = $("forge-switch");
-  if (switchEl) switchEl.addEventListener("change", updateCodexVisibility);
-  const origRender = render;
-  render = function () { origRender(); updateCodexVisibility(); };
-  updateCodexVisibility();
-})();
+mountDeviceLogin({
+  id: "grok",
+  runnerField: "hasXaiRunner",
+  authField: "authPresent",
+  unavailableNote: "Grok sign-in is unavailable on this ordinal (no OpenCode xAI runner in its chain).",
+  authPresentNote: "That ordinal already holds an xAI oauth entry (presence is not a healthy grant).",
+  confirmPrompt: "Start Grok sign-in on ",
+  confirmEffect: "This will: run a Grok device login on that pod and write that pod's Grok auth file.",
+});
+mountDeviceLogin({
+  id: "codex",
+  provider: "codex",
+  runnerField: "hasCodexRunner",
+  authField: "codexAuthPresent",
+  unavailableNote: "Codex sign-in is unavailable on this ordinal (no codex runner in its chain).",
+  authPresentNote: "That ordinal already holds a Codex ChatGPT credential (presence is not a healthy grant).",
+  confirmPrompt: "Start Codex sign-in on ",
+  confirmEffect: "This will: run a Codex device login on that pod and write that pod's Codex auth file.",
+});
 setInterval(load, 15000);
 load();
 </script>
