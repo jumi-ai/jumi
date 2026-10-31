@@ -57,6 +57,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
   appendStuckLatchFingerprint,
@@ -68,7 +69,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
+import { type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { CONFLICT_PROMPT } from "./git.ts";
 
@@ -982,10 +983,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
         return;
       }
-      await sticky(
-        redactGitSecrets(`Jumi failed: ${err instanceof Error ? err.message : String(err)}`, [loop.auth.token]),
-        pr.number
-      ).catch(() => undefined);
+      await sticky(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`, pr.number).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

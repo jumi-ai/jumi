@@ -1,3 +1,4 @@
+import { forgeRequestError } from "./forge_errors.ts";
 import type {
   ActionJob,
   Check,
@@ -320,7 +321,14 @@ export class GiteaAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea API ${method} ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea API",
+        method,
+        url,
+        status: res.status,
+        body: text,
+        secrets: [this.token],
+      });
     }
     // 204 No Content
     if (res.status === 204) return undefined as T;
@@ -335,7 +343,14 @@ export class GiteaAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea API GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea API",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [this.token],
+      });
     }
     const buf = new Uint8Array(await res.arrayBuffer());
     const slice = buf.byteLength > maxBytes ? buf.subarray(buf.byteLength - maxBytes) : buf;
@@ -472,7 +487,15 @@ export class GiteaAPI {
     const res = await fetch(url, sameHost ? { headers: { Authorization: `token ${this.token}` } } : undefined);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`Gitea attachment GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "Gitea attachment",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        // The header is host-scoped. The token is still scrubbed when the body or URL echoes it.
+        secrets: [this.token],
+      });
     }
     return new Uint8Array(await res.arrayBuffer());
   }

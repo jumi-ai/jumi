@@ -1569,6 +1569,46 @@ describe("implementIssue", () => {
     });
   });
 
+  test("does not publish a forge API error on the sticky comment", async () => {
+    await withDirs(async (home, workdir) => {
+      const token = "ghs_parent_secret_value";
+      const api = makeApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const forgeError =
+        `Gitea API POST https://gitea.example/api/v1/repos/kirmanak/demo/pulls → 500: leaked ${token} ` +
+        "x".repeat(300);
+      await expect(
+        implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: token,
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            throw new Error(forgeError);
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow(forgeError);
+      const comment = api.comments.at(-1) ?? "";
+      expect(comment).toContain("Jumi failed: forge API request failed");
+      expect(comment).toContain("_Jumi · opencode · openai/gpt-5.5_");
+      expect(comment).not.toContain(token);
+      expect(comment).not.toContain("gitea.example");
+      expect(comment).not.toContain("leaked");
+      expect(comment).not.toContain("→ 500");
+    });
+  });
+
   test("cancelIssueWork does not kill the parent pid", async () => {
     await withDirs(async (home) => {
       const killed: number[] = [];
