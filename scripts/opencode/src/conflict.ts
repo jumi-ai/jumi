@@ -743,6 +743,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           home: opts.home,
           issueNumber,
           skipLatches: latches,
+          log,
         });
         if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
       } catch (err) {

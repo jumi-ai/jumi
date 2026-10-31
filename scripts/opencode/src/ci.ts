@@ -484,22 +484,28 @@ export async function inspectCi(opts: {
   home: string;
   issueNumber: number;
   skipLatches?: SkipLatchStore;
+  log?: (message: string) => void;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
   let lookupFailed = false;
+  const noteLookupFailure = (err: unknown) => {
+    lookupFailed = true;
+    const message = err instanceof Error ? err.message : String(err);
+    opts.log?.(`CI lookup failed for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${message}`);
+  };
   let statuses: Check[] = [];
   try {
     statuses = await opts.api.listCommitStatuses(opts.owner, opts.repo, opts.sha);
-  } catch {
+  } catch (err) {
     statuses = [];
-    lookupFailed = true;
+    noteLookupFailure(err);
   }
   let checkRuns: Check[] = [];
   try {
     checkRuns = await opts.api.listCheckRuns(opts.owner, opts.repo, opts.sha);
-  } catch {
+  } catch (err) {
     checkRuns = [];
-    lookupFailed = true;
+    noteLookupFailure(err);
   }
   const fromForge = latestStatuses([...statuses, ...checkRuns]).filter(
     (status) => !isJumiReviewContext(status.context)
@@ -507,9 +513,9 @@ export async function inspectCi(opts: {
   let live: Check[] = [];
   try {
     live = checksFromActionJobs(await opts.api.listActionJobs(opts.owner, opts.repo, { headSha: opts.sha }), opts.sha);
-  } catch {
+  } catch (err) {
     live = [];
-    lookupFailed = true;
+    noteLookupFailure(err);
   }
   const sawShaJobs = fromForge.length > 0 || live.length > 0;
   // Live Action jobs are fresher than forge rows (status / check-run lag), so a matching live job's state wins.

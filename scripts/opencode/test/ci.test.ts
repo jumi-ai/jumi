@@ -455,6 +455,35 @@ describe("inspectCi", () => {
     }
   });
 
+  test("logs why a forge list call threw", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const lines: string[] = [];
+      await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => {
+            throw new Error("statuses → 500");
+          },
+          listActionJobs: async () => {
+            throw new Error("Gitea actions jobs list is incomplete: fetched 2000 of 3823");
+          },
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        log: (message) => lines.push(message),
+      });
+      expect(lines).toEqual([
+        "CI lookup failed for kirmanak/demo#12: statuses → 500",
+        "CI lookup failed for kirmanak/demo#12: Gitea actions jobs list is incomplete: fetched 2000 of 3823",
+      ]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("partial list failure is not green", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {

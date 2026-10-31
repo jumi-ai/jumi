@@ -504,7 +504,10 @@ describe("GiteaAPI", () => {
       const href = String(url);
       urls.push(href);
       if (href.includes("/actions/jobs/9/logs")) return new Response("##[error]boom\n", { status: 200 });
-      if (href.includes("/actions/jobs")) return Response.json({ jobs: [{ id: 9, name: "build" }], total_count: 1 });
+      if (href.includes("/actions/runs/3/jobs")) {
+        return Response.json({ jobs: [{ id: 9, name: "build" }], total_count: 1 });
+      }
+      if (href.includes("/actions/runs")) return Response.json({ workflow_runs: [{ id: 3 }], total_count: 1 });
       if (href.includes("/commits/") && href.includes("/statuses")) {
         return Response.json([{ id: 1, context: "build", status: "failure" }]);
       }
@@ -521,29 +524,98 @@ describe("GiteaAPI", () => {
     ]);
     await expect(api.getActionJobLogs("owner", "repo", 9)).resolves.toBe("##[error]boom\n");
     expect(urls[0]).toContain("/commits/sha%2F1/statuses");
-    expect(urls[1]).toContain("/actions/jobs?limit=50&page=1&order=desc&status=failure");
-    expect(urls[2]).toContain("/actions/jobs/9/logs");
+    expect(urls[1]).toContain("/actions/runs?limit=50&page=1");
+    expect(urls[1]).not.toContain("status=");
+    expect(urls[2]).toContain("/actions/runs/3/jobs?limit=50&page=1&status=failure");
+    expect(urls[3]).toContain("/actions/jobs/9/logs");
   });
 
-  test("lists action jobs newest-first and filters head_sha client-side", async () => {
+  test("finds a head's jobs in a repo with more jobs than one paged list holds", async () => {
+    const sha = "ab7d072c232eaac78c475e5647d98a12ece5504c";
+    // Observed on a live Gitea: /actions/jobs is oldest-first and ignores both order and head_sha.
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const { pathname, searchParams } = new URL(String(url));
+      if (pathname.endsWith("/actions/jobs")) {
+        const page = Number(searchParams.get("page"));
+        return Response.json({
+          total_count: 3823,
+          jobs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1, name: "old", head_sha: "ffff" })),
+        });
+      }
+      if (pathname.endsWith("/actions/runs")) {
+        const match = searchParams.get("head_sha") === sha;
+        return Response.json({ workflow_runs: match ? [{ id: 41224 }] : [], total_count: match ? 1 : 0 });
+      }
+      if (pathname.endsWith("/actions/runs/41224/jobs")) {
+        return Response.json({ jobs: [{ id: 91889, name: "gate", head_sha: sha }], total_count: 1 });
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listActionJobs("owner", "repo", { headSha: sha })).resolves.toEqual([
+      { id: 91889, name: "gate", head_sha: sha },
+    ]);
+    // Gitea matches head_sha case-sensitively.
+    await expect(api.listActionJobs("owner", "repo", { headSha: sha.toUpperCase() })).resolves.toEqual([
+      { id: 91889, name: "gate", head_sha: sha },
+    ]);
+  });
+
+  test("listActionJobs lists every run of a head and drops jobs from another head", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
-      urls.push(String(url));
-      return Response.json({
-        jobs: [
-          { id: 12, name: "build", head_sha: "abc/def" },
-          { id: 11, name: "other", head_sha: "ffff" },
-        ],
-        total_count: 2,
-      });
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/actions/runs/1/jobs")) {
+        return Response.json({ jobs: [{ id: 11, name: "build", head_sha: "abc/def" }], total_count: 1 });
+      }
+      if (href.includes("/actions/runs/2/jobs")) {
+        return Response.json({
+          jobs: [
+            { id: 21, name: "test", head_sha: "abc/def" },
+            { id: 22, name: "other", head_sha: "ffff" },
+          ],
+          total_count: 2,
+        });
+      }
+      return Response.json({ workflow_runs: [{ id: 1 }, { id: 2 }], total_count: 2 });
     }) as unknown as typeof fetch;
 
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
     await expect(api.listActionJobs("owner", "repo", { headSha: "abc/def" })).resolves.toEqual([
-      { id: 12, name: "build", head_sha: "abc/def" },
+      { id: 11, name: "build", head_sha: "abc/def" },
+      { id: 21, name: "test", head_sha: "abc/def" },
     ]);
-    expect(urls[0]).toContain("/actions/jobs?limit=50&page=1&order=desc");
-    expect(urls[0]).not.toContain("head_sha");
+    expect(urls[0]).toContain("/actions/runs?limit=50&page=1&head_sha=abc%2Fdef");
+  });
+
+  test("a status filter reaches the jobs of a run that has not concluded", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/actions/runs/3/jobs")) {
+        return Response.json({ jobs: [{ id: 9, name: "build", head_sha: "abc" }], total_count: 1 });
+      }
+      return Response.json({ workflow_runs: [{ id: 3, status: "running" }], total_count: 1 });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listActionJobs("owner", "repo", { status: "failure", headSha: "abc" })).resolves.toHaveLength(1);
+    expect(urls[0]).not.toContain("status=");
+    expect(urls[1]).toContain("status=failure");
+  });
+
+  test("a run whose jobs cannot be listed throws, even on 404", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/actions/runs/3/jobs")) return new Response("gone", { status: 404 });
+      return Response.json({ workflow_runs: [{ id: 3 }], total_count: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo", { headSha: "abc" })
+    ).rejects.toThrow("404");
   });
 
   test("a disabled Actions unit is an empty job list, not an error", async () => {
@@ -567,15 +639,28 @@ describe("GiteaAPI", () => {
     );
   });
 
-  test("listActionJobs throws when total_count exceeds the jobs returned", async () => {
+  test("listActionJobs throws when total_count exceeds the runs returned", async () => {
     globalThis.fetch = (async () =>
       Response.json({
-        jobs: [{ id: 9, name: "build", head_sha: "abc" }],
+        workflow_runs: [{ id: 9 }],
         total_count: 51,
       })) as unknown as typeof fetch;
 
     await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
-      /incomplete/
+      /runs list is incomplete/
+    );
+  });
+
+  test("listActionJobs throws when total_count exceeds the jobs of a run", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/actions/runs/9/jobs")) {
+        return Response.json({ jobs: [{ id: 1, name: "build" }], total_count: 2 });
+      }
+      return Response.json({ workflow_runs: [{ id: 9 }], total_count: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
+      /jobs list is incomplete/
     );
   });
 
@@ -586,7 +671,7 @@ describe("GiteaAPI", () => {
       const page = Number(new URL(String(url)).searchParams.get("page"));
       return Response.json({
         total_count: 2001,
-        jobs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1, name: "build" })),
+        workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1 })),
       });
     }) as unknown as typeof fetch;
 
@@ -598,6 +683,9 @@ describe("GiteaAPI", () => {
 
   test("listActionJobs returns every job when total_count fits in the page cap", async () => {
     globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (!String(url).includes("/actions/runs/9/jobs")) {
+        return Response.json({ workflow_runs: [{ id: 9 }], total_count: 1 });
+      }
       const page = Number(new URL(String(url)).searchParams.get("page"));
       return Response.json({
         total_count: 2000,

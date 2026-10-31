@@ -17,6 +17,7 @@ import type {
 } from "./ports.ts";
 import type {
   GiteaActionJob,
+  GiteaActionRun,
   GiteaComment,
   GiteaCommitStatus,
   GiteaCommitStatusPayload,
@@ -263,15 +264,15 @@ function isActionsDisabledError(err: unknown): boolean {
   return /→ (403|404)\b/.test(err.message);
 }
 
-const ACTION_JOB_PAGE_SIZE = 50;
-const ACTION_JOB_MAX_PAGES = 40;
+const ACTION_PAGE_SIZE = 50;
+const ACTION_MAX_PAGES = 40;
 
 function incompleteListError(label: string, seen: number, totalCount: number | undefined): Error {
   const total = typeof totalCount === "number" ? String(totalCount) : "unknown";
   return new Error(`${label} list is incomplete: fetched ${seen} of ${total}`);
 }
 
-// A short page ends the list. A full page at the cap, or a total_count past the jobs fetched, does not.
+// A short page ends the list. A full page at the cap, or a total_count past the rows fetched, does not.
 function finishForgePage(
   label: string,
   seen: number,
@@ -733,38 +734,57 @@ export class GiteaAPI {
     repo: string,
     opts?: { status?: string; headSha?: string }
   ): Promise<ActionJob[]> {
-    const results: ActionJob[] = [];
-    let page = 1;
-    let seen = 0;
-    let totalCount: number | undefined;
-    const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    // /actions/jobs ignores order and head_sha, and is oldest-first, so a busy repo's new jobs sit past any page cap.
+    // Gitea matches head_sha case-sensitively. A run still in progress can already hold a failed job, so `status`
+    // filters the jobs and never the runs.
     const needle = opts?.headSha?.toLowerCase();
-    while (page <= ACTION_JOB_MAX_PAGES) {
-      let body: { jobs?: GiteaActionJob[]; total_count?: number };
-      try {
-        body = await this.get<{ jobs?: GiteaActionJob[]; total_count?: number }>(
-          `/repos/${this.repoPath(owner, repo)}/actions/jobs?limit=${ACTION_JOB_PAGE_SIZE}&page=${page}&order=desc${statusQ}`
-        );
-      } catch (err) {
-        if (seen === 0 && isActionsDisabledError(err)) return [];
-        throw err;
-      }
-      if (typeof body?.total_count === "number") totalCount = body.total_count;
-      const batch = Array.isArray(body?.jobs) ? body.jobs : [];
-      for (const job of batch) {
+    const repoPath = this.repoPath(owner, repo);
+    const shaQ = needle ? `&head_sha=${encodeURIComponent(needle)}` : "";
+    const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
+    const runs = await this.actionPages<GiteaActionRun>(
+      "Gitea actions runs",
+      "workflow_runs",
+      (page) => `/repos/${repoPath}/actions/runs?limit=${ACTION_PAGE_SIZE}&page=${page}${shaQ}`,
+      true
+    );
+    const results: ActionJob[] = [];
+    for (const run of runs) {
+      const jobs = await this.actionPages<GiteaActionJob>(
+        "Gitea actions jobs",
+        "jobs",
+        (page) => `/repos/${repoPath}/actions/runs/${run.id}/jobs?limit=${ACTION_PAGE_SIZE}&page=${page}${statusQ}`,
+        false
+      );
+      for (const job of jobs) {
         if (needle && (job.head_sha ?? "").toLowerCase() !== needle) continue;
         results.push(toActionJob(job));
       }
-      seen += batch.length;
-      const outcome = finishForgePage(
-        "Gitea actions jobs",
-        seen,
-        totalCount,
-        batch.length === ACTION_JOB_PAGE_SIZE,
-        page === ACTION_JOB_MAX_PAGES
-      );
-      if (outcome === "done") return results;
-      page += 1;
+    }
+    return results;
+  }
+
+  private async actionPages<T>(
+    label: string,
+    key: "jobs" | "workflow_runs",
+    path: (page: number) => string,
+    emptyOnDisabled: boolean
+  ): Promise<T[]> {
+    const results: T[] = [];
+    let totalCount: number | undefined;
+    for (let page = 1; page <= ACTION_MAX_PAGES; page += 1) {
+      let body: { jobs?: T[]; workflow_runs?: T[]; total_count?: number };
+      try {
+        body = await this.get<{ jobs?: T[]; workflow_runs?: T[]; total_count?: number }>(path(page));
+      } catch (err) {
+        if (emptyOnDisabled && results.length === 0 && isActionsDisabledError(err)) return [];
+        throw err;
+      }
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
+      const rows = body?.[key];
+      const batch = Array.isArray(rows) ? rows : [];
+      results.push(...batch);
+      const full = batch.length === ACTION_PAGE_SIZE;
+      if (finishForgePage(label, results.length, totalCount, full, page === ACTION_MAX_PAGES) === "done") break;
     }
     return results;
   }

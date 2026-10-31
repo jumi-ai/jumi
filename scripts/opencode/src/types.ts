@@ -278,6 +278,10 @@ export interface GiteaActionJob {
   run_id?: number;
 }
 
+export interface GiteaActionRun {
+  id: number;
+}
+
 export interface GiteaWorkflowJob {
   id?: number;
   name?: string;
