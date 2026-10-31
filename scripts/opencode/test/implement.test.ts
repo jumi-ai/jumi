@@ -6,7 +6,14 @@ import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import { engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
+import {
+  BLOCKED_BY_REJECTED_PROMPT,
+  IMPLEMENT_PROMPT,
+  IMPLEMENT_YIELD_PROMPT,
+  resetOpenCodeVersionForTests,
+  runOpenCode,
+  setOpenCodeMajorForTests,
+} from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import {
@@ -43,6 +50,7 @@ afterEach(() => {
   process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
+  resetOpenCodeVersionForTests();
 });
 
 function stripGitConfigArgs(args: string[]): string[] {
@@ -2626,6 +2634,7 @@ exit 1
         );
         await chmod(bin, 0o755);
         process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+        setOpenCodeMajorForTests(1);
         const api = makeApi();
         const logs: string[] = [];
         const gitRunner: GitRunner = async (args) => {
@@ -2727,6 +2736,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
         );
         await chmod(join(dir, "opencode"), 0o755);
         process.env.PATH = `${dir}:${originalPath ?? ""}`;
+        setOpenCodeMajorForTests(1);
         const api = makeApi();
         const gitRunner: GitRunner = async (args) => {
           const gitArgs = stripGitConfigArgs(args);
