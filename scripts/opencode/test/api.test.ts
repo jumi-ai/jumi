@@ -566,6 +566,50 @@ describe("GiteaAPI", () => {
     );
   });
 
+  test("listActionJobs throws when total_count exceeds the jobs returned", async () => {
+    globalThis.fetch = (async () =>
+      Response.json({
+        jobs: [{ id: 9, name: "build", head_sha: "abc" }],
+        total_count: 51,
+      })) as unknown as typeof fetch;
+
+    await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
+      /incomplete/
+    );
+  });
+
+  test("listActionJobs throws when the page cap is still full", async () => {
+    let pages = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      pages += 1;
+      const page = Number(new URL(String(url)).searchParams.get("page"));
+      return Response.json({
+        total_count: 2001,
+        jobs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1, name: "build" })),
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo")).rejects.toThrow(
+      /incomplete/
+    );
+    expect(pages).toBe(40);
+  });
+
+  test("listActionJobs returns every job when total_count fits in the page cap", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const page = Number(new URL(String(url)).searchParams.get("page"));
+      return Response.json({
+        total_count: 2000,
+        jobs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1, name: "build" })),
+      });
+    }) as unknown as typeof fetch;
+
+    const jobs = await new GiteaAPI("https://gitea.example.test", "token-1").listActionJobs("owner", "repo");
+    expect(jobs).toHaveLength(2000);
+    expect(jobs[0]?.id).toBe(1);
+    expect(jobs[1999]?.id).toBe(2000);
+  });
+
   test("throws useful errors for non-2xx responses", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
 
