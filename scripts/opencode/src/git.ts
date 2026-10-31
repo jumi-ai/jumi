@@ -495,26 +495,49 @@ export function resetOpenCodeVersionForTests(): void {
   cachedMajor = undefined;
 }
 
+function openCodeVersionError(detail: string): EngineFailedError {
+  return new EngineFailedError(`opencode spawn refused: cannot read opencode version: ${detail}`, true);
+}
+
+function clipVersionText(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length <= 200 ? trimmed : `${trimmed.slice(0, 200)}…`;
+}
+
 export function detectOpenCodeMajor(bin = "opencode"): number {
   if (openCodeMajorOverride !== undefined) {
     return openCodeMajorOverride;
   }
+  // A failed parse must not become major 1. The image pins OpenCode 2.x, and
+  // major 1 selects different argv and skips the V2 XAI_API_KEY handoff.
+  // Bun.spawnSync keeps the startup PATH unless env is passed. The child
+  // resolves `opencode` through the live process PATH, so the version check
+  // has to use that same env.
+  let stdout = "";
+  let stderr = "";
+  let exitCode: number | null = null;
   try {
     const proc = Bun.spawnSync([bin, "--version"], {
       stdout: "pipe",
       stderr: "pipe",
+      env: process.env,
     });
-    if (proc.exitCode === 0) {
-      const text = proc.stdout.toString().trim();
-      const match = /(\d+)\.\d+\.\d+/.exec(text);
-      if (match) {
-        return Number.parseInt(match[1], 10);
-      }
-    }
-  } catch {
-    // Binary missing or spawn error; fall back to 1.
+    exitCode = proc.exitCode;
+    stdout = proc.stdout.toString();
+    stderr = proc.stderr.toString();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw openCodeVersionError(message);
   }
-  return 1;
+  if (exitCode === 0) {
+    const match = /(\d+)\.\d+\.\d+/.exec(stdout);
+    if (match) return Number.parseInt(match[1], 10);
+  }
+  const detail =
+    exitCode === 0
+      ? `output ${JSON.stringify(clipVersionText(stdout))} did not contain x.y.z`
+      : `exit ${exitCode}${stderr.trim() ? `: ${clipVersionText(stderr)}` : ""}`;
+  throw openCodeVersionError(detail);
 }
 
 export function getOpenCodeMajor(): number {
@@ -524,8 +547,9 @@ export function getOpenCodeMajor(): number {
   if (cachedMajor !== undefined) {
     return cachedMajor;
   }
-  cachedMajor = detectOpenCodeMajor();
-  return cachedMajor;
+  const major = detectOpenCodeMajor();
+  cachedMajor = major;
+  return major;
 }
 
 export interface OpenCodeArgOptions {

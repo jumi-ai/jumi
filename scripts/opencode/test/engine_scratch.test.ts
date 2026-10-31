@@ -9,7 +9,7 @@ import {
   engineScratchUntrackedNotIgnored,
   ensureEngineScratchIgnored,
 } from "../src/engine_scratch.ts";
-import { runOpenCode } from "../src/git.ts";
+import { resetOpenCodeVersionForTests, runOpenCode, setOpenCodeMajorForTests } from "../src/git.ts";
 import { type GitAuth, workerOpenCodeChildEnv } from "../src/workspace.ts";
 
 const originalPath = process.env.PATH;
@@ -19,6 +19,7 @@ afterEach(() => {
   process.env.PATH = originalPath;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  resetOpenCodeVersionForTests();
 });
 
 function git(cwd: string, args: string[]): string {
@@ -171,6 +172,7 @@ echo IGNORED_END
         await chmod(join(binDir, "opencode"), 0o755);
         process.env.PATH = `${binDir}:${originalPath ?? ""}`;
         process.env.HOME = home;
+        setOpenCodeMajorForTests(1);
         const result = await runOpenCode({
           prompt: "implement",
           model: "openai/gpt-5.5",

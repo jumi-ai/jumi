@@ -16,7 +16,7 @@ import {
   withEngineChain,
   withModelHop,
 } from "../src/fallback.ts";
-import { runOpenCode } from "../src/git.ts";
+import { resetOpenCodeVersionForTests, runOpenCode, setOpenCodeMajorForTests } from "../src/git.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
@@ -33,6 +33,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   resetXaiAuthStateForTests();
+  resetOpenCodeVersionForTests();
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   if (isolatedHome) await rm(isolatedHome, { recursive: true, force: true });
@@ -414,6 +415,7 @@ describe("withModelHop", () => {
       await writeFile(join(binDir, "opencode"), "#!/bin/sh\nprintf 'ok\\n'\n");
       await chmod(join(binDir, "opencode"), 0o755);
       process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+      setOpenCodeMajorForTests(1);
       const logDir = openCodeLogDirPath(workdir);
       await mkdir(logDir, { recursive: true });
       await writeFile(

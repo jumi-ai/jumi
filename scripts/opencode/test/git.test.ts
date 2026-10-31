@@ -4,12 +4,14 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
 import { FORGE_DENY_DOMAIN, forgeOpenCodeConfigContent, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   buildOpenCodeArgs,
   CONFLICT_PROMPT,
+  detectOpenCodeMajor,
   FOLLOWUP_PROMPT,
   getOpenCodeMajor,
   IMPLEMENT_PROMPT,
@@ -39,6 +41,9 @@ beforeEach(async () => {
   delete process.env.OPENCODE_API_KEY_FILE;
   isolatedHome = await mkdtemp(join(tmpdir(), "jumi-opencode-home-"));
   process.env.HOME = isolatedHome;
+  // Fake binaries in this file do not print x.y.z. Local runs pin the major
+  // instead of taking the old silent v1 fallback.
+  setOpenCodeMajorForTests(1);
 });
 
 afterEach(async () => {
@@ -243,11 +248,10 @@ printf 'ARGS=%s VARIANT=%s PWD=%s\\n' "$*" "$OPENCODE_VARIANT" "$(pwd)"
     }
   });
 
-  test("getOpenCodeMajor returns detected or overridden major", () => {
-    expect(getOpenCodeMajor()).toBeGreaterThanOrEqual(1);
+  test("setOpenCodeMajorForTests skips version detection", () => {
     setOpenCodeMajorForTests(2);
     expect(getOpenCodeMajor()).toBe(2);
-    setOpenCodeMajorForTests(undefined);
+    expect(detectOpenCodeMajor("/no/such/opencode")).toBe(2);
   });
 
   test("buildOpenCodeArgs builds 1.x argv unchanged", () => {
@@ -1505,6 +1509,150 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
     } finally {
       await rm(workdir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("opencode version", () => {
+  test("does not cache a failed version parse", async () => {
+    resetOpenCodeVersionForTests();
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'not-a-version\\n'
+`,
+      async () => {
+        expect(() => getOpenCodeMajor()).toThrow(/cannot read opencode version/);
+      }
+    );
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf '2.2.0\\n'
+`,
+      async () => {
+        expect(getOpenCodeMajor()).toBe(2);
+      }
+    );
+  });
+
+  test("caches a successful version parse", async () => {
+    resetOpenCodeVersionForTests();
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf '2.2.0\\n'
+`,
+      async (binDir) => {
+        expect(getOpenCodeMajor()).toBe(2);
+        await writeFile(join(binDir, "opencode"), "#!/bin/sh\nprintf '1.0.0\\n'\n");
+        await chmod(join(binDir, "opencode"), 0o755);
+        expect(getOpenCodeMajor()).toBe(2);
+      }
+    );
+  });
+
+  test("refuses the spawn when version text cannot be parsed", async () => {
+    resetOpenCodeVersionForTests();
+    const marker = join(tmpdir(), `jumi-version-ran-${process.pid}`);
+    await rm(marker, { force: true });
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'not-a-version\\n'
+  exit 0
+fi
+printf ran > '${marker}'
+`,
+        async (_binDir, workdir) => {
+          let caught: unknown;
+          try {
+            await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          } catch (err) {
+            caught = err;
+          }
+          expect(caught).toBeInstanceOf(EngineFailedError);
+          expect(caught).toMatchObject({ infra: true, auth: false });
+          expect((caught as Error).message).toContain("cannot read opencode version");
+          expect((caught as Error).message).toContain("not-a-version");
+        }
+      );
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally {
+      await rm(marker, { force: true });
+    }
+  });
+
+  test("refuses the spawn when opencode --version exits non-zero", async () => {
+    resetOpenCodeVersionForTests();
+    const marker = join(tmpdir(), `jumi-version-exit-${process.pid}`);
+    await rm(marker, { force: true });
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'boom\\n' >&2
+  exit 2
+fi
+printf ran > '${marker}'
+`,
+        async (_binDir, workdir) => {
+          let caught: unknown;
+          try {
+            await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+          } catch (err) {
+            caught = err;
+          }
+          expect(caught).toBeInstanceOf(EngineFailedError);
+          expect(caught).toMatchObject({ infra: true, auth: false });
+          expect((caught as Error).message).toContain("cannot read opencode version");
+          expect((caught as Error).message).toContain("exit 2");
+        }
+      );
+      expect(await Bun.file(marker).exists()).toBe(false);
+    } finally {
+      await rm(marker, { force: true });
+    }
+  });
+
+  test("refuses the spawn when the opencode binary is missing", async () => {
+    resetOpenCodeVersionForTests();
+    const workdir = await mkdtemp(join(tmpdir(), "jumi-version-missing-"));
+    process.env.PATH = "/nonexistent";
+    try {
+      let caught: unknown;
+      try {
+        await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(EngineFailedError);
+      expect(caught).toMatchObject({ infra: true, auth: false });
+      expect((caught as Error).message).toContain("cannot read opencode version");
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses parsed 2.x argv without a test override", async () => {
+    resetOpenCodeVersionForTests();
+    await withFakeOpenCode(
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '2.2.0\\n'
+  exit 0
+fi
+printf 'ARGS=%s\\n' "$*"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          variant: "xhigh",
+          workdir,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("ARGS=run --standalone -m openai/gpt-5.5#xhigh");
+      }
+    );
   });
 });
 
