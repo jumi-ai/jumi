@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CI_LOOKUP_BACKOFF_MS, CI_LOOKUP_BUDGET_MS, CI_LOOKUP_FAILED_REASON, encodeCiLookupMarker } from "../src/ci.ts";
+import { EngineFailedError } from "../src/engine.ts";
+import { decideQuotaRetry, QUOTA_MESSAGE, QuotaWaitError } from "../src/quota.ts";
 import type { ReviewApi } from "../src/review.ts";
 import {
   createBunSqlClient,
@@ -14,7 +16,20 @@ import {
 } from "../src/review_jobs.ts";
 import { processEngineTick } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-import { makeComment, makeConfig, makeIssueJob, makeJob, makePR, makeRepo } from "./fixtures.ts";
+import { processWorkerTick } from "../src/worker.ts";
+import type { GitRunner } from "../src/workspace.ts";
+import {
+  emptyCiMethods,
+  makeComment,
+  makeConfig,
+  makeFile,
+  makeIssue,
+  makeIssueJob,
+  makeJob,
+  makePR,
+  makeRepo,
+  makeWorkerConfig,
+} from "./fixtures.ts";
 
 // The ledger invariants below live in Postgres, not in TypeScript: partial unique
 // indexes, `FOR UPDATE SKIP LOCKED`, `ON CONFLICT ... WHERE`, and the migration that
@@ -123,13 +138,14 @@ describePg("PgReviewJobStore against real postgres", () => {
     store = new PgReviewJobStore(sql);
     // Start from an empty database so `migrate()` is exercised from scratch, not against
     // whatever a previous run left behind.
-    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches`);
+    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, role_gates`);
     await store.migrate();
   });
 
   beforeEach(async () => {
     if (!databaseUrl) return;
     await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE role_gates`);
     // Re-assert the schema: the migrate test drops an index on purpose.
     await store.migrate();
   });
@@ -415,6 +431,287 @@ describePg("PgReviewJobStore against real postgres", () => {
       expect(lists()).toBe(0);
       expect(await store.lease("engine-2", 60_000)).toBeUndefined();
     } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  function makeReviewApi(): ReviewApi {
+    return {
+      getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getPR: async () => makePR(),
+      getPRFiles: async () => [makeFile()],
+      getIssue: async () => makeIssue(),
+      listIssueComments: async () => [],
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async () => makeComment(),
+      updateIssueComment: async () => makeComment(),
+      listPullReviewComments: async () => [],
+      listPullReviews: async () => [],
+      createPullReview: async () => ({ id: 1 }),
+      submitPullReview: async () => ({ id: 1 }),
+      resolvePullComment: async () => undefined,
+      unresolvePullComment: async () => undefined,
+      dismissPullReview: async () => ({ id: 1 }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => status,
+      ...emptyCiMethods(),
+      listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+    };
+  }
+
+  function frozenGitRunner(): GitRunner {
+    return async (args) => {
+      if (args[0] === "rev-parse") return "headsha";
+      if (args[0] === "status") return "?? JUMI_REVIEW.md";
+      if (args[0] === "ls-files") return "";
+      if (args[0] === "checkout") return "";
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    };
+  }
+
+  function secondStore(): { sql2: SqlClient; store2: PgReviewJobStore; close: () => Promise<void> } {
+    const sql2 = createBunSqlClient(databaseUrl);
+    const store2 = new PgReviewJobStore(sql2);
+    return {
+      sql2,
+      store2,
+      close: async () => {
+        await sql2.close?.();
+      },
+    };
+  }
+
+  test("breaker tripped by one process blocks an engine lease in another", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-gate-breaker-"));
+    const { store2, close } = secondStore();
+    try {
+      await store.enqueue(makeJob());
+      // Trip the ledger breaker from the first process.
+      await store.recordRoleInfra("engine");
+      await store.recordRoleInfra("engine");
+      await store.recordRoleInfra("engine");
+      expect(await store.mayStartWork("engine")).toBe(false);
+      expect((await store2.checkRoleGate("engine")).infraBlocked).toBe(true);
+      expect(await store2.mayStartWork("engine")).toBe(false);
+
+      const logs: string[] = [];
+      const result = await processEngineTick(
+        store2,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeReviewApi(),
+        "engine-2",
+        {
+          gitRunner: frozenGitRunner(),
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async () => {
+            throw new Error("runner should not be called while the breaker is open");
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(result).toBe("idle");
+      expect(logs.some((line) => line === "breaker open")).toBe(true);
+      const row = await store2.get(1);
+      expect(row?.state).toBe("queued");
+
+      // A model success resets the ledger breaker for the other process.
+      await store.recordRoleSuccess("engine");
+      expect(await store2.mayStartWork("engine")).toBe(true);
+    } finally {
+      await close();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("breaker tripped by one process blocks a worker lease in another", async () => {
+    const { store2, close } = secondStore();
+    try {
+      await store.enqueueIssue(makeIssueJob());
+      await store.recordRoleInfra("worker");
+      await store.recordRoleInfra("worker");
+      await store.recordRoleInfra("worker");
+      expect(await store2.mayStartWork("worker")).toBe(false);
+
+      const logs: string[] = [];
+      let calls = 0;
+      const result = await processWorkerTick(
+        store2,
+        makeWorkerConfig(),
+        {
+          getRepo: async () => makeRepo(),
+          getCollaboratorPermission: async () => ({ permission: "write" }),
+          getIssue: async () => makeIssue(),
+        } as never,
+        "worker-2",
+        {
+          implement: async () => {
+            calls += 1;
+            return { status: "pr" as const, prNumber: 3, htmlUrl: "https://example.test/pr/3" };
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(result).toBe("idle");
+      expect(calls).toBe(0);
+      expect(logs.some((line) => line === "breaker open")).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  test("quota recorded by one process blocks an engine lease in another", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-gate-quota-engine-"));
+    const { store2, close } = secondStore();
+    try {
+      await store.enqueue(makeJob());
+      // First process hits quota through the real tick, recording to the ledger.
+      await processEngineTick(
+        store,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeReviewApi(),
+        "engine-1",
+        {
+          gitRunner: frozenGitRunner(),
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" as const }),
+        },
+        () => undefined
+      );
+      const gate = await store2.checkRoleGate("engine", new Date());
+      expect(gate.quotaBlocked).toBe(true);
+      expect(await store2.mayStartWork("engine")).toBe(false);
+
+      const logs: string[] = [];
+      const result = await processEngineTick(
+        store2,
+        makeConfig({ workdir: workspace, home: workspace }),
+        makeReviewApi(),
+        "engine-2",
+        {
+          gitRunner: frozenGitRunner(),
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async () => {
+            throw new Error("runner should not be called while quota cools");
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(result).toBe("idle");
+      expect(logs.some((line) => line === "quota cooldown")).toBe(true);
+    } finally {
+      await close();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  test("quota recorded by one process blocks a worker lease in another", async () => {
+    const { store2, close } = secondStore();
+    try {
+      await store.enqueueIssue(makeIssueJob());
+      await processWorkerTick(
+        store,
+        makeWorkerConfig(),
+        {
+          getRepo: async () => makeRepo(),
+          getCollaboratorPermission: async () => ({ permission: "write" }),
+          getIssue: async () => makeIssue(),
+        } as never,
+        "worker-1",
+        {
+          implement: async () => {
+            const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
+            if (decision.action !== "requeue") throw new Error("expected requeue");
+            throw new QuotaWaitError(decision);
+          },
+        },
+        () => undefined
+      );
+      expect((await store2.checkRoleGate("worker")).quotaBlocked).toBe(true);
+      expect(await store2.mayStartWork("worker")).toBe(false);
+
+      const logs: string[] = [];
+      let calls = 0;
+      const result = await processWorkerTick(
+        store2,
+        makeWorkerConfig(),
+        {
+          getRepo: async () => makeRepo(),
+          getCollaboratorPermission: async () => ({ permission: "write" }),
+          getIssue: async () => makeIssue(),
+        } as never,
+        "worker-2",
+        {
+          implement: async () => {
+            calls += 1;
+            return { status: "pr" as const, prNumber: 3, htmlUrl: "https://example.test/pr/3" };
+          },
+        },
+        (message) => logs.push(message)
+      );
+      expect(result).toBe("idle");
+      expect(calls).toBe(0);
+      expect(logs.some((line) => line === "quota cooldown")).toBe(true);
+    } finally {
+      await close();
+    }
+  });
+
+  test("concurrent writers cannot lose a failure count or shorten a longer cooldown", async () => {
+    const { store2, close } = secondStore();
+    try {
+      await Promise.all([
+        store.recordRoleInfra("engine"),
+        store2.recordRoleInfra("engine"),
+        store.recordRoleInfra("engine"),
+        store2.recordRoleInfra("engine"),
+      ]);
+      const gate = await store.checkRoleGate("engine");
+      expect(gate.infraConsecutive).toBe(4);
+      expect(gate.infraBlocked).toBe(true);
+
+      const now = Date.now();
+      await Promise.all([
+        store.recordRoleQuotaWait("worker", now + 60_000),
+        store2.recordRoleQuotaWait("worker", now + 3_600_000),
+        store.recordRoleQuotaWait("worker", now + 1_000),
+      ]);
+      const quotaGate = await store.checkRoleGate("worker", new Date(now));
+      expect(quotaGate.quotaUntil).toBe(now + 3_600_000);
+      expect(quotaGate.quotaBlocked).toBe(true);
+      expect(await store2.mayStartWork("worker", new Date(now))).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  test("failing engine infra ticks share the ledger breaker across processes", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-gate-infra-ticks-"));
+    const { store2, close } = secondStore();
+    try {
+      await store.enqueue(makeJob());
+      const extras = {
+        gitRunner: frozenGitRunner(),
+        workspacePreparer: async () => undefined,
+        openCodeRunner: async () => {
+          throw new EngineFailedError("EACCES: spawn /bin/sh", true);
+        },
+      };
+      for (let i = 0; i < 3; i++) {
+        await processEngineTick(
+          store,
+          makeConfig({ workdir: workspace, home: workspace }),
+          makeReviewApi(),
+          "engine-1",
+          extras,
+          () => undefined
+        );
+        // Clear the infra backoff so the next failure can lease again.
+        await sql.unsafe(`UPDATE review_jobs SET leased_until = NULL WHERE state = 'queued'`);
+      }
+      expect((await store2.checkRoleGate("engine")).infraBlocked).toBe(true);
+      expect(await store2.mayStartWork("engine")).toBe(false);
+    } finally {
+      await close();
       await rm(workspace, { recursive: true, force: true });
     }
   });
