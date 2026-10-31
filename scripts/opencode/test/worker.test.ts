@@ -196,6 +196,7 @@ describe("handleIssueCancel", () => {
         conflict: {},
         ci: {},
         stuck: {},
+        reviewStuck: {},
       });
       expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
       await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);

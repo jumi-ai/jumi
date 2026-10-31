@@ -388,6 +388,7 @@ describe("MemoryReviewJobStore", () => {
       conflict: {},
       ci: {},
       stuck: {},
+      reviewStuck: {},
     });
     await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: repeated error");
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({

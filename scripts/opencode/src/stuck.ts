@@ -317,7 +317,17 @@ export async function readReviewStuckLatch(
   repo: string,
   prNumber: number
 ): Promise<StuckState> {
-  return readStuckLatch(store, reviewLatchKey(owner, repo, prNumber));
+  return parseStuckState((await store.get(reviewLatchKey(owner, repo, prNumber))).reviewStuck);
+}
+
+export async function writeReviewStuckLatch(
+  store: SkipLatchStore,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  state: StuckState
+): Promise<void> {
+  await store.put(reviewLatchKey(owner, repo, prNumber), { reviewStuck: state });
 }
 
 export async function appendReviewStuckLatch(
@@ -328,7 +338,12 @@ export async function appendReviewStuckLatch(
   fingerprint: StuckFingerprint,
   now = () => new Date()
 ): Promise<void> {
-  await appendStuckLatchFingerprint(store, reviewLatchKey(owner, repo, prNumber), fingerprint, now);
+  const key = reviewLatchKey(owner, repo, prNumber);
+  const state = parseStuckState((await store.get(key)).reviewStuck);
+  const fingerprints = [...state.fingerprints, fingerprint].slice(-STUCK_HISTORY_LIMIT);
+  const next: StuckState = { fingerprints, updatedAt: now().toISOString() };
+  if (state.quota) next.quota = state.quota;
+  await store.put(key, { reviewStuck: next });
 }
 
 export async function markReviewQuotaStuckLatch(
@@ -339,7 +354,15 @@ export async function markReviewQuotaStuckLatch(
   reason: string,
   now = () => new Date()
 ): Promise<void> {
-  await markQuotaStuckLatch(store, reviewLatchKey(owner, repo, prNumber), reason, now);
+  const key = reviewLatchKey(owner, repo, prNumber);
+  const state = parseStuckState((await store.get(key)).reviewStuck);
+  await store.put(key, {
+    reviewStuck: {
+      fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+      updatedAt: now().toISOString(),
+      quota: { reason, updatedAt: now().toISOString() },
+    },
+  });
 }
 
 export async function clearReviewQuotaStuckLatch(
@@ -350,11 +373,13 @@ export async function clearReviewQuotaStuckLatch(
   now = () => new Date()
 ): Promise<void> {
   const key = reviewLatchKey(owner, repo, prNumber);
-  const state = await readStuckLatch(store, key);
+  const state = parseStuckState((await store.get(key)).reviewStuck);
   if (!state.quota) return;
-  await writeStuckLatch(store, key, {
-    fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
-    updatedAt: now().toISOString(),
+  await store.put(key, {
+    reviewStuck: {
+      fingerprints: state.fingerprints.slice(-STUCK_HISTORY_LIMIT),
+      updatedAt: now().toISOString(),
+    },
   });
 }
 
@@ -364,7 +389,7 @@ export async function deleteReviewStuckLatch(
   repo: string,
   prNumber: number
 ): Promise<void> {
-  await writeStuckLatch(store, reviewLatchKey(owner, repo, prNumber), { fingerprints: [], updatedAt: "" });
+  await store.put(reviewLatchKey(owner, repo, prNumber), { reviewStuck: { fingerprints: [], updatedAt: "" } });
 }
 
 function reviewLedgerMode(): boolean {

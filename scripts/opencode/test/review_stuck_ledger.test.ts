@@ -6,12 +6,18 @@ import { reviewStuckStatePath } from "../src/claim.ts";
 import { QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
+import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import {
   appendReviewStuckLatch,
+  appendStuckLatchFingerprint,
+  deleteReviewStuckLatch,
   fingerprintReviewArtifact,
+  isQuotaStuck,
+  markQuotaStuckLatch,
   markReviewQuotaStuckLatch,
   readReviewStuckLatch,
+  readStuckLatch,
   readStuckState,
   writeStuckState,
 } from "../src/stuck.ts";
@@ -279,5 +285,88 @@ describe("DATABASE_URL disables the HOME file", () => {
       if (prev !== undefined) process.env.DATABASE_URL = prev;
       await rm(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("review and worker stuck cells are isolated", () => {
+  const key = { owner: "kirmanak", repo: "demo", issueNumber: 7 };
+
+  test("worker fingerprints + quota do not stop review", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-isolation-"));
+    try {
+      const store = new MemorySkipLatchStore();
+      const workerHash = fingerprintReviewArtifact("worker finding\n<!-- jumi-check: failure -->")!;
+      for (let i = 0; i < 4; i++) {
+        await appendStuckLatchFingerprint(store, key, { kind: "action", hash: workerHash });
+      }
+      await markQuotaStuckLatch(store, key, QUOTA_STUCK_TEXT);
+      expect((await readStuckLatch(store, key)).fingerprints).toHaveLength(4);
+      expect(isQuotaStuck(await readStuckLatch(store, key))).toBe(true);
+      expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(0);
+
+      const workspace = await mkdtemp(join(tmpdir(), "jumi-ws-"));
+      try {
+        let openCode = 0;
+        const failureMarkdown = "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->";
+        const result = await reviewPullRequest({
+          ...baseOptions,
+          workspace,
+          home,
+          skipLatches: store,
+          api: makeApi(),
+          gitRunner: frozenGit(),
+          openCodeRunner: async () => {
+            openCode++;
+            await writeFile(join(workspace, "JUMI_REVIEW.md"), failureMarkdown);
+            return { status: "ok" };
+          },
+        });
+        expect(result.status).toBe("posted");
+        expect(openCode).toBeGreaterThan(0);
+        // Worker state survives the review run; review wrote only its own cell.
+        expect((await readStuckLatch(store, key)).fingerprints).toHaveLength(4);
+        expect(isQuotaStuck(await readStuckLatch(store, key))).toBe(true);
+        expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(1);
+      } finally {
+        await rm(workspace, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("review fingerprints + quota do not pollute worker state", async () => {
+    const store = new MemorySkipLatchStore();
+    const reviewHash = fingerprintReviewArtifact("review finding\n<!-- jumi-check: failure -->")!;
+    for (let i = 0; i < 4; i++) {
+      await appendReviewStuckLatch(store, "kirmanak", "demo", 7, { kind: "action", hash: reviewHash });
+    }
+    await markReviewQuotaStuckLatch(store, "kirmanak", "demo", 7, QUOTA_STUCK_TEXT);
+    expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(4);
+    const workerState = await readStuckLatch(store, key);
+    expect(workerState.fingerprints).toHaveLength(0);
+    expect(isQuotaStuck(workerState)).toBe(false);
+  });
+
+  test("review delete preserves worker state; worker clear preserves review state", async () => {
+    const jobs = new MemoryReviewJobStore();
+    const store = jobs.skipLatches;
+    const workerHash = fingerprintReviewArtifact("worker finding\n<!-- jumi-check: failure -->")!;
+    const reviewHash = fingerprintReviewArtifact("review finding\n<!-- jumi-check: failure -->")!;
+    await appendStuckLatchFingerprint(store, key, { kind: "action", hash: workerHash });
+    await appendReviewStuckLatch(store, "kirmanak", "demo", 7, { kind: "action", hash: reviewHash });
+
+    await deleteReviewStuckLatch(store, "kirmanak", "demo", 7);
+    expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(0);
+    expect(await readStuckLatch(store, key)).toMatchObject({
+      fingerprints: [{ kind: "action", hash: workerHash }],
+    });
+
+    await appendReviewStuckLatch(store, "kirmanak", "demo", 7, { kind: "action", hash: reviewHash });
+    await jobs.clearIssueSkipLatch("kirmanak", "demo", 7);
+    expect((await readStuckLatch(store, key)).fingerprints).toHaveLength(0);
+    expect(await readReviewStuckLatch(store, "kirmanak", "demo", 7)).toMatchObject({
+      fingerprints: [{ kind: "action", hash: reviewHash }],
+    });
   });
 });
