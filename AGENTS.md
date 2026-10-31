@@ -20,6 +20,10 @@ Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/o
 
 The worker image ships Temurin 21 (`JAVA_HOME=/opt/java/openjdk`). The reviewer image has no JVM. Do not add one. `type: agy` is refused unless `FORGE=github`.
 
+## Ledger schema
+
+Only the router migrates (`PgReviewJobStore.migrate` under a Postgres advisory lock). Job-mode processes (`JUMI_JOB_MODE=1`, `openPgReviewJobStoreForJob`) never migrate; they check the schema with `assertLedgerSchema` and fail clearly when the router has not migrated yet. Schema changes stay compatible with the previous release, because a job can run on the old image for hours after a rollout.
+
 ## Verify
 
 From `scripts/opencode`, after `bun install --frozen-lockfile`:
