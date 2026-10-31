@@ -190,6 +190,19 @@ export interface ClosedPullRecord {
   number: number;
 }
 
+/** Shared board-list bound. Memory and Postgres must drop the same tail. */
+export const ROUTER_SIT_LIST_LIMIT = 500;
+
+function compareSitKey(a: ClosedPullRecord, b: ClosedPullRecord): number {
+  if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1;
+  if (a.repo !== b.repo) return a.repo < b.repo ? -1 : 1;
+  return a.number - b.number;
+}
+
+function capSitList<T extends ClosedPullRecord>(rows: T[]): T[] {
+  return rows.sort(compareSitKey).slice(0, ROUTER_SIT_LIST_LIMIT);
+}
+
 export const CLOSED_PULLS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS closed_pulls (
   owner TEXT NOT NULL,
@@ -227,13 +240,7 @@ export class MemoryRouterSitStore implements RouterSitStore {
   }
 
   async list(): Promise<RouterSitRecord[]> {
-    return [...this.rows.values()]
-      .map((row) => ({ ...row }))
-      .sort((a, b) => {
-        if (a.owner !== b.owner) return a.owner < b.owner ? -1 : 1;
-        if (a.repo !== b.repo) return a.repo < b.repo ? -1 : 1;
-        return a.number - b.number;
-      });
+    return capSitList([...this.rows.values()].map((row) => ({ ...row })));
   }
 
   async markPullClosed(owner: string, repo: string, number: number): Promise<void> {
@@ -246,7 +253,7 @@ export class MemoryRouterSitStore implements RouterSitStore {
   }
 
   async listClosedPulls(): Promise<ClosedPullRecord[]> {
-    return [...this.closed.values()].map((row) => ({ ...row }));
+    return capSitList([...this.closed.values()].map((row) => ({ ...row })));
   }
 }
 
@@ -359,7 +366,7 @@ export class PgRouterSitStore implements RouterSitStore {
         updated_at: unknown;
       }>(
         await this.sql.unsafe(
-          `SELECT owner, repo, number, reason, decided_at, updated_at FROM router_sits ORDER BY owner ASC, repo ASC, number ASC LIMIT 500`
+          `SELECT owner, repo, number, reason, decided_at, updated_at FROM router_sits ORDER BY owner ASC, repo ASC, number ASC LIMIT ${ROUTER_SIT_LIST_LIMIT}`
         )
       );
       const out: RouterSitRecord[] = [];
@@ -412,7 +419,7 @@ export class PgRouterSitStore implements RouterSitStore {
     try {
       const rows = asRows<{ owner: unknown; repo: unknown; number: unknown }>(
         await this.sql.unsafe(
-          `SELECT owner, repo, number FROM closed_pulls ORDER BY owner ASC, repo ASC, number ASC LIMIT 500`
+          `SELECT owner, repo, number FROM closed_pulls ORDER BY owner ASC, repo ASC, number ASC LIMIT ${ROUTER_SIT_LIST_LIMIT}`
         )
       );
       return rows.map((row) => ({ owner: String(row.owner), repo: String(row.repo), number: num(row.number) }));
