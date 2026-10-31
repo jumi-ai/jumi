@@ -1,3 +1,4 @@
+import { forgeRequestError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
@@ -586,8 +587,7 @@ export class GithubAPI {
     return this.gitAccessToken(target);
   }
 
-  private async headers(target?: GithubTokenTarget): Promise<Record<string, string>> {
-    const token = await this.accessToken(target);
+  private headerRecord(token: string): Record<string, string> {
     return {
       Authorization: `Bearer ${token}`,
       Accept: "application/vnd.github+json",
@@ -599,14 +599,22 @@ export class GithubAPI {
 
   private async request<T>(method: string, path: string, body?: unknown, target?: GithubTokenTarget): Promise<T> {
     const url = `${this.base}${path}`;
+    const token = await this.accessToken(target ?? repoTargetFromPath(path));
     const res = await fetch(url, {
       method,
-      headers: await this.headers(target ?? repoTargetFromPath(path)),
+      headers: this.headerRecord(token),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub API ${method} ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method,
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     if (res.status === 204) return undefined as T;
     return res.json() as Promise<T>;
@@ -614,24 +622,48 @@ export class GithubAPI {
 
   private async requestText(path: string, maxBytes = LOG_MAX_BYTES): Promise<string> {
     const url = `${this.base}${path}`;
+    const token = await this.accessToken(repoTargetFromPath(path));
     const res = await fetch(url, {
       method: "GET",
-      headers: await this.headers(repoTargetFromPath(path)),
+      headers: this.headerRecord(token),
       redirect: "manual",
     });
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("Location");
-      if (!location) throw new Error(`GitHub API GET ${url} → ${res.status}: missing Location`);
+      if (!location) {
+        throw forgeRequestError({
+          service: "GitHub API",
+          method: "GET",
+          url,
+          status: res.status,
+          body: "missing Location",
+          secrets: [token, this.staticToken],
+        });
+      }
       const signed = await fetch(new URL(location, url).toString(), { method: "GET" });
       if (!signed.ok) {
         const text = await signed.text().catch(() => "");
-        throw new Error(`GitHub API GET ${url} → ${signed.status}: ${text}`);
+        throw forgeRequestError({
+          service: "GitHub API",
+          method: "GET",
+          url,
+          status: signed.status,
+          body: text,
+          secrets: [token, this.staticToken, location.includes("=") ? location : undefined],
+        });
       }
       return decodeTail(new Uint8Array(await signed.arrayBuffer()), maxBytes);
     }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub API GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub API",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     return decodeTail(new Uint8Array(await res.arrayBuffer()), maxBytes);
   }
@@ -809,6 +841,7 @@ export class GithubAPI {
     } catch {
       sameHost = false;
     }
+    // Do not mint or send a token for an off-host URL. A configured static token is still scrubbed.
     const token = sameHost ? await this.accessToken() : undefined;
     const res = await fetch(url, {
       headers: {
@@ -819,7 +852,14 @@ export class GithubAPI {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
-      throw new Error(`GitHub attachment GET ${url} → ${res.status}: ${text}`);
+      throw forgeRequestError({
+        service: "GitHub attachment",
+        method: "GET",
+        url,
+        status: res.status,
+        body: text,
+        secrets: [token, this.staticToken],
+      });
     }
     return new Uint8Array(await res.arrayBuffer());
   }
