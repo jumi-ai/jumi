@@ -13,6 +13,7 @@ import {
 } from "../src/claim.ts";
 import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import { EngineFailedError } from "../src/engine.ts";
+import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import {
   buildFeedbackMarkdown,
   CI_PENDING_RETRY_MS,
@@ -30,6 +31,8 @@ import {
 } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { PR_BODY_FENCE_END, PR_BODY_FENCE_START } from "../src/implement.ts";
+import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
+import { standingPodRuntime } from "../src/runtime.ts";
 import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -717,6 +720,94 @@ describe("implementFollowUp", () => {
       expect(gitCalls.some((args) => args[0] === "push" && args.includes("--force"))).toBe(false);
       expect(api.comments.at(-1)).toContain("Pushed follow-up to");
       expect(api.commentIndexes.at(-1)).toBe(127);
+    });
+  });
+
+  test.each([
+    ["engine scratch", ".jumi-tmp", ".jumi-tmp/auth.json\0", engineScratchTrackedReason],
+    ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
+  ] as const)("does not push when the tip tracks %s", async (_label, dir, listed, reasonFor) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      let kind: string | undefined;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "1";
+        if (gitArgs[0] === "ls-tree") return gitArgs.includes(dir) ? listed : "";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async (opts) => {
+          kind = opts.trace?.kind;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      const reason = reasonFor("jumi/issue-12-fix-the-thing");
+      expect(kind).toBe("follow-up");
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(gitCalls.some((args) => args[0] === "ls-tree" && args.includes(dir))).toBe(true);
+      expect(api.comments.at(-1)).toContain(reason);
+    });
+  });
+
+  test.each([
+    ["engine scratch", ".jumi-tmp", ".jumi-tmp/auth.json\0", engineScratchTrackedReason],
+    ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
+  ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      const runtime = {
+        ...standingPodRuntime,
+        destroyRuntimeWorkspace: async () => {
+          throw new Error("destroy boom");
+        },
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          gitCalls.push(gitArgs);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "1";
+          if (gitArgs[0] === "ls-tree") return gitArgs.includes(dir) ? listed : "";
+          return "";
+        },
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      const reason = reasonFor("jumi/issue-12-fix-the-thing");
+      expect(result).toEqual({ status: "skipped", reason });
+      expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(reason);
+      expect((await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12))).round).toBe(0);
     });
   });
 
@@ -1785,6 +1876,47 @@ describe("implementFollowUp", () => {
       expect(conflict.round).toBe(1);
       expect(conflict.lastHeadSha).toBe("abc123");
       expect(conflict.lastBaseSha).toBe("abc123");
+    });
+  });
+
+  test("prefix-merge quota skip survives a throwing destroy", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const runtime = {
+        ...standingPodRuntime,
+        destroyRuntimeWorkspace: async () => {
+          throw new Error("destroy boom");
+        },
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+            throw new Error("git merge-base --is-ancestor failed with exit code 1");
+          }
+          if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+          if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+          if (gitArgs[0] === "grep") return "src/demo.ts";
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          return "";
+        },
+        openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "hard" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: QUOTA_STUCK_TEXT });
+      expect(api.comments.some((body) => body.includes("Jumi failed"))).toBe(false);
+      expect(api.comments.at(-1)).toContain(QUOTA_STUCK_TEXT);
+      expect((await readClaim(claimFilePath(home, "kirmanak", "demo", 12)))?.terminal).not.toBe(true);
     });
   });
 

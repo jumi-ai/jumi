@@ -30,6 +30,12 @@ import {
   thrownRunner,
 } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
+import {
+  attachmentsTrackedReason,
+  engineScratchTrackedReason,
+  tipTracksAttachments,
+  tipTracksEngineScratch,
+} from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
@@ -914,6 +920,20 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       if (gate.continued) {
         await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", ATTACHMENTS_MANIFEST]);
         await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
+      }
+
+      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = engineScratchTrackedReason(branch);
+        await sticky(reason, pr.number);
+        // The refusal is decided; teardown noise must not replace it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+        return { status: "skipped", reason };
+      }
+      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+        const reason = attachmentsTrackedReason(branch);
+        await sticky(reason, pr.number);
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+        return { status: "skipped", reason };
       }
 
       try {
