@@ -7,8 +7,8 @@ import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflic
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
-import { standingPodRuntime } from "../src/runtime.ts";
 import { issueJobFromRecord, MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { standingPodRuntime } from "../src/runtime.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
