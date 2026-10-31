@@ -26,7 +26,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getOpenCodeMajor } from "./git.ts";
+import { armChildCredentialImport } from "./opencode_credentials.ts";
 import { childAuthFile, XAI_CHILD_AUTH_SHAPE, XAI_PROVIDER_ID } from "./xai_auth.ts";
 
 /** Never a real token: the probe only needs the string to be echoed back. */
@@ -66,12 +66,16 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
     JSON.stringify({
       $schema: "https://opencode.ai/config.json",
       share: "disabled",
-      autoupdate: false,
-      snapshot: false,
+      update: "disable",
+      snapshots: false,
       // Only the base URL moves: the provider, its auth loader and its SDK stay
       // the ones production uses, which is the point of the probe.
-      provider: { [XAI_PROVIDER_ID]: { options: { baseURL: `${origin}/v1` }, models: { [MODEL_ID]: {} } } },
-      permission: { edit: "deny", write: "deny", bash: "deny", webfetch: "deny", task: "deny", question: "deny" },
+      providers: { [XAI_PROVIDER_ID]: { settings: { baseURL: `${origin}/v1` }, models: { [MODEL_ID]: {} } } },
+      permissions: ["edit", "shell", "webfetch", "subagent", "question"].map((action) => ({
+        action,
+        resource: "*",
+        effect: "deny",
+      })),
     }),
     "utf8"
   );
@@ -79,12 +83,7 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
 }
 
 async function runOpenCode(env: Record<string, string>, workdir: string): Promise<void> {
-  const major = getOpenCodeMajor();
-  const args =
-    major >= 2
-      ? ["opencode", "run", "--standalone", "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"]
-      : ["opencode", "run", "--dir", workdir, "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"];
-  const proc = Bun.spawn(args, {
+  const proc = Bun.spawn(["opencode", "run", "--standalone", "-m", `${XAI_PROVIDER_ID}/${MODEL_ID}`, "say ok"], {
     cwd: workdir,
     stdin: "ignore",
     stdout: "pipe",
@@ -133,23 +132,20 @@ async function main(): Promise<number> {
       failures.push("childAuthFile handed the child a refresh token");
     }
 
-    await runOpenCode(
-      {
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        HOME: join(dir, "home"),
-        TMPDIR: dir,
-        XDG_DATA_HOME: dataHome,
-        XDG_CONFIG_HOME: join(dir, "xdg-config"),
-        OPENCODE_CONFIG: await writeProbeConfig(dir, origin),
-        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
-        // OpenCode 2 stores credentials in SQLite, not auth.json, and its xAI
-        // provider sends XAI_API_KEY as bearer. The isolated auth file above is
-        // ignored by V2, so hand the V2 child the same refresh-less token via
-        // env, exactly like production does. V1 ignores the env and uses the file.
-        XAI_API_KEY: PROBE_ACCESS,
-      },
-      workdir
-    );
+    const env = {
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+      HOME: join(dir, "home"),
+      TMPDIR: dir,
+      XDG_DATA_HOME: dataHome,
+      XDG_CONFIG_HOME: join(dir, "xdg-config"),
+      OPENCODE_DB: join(dir, "opencode-session.db"),
+      OPENCODE_CONFIG: await writeProbeConfig(dir, origin),
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    };
+    // No XAI_API_KEY here, unlike production: the bearer must arrive through
+    // the seeded file, so a binary that stops importing it fails this image.
+    await armChildCredentialImport({ dbPath: env.OPENCODE_DB, env, cwd: workdir, log: (m) => failures.push(m) });
+    await runOpenCode(env, workdir);
 
     if (state.authorization !== `Bearer ${PROBE_ACCESS}`) {
       failures.push(

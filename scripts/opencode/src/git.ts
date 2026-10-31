@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
 import {
   type ChildGitProxy,
@@ -30,12 +30,14 @@ import {
   redactEngineText,
 } from "./engine.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
-import { forgeDenyHost, forgeOpenCodeConfigContent, forgeOpenCodePermission } from "./forge_webfetch.ts";
+import { forgeDenyHost, forgePermissions } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
+import { armChildCredentialImport } from "./opencode_credentials.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
 import {
-  inspectQuotaHit,
-  inspectQuotaInLogDir,
+  checkQuotaDbSchema,
+  inspectQuotaRetryInDb,
+  inspectQuotaSleepInDb,
   QUOTA_MESSAGE,
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
@@ -148,46 +150,40 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
 }
 
 /**
- * Every OpenCode child gets the forge webfetch deny, worker runs included: the
- * worker is the one holding a write-capable git token. The denied host is the
- * one this spawn authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so
- * the GitHub factory denies `github.com` rather than the Gitea default. Set,
- * never merged, so a loosened `OPENCODE_PERMISSION` in the parent env cannot
- * reopen the host.
+ * Inline config every OpenCode child gets, merged over any job-supplied
+ * `OPENCODE_CONFIG_CONTENT` so nothing in the parent env can reopen the deny.
  *
- * OpenCode 2 ignores `OPENCODE_PERMISSION` and only reads `permissions`
- * (ordered array) from file config and `OPENCODE_CONFIG_CONTENT`, so the same
- * deny is also set as inline config for the V2 binary. V1 ignores the unknown
- * `permissions` field, V2 ignores `OPENCODE_PERMISSION`: setting both keeps
- * one binary from silently losing the deny during the upgrade.
+ * The forge webfetch deny covers worker runs too: the worker is the one holding
+ * a write-capable git token. The denied host is the one this spawn
+ * authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so the GitHub factory
+ * denies `github.com` rather than the Gitea default. The rules go last because
+ * OpenCode permissions are last-match.
+ *
+ * `instructions` is for sanitized children, which run with project config off
+ * and so lose `AGENTS.md` discovery along with checkout plugins and hooks.
  */
-function denyForgeWebfetch(env: Record<string, string>, opts: OpenCodeRunOptions): void {
-  const host = forgeDenyHost(opts.extraEnv);
-  env.OPENCODE_PERMISSION = forgeOpenCodePermission(host);
-  const ours = JSON.parse(forgeOpenCodeConfigContent(host)) as { permissions: unknown[] };
-  const existing = env.OPENCODE_CONFIG_CONTENT;
-  if (!existing) {
-    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permissions: ours.permissions });
-    return;
-  }
+function applyOpenCodeInlineConfig(
+  env: Record<string, string>,
+  opts: OpenCodeRunOptions,
+  instructions: string[] = []
+): void {
+  let existing: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(existing) as { permissions?: unknown[] } & Record<string, unknown>;
-    const base = Array.isArray(parsed.permissions) ? parsed.permissions : [];
-    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
-      ...parsed,
-      permissions: [...base, ...(ours.permissions as unknown[])],
-    });
+    const parsed: unknown = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
   } catch {
-    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permissions: ours.permissions });
+    existing = {};
   }
+  const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
+  env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+    ...existing,
+    permissions: [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv))],
+    ...(instructions.length > 0 ? { instructions: [...listOf(existing.instructions), ...instructions] } : {}),
+  });
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
   return join(tempRoot, "xdg-data");
-}
-
-function openCodeLogDir(tempRoot: string): string {
-  return join(openCodeXdgDataHome(tempRoot), "opencode", "log");
 }
 
 /**
@@ -195,6 +191,7 @@ function openCodeLogDir(tempRoot: string): string {
  * dir so `XDG_DATA_HOME` isolation does not break provider auth. The file
  * holds well-known/Zen credentials seeded at server startup; `OPENCODE_API_KEY`
  * still flows via env. Never throws; missing source is fine (env-only auth).
+ * OpenCode 2 reads this file only through `armChildCredentialImport`.
  *
  * The copy is never the parent's xAI credential: `childAuthFile` swaps in one
  * that cannot refresh, so a killed child cannot rotate the grant and take the
@@ -310,10 +307,8 @@ function buildEnv(
 ): Record<string, string> | undefined {
   // Per-review SQLite path under the workspace temp dir so session DB does not
   // accumulate on HOME across runs (OOM trail: 1.5GiB shared opencode.db).
-  // Per-run XDG_DATA_HOME for the same reason for the OpenCode log dir: the
-  // live quota signal is the isolated log file (`stream error` with a Free/Go
-  // quota string), so a fresh dir means any hit belongs to this child and no
-  // offset tracking against the shared `$HOME/.local/share` log is needed.
+  // Per-run XDG_DATA_HOME for the same reason: logs and the seeded auth file
+  // stay with this run instead of `$HOME/.local/share`.
   const configPath = resolveOpenCodeConfigPath(opts);
   const xdgDataHome = openCodeXdgDataHome(tempRoot);
   // Read fresh on every spawn so a rotated Secret file applies to the next
@@ -323,6 +318,9 @@ function buildEnv(
   if (!opts.sanitizeEnv) {
     const env = {
       ...process.env,
+      // OpenCode 2 takes its directory from PWD before cwd, and this spread
+      // would hand it the parent's.
+      PWD: opts.workdir,
       TMPDIR: tempRoot,
       OPENCODE_DB: openCodeDbPath,
       XDG_DATA_HOME: xdgDataHome,
@@ -333,7 +331,7 @@ function buildEnv(
       throw new EngineFailedError(openCodeApiKeyConfigError(apiKey.filePath), false, { auth: true });
     }
     if (configPath) env.OPENCODE_CONFIG = configPath;
-    denyForgeWebfetch(env, opts);
+    applyOpenCodeInlineConfig(env, opts);
     return env;
   }
 
@@ -379,8 +377,10 @@ function buildEnv(
       })
     );
   }
-  // After extraEnv: a job-supplied OPENCODE_PERMISSION must not win over the deny.
-  denyForgeWebfetch(env, opts);
+  // After extraEnv: a job-supplied OPENCODE_CONFIG_CONTENT must not win over the
+  // deny. Absolute, because with project discovery off a relative instruction
+  // resolves against the global config dir. A checkout without the file is fine.
+  applyOpenCodeInlineConfig(env, opts, [join(resolve(opts.workdir), "AGENTS.md")]);
   return env;
 }
 
@@ -483,68 +483,16 @@ function engineExitMessage(exitCode: number | null, stderr: string): string {
   return `opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`;
 }
 
-let openCodeMajorOverride: number | undefined;
-let cachedMajor: number | undefined;
-
-export function setOpenCodeMajorForTests(major?: number): void {
-  openCodeMajorOverride = major;
-}
-
-export function resetOpenCodeVersionForTests(): void {
-  openCodeMajorOverride = undefined;
-  cachedMajor = undefined;
-}
-
-export function detectOpenCodeMajor(bin = "opencode"): number {
-  if (openCodeMajorOverride !== undefined) {
-    return openCodeMajorOverride;
-  }
-  try {
-    const proc = Bun.spawnSync([bin, "--version"], {
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    if (proc.exitCode === 0) {
-      const text = proc.stdout.toString().trim();
-      const match = /(\d+)\.\d+\.\d+/.exec(text);
-      if (match) {
-        return Number.parseInt(match[1], 10);
-      }
-    }
-  } catch {
-    // Binary missing or spawn error; fall back to 1.
-  }
-  return 1;
-}
-
-export function getOpenCodeMajor(): number {
-  if (openCodeMajorOverride !== undefined) {
-    return openCodeMajorOverride;
-  }
-  if (cachedMajor !== undefined) {
-    return cachedMajor;
-  }
-  cachedMajor = detectOpenCodeMajor();
-  return cachedMajor;
-}
-
 export interface OpenCodeArgOptions {
-  workdir: string;
   model: string;
   variant?: string;
   continueSession?: boolean;
 }
 
-export function buildOpenCodeArgs(opts: OpenCodeArgOptions, major: number = getOpenCodeMajor()): string[] {
-  if (major >= 2) {
-    const variant = opts.variant?.trim();
-    const model = variant ? `${opts.model}#${variant}` : opts.model;
-    const args = ["opencode", "run", "--standalone", "-m", model];
-    if (opts.continueSession) args.push("--continue");
-    return args;
-  }
-  const args = ["opencode", "run", "--dir", opts.workdir, "-m", opts.model];
-  if (opts.variant) args.push("--variant", opts.variant);
+export function buildOpenCodeArgs(opts: OpenCodeArgOptions): string[] {
+  const variant = opts.variant?.trim();
+  const model = variant ? `${opts.model}#${variant}` : opts.model;
+  const args = ["opencode", "run", "--standalone", "-m", model];
   if (opts.continueSession) args.push("--continue");
   return args;
 }
@@ -563,13 +511,11 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const home = opts.home ?? process.env.HOME ?? opts.workdir;
   // Always isolate session DB under the review temp dir (deleted with workspace).
   const dbPath = join(tempRoot, "opencode-session.db");
-  const logDir = openCodeLogDir(tempRoot);
-  // Isolate the OpenCode log dir (XDG_DATA_HOME) so the live quota poll sees
-  // only this child. Seed auth so isolation does not break provider auth.
+  // XDG_DATA_HOME is per-run too: seed auth so isolation does not break provider auth.
   const xaiChild = await resolveXaiChildCredential(opts, home, log);
   await seedIsolatedAuth(home, tempRoot, xaiChild);
   const promptBytes = byteLength(prompt);
-  const dbBefore = await pathSizeBytes(dbPath);
+  let dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);
 
   logDiagnostic(log, "opencode_start", {
@@ -630,16 +576,14 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       const built = buildEnv(opts, tempRoot, dbPath, gitProxy?.url);
       if (!built) throw new EngineFailedError("opencode spawn refused: no child env", true);
       childEnv = built;
-      // OpenCode 2 stores credentials in SQLite, not auth.json, and its xAI
-      // provider sends XAI_API_KEY as bearer. The isolated auth file above is
-      // ignored by V2, so hand the V2 child the same refresh-less access token
-      // via env. V1 still uses the file and ignores the env.
-      if (xaiChild && getOpenCodeMajor() >= 2) {
+      // OpenCode 2's xAI provider also sends XAI_API_KEY as bearer. The imported
+      // credential outranks it, so this is the fallback for an import that did
+      // not land.
+      if (xaiChild) {
         const token = xaiChild.type === "api" ? xaiChild.key : xaiChild.access;
         if (token) childEnv.XAI_API_KEY = token;
-      } else if (!xaiChild && getOpenCodeMajor() >= 2 && isXaiModel(opts.model)) {
-        // API-key parent (no OAuth entry): the file copy above carries the key
-        // for V1, but V2 needs it as env. Best-effort, never throws or logs.
+      } else if (isXaiModel(opts.model)) {
+        // API-key parent (no OAuth entry). Best-effort, never throws or logs.
         try {
           const parentRaw = await readFile(join(home, ".local", "share", "opencode", "auth.json"), "utf8");
           const parent = JSON.parse(parentRaw) as Record<string, unknown>;
@@ -669,8 +613,12 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       }
       throw err;
     }
-    const major = getOpenCodeMajor();
-    const args = buildOpenCodeArgs(opts, major);
+    if (existsSync(join(openCodeXdgDataHome(tempRoot), "opencode", "auth.json"))) {
+      await armChildCredentialImport({ dbPath, env: childEnv, cwd: opts.workdir, log });
+      dbBefore = await pathSizeBytes(dbPath);
+    }
+    const args = buildOpenCodeArgs(opts);
+    const spawnedAt = Date.now();
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -724,18 +672,15 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         : undefined;
 
     // Quota abort: while OpenCode sleeps on a Free/Go usage-limit retry-after
-    // (often hours), the child PID stays alive and RSS goes flat. The pinned
-    // OpenCode keeps retry status in memory (SessionStatus) and never writes
-    // a per-attempt row to the session DB while sleeping, and `opencode run`
-    // without `--print-logs` emits only the banner to stderr, so neither the
-    // stderr stream nor DB polling can fire during the hang. Instead poll the
-    // per-run isolated log file for the `llm` `stream error` line carrying a
-    // Free/Go quota string (~170ms after stream start, before the sleep).
-    // Match the Free/Go quota class only (narrow live pattern, retry context
-    // required); ordinary short-window 429s that OpenCode retries in seconds
-    // do not contain these strings and stay retries. No --print-logs, no
-    // transcript dump to Loki, no Phoenix. The isolated dir means any hit
-    // belongs to this child; no ANSI concerns (log has no color codes).
+    // (up to 15 minutes a gap, ten times over), the child PID stays alive and
+    // RSS goes flat. `opencode run` without `--print-logs` emits only the banner
+    // to stderr, so the stderr stream cannot fire during the hang. OpenCode
+    // writes the pending retry onto the assistant row and clears it when the
+    // sleep ends, so poll that. Match the Free/Go quota class only (narrow live
+    // pattern); ordinary short-window 429s that OpenCode retries in seconds do
+    // not contain these strings and stay retries. No --print-logs, no transcript
+    // dump to Loki, no Phoenix. A `--continue` run reuses this DB, so only rows
+    // written since this spawn count.
     let quotaHit = false;
     let quotaInfo: QuotaHit | undefined;
     const quotaIntervalMs = opts.quotaPollIntervalMs ?? QUOTA_POLL_INTERVAL_MS;
@@ -745,7 +690,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
             if (quotaHit || timedOut || opts.abortSignal?.aborted) return;
             let hit: QuotaHit | undefined;
             try {
-              hit = inspectQuotaInLogDir(logDir);
+              hit = inspectQuotaSleepInDb(dbPath, spawnedAt);
             } catch {
               hit = undefined;
             }
@@ -793,6 +738,10 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       finalSample = await finalizeMemoryTracker(tracker, childPid);
     }
 
+    // The OpenCode 2 CLI exits 130 on SIGTERM. Everything past this engine
+    // reads a killed child as 143.
+    if (exitCode === 130) exitCode = 143;
+
     const dbAfter = await pathSizeBytes(dbPath);
     const parentAfter = await sampleMemory(process.pid);
 
@@ -808,7 +757,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbAfter,
       tokensExist,
     });
-    // Post-hoc quota classifier: the live log poll above drove the abort while
+    // Post-hoc quota classifier: the live DB poll above drove the abort while
     // running. The checks below only classify outcomes where the poll missed
     // (child exited before the first 5s tick) or the error record landed in
     // the session DB (e.g. halt persisted assistantMessage.error).
@@ -818,10 +767,14 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     // the literals, not a quota retry.
     if (!quotaInfo) {
       try {
-        quotaInfo = inspectQuotaHit(logDir, dbPath);
+        quotaInfo = inspectQuotaRetryInDb(dbPath);
       } catch {
         quotaInfo = undefined;
       }
+    }
+    const quotaSchemaProblem = checkQuotaDbSchema(dbPath);
+    if (quotaSchemaProblem) {
+      logDiagnostic(log, "opencode_quota_schema", { review: opts.reviewLabel, problem: quotaSchemaProblem });
     }
     const quota = quotaInfo != null;
     const auth = !quota && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(stderr);

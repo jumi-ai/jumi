@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -42,7 +42,7 @@ interface FakeEnv {
 /** Fake binaries append one line of argv per call to `$ARGS_LOG`. */
 async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-agy-"));
-  const workdir = await mkdtemp(join(tmpdir(), "fake-agy-work-"));
+  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-agy-work-")));
   const home = await mkdtemp(join(tmpdir(), "fake-agy-home-"));
   try {
     for (const [name, script] of Object.entries(bins)) {

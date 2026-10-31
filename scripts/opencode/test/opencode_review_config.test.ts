@@ -3,41 +3,28 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   FORGE_DENY_DOMAIN,
-  forgeOpenCodePermission,
-  forgeWebfetchPermission,
+  forgeOpenCodeConfigContent,
+  forgePermissions,
   isPermissionDenyText,
-  PERMISSION_DENY_V1_TEXT,
-  PERMISSION_DENY_V2_PREFIX,
 } from "../src/forge_webfetch.ts";
+
+type Effect = "allow" | "ask" | "deny";
 
 interface OpenCodeReviewConfig {
   model?: unknown;
   small_model?: unknown;
-  plugin?: unknown;
+  plugins?: unknown;
   experimental?: { hook?: unknown };
-  enabled_providers?: unknown;
-  skills?: { paths?: string[] };
-  provider?: {
+  providers?: {
     xai?: {
-      models?: Record<string, { options?: { reasoningEffort?: unknown } }>;
+      models?: Record<string, { settings?: { reasoningEffort?: unknown } }>;
     };
     openai?: {
-      models?: Record<string, { options?: { reasoningEffort?: unknown } }>;
+      models?: Record<string, { settings?: { reasoningEffort?: unknown } }>;
     };
   };
-  permission: {
-    bash: Record<string, "allow" | "ask" | "deny">;
-    webfetch: "allow" | "ask" | "deny";
-    websearch: "allow" | "ask" | "deny";
-    edit: "allow" | "ask" | "deny";
-    write: "allow" | "ask" | "deny";
-    task: "allow" | "ask" | "deny";
-    external_directory: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
-    lsp: "allow" | "ask" | "deny";
-    skill: "allow" | "ask" | "deny" | { [pattern: string]: "allow" | "ask" | "deny" };
-    question: "allow" | "ask" | "deny";
-    doom_loop: "allow" | "ask" | "deny";
-  };
+  skills?: string[];
+  permissions: { action: string; resource: string; effect: Effect }[];
 }
 
 // No local matcher lives here on purpose. Whether a pattern actually denies a
@@ -50,37 +37,48 @@ describe("opencode review config", () => {
   const config = JSON.parse(
     readFileSync(join(process.cwd(), "../../.gitea/opencode-review.json"), "utf8")
   ) as OpenCodeReviewConfig;
+  const rulesFor = (action: string) => config.permissions.filter((rule) => rule.action === action);
+  const defaultFor = (action: string) => {
+    const rules = rulesFor(action);
+    expect(rules.map((rule) => rule.resource)).toEqual(["*"]);
+    return rules[0]?.effect;
+  };
 
   test("keeps model selection remote while pinning reviewer reasoning high", () => {
     expect(config.model).toBeUndefined();
     expect(config.small_model).toBeUndefined();
-    expect(config.enabled_providers).toBeUndefined();
-    expect(config.provider?.xai?.models?.["grok-4.5"]?.options?.reasoningEffort).toBe("high");
-    expect(config.provider?.xai?.models?.["grok-4.6"]?.options?.reasoningEffort).toBe("high");
-    expect(config.provider?.openai?.models?.["gpt-5.5"]?.options?.reasoningEffort).toBe("high");
+    expect(config.providers?.xai?.models?.["grok-4.5"]?.settings?.reasoningEffort).toBe("high");
+    expect(config.providers?.xai?.models?.["grok-4.6"]?.settings?.reasoningEffort).toBe("high");
+    expect(config.providers?.openai?.models?.["gpt-5.5"]?.settings?.reasoningEffort).toBe("high");
   });
 
-  test("allows edit/write for JUMI_REVIEW.md while keeping other mutation-oriented tools denied", () => {
-    expect(config.permission.webfetch).toBe("allow");
-    expect(config.permission.websearch).toBe("allow");
-    expect(config.permission.edit).toBe("allow");
-    expect(config.permission.write).toBe("allow");
-    expect(config.permission.lsp).toBe("deny");
-    expect(config.permission.task).toBe("deny");
-    expect(config.permission.question).toBe("deny");
-    expect(config.permission.doom_loop).toBe("deny");
+  test("uses only OpenCode 2 config keys", () => {
+    const keys = Object.keys(config);
+    for (const v1 of ["autoupdate", "snapshot", "provider", "permission", "plugin"]) expect(keys).not.toContain(v1);
+  });
+
+  test("allows edit for JUMI_REVIEW.md while keeping other mutation-oriented tools denied", () => {
+    expect(defaultFor("webfetch")).toBe("allow");
+    expect(defaultFor("websearch")).toBe("allow");
+    expect(defaultFor("edit")).toBe("allow");
+    expect(defaultFor("subagent")).toBe("deny");
+    expect(defaultFor("todowrite")).toBe("deny");
+    expect(defaultFor("question")).toBe("deny");
   });
 
   test("allows every skill the reviewer can discover: image, fleet, and checkout", () => {
     // No named allow-list: the model only sees a description until it loads one.
-    expect(config.permission.skill).toBe("allow");
-    // Image pack, checkout `.opencode/skill(s)` (relative paths resolve against
-    // `--dir`, and the sanitized spawn keeps project config off, so these are
-    // the only way they load), and fleet OpenCode skills under the real HOME
-    // (the sanitized spawn points XDG_CONFIG_HOME at a scratch dir). Checkout
-    // and fleet `.claude/skills` / `.agents/skills` are OpenCode's own scans.
-    expect(config.skills?.paths).toEqual([
+    expect(defaultFor("skill")).toBe("allow");
+    // Image pack, then the checkout's skill roots: the sanitized spawn keeps
+    // project config off, and that also stops OpenCode 2 scanning the checkout,
+    // so these relative paths (resolved against `--dir`) are how they load.
+    // Fleet OpenCode skills live under the real HOME (the sanitized spawn points
+    // XDG_CONFIG_HOME at a scratch dir). Fleet `.claude/skills` and
+    // `.agents/skills` are OpenCode's own scans.
+    expect(config.skills).toEqual([
       "/app/review-skills",
+      ".claude/skills",
+      ".agents/skills",
       ".opencode/skill",
       ".opencode/skills",
       "~/.config/opencode/skill",
@@ -92,40 +90,46 @@ describe("opencode review config", () => {
     // Checkout plugins stay off because the review spawn sets
     // OPENCODE_DISABLE_PROJECT_CONFIG (test/git.test.ts); this config must not
     // add a plugin or command hook back.
-    expect(config.plugin).toBeUndefined();
+    expect(config.plugins).toBeUndefined();
     expect(config.experimental?.hook).toBeUndefined();
   });
 
   test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
-    const rules = forgeWebfetchPermission(FORGE_DENY_DOMAIN);
-    expect(JSON.parse(forgeOpenCodePermission(FORGE_DENY_DOMAIN))).toEqual({ webfetch: rules });
-    expect(rules).toEqual({
-      "*": "allow",
-      "*kirmanak.stream*": "deny",
-      "*github.com/search*": "deny",
-    });
-    expect(Object.keys(rules)).toEqual(["*", "*kirmanak.stream*", "*github.com/search*"]);
+    const rules = forgePermissions(FORGE_DENY_DOMAIN);
+    expect(JSON.parse(forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN))).toEqual({ permissions: rules });
+    expect(rules).toEqual([
+      { action: "webfetch", resource: "*", effect: "allow" },
+      { action: "webfetch", resource: "*kirmanak.stream*", effect: "deny" },
+      { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
+    ]);
   });
 
   test("the binary probe drives the shipped map rather than a copy of it", () => {
     const probe = readFileSync(join(process.cwd(), "src/webfetch_probe.ts"), "utf8");
     expect(probe).toContain('from "./forge_webfetch.ts"');
-    expect(probe).toContain("forgeOpenCodePermission(FORGE_DENY_DOMAIN)");
-    expect(probe).toContain("forgeWebfetchPermission(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgePermissions(FORGE_DENY_DOMAIN)");
     // Deny of the forge host and allow of an unrelated host, both on the binary.
     expect(probe).toContain('expect: "allow"');
     expect(probe).toContain('expect: "deny"');
     expect(probe).toContain("https://gitea.kirmanak.stream/");
     expect(probe).toContain("github.com/search");
-    // The deny assertion reads the shipped map, so it cannot drift from it.
-    expect(probe).toContain("DENY_PATTERNS");
+    // The deny assertion reads the shipped matcher, so it cannot drift from it.
+    expect(probe).toContain("isPermissionDenyText(result)");
+    // Image jobs start the probe from another directory, and OpenCode 2 prefers
+    // PWD over cwd, so without this the relative skill roots miss the workspace.
+    expect(probe).toContain("PWD: workdir");
+    // Every checkout root the shipped config names is loaded through the binary.
+    for (const root of [".claude/skills", ".agents/skills"]) {
+      expect(config.skills).toContain(root);
+      expect(probe).toContain(`"${root}"`);
+    }
   });
 
   test("allows Read of image and fleet skill dirs after star deny (last-match)", () => {
     // OpenCode expands `~/` against the spawn's HOME, where fleet skills live.
-    const rules = config.permission.external_directory;
-    if (typeof rules === "string") throw new Error("expected last-match object, not scalar deny");
-    expect(Object.keys(rules)).toEqual([
+    const rules = rulesFor("external_directory");
+    expect(rules.map((rule) => rule.resource)).toEqual([
       "*",
       "/app/review-skills/**",
       "~/.claude/skills/**",
@@ -133,17 +137,12 @@ describe("opencode review config", () => {
       "~/.config/opencode/skill/**",
       "~/.config/opencode/skills/**",
     ]);
-    expect(rules["*"]).toBe("deny");
-    for (const [pattern, action] of Object.entries(rules)) {
-      if (pattern !== "*") expect(action).toBe("allow");
-    }
+    expect(rules[0]?.effect).toBe("deny");
+    for (const rule of rules.slice(1)) expect(rule.effect).toBe("allow");
   });
 
-  test("defaults bash to allow with no commit/push carve-outs", () => {
-    const bash = config.permission.bash;
-    expect(bash["*"]).toBe("allow");
-    expect(Object.keys(bash)).toEqual(["*"]);
-    expect(Object.keys(bash).some((pattern) => /git commit|git push/i.test(pattern))).toBe(false);
+  test("defaults shell to allow with no commit/push carve-outs", () => {
+    expect(defaultFor("shell")).toBe("allow");
   });
 });
 
@@ -186,6 +185,19 @@ describe("reviewer image permissions", () => {
     }
     // src/ is what carries the probe (and the map it imports) into the image.
     expect(dockerfile).toContain("COPY scripts/opencode/src ./src");
+  });
+
+  test("runs the quota probe on the binary in every image verification path", () => {
+    // The quota reads swallow SQLite errors, so this is what stops an OpenCode
+    // upgrade from silently turning quota sleeps into job timeouts.
+    expect(existsSync(join(repoRoot, "scripts/opencode/src/quota_probe.ts"))).toBe(true);
+    for (const path of [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ]) {
+      expect(readFileSync(join(repoRoot, path), "utf8")).toContain("bun src/quota_probe.ts");
+    }
   });
 
   test("installs python3 and helm in the runtime image", () => {
@@ -304,21 +316,7 @@ describe("renovate bun pin", () => {
 });
 
 describe("isPermissionDenyText", () => {
-  test("matches V1 ruleset echo and deny text", () => {
-    expect(isPermissionDenyText(PERMISSION_DENY_V1_TEXT)).toBe(true);
-    expect(
-      isPermissionDenyText(
-        "The user has specified a rule which prevents you from using this specific tool call with the provided arguments"
-      )
-    ).toBe(true);
-    expect(
-      isPermissionDenyText(
-        "Error: The user has specified a rule which prevents you from using this specific tool call."
-      )
-    ).toBe(true);
-  });
-
-  test("matches V2 Permission denied prefix", () => {
+  test("matches the Permission denied prefix", () => {
     expect(
       isPermissionDenyText("Permission denied: webfetch is not allowed for https://gitea.kirmanak.stream/foo")
     ).toBe(true);
@@ -329,7 +327,7 @@ describe("isPermissionDenyText", () => {
     expect(isPermissionDenyText("404 Not Found")).toBe(false);
     expect(isPermissionDenyText("Connection refused")).toBe(false);
     expect(isPermissionDenyText("Permission denied")).toBe(false);
-    expect(isPermissionDenyText(PERMISSION_DENY_V2_PREFIX)).toBe(false);
+    expect(isPermissionDenyText("Permission denied:")).toBe(false);
     expect(isPermissionDenyText("")).toBe(false);
     expect(isPermissionDenyText(null)).toBe(false);
     expect(isPermissionDenyText(undefined)).toBe(false);

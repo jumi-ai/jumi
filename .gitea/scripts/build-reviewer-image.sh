@@ -176,6 +176,14 @@ verify_reviewer_runtime() {
     echo "reviewer webfetch permission probe failed against the installed opencode binary" >&2
     exit 1
   fi
+  # The quota reads swallow SQLite errors, so an opencode bump that changes the
+  # session DB would otherwise show up only as sleeping children timing out.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "quota probe failed against the installed opencode binary" >&2
+    exit 1
+  fi
   # Same idea for Antigravity: `--version` says nothing about whether a child
   # can fetch the forge host. The probe installs the production read_url deny
   # and drives the installed binary at a loopback Gemini endpoint.

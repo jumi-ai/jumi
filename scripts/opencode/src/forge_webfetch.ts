@@ -8,7 +8,7 @@
  * credential helper stays allowed, and public upstream docs stay reachable.
  *
  * Prompt prose is a hint, not a control. The rules below are what the
- * binaries enforce: OpenCode through `OPENCODE_PERMISSION`, Claude through
+ * binaries enforce: OpenCode through `OPENCODE_CONFIG_CONTENT`, Claude through
  * `--disallowedTools`, Antigravity through `permissions.deny` in
  * `settings.json`. Derive them here, not in another copy of prose.
  *
@@ -20,12 +20,7 @@
 /** Fallback for spawns that carry no `GIT_AUTH_HOST` (reviewer, tests). */
 export const FORGE_DENY_DOMAIN = "kirmanak.stream";
 
-export const PERMISSION_DENY_V1_TEXT =
-  "The user has specified a rule which prevents you from using this specific tool call";
-export const PERMISSION_DENY_V2_PREFIX = "Permission denied:";
-
-export const PERMISSION_DENY_RE =
-  /The user has specified a rule which prevents you from using this specific tool call|Permission denied:\s*\w+/i;
+export const PERMISSION_DENY_RE = /Permission denied:\s*\w+/i;
 
 export function isPermissionDenyText(text: unknown): boolean {
   if (typeof text !== "string" || !text) return false;
@@ -46,29 +41,10 @@ export function forgeDenyHost(extraEnv?: Record<string, string>): string {
 
 /**
  * OpenCode webfetch matches the whole URL and is last-match, so the star allow
- * comes first and the denies win. The host rule is a substring match, so it
- * already covers `api.<host>` and every path under it. GitHub code search is a
- * forge read path too. Key order is load-bearing; JSON.stringify preserves it.
- */
-export function forgeWebfetchPermission(host: string): Record<string, "allow" | "ask" | "deny"> {
-  return {
-    "*": "allow",
-    [`*${host}*`]: "deny",
-    "*github.com/search*": "deny",
-  };
-}
-
-/** OpenCode reads this as a JSON overlay on the config `permission` block. */
-export function forgeOpenCodePermission(host: string): string {
-  return JSON.stringify({ webfetch: forgeWebfetchPermission(host) });
-}
-
-/**
- * V2 native shape for the same deny. OpenCode 2 ignores `OPENCODE_PERMISSION`
- * (V1 `permission` overlay) and only reads `permissions` (ordered array) from
- * file config and `OPENCODE_CONFIG_CONTENT`. The three rules mirror the V1
- * object above: star allow first, then the forge-host and code-search denies
- * win by last-match. Resource is the requested URL, `*` matches across `/`.
+ * comes first and the denies win. Resource is the requested URL, `*` matches
+ * across `/`: the host rule is a substring match, so it already covers
+ * `api.<host>` and every path under it. GitHub code search is a forge read path
+ * too. Array order is load-bearing.
  */
 export interface ForgePermissionRule {
   action: "webfetch";
@@ -84,7 +60,7 @@ export function forgePermissions(host: string): ForgePermissionRule[] {
   ];
 }
 
-/** OpenCode 2 reads this via `OPENCODE_CONFIG_CONTENT` as inline config. */
+/** OpenCode reads this via `OPENCODE_CONFIG_CONTENT` as inline config. */
 export function forgeOpenCodeConfigContent(host: string): string {
   return JSON.stringify({ permissions: forgePermissions(host) });
 }

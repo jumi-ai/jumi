@@ -1,23 +1,21 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { providerAuthDeathMessage } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { FORGE_DENY_DOMAIN, forgeOpenCodeConfigContent, forgeOpenCodePermission } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgePermissions } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   buildOpenCodeArgs,
   CONFLICT_PROMPT,
   FOLLOWUP_PROMPT,
-  getOpenCodeMajor,
   IMPLEMENT_PROMPT,
   IMPLEMENT_YIELD_PROMPT,
-  resetOpenCodeVersionForTests,
   resolveOpenCodePrompt,
   runOpenCode,
-  setOpenCodeMajorForTests,
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
@@ -57,13 +55,41 @@ afterEach(async () => {
   if (originalApiKeyFile === undefined) delete process.env.OPENCODE_API_KEY_FILE;
   else process.env.OPENCODE_API_KEY_FILE = originalApiKeyFile;
   resetTokenMetricsForTests();
-  setOpenCodeMajorForTests(undefined);
-  resetOpenCodeVersionForTests();
 });
+
+/**
+ * Shell step that writes one assistant row to the child's session DB, as OpenCode
+ * does. The busy timeout is OpenCode's too: without it the parent's quota poll
+ * can fail this write with "database is locked", and the row never lands.
+ */
+function writeAssistantRow(data: unknown): string {
+  return `bun -e '
+import { Database } from "bun:sqlite";
+const db = new Database(process.env.OPENCODE_DB);
+db.exec("PRAGMA busy_timeout = 5000");
+db.exec("CREATE TABLE IF NOT EXISTS session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)");
+db.query("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)").run("m1", "ses1", "assistant", 1, Date.now(), ${JSON.stringify(JSON.stringify(data))});
+db.close();
+'`;
+}
+
+function retryRow(message: string): unknown {
+  return { content: [], retry: { attempt: 2, at: 1, error: { type: "provider.rate-limit", message } } };
+}
+
+const PRINT_INLINE_CONFIG = `#!/bin/sh
+printf 'CONTENT=%s\\n' "$OPENCODE_CONFIG_CONTENT"
+`;
+
+function inlineConfig(stdout: string | undefined): Record<string, unknown> {
+  return JSON.parse(/^CONTENT=(.*)$/m.exec(stdout ?? "")?.[1] ?? "{}") as Record<string, unknown>;
+}
+
+const FREE_QUOTA_RETRY = writeAssistantRow(retryRow("Free usage exceeded, subscribe to Go"));
 
 async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-opencode-"));
-  const workdir = await mkdtemp(join(tmpdir(), "fake-opencode-work-"));
+  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-opencode-work-")));
   try {
     const bin = join(dir, "opencode");
     await writeFile(bin, script);
@@ -100,8 +126,8 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
         expect(result.stdout).toContain("DISABLE=1");
         expect(result.stdout).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
         expect(result.stdout).toContain("SECRET=");
-        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
-        expect(result.stdout).not.toContain("--variant");
+        expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5");
+        expect(result.stdout).not.toContain("gpt-5.5#");
         expect(result.stdout).not.toContain("--continue");
         expect(result.stdout).not.toContain("--print-logs");
         expect(result.stdout).not.toContain("\u001b[");
@@ -127,7 +153,7 @@ echo done
     );
   });
 
-  test("passes --variant when variant is set", async () => {
+  test("folds the variant into the model", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
@@ -141,7 +167,7 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           sanitizeEnv: true,
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5 --variant xhigh`);
+        expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5#xhigh");
         expect(result.stdout).toContain("VARIANT=xhigh");
       }
     );
@@ -161,12 +187,12 @@ printf 'ARGS=%s\\n' "$*"
           sanitizeEnv: true,
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain("--variant not-a-real-effort");
+        expect(result.stdout).toContain("openai/gpt-5.5#not-a-real-effort");
       }
     );
   });
 
-  test("omits --variant when variant is unset or empty", async () => {
+  test("omits the variant when it is unset or empty", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
 printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
@@ -179,8 +205,8 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           sanitizeEnv: true,
         });
         expect(unset.status).toBe("ok");
-        expect(unset.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5`);
-        expect(unset.stdout).not.toContain("--variant");
+        expect(unset.stdout).toContain("run --standalone -m openai/gpt-5.5");
+        expect(unset.stdout).not.toContain("gpt-5.5#");
         expect(unset.stdout).toContain("VARIANT=");
 
         const empty = await runOpenCode({
@@ -191,7 +217,7 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           sanitizeEnv: true,
         });
         expect(empty.status).toBe("ok");
-        expect(empty.stdout).not.toContain("--variant");
+        expect(empty.stdout).not.toContain("gpt-5.5#");
         expect(empty.stdout).toContain("VARIANT=");
       }
     );
@@ -211,116 +237,40 @@ printf 'ARGS=%s\n' "$*"
           sanitizeEnv: true,
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`run --dir ${workdir} -m openai/gpt-5.5 --continue`);
+        expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5 --continue");
       }
     );
   });
 
-  test("runs with 2.x argv when OpenCode major is 2", async () => {
-    setOpenCodeMajorForTests(2);
-    try {
-      await withFakeOpenCode(
-        `#!/bin/sh
-printf 'ARGS=%s VARIANT=%s PWD=%s\\n' "$*" "$OPENCODE_VARIANT" "$(pwd)"
+  test("selects the directory through cwd, not an argument", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'ARGS=%s PWD=%s\\n' "$*" "$(pwd)"
 `,
-        async (_binDir, workdir) => {
-          const result = await runOpenCode({
-            prompt: "prompt",
-            model: "openai/gpt-5.5",
-            variant: "xhigh",
-            workdir,
-            sanitizeEnv: true,
-          });
-          expect(result.status).toBe("ok");
-          expect(result.stdout).toContain("ARGS=run --standalone -m openai/gpt-5.5#xhigh");
-          expect(result.stdout).not.toContain("--dir");
-          expect(result.stdout).not.toContain("--variant");
-          expect(result.stdout).toContain(`PWD=${workdir}`);
-        }
-      );
-    } finally {
-      setOpenCodeMajorForTests(undefined);
-    }
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({ prompt: "prompt", model: "openai/gpt-5.5", workdir, sanitizeEnv: true });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).not.toContain("--dir");
+        expect(result.stdout).toContain(`PWD=${workdir}`);
+      }
+    );
   });
 
-  test("getOpenCodeMajor returns detected or overridden major", () => {
-    expect(getOpenCodeMajor()).toBeGreaterThanOrEqual(1);
-    setOpenCodeMajorForTests(2);
-    expect(getOpenCodeMajor()).toBe(2);
-    setOpenCodeMajorForTests(undefined);
-  });
-
-  test("buildOpenCodeArgs builds 1.x argv unchanged", () => {
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5" }, 1)).toEqual([
-      "opencode",
-      "run",
-      "--dir",
-      "/app/work",
-      "-m",
-      "openai/gpt-5.5",
-    ]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh" }, 1)).toEqual([
-      "opencode",
-      "run",
-      "--dir",
-      "/app/work",
-      "-m",
-      "openai/gpt-5.5",
-      "--variant",
-      "xhigh",
-    ]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", continueSession: true }, 1)).toEqual([
-      "opencode",
-      "run",
-      "--dir",
-      "/app/work",
-      "-m",
+  test("buildOpenCodeArgs folds the variant and keeps --standalone", () => {
+    const run = ["opencode", "run", "--standalone", "-m"];
+    expect(buildOpenCodeArgs({ model: "openai/gpt-5.5" })).toEqual([...run, "openai/gpt-5.5"]);
+    expect(buildOpenCodeArgs({ model: "openai/gpt-5.5", variant: "xhigh" })).toEqual([...run, "openai/gpt-5.5#xhigh"]);
+    expect(buildOpenCodeArgs({ model: "openai/gpt-5.5", continueSession: true })).toEqual([
+      ...run,
       "openai/gpt-5.5",
       "--continue",
     ]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "" }, 1)).toEqual([
-      "opencode",
-      "run",
-      "--dir",
-      "/app/work",
-      "-m",
-      "openai/gpt-5.5",
-    ]);
-  });
-
-  test("buildOpenCodeArgs builds 2.x argv with standalone and folded variant", () => {
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5" }, 2)).toEqual([
-      "opencode",
-      "run",
-      "--standalone",
-      "-m",
-      "openai/gpt-5.5",
-    ]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh" }, 2)).toEqual([
-      "opencode",
-      "run",
-      "--standalone",
-      "-m",
+    expect(buildOpenCodeArgs({ model: "openai/gpt-5.5", variant: "xhigh", continueSession: true })).toEqual([
+      ...run,
       "openai/gpt-5.5#xhigh",
-    ]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", continueSession: true }, 2)).toEqual([
-      "opencode",
-      "run",
-      "--standalone",
-      "-m",
-      "openai/gpt-5.5",
       "--continue",
     ]);
-    expect(
-      buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "xhigh", continueSession: true }, 2)
-    ).toEqual(["opencode", "run", "--standalone", "-m", "openai/gpt-5.5#xhigh", "--continue"]);
-    expect(buildOpenCodeArgs({ workdir: "/app/work", model: "openai/gpt-5.5", variant: "" }, 2)).toEqual([
-      "opencode",
-      "run",
-      "--standalone",
-      "-m",
-      "openai/gpt-5.5",
-    ]);
+    expect(buildOpenCodeArgs({ model: "openai/gpt-5.5", variant: "" })).toEqual([...run, "openai/gpt-5.5"]);
   });
 
   test("forwards extraEnv toolchain vars into the sanitized child", async () => {
@@ -768,8 +718,7 @@ exit 1
   test("does not reclassify a quota hit as auth", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${FREE_QUOTA_RETRY}
 printf 'invalid_grant\\n' >&2
 exec sleep 30
 `,
@@ -824,7 +773,7 @@ import os, sqlite3
 path = os.environ["OPENCODE_DB"]
 con = sqlite3.connect(path)
 con.execute("""
-  CREATE TABLE session (
+  CREATE TABLE session_v2 (
     model TEXT,
     tokens_input INTEGER,
     tokens_cache_read INTEGER,
@@ -834,7 +783,7 @@ con.execute("""
   )
 """)
 con.execute(
-  "INSERT INTO session VALUES (?, ?, ?, ?, ?, ?)",
+  "INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?, ?)",
   ("xai/grok-4.6", 42, 7, 9, 0, 1),
 )
 con.commit()
@@ -946,6 +895,33 @@ PY
     );
   });
 
+  test("reports a session DB the quota reads cannot use, instead of staying quiet", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+bun -e '
+import { Database } from "bun:sqlite";
+const db = new Database(process.env.OPENCODE_DB);
+db.exec("CREATE TABLE session_message (id TEXT, sessionID TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)");
+db.close();
+'
+`,
+      async (_binDir, workdir) => {
+        const logs: string[] = [];
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        const line = logs.find((message) => message.includes("event=opencode_quota_schema"));
+        expect(line).toContain("session_id");
+        expect(renderTokenMetrics()).toContain('ai_quota_db_schema_errors{agent_instance="jumi"} 1');
+      }
+    );
+  });
+
   test("logs the last 64 KiB of stderr when the child writes more", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
@@ -988,20 +964,24 @@ python3 - <<'PY'
 import json, os, sqlite3
 path = os.environ["OPENCODE_DB"]
 con = sqlite3.connect(path)
-con.execute("CREATE TABLE session (id TEXT, time_created INTEGER, time_updated INTEGER)")
-con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
-con.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT)")
-con.execute("INSERT INTO session VALUES (?, ?, ?)", ("ses1", 1, 2))
+con.execute("CREATE TABLE session_v2 (id TEXT, time_created INTEGER, time_updated INTEGER)")
+con.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT)")
+con.execute("INSERT INTO session_v2 VALUES (?, ?, ?)", ("ses1", 1, 2))
 con.execute(
-  "INSERT INTO message VALUES (?, ?, ?, ?, ?)",
-  ("msg1", "ses1", 1, 2, json.dumps({"role": "assistant", "modelID": "grok-4.6", "providerID": "xai"})),
-)
-con.execute(
-  "INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
-  ("p1", "msg1", "ses1", 1, 2, json.dumps({
-    "type": "tool",
-    "tool": "bash",
-    "state": {"status": "error", "input": {"command": "pwd"}, "output": "FULL_STDOUT", "error": "boom", "time": {"start": 1, "end": 2}},
+  "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ("msg1", "ses1", "assistant", 1, 1, 2, json.dumps({
+    "model": {"id": "grok-4.6", "providerID": "xai"},
+    "content": [{
+      "type": "tool",
+      "name": "bash",
+      "state": {
+        "status": "error",
+        "input": {"command": "pwd"},
+        "content": [{"type": "text", "text": "FULL_STDOUT"}],
+        "error": {"type": "tool.execution", "message": "boom"},
+      },
+      "time": {"created": 1, "completed": 2},
+    }],
   })),
 )
 con.commit()
@@ -1045,16 +1025,46 @@ exec sleep 30
     );
   });
 
-  test("aborts while running when the isolated log shows Free/Go quota", async () => {
-    // Real `opencode run` without --print-logs emits only the banner to
-    // stderr; the quota error only reaches the per-run isolated log file as
-    // `message="stream error"` before the multi-hour sleep. The fake child
-    // reproduces that signal (log line, then sleep) — not a stderr line the
-    // binary never prints.
+  test("a retry a killed child left in the reused DB does not abort the resumed child", async () => {
+    // A hard kill of the whole process tree leaves `retry` on the row, and
+    // `--continue` keeps this DB but never cleans an old subagent session.
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" providerID=opencode modelID=m error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+exec sleep 0.4
+`,
+      async (_binDir, workdir) => {
+        await mkdir(join(workdir, ".jumi-tmp"), { recursive: true });
+        const db = new Database(join(workdir, ".jumi-tmp", "opencode-session.db"));
+        db.exec(
+          "CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_updated INTEGER, data TEXT)"
+        );
+        db.query("INSERT INTO session_message VALUES ('m1', 'ses_sub', 'assistant', 9, ?, ?)").run(
+          Date.now() - 60_000,
+          JSON.stringify(retryRow("Free usage exceeded, subscribe to Go"))
+        );
+        db.close();
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          continueSession: true,
+          quotaPollIntervalMs: 20,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.quota).toBeUndefined();
+      }
+    );
+  });
+
+  test("aborts while running when the session DB shows a Free/Go retry sleep", async () => {
+    // Real `opencode run` without --print-logs emits only the banner to stderr,
+    // and logs no `stream error` line. The pending retry reaches the assistant
+    // row before the multi-hour sleep, so the fake child reproduces that signal
+    // (retry row, then sleep), not a stderr line the binary never prints.
+    await withFakeOpenCode(
+      `#!/bin/sh
+${FREE_QUOTA_RETRY}
 exec sleep 30
 `,
       async (_binDir, workdir) => {
@@ -1095,8 +1105,7 @@ case "$model" in
     exit 0
     ;;
 esac
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${FREE_QUOTA_RETRY}
 exec sleep 30
 `,
       async (_binDir, workdir) => {
@@ -1119,8 +1128,7 @@ exec sleep 30
   test("quota SIGTERM stays 143 when lease is too short to hop", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: Free usage exceeded, subscribe to Go"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${FREE_QUOTA_RETRY}
 exec sleep 30
 `,
       async (_binDir, workdir) => {
@@ -1144,33 +1152,10 @@ exec sleep 30
     );
   });
 
-  test("aborts on timestamped log rotation layout (1.15.5)", async () => {
-    await withFakeOpenCode(
-      `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: FreeUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/2026-09-14T000000.log"
-exec sleep 30
-`,
-      async (_binDir, workdir) => {
-        const startedAt = Date.now();
-        const result = await runOpenCode({
-          prompt: "prompt",
-          model: "model",
-          workdir,
-          sanitizeEnv: true,
-          quotaPollIntervalMs: 50,
-        });
-        expect(result.status).toBe("stuck");
-        expect(Date.now() - startedAt).toBeLessThan(20_000);
-      }
-    );
-  });
-
   test("quota poll is independent of the memory sampler", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="GoUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${writeAssistantRow(retryRow("Go limit reached"))}
 exec sleep 30
 `,
       async (_binDir, workdir) => {
@@ -1192,8 +1177,7 @@ exec sleep 30
   test("does not abort on bare usage-limit text without a Free/Go distinguisher", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="my-model usage limit reached, retry in 5s"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${writeAssistantRow(retryRow("my-model usage limit reached, retry in 5s"))}
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1208,11 +1192,10 @@ printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream e
     );
   });
 
-  test("does not abort on ordinary 429 log lines", async () => {
+  test("does not abort on an ordinary 429 retry", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream error" error.error="AI_APICallError: 429 Too Many Requests"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${writeAssistantRow(retryRow("429 Too Many Requests"))}
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1227,11 +1210,10 @@ printf 'timestamp=2026-09-14T00:00:00.000Z level=ERROR run=abc message="stream e
     );
   });
 
-  test("does not abort on permission lines echoing quota strings without retry context", async () => {
+  test("does not abort on assistant text quoting quota strings", async () => {
     await withFakeOpenCode(
       `#!/bin/sh
-mkdir -p "$XDG_DATA_HOME/opencode/log"
-printf 'timestamp=2026-09-14T00:00:00.000Z level=INFO run=abc message="evaluated permission=bash" pattern="grep FreeUsageLimitError"\\n' >> "$XDG_DATA_HOME/opencode/log/opencode.log"
+${writeAssistantRow({ content: [{ type: "text", text: "grep FreeUsageLimitError" }] })}
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1247,7 +1229,7 @@ printf 'timestamp=2026-09-14T00:00:00.000Z level=INFO run=abc message="evaluated
   });
 
   test("does not abort on stderr tool traces containing quota literals", async () => {
-    // The live signal is the isolated log file, not the stderr stream: any
+    // The live signal is the session DB, not the stderr stream: any
     // tool trace or echoed file content containing quota literals must not
     // kill a healthy run or set the human-clear quota flag.
     await withFakeOpenCode(
@@ -1269,12 +1251,12 @@ printf 'FreeUsageLimitError in tool output\\n' >&2
 
   test("returns timeout when the child traps TERM and exits 0", async () => {
     await withFakeOpenCode(
-      `#!/usr/bin/env python3
-import signal
-import sys
-import time
-signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-time.sleep(30)
+      `#!/bin/sh
+trap 'kill "$pid"; exit 0' TERM
+sleep 30 >/dev/null 2>&1 &
+pid=$!
+: > trap-armed
+wait "$pid"
 `,
       async (_binDir, workdir) => {
         const result = await runOpenCode({
@@ -1282,7 +1264,12 @@ time.sleep(30)
           model: "model",
           workdir,
           sanitizeEnv: true,
-          timeoutMs: 100,
+          timeoutMs: 50,
+          // The timeout clock starts after onPid, so TERM can only land on a
+          // child that has installed its handler, however slow the exec was.
+          onPid: async () => {
+            while (!(await Bun.file(join(workdir, "trap-armed")).exists())) await Bun.sleep(5);
+          },
         });
         expect(result.status).toBe("timeout");
         expect(result.exitCode).toBe(0);
@@ -1329,142 +1316,148 @@ cat
     );
   });
 
-  test("overlays reviewer webfetch last-match via OPENCODE_PERMISSION", async () => {
-    await withFakeOpenCode(
-      `#!/bin/sh
-printf 'KIND_PERM=%s\n' "$OPENCODE_PERMISSION"
-printf 'KIND_CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
-`,
-      async (_binDir, workdir) => {
-        const result = await runOpenCode({
-          prompt: "prompt",
-          model: "model",
-          workdir,
-          sanitizeEnv: true,
-          trace: { kind: "review", owner: "kirmanak", repo: "demo" },
-        });
-        expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`KIND_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
-        expect(result.stdout).toContain(`KIND_CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
-      }
-    );
-    await withFakeOpenCode(
-      `#!/bin/sh
-printf 'PATH_PERM=%s\n' "$OPENCODE_PERMISSION"
-printf 'PATH_CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
-`,
-      async (_binDir, workdir) => {
-        const result = await runOpenCode({
-          prompt: "prompt",
-          model: "model",
-          workdir,
-          sanitizeEnv: true,
-          configPath: "/app/.gitea/opencode-review.json",
-        });
-        expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`PATH_PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
-        expect(result.stdout).toContain(`PATH_CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
-      }
-    );
+  test("overlays reviewer webfetch last-match via OPENCODE_CONFIG_CONTENT", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+      });
+      expect(result.status).toBe("ok");
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+    });
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        configPath: "/app/.gitea/opencode-review.json",
+      });
+      expect(result.status).toBe("ok");
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+    });
   });
 
   test("overlays the same forge webfetch deny on worker OpenCode", async () => {
-    await withFakeOpenCode(
-      `#!/bin/sh
-printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
-printf 'CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
-`,
-      async (_binDir, workdir) => {
-        for (const kind of ["implement", "follow-up", "conflict"] as const) {
-          const result = await runOpenCode({
-            prompt: "prompt",
-            model: "model",
-            workdir,
-            sanitizeEnv: true,
-            configPath: "/app/.gitea/opencode-implement.json",
-            trace: { kind, owner: "kirmanak", repo: "demo" },
-          });
-          expect(result.status).toBe("ok");
-          expect(result.stdout).toContain(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
-          expect(result.stdout).toContain(`CONTENT=${forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)}`);
-        }
-      }
-    );
-  });
-
-  test("denies the forge host even when the job env tries to loosen it", async () => {
-    await withFakeOpenCode(
-      `#!/bin/sh
-printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
-printf 'CONTENT=%s\n' "$OPENCODE_CONFIG_CONTENT"
-`,
-      async (_binDir, workdir) => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      for (const kind of ["implement", "follow-up", "conflict"] as const) {
         const result = await runOpenCode({
           prompt: "prompt",
           model: "model",
           workdir,
           sanitizeEnv: true,
           configPath: "/app/.gitea/opencode-implement.json",
-          trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
-          extraEnv: {
-            OPENCODE_PERMISSION: JSON.stringify({ webfetch: "allow" }),
-            OPENCODE_CONFIG_CONTENT: JSON.stringify({ permissions: [] }),
-          },
+          trace: { kind, owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
-        expect(result.stdout).toContain(forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN).slice(0, 60));
+        expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
       }
-    );
+    });
+  });
+
+  test("denies the forge host even when the job env tries to loosen it", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const loosen = { action: "webfetch", resource: "*", effect: "allow" };
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        configPath: "/app/.gitea/opencode-implement.json",
+        trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+        extraEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permissions: [loosen], share: "disabled" }) },
+      });
+      expect(result.status).toBe("ok");
+      const config = inlineConfig(result.stdout);
+      // Last-match: the deny has to come after whatever the job supplied.
+      expect(config.permissions).toEqual([loosen, ...forgePermissions(FORGE_DENY_DOMAIN)]);
+      expect(config.share).toBe("disabled");
+    });
+  });
+
+  test("still sets the deny when the job env's inline config is unreadable", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { OPENCODE_CONFIG_CONTENT: "{not json" },
+      });
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+    });
   });
 
   test("denies the forge host this spawn authenticates against, not a baked one", async () => {
     // GitHub factory: gitEnv hands the child GIT_AUTH_HOST=github.com with a
     // write-capable token, so the deny must follow that host.
-    await withFakeOpenCode(
-      `#!/bin/sh
-printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
-`,
-      async (_binDir, workdir) => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        configPath: "/app/.gitea/opencode-implement.json",
+        trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
+        extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+      });
+      expect(result.status).toBe("ok");
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("github.com"));
+      expect(result.stdout).toContain("*github.com*");
+    });
+  });
+
+  test("keeps the forge webfetch deny when the parent env is inherited", async () => {
+    const previous = process.env.OPENCODE_CONFIG_CONTENT;
+    const loosen = { action: "webfetch", resource: "*", effect: "allow" };
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ permissions: [loosen] });
+    try {
+      await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
         const result = await runOpenCode({
           prompt: "prompt",
           model: "model",
           workdir,
-          sanitizeEnv: true,
-          configPath: "/app/.gitea/opencode-implement.json",
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
-          extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission("github.com")}`);
-        expect(result.stdout).toContain("*github.com*");
-      }
-    );
+        expect(inlineConfig(result.stdout).permissions).toEqual([loosen, ...forgePermissions(FORGE_DENY_DOMAIN)]);
+      });
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
+      else process.env.OPENCODE_CONFIG_CONTENT = previous;
+    }
   });
 
-  test("keeps the forge webfetch deny when the parent env is inherited", async () => {
-    const previous = process.env.OPENCODE_PERMISSION;
-    process.env.OPENCODE_PERMISSION = JSON.stringify({ webfetch: "allow" });
-    try {
-      await withFakeOpenCode(
-        `#!/bin/sh
-printf 'PERM=%s\n' "$OPENCODE_PERMISSION"
-`,
-        async (_binDir, workdir) => {
-          const result = await runOpenCode({
-            prompt: "prompt",
-            model: "model",
-            workdir,
-            trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
-          });
-          expect(result.status).toBe("ok");
-          expect(result.stdout?.trim()).toBe(`PERM=${forgeOpenCodePermission(FORGE_DENY_DOMAIN)}`);
-        }
-      );
-    } finally {
-      if (previous === undefined) delete process.env.OPENCODE_PERMISSION;
-      else process.env.OPENCODE_PERMISSION = previous;
-    }
+  test("names the checkout's AGENTS.md for a sanitized child, whose project discovery is off", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
+      expect(result.status).toBe("ok");
+      expect(inlineConfig(result.stdout).instructions).toEqual([join(workdir, "AGENTS.md")]);
+    });
+  });
+
+  test("keeps job-supplied instructions alongside AGENTS.md", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ instructions: ["/job/rules.md"] }) },
+      });
+      expect(inlineConfig(result.stdout).instructions).toEqual(["/job/rules.md", join(workdir, "AGENTS.md")]);
+    });
+  });
+
+  test("leaves AGENTS.md to project discovery on an unsanitized child", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({ prompt: "prompt", model: "model", workdir });
+      expect(result.status).toBe("ok");
+      expect(inlineConfig(result.stdout).instructions).toBeUndefined();
+    });
   });
 
   test("reads OPENCODE_CONFIG from the environment when configPath is omitted", async () => {
@@ -1493,7 +1486,7 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
   });
 
   test("PATH miss throws infra EngineFailedError before the child runs", async () => {
-    const workdir = await mkdtemp(join(tmpdir(), "fake-opencode-work-"));
+    const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-opencode-work-")));
     process.env.PATH = "/nonexistent";
     try {
       await expect(runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true })).rejects.toMatchObject(
@@ -1604,5 +1597,163 @@ describe("resolveOpenCodePrompt", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("runOpenCode child lifecycle", () => {
+  const SEEDED_AUTH = JSON.stringify({ openai: { type: "oauth", access: "a", refresh: "r", expires: 1 } });
+
+  async function seedHomeAuth(home: string): Promise<void> {
+    await mkdir(join(home, ".local", "share", "opencode"), { recursive: true });
+    await writeFile(join(home, ".local", "share", "opencode", "auth.json"), SEEDED_AUTH);
+  }
+
+  test("reports a child killed by SIGTERM as 143, not the 130 the CLI exits with", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+trap 'exit 130' TERM
+sleep 30 >/dev/null 2>&1 &
+wait
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          home: isolatedHome,
+          sanitizeEnv: true,
+          timeoutMs: 200,
+        });
+        expect(result.status).toBe("timeout");
+        expect(result.exitCode).toBe(143);
+      }
+    );
+  });
+
+  test("runs the child in workdir when the parent's PWD points elsewhere", async () => {
+    const originalPwd = process.env.PWD;
+    process.env.PWD = "/somewhere/else";
+    try {
+      await withFakeOpenCode(
+        `#!/bin/sh
+printf 'PWD=%s\n' "$PWD"
+`,
+        async (_binDir, workdir) => {
+          const result = await runOpenCode({
+            prompt: "prompt",
+            model: "openai/gpt-5.5",
+            workdir,
+            home: isolatedHome,
+            sanitizeEnv: false,
+          });
+          expect(result.stdout).toContain(`PWD=${workdir}`);
+        }
+      );
+    } finally {
+      if (originalPwd === undefined) delete process.env.PWD;
+      else process.env.PWD = originalPwd;
+    }
+  });
+
+  test("carries the retry-after of the quota retry the child is sleeping on", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+${writeAssistantRow({
+  content: [],
+  retry: {
+    attempt: 2,
+    at: 1,
+    error: {
+      type: "provider.rate-limit",
+      message: "Rate limit exceeded. Please try again later.",
+      retryAfterMs: 7200000,
+    },
+  },
+})}
+exec sleep 30
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          home: isolatedHome,
+          sanitizeEnv: true,
+          quotaPollIntervalMs: 50,
+          timeoutMs: 20_000,
+        });
+        expect(result.status).toBe("stuck");
+        expect(result.quota).toBe("resetting");
+        expect(result.retryAfterMs).toBe(7_200_000);
+      }
+    );
+  });
+
+  test("bootstraps the child's DB and re-arms the credential import before the run", async () => {
+    await seedHomeAuth(isolatedHome);
+    await withFakeOpenCode(
+      `#!/bin/sh
+if [ "$1" = "auth" ]; then
+  printf '%s\n' "$*" >> "$XDG_DATA_HOME/bootstrap-args"
+  exec bun -e '
+import { Database } from "bun:sqlite";
+const db = new Database(process.env.OPENCODE_DB);
+db.exec("CREATE TABLE migration (id TEXT PRIMARY KEY); CREATE TABLE credential (integration_id TEXT)");
+db.exec("INSERT INTO migration VALUES (\\x2720260805200742_import_legacy_credentials\\x27), (\\x27other\\x27)");
+db.exec("INSERT INTO credential VALUES (\\x27xai\\x27), (\\x27openai\\x27)");
+db.close();
+'
+fi
+cat "$XDG_DATA_HOME/bootstrap-args"
+cat "$XDG_DATA_HOME/opencode/auth.json"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          home: isolatedHome,
+          sanitizeEnv: true,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("auth export --standalone");
+        expect(result.stdout).toContain('"refresh": "r"');
+
+        const db = new Database(join(workdir, ".jumi-tmp", "opencode-session.db"), { readonly: true });
+        const migrations = db.query("SELECT id FROM migration").all() as Array<{ id: string }>;
+        const credentials = db.query("SELECT integration_id FROM credential").all() as Array<{
+          integration_id: string;
+        }>;
+        db.close();
+        expect(migrations.map((row) => row.id)).toEqual(["other"]);
+        // The xAI row goes so a rewritten key is imported; other providers keep
+        // whatever the child already refreshed.
+        expect(credentials.map((row) => row.integration_id)).toEqual(["openai"]);
+      }
+    );
+  });
+
+  test("a failed bootstrap does not stop the run: env-only auth still works", async () => {
+    await seedHomeAuth(isolatedHome);
+    await withFakeOpenCode(
+      `#!/bin/sh
+if [ "$1" = "auth" ]; then exit 1; fi
+echo ran
+`,
+      async (_binDir, workdir) => {
+        const logs: string[] = [];
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "openai/gpt-5.5",
+          workdir,
+          home: isolatedHome,
+          sanitizeEnv: true,
+          logger: (message) => logs.push(message),
+        });
+        expect(result.status).toBe("ok");
+        expect(result.stdout).toContain("ran");
+        expect(logs.join("\n")).toContain("credential bootstrap");
+      }
+    );
   });
 });

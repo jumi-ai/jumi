@@ -61,8 +61,13 @@ async function provisionWithRetry(
 }
 
 // Proof runs where a docker CLI is already available (CI checks job). Elsewhere
-// it skips so `bun run ci` stays green without docker; in CI it must not skip.
-const itDocker = hasDockerCli ? test : test.skip;
+// it skips so `bun run ci` stays green without docker, including a laptop whose
+// CLI is installed but whose daemon is stopped; in CI it must not skip.
+const dockerRunnable =
+  hasDockerCli &&
+  (Boolean(process.env.CI) ||
+    Bun.spawnSync(["docker", "info"], { stdout: "ignore", stderr: "ignore", timeout: 5_000 }).exitCode === 0);
+const itDocker = dockerRunnable ? test : test.skip;
 
 async function containerExists(name: string): Promise<boolean> {
   try {

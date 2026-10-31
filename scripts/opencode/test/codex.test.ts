@@ -869,7 +869,7 @@ describe("codex dispatch and chain", () => {
           workdir,
           home,
           sanitizeEnv: true,
-          timeoutMs: 300,
+          timeoutMs: 2_000,
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("timeout");

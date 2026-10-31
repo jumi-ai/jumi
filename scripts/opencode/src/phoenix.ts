@@ -153,11 +153,6 @@ function randomId(bytes: number): Uint8Array {
   return id;
 }
 
-function tableNames(db: Database): Set<string> {
-  const rows = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
-  return new Set(rows.map((row) => row.name));
-}
-
 function tracesUrl(endpoint: string): URL | undefined {
   try {
     const trimmed = endpoint.replace(/\/+$/, "");
@@ -210,6 +205,15 @@ interface RawMessageRow {
   data: unknown;
 }
 
+interface SessionMessageRow {
+  id: string;
+  session_id: string;
+  type: string;
+  time_created: number | null;
+  time_updated: number | null;
+  data: unknown;
+}
+
 interface RawPartRow {
   id: string;
   message_id: string;
@@ -232,7 +236,6 @@ interface ParsedPart {
   output: string | undefined;
   error: string | undefined;
   text: string | undefined;
-  file: Record<string, unknown> | undefined;
 }
 
 interface ParsedMessage {
@@ -250,183 +253,107 @@ interface ParsedMessage {
   parts: ParsedPart[];
 }
 
+/**
+ * OpenCode stores one row per message: the row `type` is the role, and the
+ * prompt or assistant content lives inline in `data`. Rendered as the part rows
+ * the span builder reads.
+ */
+function inlineParts(rowType: string, data: Record<string, unknown> | undefined): unknown[] {
+  if (rowType === "user") return typeof data?.text === "string" ? [{ type: "text", text: data.text }] : [];
+  if (rowType !== "assistant" || !Array.isArray(data?.content)) return [];
+  return data.content.map((item: Record<string, unknown>) => {
+    if (item?.type !== "tool") return item;
+    const state = asRecord(item.state);
+    const content = Array.isArray(state?.content) ? (state.content as Array<Record<string, unknown>>) : [];
+    return {
+      type: "tool",
+      tool: item.name,
+      state: {
+        status: state?.status,
+        input: state?.input,
+        output: content
+          .map((block) => (typeof block?.text === "string" ? block.text : ""))
+          .filter(Boolean)
+          .join("\n"),
+        error: field(state, "error", "message"),
+        time: {
+          start: asNumber(field(item, "time", "ran")) ?? asNumber(field(item, "time", "created")),
+          end: asNumber(field(item, "time", "completed")),
+        },
+      },
+    };
+  });
+}
+
 function readTrace(
   db: Database
 ): { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[] } | undefined {
-  const tables = tableNames(db);
-  const sessionTable = tables.has("session_v2") ? "session_v2" : tables.has("session") ? "session" : null;
-  if (!sessionTable) {
-    console.warn("OpenCode trace export: unrecognized schema (no session or session_v2 table)");
+  // Outside the try: a file that is not SQLite is an export error, not a schema mismatch.
+  const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
+  const names = new Set(tables.map((row) => row.name));
+  if (!names.has("session_v2") || !names.has("session_message")) {
+    console.warn("OpenCode trace export: unrecognized schema (no session_v2 or session_message table)");
     return undefined;
   }
   let sessions: SessionRow[];
+  let rows: SessionMessageRow[];
   try {
     sessions = db
-      .query(`SELECT id, time_created, time_updated FROM ${sessionTable} ORDER BY time_created, id`)
+      .query("SELECT id, time_created, time_updated FROM session_v2 ORDER BY time_created, id")
       .all() as SessionRow[];
+    rows = db
+      .query(
+        `SELECT id, session_id, type, time_created, time_updated, data FROM session_message
+         WHERE type IN ('user', 'assistant') ORDER BY seq`
+      )
+      .all() as SessionMessageRow[];
   } catch {
-    console.warn("OpenCode trace export: unrecognized schema (session table shape)");
+    console.warn("OpenCode trace export: unrecognized schema (session_v2/session_message shape)");
     return undefined;
   }
 
-  if (tables.has("message") && tables.has("part")) {
-    try {
-      const messages = db
-        .query("SELECT id, session_id, time_created, time_updated, data FROM message ORDER BY time_created, id")
-        .all() as RawMessageRow[];
-      const parts = db
-        .query("SELECT id, message_id, time_created, time_updated, data FROM part ORDER BY time_created, id")
-        .all() as RawPartRow[];
-      return { sessions, messages, parts };
-    } catch {
-      console.warn("OpenCode trace export: unrecognized schema (message/part table shape)");
-      return undefined;
-    }
-  }
-
-  if (tables.has("session_message")) {
-    let rows: Array<Record<string, unknown>>;
-    try {
-      rows = db.query("SELECT * FROM session_message").all() as Array<Record<string, unknown>>;
-    } catch {
-      console.warn("OpenCode trace export: unrecognized schema (session_message table shape)");
-      return undefined;
-    }
-    rows.sort((a, b) => {
-      const seqA = asNumber(a.seq);
-      const seqB = asNumber(b.seq);
-      if (seqA != null && seqB != null) return seqA - seqB;
-      const tcA = asNumber(a.time_created);
-      const tcB = asNumber(b.time_created);
-      if (tcA != null && tcB != null) return tcA - tcB;
-      return 0;
+  const messages: RawMessageRow[] = [];
+  const parts: RawPartRow[] = [];
+  for (const row of rows) {
+    const data = parseObject(row.data);
+    messages.push({
+      id: row.id,
+      session_id: row.session_id,
+      time_created: row.time_created,
+      time_updated: row.time_updated,
+      data: JSON.stringify({ ...data, role: row.type }),
     });
-
-    const messages: RawMessageRow[] = [];
-    const parts: RawPartRow[] = [];
-    let currentMessageId: string | undefined;
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const data = parseObject(row.data);
-      const rowType = asString(row.type);
-      const dataRole = asString(data?.role);
-      const dataType = asString(data?.type);
-
-      const isPart =
-        rowType === "part" ||
-        rowType === "tool" ||
-        rowType === "text" ||
-        rowType === "reasoning" ||
-        rowType === "file" ||
-        rowType === "shell" ||
-        rowType === "bash" ||
-        dataType === "tool" ||
-        dataType === "text" ||
-        dataType === "reasoning" ||
-        dataType === "file" ||
-        data?.tool != null;
-
-      if (!isPart && (rowType === "message" || dataRole != null || rowType === "user" || rowType === "assistant")) {
-        const id = asString(row.id) ?? asString(data?.id) ?? `msg-${row.seq ?? i + 1}`;
-        const sessionId =
-          asString(row.session_id) ??
-          asString(data?.sessionID) ??
-          asString(data?.sessionId) ??
-          sessions[0]?.id ??
-          "ses1";
-        const timeCreated =
-          asNumber(row.time_created) ?? asNumber(field(data, "time", "created")) ?? sessions[0]?.time_created ?? null;
-        const timeUpdated = asNumber(row.time_updated) ?? asNumber(field(data, "time", "completed")) ?? timeCreated;
-
-        messages.push({
-          id,
-          session_id: sessionId,
-          time_created: timeCreated,
-          time_updated: timeUpdated,
-          data: row.data,
-        });
-        currentMessageId = id;
-
-        if (Array.isArray(data?.parts)) {
-          for (let pIdx = 0; pIdx < data.parts.length; pIdx++) {
-            const p = data.parts[pIdx];
-            if (!p || typeof p !== "object") continue;
-            parts.push({
-              id: asString(p.id) ?? `part-${id}-${pIdx + 1}`,
-              message_id: id,
-              time_created: asNumber(field(p, "state", "time", "start")) ?? timeCreated,
-              time_updated: asNumber(field(p, "state", "time", "end")) ?? timeUpdated,
-              data: typeof p === "string" ? p : JSON.stringify(p),
-            });
-          }
-        }
-      } else {
-        const id = asString(row.id) ?? asString(data?.id) ?? `part-${row.seq ?? i + 1}`;
-        const messageId =
-          asString(row.message_id) ??
-          asString(data?.messageID) ??
-          asString(data?.message_id) ??
-          currentMessageId ??
-          messages[messages.length - 1]?.id ??
-          "msg1";
-        const timeCreated =
-          asNumber(row.time_created) ??
-          asNumber(field(data, "state", "time", "start")) ??
-          asNumber(field(data, "time", "start")) ??
-          null;
-        const timeUpdated =
-          asNumber(row.time_updated) ??
-          asNumber(field(data, "state", "time", "end")) ??
-          asNumber(field(data, "time", "end")) ??
-          timeCreated;
-
-        parts.push({
-          id,
-          message_id: messageId,
-          time_created: timeCreated,
-          time_updated: timeUpdated,
-          data: row.data,
-        });
-      }
-    }
-    return { sessions, messages, parts };
+    inlineParts(row.type, data).forEach((part, index) => {
+      parts.push({
+        id: `part-${row.id}-${index + 1}`,
+        message_id: row.id,
+        time_created: asNumber(field(asRecord(part), "state", "time", "start")) ?? row.time_created,
+        time_updated: asNumber(field(asRecord(part), "state", "time", "end")) ?? row.time_updated,
+        data: JSON.stringify(part),
+      });
+    });
   }
-
-  console.warn("OpenCode trace export: unrecognized schema (no message/part or session_message table)");
-  return undefined;
+  return { sessions, messages, parts };
 }
 
 function parsePart(row: RawPartRow): ParsedPart {
   const data = parseObject(row.data);
   const state = asRecord(field(data, "state"));
-  const time = asRecord(field(state, "time")) ?? asRecord(field(data, "time"));
-  const tool = asString(data?.tool) ?? asString(data?.name);
-  const file =
-    data && data.type === "file"
-      ? {
-          type: "file",
-          mime: data.mime,
-          filename: data.filename,
-          url: data.url,
-          path: field(data, "source", "path"),
-        }
-      : undefined;
+  const time = asRecord(field(state, "time"));
   return {
     id: row.id,
     messageId: row.message_id,
     timeCreated: row.time_created,
     timeUpdated: row.time_updated,
-    type: asString(data?.type) ?? (tool ? "tool" : undefined),
-    tool,
-    status: asString(state?.status) ?? asString(data?.status),
+    type: asString(data?.type),
+    tool: asString(data?.tool),
+    status: asString(state?.status),
     startMs: asNumber(time?.start),
     endMs: asNumber(time?.end),
-    input: state?.input ?? data?.input,
-    output: payloadString(state?.output) ?? payloadString(data?.output),
-    error: payloadString(state?.error) ?? payloadString(data?.error),
+    input: state?.input,
+    output: payloadString(state?.output),
+    error: payloadString(state?.error),
     text: asString(data?.text),
-    file,
   };
 }
 
@@ -438,8 +365,8 @@ function parseMessage(row: RawMessageRow, parts: ParsedPart[]): ParsedMessage {
     timeCreated: row.time_created,
     timeUpdated: row.time_updated,
     role: asString(data?.role) ?? "",
-    model: asString(data?.modelID) ?? asString(field(data, "model", "id")) ?? asString(field(data, "model", "modelID")),
-    provider: asString(data?.providerID) ?? asString(field(data, "model", "providerID")),
+    model: asString(field(data, "model", "id")),
+    provider: asString(field(data, "model", "providerID")),
     tokensInput: asNumber(field(data, "tokens", "input")),
     tokensOutput: asNumber(field(data, "tokens", "output")),
     msgCreated: asNumber(field(data, "time", "created")),
@@ -690,176 +617,8 @@ function buildTraceBody(dbPath: string, trace?: TraceContext): { body?: Uint8Arr
   }
 }
 
-export function buildOpenCodeSpansFromEvents(events: unknown[] | string, trace?: TraceContext): OtlpSpan[] {
-  let list: unknown[];
-  if (typeof events === "string") {
-    list = [];
-    for (const line of events.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        list.push(JSON.parse(trimmed));
-      } catch {
-        // ignore
-      }
-    }
-  } else if (Array.isArray(events)) {
-    list = events;
-  } else {
-    return [];
-  }
-
-  const now = Date.now();
-  let startMs = now;
-  let endMs = now;
-  let userPrompt: string | undefined;
-  let assistantModel: string | undefined;
-  let assistantProvider: string | undefined;
-  let tokensInput: number | undefined;
-  let tokensOutput: number | undefined;
-  let assistantError: string | undefined;
-  const assistantTexts: string[] = [];
-  const toolParts: ParsedPart[] = [];
-
-  for (let i = 0; i < list.length; i++) {
-    const item = list[i];
-    if (!item || typeof item !== "object") continue;
-    const ev = item as Record<string, unknown>;
-    const part = (ev.part && typeof ev.part === "object" ? ev.part : ev) as Record<string, unknown>;
-    const time = asNumber(ev.time) ?? asNumber(part.time) ?? asNumber(field(part, "state", "time", "start"));
-    if (time != null && time > 0) {
-      if (startMs === now || time < startMs) startMs = time;
-      if (time > endMs) endMs = time;
-    }
-
-    if (ev.type === "step_start") {
-      if (typeof ev.model === "string") assistantModel = ev.model;
-      if (typeof part.model === "string") assistantModel = part.model;
-      if (typeof ev.provider === "string") assistantProvider = ev.provider;
-    } else if (ev.type === "text" || part.type === "text") {
-      const text = asString(part.text) ?? asString(ev.text);
-      if (text) assistantTexts.push(text);
-    } else if (ev.type === "tool_use" || ev.type === "tool" || part.type === "tool") {
-      const state = asRecord(field(part, "state"));
-      const toolTime = asRecord(field(state, "time")) ?? asRecord(field(part, "time"));
-      const tool = asString(part.tool) ?? asString(part.name) ?? asString(ev.tool) ?? asString(ev.name);
-      toolParts.push({
-        id: asString(ev.id) ?? asString(part.id) ?? `tool-${i}`,
-        messageId: "msg-assistant",
-        timeCreated: time ?? null,
-        timeUpdated: asNumber(toolTime?.end) ?? time ?? null,
-        type: "tool",
-        tool,
-        status: asString(state?.status) ?? asString(part.status) ?? "completed",
-        startMs: asNumber(toolTime?.start) ?? time,
-        endMs: asNumber(toolTime?.end) ?? time,
-        input: state?.input ?? part.input ?? ev.input,
-        output: payloadString(state?.output) ?? payloadString(part.output) ?? payloadString(ev.output),
-        error: payloadString(state?.error) ?? payloadString(part.error) ?? payloadString(ev.error),
-        text: undefined,
-        file: undefined,
-      });
-    } else if (ev.type === "step_finish") {
-      const tokens = (part.tokens ?? ev.tokens) as Record<string, unknown> | undefined;
-      if (tokens) {
-        tokensInput = asNumber(tokens.input);
-        tokensOutput = asNumber(tokens.output);
-      }
-      if (part.error || ev.error) {
-        assistantError = payloadString(part.error) ?? payloadString(ev.error);
-      }
-    } else if (ev.role === "user" || ev.type === "user") {
-      userPrompt = asString(ev.text) ?? asString(ev.content);
-    }
-  }
-
-  const sessions: SessionRow[] = [{ id: "ses1", time_created: startMs, time_updated: endMs }];
-  const messages: RawMessageRow[] = [];
-  if (userPrompt) {
-    messages.push({
-      id: "msg-user",
-      session_id: "ses1",
-      time_created: startMs,
-      time_updated: startMs,
-      data: JSON.stringify({ role: "user", time: { created: startMs } }),
-    });
-  }
-  messages.push({
-    id: "msg-assistant",
-    session_id: "ses1",
-    time_created: startMs,
-    time_updated: endMs,
-    data: JSON.stringify({
-      role: "assistant",
-      modelID: assistantModel,
-      providerID: assistantProvider,
-      tokens: { input: tokensInput ?? 0, output: tokensOutput ?? 0 },
-      time: { created: startMs, completed: endMs },
-      error: assistantError ? { message: assistantError } : undefined,
-    }),
-  });
-
-  const parts: RawPartRow[] = [];
-  if (userPrompt) {
-    parts.push({
-      id: "part-user",
-      message_id: "msg-user",
-      time_created: startMs,
-      time_updated: startMs,
-      data: JSON.stringify({ type: "text", text: userPrompt }),
-    });
-  }
-  for (const text of assistantTexts) {
-    parts.push({
-      id: `part-text-${parts.length + 1}`,
-      message_id: "msg-assistant",
-      time_created: startMs,
-      time_updated: startMs,
-      data: JSON.stringify({ type: "text", text }),
-    });
-  }
-  for (const toolPart of toolParts) {
-    parts.push({
-      id: toolPart.id,
-      message_id: "msg-assistant",
-      time_created: toolPart.timeCreated,
-      time_updated: toolPart.timeUpdated,
-      data: JSON.stringify({
-        type: "tool",
-        tool: toolPart.tool,
-        state: {
-          status: toolPart.status,
-          input: toolPart.input,
-          output: toolPart.output,
-          error: toolPart.error,
-          time: { start: toolPart.startMs, end: toolPart.endMs },
-        },
-      }),
-    });
-  }
-
-  return buildSpans(trace, { sessions, messages, parts });
-}
-
-export function buildOpenCodeTraceRequest(source: string | unknown[], trace?: TraceContext): Uint8Array | undefined {
-  if (typeof source === "string") {
-    return buildTraceBody(source, trace).body;
-  }
-  if (Array.isArray(source)) {
-    const agent = agentInstance();
-    const spans = buildOpenCodeSpansFromEvents(source, trace);
-    return encodeWithinLimit(
-      {
-        attributes: {
-          "service.name": agent,
-          "openinference.project.name": agent,
-          ...filterAttrs(trace, agent),
-        },
-      },
-      spans
-    );
-  }
-  return undefined;
+export function buildOpenCodeTraceRequest(dbPath: string, trace?: TraceContext): Uint8Array | undefined {
+  return buildTraceBody(dbPath, trace).body;
 }
 
 async function postTraces(body: Uint8Array): Promise<void> {
@@ -891,11 +650,7 @@ async function postTraces(body: Uint8Array): Promise<void> {
   }
 }
 
-export async function exportOpenCodeTrace(opts: {
-  dbPath?: string;
-  events?: unknown[];
-  trace?: TraceContext;
-}): Promise<void> {
+export async function exportOpenCodeTrace(opts: { dbPath: string; trace?: TraceContext }): Promise<void> {
   const endpoint = phoenixEndpoint();
   if (!endpoint) return;
   if (!tracesUrl(endpoint)) {
@@ -904,26 +659,7 @@ export async function exportOpenCodeTrace(opts: {
   }
   let result: { body?: Uint8Array; tooLarge?: boolean };
   try {
-    if (opts.events) {
-      const spans = buildOpenCodeSpansFromEvents(opts.events, opts.trace);
-      const agent = agentInstance();
-      const body = encodeWithinLimit(
-        {
-          attributes: {
-            "service.name": agent,
-            "openinference.project.name": agent,
-            ...filterAttrs(opts.trace, agent),
-          },
-        },
-        spans
-      );
-      if (!body) result = { tooLarge: true };
-      else result = { body };
-    } else if (opts.dbPath) {
-      result = buildTraceBody(opts.dbPath, opts.trace);
-    } else {
-      return;
-    }
+    result = buildTraceBody(opts.dbPath, opts.trace);
   } catch {
     noteError();
     return;

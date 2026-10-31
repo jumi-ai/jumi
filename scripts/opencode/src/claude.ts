@@ -9,7 +9,6 @@ import {
   isChildStrippedKey,
   startChildGitProxy,
 } from "./child_git_proxy.ts";
-import { stageClaudeCheckoutSkills } from "./claude_checkout_skills.ts";
 import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
@@ -28,7 +27,8 @@ import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 
-export const CLAUDE_SETTING_SOURCES = "user";
+/** `project` is what loads the checkout's `AGENTS.md`, `CLAUDE.md`, skills and settings. */
+export const CLAUDE_SETTING_SOURCES = "user,project";
 export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch,Skill";
 export const CLAUDE_PERMISSION_MODE = "dontAsk";
 /** stream-json keeps per-message usage even when the child is killed before `result`. */
@@ -196,18 +196,12 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: str
 }
 
 /**
- * `checkoutSkillsPlugin` is the hook-free plugin `stageClaudeCheckoutSkills`
- * wrote for this review spawn, when the checkout has skills.
- * `imageSkillsPlugin` is the hook-free plugin `stageImageSkillsForClaude`
- * wrote for this spawn's kind: the reviewer skill for reviews, the worker
+ * `imageSkillsPlugin` is the plugin `stageImageSkillsForClaude` wrote for this
+ * spawn's kind: the reviewer skill for reviews, the worker
  * skill for implement/follow-up/conflict. Workers never see the reviewer
  * skill, and reviews never see the worker skill.
  */
-export function claudeArgv(
-  opts: EngineRunOptions,
-  checkoutSkillsPlugin?: string,
-  imageSkillsPlugin?: string
-): string[] {
+export function claudeArgv(opts: EngineRunOptions, imageSkillsPlugin?: string): string[] {
   const args = [
     "claude",
     "-p",
@@ -230,13 +224,9 @@ export function claudeArgv(
     opts.model,
   ];
   if (opts.effort) args.push("--effort", opts.effort);
-  // Phoenix tracing is an image-local plugin the parent names per spawn, so
-  // `--setting-sources user` still keeps the untrusted checkout's hooks out.
+  // Phoenix tracing is an image-local plugin the parent names per spawn.
   const tracingPlugin = claudeTracingPluginDir();
   if (tracingPlugin) args.push("--plugin-dir", tracingPlugin);
-  // Checkout skills ride the same way: staged by the parent, never read from
-  // the checkout's own `.claude/`, so `--setting-sources user` stays.
-  if (checkoutSkillsPlugin) args.push("--plugin-dir", checkoutSkillsPlugin);
   // Shared image skills ride the same way: staged per spawn outside the
   // checkout, so the tree stays clean and the kind stays separated.
   if (imageSkillsPlugin) args.push("--plugin-dir", imageSkillsPlugin);
@@ -273,15 +263,10 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   }
 
   try {
-    // Reviewers only, like the Antigravity skills stash: a worker spawn sees no
-    // checkout skills, as before. Image skills are per-kind: review gets the
-    // reviewer skill, workers get the worker skill.
-    const checkoutSkills =
-      opts.trace?.kind === "review"
-        ? await stageClaudeCheckoutSkills(opts.workdir, join(tmpDir, "checkout-skills"), log)
-        : undefined;
+    // Image skills are per-kind: review gets the reviewer skill, workers get the
+    // worker skill.
     const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
-    const args = claudeArgv(opts, checkoutSkills, imageSkills);
+    const args = claudeArgv(opts, imageSkills);
     if (opts.sanitizeEnv) {
       const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
       if (request) {

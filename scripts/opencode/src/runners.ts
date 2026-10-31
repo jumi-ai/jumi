@@ -430,4 +430,4 @@ export function appendRunnerStamp(body: string, runner: RunnerStamp | string | u
   return text ? `${text}\n\n${line}` : line;
 }
 
-export { buildOpenCodeArgs, detectOpenCodeMajor, getOpenCodeMajor, setOpenCodeMajorForTests } from "./git.ts";
+export { buildOpenCodeArgs } from "./git.ts";

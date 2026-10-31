@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { opencodeAuthPath } from "../src/opencode_auth.ts";
@@ -36,7 +36,8 @@ afterEach(async () => {
 });
 
 async function tempDir(label: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `jumi-${label}-`));
+  // realpath: macOS tmpdir is a symlink, and durableAuthPath resolves symlinks.
+  const dir = await realpath(await mkdtemp(join(tmpdir(), `jumi-${label}-`)));
   tempDirs.push(dir);
   return dir;
 }

@@ -150,7 +150,7 @@ jobs:
           # that drops the flag must fail here, not silently stop tracing.
           docker run --rm jumi-reviewer:ci claude --help | grep -F -- '--plugin-dir' >/dev/null
           # Plugin root may also carry bin/, agents/, skills/, .mcp.json,
-          # monitors/ and settings.json — any of those reach the untrusted-checkout
+          # monitors/ and settings.json — any of those reach every traced
           # child. A re-sync that adds one must fail the build, not ship.
           plugin_top="$(docker run --rm jumi-reviewer:ci sh -c 'ls -1A /app/claude-plugins/claude-code-tracing' | sort)"
           plugin_want="$(printf '%s\n' '.claude-plugin' 'LICENSE' 'UPSTREAM.md' 'hooks' | sort)"
@@ -172,6 +172,14 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
+
+      - name: Verify quota reads against the opencode binary
+        # The quota reads swallow SQLite errors, so an opencode bump that changes
+        # the session DB would otherwise show up only as children timing out.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'
 
       - name: Verify agy forge read_url deny against the installed binary
         # `agy --version` proves the binary exists, not that a child is refused

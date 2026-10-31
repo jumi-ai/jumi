@@ -156,6 +156,15 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
 
+      - name: Verify quota reads against the opencode binary
+        if: ${{ env.VERSION != '' }}
+        # The quota reads swallow SQLite errors, so an opencode bump that changes
+        # the session DB would otherwise show up only as children timing out.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'
+
       - name: Verify agy forge read_url deny against the installed binary
         if: ${{ env.VERSION != '' }}
         # Same probe as the pull_request image job: the installed agy binary
