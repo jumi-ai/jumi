@@ -42,7 +42,7 @@ describe("opencode implement config", () => {
   const rulesFor = (action: string) => resourceRules(config.permissions.filter((rule) => rule.action === action));
 
   test("allows skills, tasks, and edits for the implement worker", () => {
-    expect(config.skills).toEqual(["/app/review-skills", ".claude/skills", ".agents/skills"]);
+    expect(config.skills).toEqual(["/app/review-skills"]);
     expect(rulesFor("skill")).toEqual({ "*": "allow" });
     expect(rulesFor("subagent")).toEqual({ "*": "allow" });
     expect(rulesFor("todowrite")).toEqual({ "*": "allow" });

@@ -4,9 +4,7 @@
   "share": "disabled",
   "snapshots": false,
   "skills": [
-    "/app/review-skills",
-    ".claude/skills",
-    ".agents/skills"
+    "/app/review-skills"
   ],
   "providers": {
     "xai": {

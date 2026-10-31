@@ -118,7 +118,6 @@ async function main(): Promise<number> {
         OPENCODE_CONFIG: await writeProbeConfig(dir, `http://127.0.0.1:${server.port}`),
         OPENCODE_DB: dbPath,
         OPENCODE_DISABLE_AUTOUPDATE: "1",
-        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
       },
     });
     try {

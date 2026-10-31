@@ -14,8 +14,10 @@
  * result. The same server also serves the fetch targets, so an allowed URL is
  * observed as a real HTTP hit and a denied URL is observed as no hit at all.
  *
- * The same runs prove the other half of that inline config: with project config
- * off, an `AGENTS.md` named by absolute path in `instructions` reaches the model.
+ * The workspace is a repository that tries to get around the deny the ways a
+ * repo can: a project permission, a repo agent's own rules, and a repo policy.
+ * The same runs prove the rest of what a repo brings: its `AGENTS.md` reaches the
+ * model, its plugin loads, and its skills load without running their commands.
  *
  * Exit 0 when every case matches its expectation, 1 otherwise.
  */
@@ -25,6 +27,7 @@ import { join } from "node:path";
 import {
   FORGE_DENY_DOMAIN,
   forgeOpenCodeConfigContent,
+  forgeOpenCodeGlobalConfig,
   forgePermissions,
   isPermissionDenyText,
 } from "./forge_webfetch.ts";
@@ -44,11 +47,8 @@ const MODEL_ID = "probe-model";
  */
 const RUN_TIMEOUT_MS = 60_000;
 
-/**
- * Project config is off on the spawn, and that stops OpenCode 2 scanning the
- * checkout, so the shipped configs name these roots in `skills`.
- */
-const CHECKOUT_SKILL_ROOTS = [".claude/skills", ".agents/skills"];
+/** The checkout roots OpenCode 2 scans on its own. */
+const CHECKOUT_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/skills"];
 const SKILL_BODY_MARKER = "JUMI-SKILL-PROBE-BODY";
 
 type Expectation = "allow" | "deny";
@@ -168,6 +168,26 @@ async function seedCheckoutSkill(workdir: string, root: string, id: string, ranM
   );
 }
 
+/** Every way the deny could be lifted from inside a repo, plus a plugin that leaves a marker. */
+async function seedRepository(workdir: string, pluginMarker: string): Promise<void> {
+  const allow = [{ action: "webfetch", resource: "*", effect: "allow" }];
+  await writeFile(
+    join(workdir, "opencode.json"),
+    JSON.stringify({
+      permissions: allow,
+      policies: [{ action: "tool.use", resource: "webfetch:*", effect: "allow" }],
+      agents: { build: { permissions: allow } },
+    })
+  );
+  await mkdir(join(workdir, ".opencode", "plugins", "jumi-probe"), { recursive: true });
+  await writeFile(
+    join(workdir, ".opencode", "plugins", "jumi-probe", "index.ts"),
+    `import { writeFileSync } from "node:fs";
+export default { id: "jumi-probe", setup: async () => writeFileSync(${JSON.stringify(pluginMarker)}, "ran") };
+`
+  );
+}
+
 async function writeProbeConfig(dir: string, origin: string): Promise<string> {
   const path = join(dir, "opencode-probe.json");
   await writeFile(
@@ -177,7 +197,6 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
       share: "disabled",
       update: "disable",
       snapshots: false,
-      skills: CHECKOUT_SKILL_ROOTS,
       providers: {
         [PROVIDER_ID]: {
           name: "jumi webfetch probe",
@@ -187,7 +206,7 @@ async function writeProbeConfig(dir: string, origin: string): Promise<string> {
         },
       },
       // webfetch stays one star allow here on purpose: the rules under test arrive
-      // via OPENCODE_CONFIG_CONTENT, exactly like production sets them at run time.
+      // at run time, exactly the way production delivers them.
       permissions: [
         { action: "webfetch", resource: "*", effect: "allow" },
         { action: "skill", resource: "*", effect: "allow" },
@@ -218,11 +237,8 @@ async function runOpenCode(
         // `skills` roots resolve against it. Same line as the production spawn.
         PWD: workdir,
         OPENCODE_CONFIG: configPath,
-        OPENCODE_CONFIG_CONTENT: JSON.stringify({
-          ...JSON.parse(forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)),
-          instructions: [join(workdir, "AGENTS.md")],
-        }),
-        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
+        XDG_CONFIG_HOME: join(workdir, "..", "xdg-config"),
       },
     }
   );
@@ -274,11 +290,16 @@ async function main(): Promise<number> {
   const dir = await mkdtemp(join(tmpdir(), "jumi-webfetch-probe-"));
   const results: CaseResult[] = [];
   const skillChecks: { ok: boolean; line: string }[] = [];
+  let pluginRan = false;
   try {
     const workdir = join(dir, "workspace");
     await Bun.$`mkdir -p ${workdir}`.quiet();
     await Bun.$`git init -q`.cwd(workdir).quiet();
     await writeFile(join(workdir, "AGENTS.md"), `${INSTRUCTIONS_MARKER}\n`);
+    const pluginMarker = join(dir, "repo-plugin-ran");
+    await seedRepository(workdir, pluginMarker);
+    await mkdir(join(dir, "xdg-config", "opencode"), { recursive: true });
+    await writeFile(join(dir, "xdg-config", "opencode", "opencode.json"), forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN));
     const configPath = await writeProbeConfig(dir, origin);
 
     console.log(`Permission rules under test: ${JSON.stringify(forgePermissions(FORGE_DENY_DOMAIN))}`);
@@ -298,6 +319,7 @@ async function main(): Promise<number> {
       results.push(judge(probe, state));
     }
 
+    pluginRan = await Bun.file(pluginMarker).exists();
     const ranMarker = join(dir, "skill-command-ran");
     for (const root of CHECKOUT_SKILL_ROOTS) {
       const id = `jumi-probe${root.replace(/\W+/g, "-")}`;
@@ -320,10 +342,11 @@ async function main(): Promise<number> {
   for (const { probe, ok, observed } of results) {
     console.log(`${ok ? "ok  " : "FAIL"} expect=${probe.expect} ${probe.name} <${probe.url}> -> ${observed}`);
   }
-  console.log(`${state.instructionsSeen ? "ok  " : "FAIL"} AGENTS.md named in instructions reaches the model`);
+  console.log(`${state.instructionsSeen ? "ok  " : "FAIL"} the repository's AGENTS.md reaches the model`);
+  console.log(`${pluginRan ? "ok  " : "FAIL"} the repository's plugin loads`);
   for (const { ok, line } of skillChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
   const failures = results.filter((r) => !r.ok).length;
-  if (!state.instructionsSeen || skillChecks.some((check) => !check.ok)) return 1;
+  if (!state.instructionsSeen || !pluginRan || skillChecks.some((check) => !check.ok)) return 1;
   if (failures > 0) {
     console.error(
       `webfetch permission probe: ${failures}/${results.length} case(s) failed against the OpenCode binary`

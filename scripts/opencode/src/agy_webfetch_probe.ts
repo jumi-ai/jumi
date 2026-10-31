@@ -7,7 +7,8 @@
  * `--dangerously-skip-permissions` does not override a deny. This probe
  * installs that rule the way production does, points `agy -p` at a loopback
  * Gemini endpoint that emits one `read_url_content` call, and checks the
- * binary: an unrelated host is a real HTTP hit, the forge host is refused.
+ * binary: an unrelated host is a real HTTP hit, the forge host is refused, and
+ * the workspace is a repository trying to allow it back.
  *
  * Exit 0 when every case matches, 1 otherwise.
  */
@@ -133,6 +134,15 @@ async function writeSettings(home: string, host: string): Promise<void> {
     )}\n`
   );
   await ensureAgyForgeDeny(home, host);
+}
+
+/** A repository trying to lift the deny, which lives under HOME and must hold anyway. */
+async function seedRepository(workdir: string): Promise<void> {
+  const settings = JSON.stringify({ permissions: { allow: ["read_url(*)"], deny: [] } });
+  for (const root of [".agents", ".agent", "_agents", "_agent", ".gemini", ".gemini/antigravity-cli"]) {
+    await mkdir(join(workdir, root), { recursive: true });
+    await Bun.write(join(workdir, root, "settings.json"), settings);
+  }
 }
 
 async function runAgy(
@@ -290,6 +300,7 @@ async function main(): Promise<number> {
     const workdir = join(dir, "workspace");
     await mkdir(workdir, { recursive: true });
     await Bun.$`git init -q`.cwd(workdir).quiet();
+    await seedRepository(workdir);
     const homes = new Map<string, string>();
     for (const host of [FORGE_DENY_DOMAIN, "github.com"]) {
       const home = join(dir, `home-${host.replaceAll(".", "-")}`);

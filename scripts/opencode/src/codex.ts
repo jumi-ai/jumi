@@ -40,13 +40,8 @@ const CODEX_AUTH_RE =
 const CODEX_USAGE_LIMIT_RE =
   /usage[_\s-]*limit|rate[\s_-]*limit|too many requests|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|out of quota|hit your (?:usage|free|session) limit/i;
 
-// `mcp_servers` is deliberately absent here, not an oversight: project-local
-// `.codex/config.toml` MCP entries only load for trusted projects, and this
-// deployment never writes a trust entry for the per-job workdir (the spawn
-// also passes `--ignore-user-config`, so even a retained HOME trust entry is
-// not read). A `-c` override could not clear a merged `mcp_servers` table
-// anyway, so trust gating — not a `-c` pin — is what keeps a checkout-supplied
-// MCP command from executing.
+// The repository's `.codex` config, hooks, rules, and MCP servers load on every
+// spawn, and a `-c` override outranks them, so what this list pins still holds.
 function codexHardeningArgs(effort: string): string[] {
   return [
     "-c",
@@ -58,8 +53,6 @@ function codexHardeningArgs(effort: string): string[] {
     // `--disable` is not a documented `codex exec` flag (it is a global flag
     // that does not propagate there), so these use the `-c features.*=false`
     // form `--disable` itself translates to.
-    "-c",
-    "features.hooks=false",
     "-c",
     "features.multi_agent=false",
     "-c",
@@ -101,8 +94,8 @@ function codexConfigArgs(model: string, effort: string): string[] {
     "--sandbox",
     CODEX_SANDBOX,
     "--skip-git-repo-check",
-    "--ignore-rules",
-    "--ignore-user-config",
+    // Hooks otherwise wait for a trust approval nobody is there to give.
+    "--dangerously-bypass-hook-trust",
     "--model",
     model,
     ...codexHardeningArgs(effort),
@@ -113,8 +106,8 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * Flags for `codex exec resume <id>`. `--color` is declared on the `exec`
  * command without `global = true`, so it must appear before the `resume`
  * subcommand — after it the real binary rejects it as an unexpected
- * argument. `--json`, `--skip-git-repo-check`, `--ignore-rules`,
- * `--ignore-user-config`, and `-c` are `global = true` and therefore valid
+ * argument. `--json`, `--skip-git-repo-check`,
+ * `--dangerously-bypass-hook-trust`, and `-c` are `global = true` and therefore valid
  * on either side; the globals stay before `resume` with `--color` while the
  * `-c` overrides travel after the thread id. `--model` is made global by
  * upstream `mark_exec_global_args()` and is repeated too: `exec resume` takes
@@ -122,9 +115,8 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * without it an extra turn would run on the binary's default model. Every
  * `-c` override is per-invocation config reloaded from scratch on each `exec resume`, not
  * per-thread state, so the full turn-1 hardening list is repeated here —
- * otherwise turn 2+ would silently re-enable hooks, web-search,
- * experimental context management, and project `.rules` loading that turn 1
- * disabled.
+ * otherwise turn 2+ would silently re-enable web-search and experimental
+ * context management, which turn 1 disabled.
  */
 function codexResumePreArgs(model: string): string[] {
   return [
@@ -132,8 +124,8 @@ function codexResumePreArgs(model: string): string[] {
     "--color",
     "never",
     "--skip-git-repo-check",
-    "--ignore-rules",
-    "--ignore-user-config",
+    // Hooks otherwise wait for a trust approval nobody is there to give.
+    "--dangerously-bypass-hook-trust",
     "--model",
     model,
   ];

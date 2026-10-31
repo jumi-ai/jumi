@@ -8,9 +8,10 @@
  * credential helper stays allowed, and public upstream docs stay reachable.
  *
  * Prompt prose is a hint, not a control. The rules below are what the
- * binaries enforce: OpenCode through `OPENCODE_CONFIG_CONTENT`, Claude through
- * `--disallowedTools`, Antigravity through `permissions.deny` in
- * `settings.json`. Derive them here, not in another copy of prose.
+ * binaries enforce: OpenCode through a global `policies` file and
+ * `OPENCODE_CONFIG_CONTENT`, Claude through `--disallowedTools`, Antigravity
+ * through `permissions.deny` in `settings.json`. Derive them here, not in
+ * another copy of prose.
  *
  * The host is per-spawn, not compile-time: the forge is configured, and the
  * GitHub factory hands the child `GIT_AUTH_HOST=github.com` with a write-capable
@@ -20,7 +21,7 @@
 /** Fallback for spawns that carry no `GIT_AUTH_HOST` (reviewer, tests). */
 export const FORGE_DENY_DOMAIN = "kirmanak.stream";
 
-export const PERMISSION_DENY_RE = /Permission denied:\s*\w+/i;
+export const PERMISSION_DENY_RE = /Permission denied:\s*\w+|Blocked by configuration policy/i;
 
 export function isPermissionDenyText(text: unknown): boolean {
   if (typeof text !== "string" || !text) return false;
@@ -63,6 +64,21 @@ export function forgePermissions(host: string): ForgePermissionRule[] {
 /** OpenCode reads this via `OPENCODE_CONFIG_CONTENT` as inline config. */
 export function forgeOpenCodeConfigContent(host: string): string {
   return JSON.stringify({ permissions: forgePermissions(host) });
+}
+
+/**
+ * The repository's config loads on every spawn, and a repo agent's own rules
+ * outrank `permissions` from any source. `policies` apply after agent rules, but
+ * a repo policy can lift an inline one, so these go in the global config file,
+ * which outranks project files. Written per spawn, as `XDG_CONFIG_HOME` is.
+ */
+export function forgeOpenCodeGlobalConfig(host: string): string {
+  return JSON.stringify({
+    policies: [
+      { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
+      { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
+    ],
+  });
 }
 
 /**

@@ -140,7 +140,6 @@ async function main(): Promise<number> {
       XDG_CONFIG_HOME: join(dir, "xdg-config"),
       OPENCODE_DB: join(dir, "opencode-session.db"),
       OPENCODE_CONFIG: await writeProbeConfig(dir, origin),
-      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     };
     // No XAI_API_KEY here, unlike production: the bearer must arrive through
     // the seeded file, so a binary that stops importing it fails this image.

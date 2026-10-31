@@ -134,11 +134,11 @@ jobs:
           # run in production. Help output can only prove flag presence;
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
           codex_exec_help="$(docker run --rm jumi-reviewer:ci codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm jumi-reviewer:ci codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
@@ -263,11 +263,11 @@ jobs:
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm jumi-worker:ci codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           docker run --rm jumi-worker:ci \

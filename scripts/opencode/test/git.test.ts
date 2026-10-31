@@ -123,7 +123,8 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
         expect(result.stdout).toContain(`HOME=${isolatedHome}`);
         expect(result.stdout).toContain("MODEL=openai/gpt-5.5");
         expect(result.stdout).toContain("CONFIG=/config.json");
-        expect(result.stdout).toContain("DISABLE=1");
+        // Empty: the repository's own config loads.
+        expect(result.stdout).toContain("DISABLE= XDG_CONFIG=");
         expect(result.stdout).toContain(`XDG_CONFIG=${workdir}/.jumi-tmp/xdg-config`);
         expect(result.stdout).toContain("SECRET=");
         expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5");
@@ -1431,32 +1432,42 @@ cat
     }
   });
 
-  test("names the checkout's AGENTS.md for a sanitized child, whose project discovery is off", async () => {
+  test("leaves AGENTS.md to OpenCode's own project discovery", async () => {
     await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
-      const result = await runOpenCode({ prompt: "prompt", model: "model", workdir, sanitizeEnv: true });
-      expect(result.status).toBe("ok");
-      expect(inlineConfig(result.stdout).instructions).toEqual([join(workdir, "AGENTS.md")]);
-    });
-  });
-
-  test("keeps job-supplied instructions alongside AGENTS.md", async () => {
-    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
-      const result = await runOpenCode({
-        prompt: "prompt",
-        model: "model",
-        workdir,
-        sanitizeEnv: true,
-        extraEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ instructions: ["/job/rules.md"] }) },
-      });
-      expect(inlineConfig(result.stdout).instructions).toEqual(["/job/rules.md", join(workdir, "AGENTS.md")]);
-    });
-  });
-
-  test("leaves AGENTS.md to project discovery on an unsanitized child", async () => {
-    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
-      const result = await runOpenCode({ prompt: "prompt", model: "model", workdir });
-      expect(result.status).toBe("ok");
+      const result = await runOpenCode({ prompt: "p", model: "m", workdir, home: isolatedHome, sanitizeEnv: true });
       expect(inlineConfig(result.stdout).instructions).toBeUndefined();
+    });
+  });
+
+  test("hands each sanitized spawn the forge policy for its own host, where a repo cannot lift it", async () => {
+    await withFakeOpenCode(
+      `#!/bin/sh
+printf 'POLICY=%s\\n' "$(cat "$XDG_CONFIG_HOME/opencode/opencode.json")"
+`,
+      async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "p",
+          model: "m",
+          workdir,
+          home: isolatedHome,
+          sanitizeEnv: true,
+          extraEnv: { GIT_AUTH_HOST: "gitea.example.com:3000" },
+        });
+        const policy = JSON.parse(/^POLICY=(.*)$/m.exec(result.stdout ?? "")?.[1] ?? "{}") as {
+          policies?: { resource: string; effect: string }[];
+        };
+        expect(policy.policies?.[0]).toMatchObject({ resource: "webfetch:*gitea.example.com*", effect: "deny" });
+      }
+    );
+  });
+
+  test("refuses to start a sanitized spawn that cannot take the forge policy", async () => {
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      await mkdir(join(workdir, ".jumi-tmp"), { recursive: true });
+      await writeFile(join(workdir, ".jumi-tmp", "xdg-config"), "a file where the directory goes");
+      await expect(
+        runOpenCode({ prompt: "p", model: "m", workdir, home: isolatedHome, sanitizeEnv: true })
+      ).rejects.toThrow();
     });
   });
 

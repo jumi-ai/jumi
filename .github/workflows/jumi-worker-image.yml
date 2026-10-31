@@ -142,11 +142,11 @@ jobs:
           # run in production. Help output can only prove flag presence;
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
           codex_exec_help="$(docker run --rm "${TEST_TAG}" codex exec --help)"
-          for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
           codex_resume_help="$(docker run --rm "${TEST_TAG}" codex exec resume --help)"
-          for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+          for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
 
@@ -175,7 +175,7 @@ jobs:
           config_json="$(docker run --rm -e OPENCODE_DISABLE_PROJECT_CONFIG=1 -e OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${TEST_TAG}" sh -c 'cd /work && git init -q && timeout 120 opencode debug config')"
           if ! printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null; then
             printf '%s\n' "${config_json}" >&2
-            echo "worker opencode debug config did not load skills.paths /app/review-skills" >&2
+            echo "worker opencode debug config did not load skills /app/review-skills" >&2
             exit 1
           fi
           echo "Verified opencode debug config"

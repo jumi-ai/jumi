@@ -5,10 +5,6 @@
   "snapshots": false,
   "skills": [
     "/app/review-skills",
-    ".claude/skills",
-    ".agents/skills",
-    ".opencode/skill",
-    ".opencode/skills",
     "~/.config/opencode/skill",
     "~/.config/opencode/skills"
   ],

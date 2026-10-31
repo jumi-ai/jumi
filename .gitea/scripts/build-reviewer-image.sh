@@ -118,7 +118,7 @@ verify_reviewer_runtime() {
   if ! printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null; then
     printf '%s\n' "${config_json}" >&2
     buildah rm "${ctr}" >/dev/null 2>&1 || true
-    echo "opencode debug config did not load skills.paths /app/review-skills" >&2
+    echo "opencode debug config did not load skills /app/review-skills" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- claude --version; then
@@ -148,7 +148,7 @@ verify_reviewer_runtime() {
     echo "codex exec --help failed in reviewer image" >&2
     exit 1
   fi
-  for flag in --json --color --sandbox --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+  for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
     if ! printf '%s\n' "${codex_exec_help}" | grep -E -- "${flag}([ ,=]|$)" >/dev/null; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "codex exec --help is missing ${flag} the codex runner spawns with" >&2
@@ -160,7 +160,7 @@ verify_reviewer_runtime() {
     echo "codex exec resume --help failed in reviewer image" >&2
     exit 1
   fi
-  for flag in --json --skip-git-repo-check --ignore-rules --ignore-user-config --model --config; do
+  for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
     if ! printf '%s\n' "${codex_resume_help}" | grep -E -- "${flag}([ ,=]|$)" >/dev/null; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "codex exec resume --help is missing ${flag} the codex resume turn spawns with" >&2

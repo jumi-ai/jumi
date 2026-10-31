@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
 import {
   type ChildGitProxy,
@@ -30,7 +30,7 @@ import {
   redactEngineText,
 } from "./engine.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
-import { forgeDenyHost, forgePermissions } from "./forge_webfetch.ts";
+import { forgeDenyHost, forgeOpenCodeGlobalConfig, forgePermissions } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { armChildCredentialImport } from "./opencode_credentials.ts";
 import { exportOpenCodeTrace } from "./phoenix.ts";
@@ -158,15 +158,8 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
  * authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so the GitHub factory
  * denies `github.com` rather than the Gitea default. The rules go last because
  * OpenCode permissions are last-match.
- *
- * `instructions` is for sanitized children, which run with project config off
- * and so lose `AGENTS.md` discovery along with checkout plugins and hooks.
  */
-function applyOpenCodeInlineConfig(
-  env: Record<string, string>,
-  opts: OpenCodeRunOptions,
-  instructions: string[] = []
-): void {
+function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRunOptions): void {
   let existing: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
@@ -178,12 +171,22 @@ function applyOpenCodeInlineConfig(
   env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
     ...existing,
     permissions: [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv))],
-    ...(instructions.length > 0 ? { instructions: [...listOf(existing.instructions), ...instructions] } : {}),
   });
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
   return join(tempRoot, "xdg-data");
+}
+
+function openCodeXdgConfigHome(tempRoot: string): string {
+  return join(tempRoot, "xdg-config");
+}
+
+/** Not best-effort: a spawn that cannot take the forge deny must not start. */
+async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Promise<void> {
+  const dir = join(openCodeXdgConfigHome(tempRoot), "opencode");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "opencode.json"), forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv)));
 }
 
 /**
@@ -339,10 +342,9 @@ function buildEnv(
     HOME: opts.home ?? process.env.HOME ?? opts.workdir,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     TMPDIR: tempRoot,
-    XDG_CONFIG_HOME: join(tempRoot, "xdg-config"),
+    XDG_CONFIG_HOME: openCodeXdgConfigHome(tempRoot),
     XDG_DATA_HOME: xdgDataHome,
     OPENCODE_MODEL: opts.model,
-    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DB: openCodeDbPath,
   };
   if (opts.variant) env.OPENCODE_VARIANT = opts.variant;
@@ -377,10 +379,8 @@ function buildEnv(
       })
     );
   }
-  // After extraEnv: a job-supplied OPENCODE_CONFIG_CONTENT must not win over the
-  // deny. Absolute, because with project discovery off a relative instruction
-  // resolves against the global config dir. A checkout without the file is fine.
-  applyOpenCodeInlineConfig(env, opts, [join(resolve(opts.workdir), "AGENTS.md")]);
+  // After extraEnv: a job-supplied OPENCODE_CONFIG_CONTENT must not win over the deny.
+  applyOpenCodeInlineConfig(env, opts);
   return env;
 }
 
@@ -514,6 +514,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   // XDG_DATA_HOME is per-run too: seed auth so isolation does not break provider auth.
   const xaiChild = await resolveXaiChildCredential(opts, home, log);
   await seedIsolatedAuth(home, tempRoot, xaiChild);
+  if (opts.sanitizeEnv) await seedForgePolicy(tempRoot, opts);
   const promptBytes = byteLength(prompt);
   let dbBefore = await pathSizeBytes(dbPath);
   const parentBefore = await sampleMemory(process.pid);

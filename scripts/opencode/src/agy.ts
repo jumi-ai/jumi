@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AgyStreamParser } from "./agy_usage.ts";
 import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
@@ -40,13 +40,6 @@ export const AGY_ARGV_PROMPT_MAX_BYTES = 96_000;
 export const AGY_SETTINGS_DIR = join(".gemini", "antigravity-cli");
 /** Only seeded when absent: never overwrite a logged-in settings file. */
 export const AGY_SEED_SETTINGS = { enableTelemetry: false, useG1Credits: false } as const;
-/**
- * Workspace customization roots the CLI reads. Each can carry `hooks.json`,
- * plugins (which bundle their own hooks), rules, workflows, MCP config, and
- * `skills/`. A reviewer keeps only `skills/`.
- */
-export const AGY_PROJECT_AGENT_NAMES = [".agents", ".agent", "_agents", "_agent"] as const;
-const AGY_SKILLS_DIR = "skills";
 
 const AGY_STDERR_MAX_BYTES = 64_000;
 const AGY_AUTH_RE =
@@ -71,70 +64,6 @@ export function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClas
 
 function isEnoent(err: unknown): boolean {
   return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
-}
-
-interface StashedAgyRoot {
-  name: string;
-  /** `skills/` was put back in a fresh root in the workdir for this spawn. */
-  skills: boolean;
-}
-
-/**
- * Move every checkout customization root out of the workdir, then put back
- * only its `skills/` in a fresh root. Skills carry no commands in this CLI: the
- * model reads `SKILL.md` as a plain file, and on agy 1.2.7 neither frontmatter
- * `hooks:` nor inline `` !`cmd` `` in a skill ran. Hooks live in the root's
- * `hooks.json` and in plugins, which stay stashed.
- * Records into `moved` as it goes, so a throw part-way still restores.
- */
-async function stashAgyProjectAgents(workdir: string, stashRoot: string, moved: StashedAgyRoot[]): Promise<void> {
-  for (const name of AGY_PROJECT_AGENT_NAMES) {
-    try {
-      await rename(join(workdir, name), join(stashRoot, name));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-      continue;
-    }
-    const root: StashedAgyRoot = { name, skills: false };
-    moved.push(root);
-    if (!(await lstat(join(stashRoot, name))).isDirectory()) continue;
-    try {
-      await lstat(join(stashRoot, name, AGY_SKILLS_DIR));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-      continue;
-    }
-    root.skills = true;
-    await mkdir(join(workdir, name));
-    await rename(join(stashRoot, name, AGY_SKILLS_DIR), join(workdir, name, AGY_SKILLS_DIR));
-  }
-}
-
-async function restoreAgyProjectAgents(
-  workdir: string,
-  stashRoot: string,
-  moved: StashedAgyRoot[],
-  log: (message: string) => void
-): Promise<void> {
-  for (const { name, skills } of moved) {
-    if (skills) {
-      try {
-        await rename(join(workdir, name, AGY_SKILLS_DIR), join(stashRoot, name, AGY_SKILLS_DIR));
-      } catch (err) {
-        // Anything but "the child removed it" leaves the skills where they are
-        // rather than deleting them with the root below. The rest of the root
-        // then goes with the stash, so say so.
-        if (!isEnoent(err)) {
-          const reason = err instanceof Error ? err.message : String(err);
-          log(`[agy] ${name} not restored, only its ${AGY_SKILLS_DIR}/ is left in the checkout: ${reason}`);
-          continue;
-        }
-      }
-      // Only the root this spawn made; whatever the child wrote into it goes.
-      await rm(join(workdir, name), { recursive: true, force: true }).catch(() => {});
-    }
-    await rename(join(stashRoot, name), join(workdir, name)).catch(() => {});
-  }
 }
 
 function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
@@ -337,8 +266,6 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
 
   const tmpDir = await mkdtemp(join(tempRoot, "agy-prompt-"));
   const startedAtMs = Date.now();
-  const stashRoot = join(tmpDir, "project-agents");
-  const movedAgents: StashedAgyRoot[] = [];
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
 
@@ -379,13 +306,9 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv));
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
     const args = agyArgv(opts, promptArg, conversationId);
-    if (opts.trace?.kind === "review") {
-      await mkdir(stashRoot, { recursive: true });
-      await stashAgyProjectAgents(opts.workdir, stashRoot, movedAgents);
-    }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,
-    // cleaned up before the stash restore so the tree stays clean.
+    // cleaned up afterwards so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
     const proc = (() => {
       try {
@@ -554,7 +477,6 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     throw err;
   } finally {
     await imageStaging?.cleanup().catch(() => undefined);
-    await restoreAgyProjectAgents(opts.workdir, stashRoot, movedAgents, log);
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);

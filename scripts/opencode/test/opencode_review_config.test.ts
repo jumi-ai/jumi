@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   FORGE_DENY_DOMAIN,
   forgeOpenCodeConfigContent,
+  forgeOpenCodeGlobalConfig,
   forgePermissions,
   isPermissionDenyText,
 } from "../src/forge_webfetch.ts";
@@ -69,27 +70,14 @@ describe("opencode review config", () => {
   test("allows every skill the reviewer can discover: image, fleet, and checkout", () => {
     // No named allow-list: the model only sees a description until it loads one.
     expect(defaultFor("skill")).toBe("allow");
-    // Image pack, then the checkout's skill roots: the sanitized spawn keeps
-    // project config off, and that also stops OpenCode 2 scanning the checkout,
-    // so these relative paths (resolved against `--dir`) are how they load.
-    // Fleet OpenCode skills live under the real HOME (the sanitized spawn points
-    // XDG_CONFIG_HOME at a scratch dir). Fleet `.claude/skills` and
-    // `.agents/skills` are OpenCode's own scans.
-    expect(config.skills).toEqual([
-      "/app/review-skills",
-      ".claude/skills",
-      ".agents/skills",
-      ".opencode/skill",
-      ".opencode/skills",
-      "~/.config/opencode/skill",
-      "~/.config/opencode/skills",
-    ]);
+    // Image pack, then fleet OpenCode skills under the real HOME (the sanitized
+    // spawn points XDG_CONFIG_HOME at a scratch dir). Checkout roots and fleet
+    // `.claude/skills` / `.agents/skills` are OpenCode's own scans.
+    expect(config.skills).toEqual(["/app/review-skills", "~/.config/opencode/skill", "~/.config/opencode/skills"]);
   });
 
   test("brings no hooks or plugins of its own", () => {
-    // Checkout plugins stay off because the review spawn sets
-    // OPENCODE_DISABLE_PROJECT_CONFIG (test/git.test.ts); this config must not
-    // add a plugin or command hook back.
+    // Plugins and hooks are the repository's to bring, not this config's.
     expect(config.plugins).toBeUndefined();
     expect(config.experimental?.hook).toBeUndefined();
   });
@@ -102,6 +90,15 @@ describe("opencode review config", () => {
       { action: "webfetch", resource: "*kirmanak.stream*", effect: "deny" },
       { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
     ]);
+  });
+
+  test("the forge policy outranks a repository by living in the global config", () => {
+    expect(JSON.parse(forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN))).toEqual({
+      policies: [
+        { action: "tool.use", resource: `webfetch:*${FORGE_DENY_DOMAIN}*`, effect: "deny" },
+        { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
+      ],
+    });
   });
 
   test("the binary probe drives the shipped map rather than a copy of it", () => {
@@ -119,11 +116,9 @@ describe("opencode review config", () => {
     // Image jobs start the probe from another directory, and OpenCode 2 prefers
     // PWD over cwd, so without this the relative skill roots miss the workspace.
     expect(probe).toContain("PWD: workdir");
-    // Every checkout root the shipped config names is loaded through the binary.
-    for (const root of [".claude/skills", ".agents/skills"]) {
-      expect(config.skills).toContain(root);
-      expect(probe).toContain(`"${root}"`);
-    }
+    // The deny has to hold against a repository trying to lift it.
+    expect(probe).toContain("forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("agents: { build: { permissions: allow } }");
   });
 
   test("allows Read of image and fleet skill dirs after star deny (last-match)", () => {
@@ -321,6 +316,7 @@ describe("isPermissionDenyText", () => {
       isPermissionDenyText("Permission denied: webfetch is not allowed for https://gitea.kirmanak.stream/foo")
     ).toBe(true);
     expect(isPermissionDenyText("permission denied: tool execution forbidden")).toBe(true);
+    expect(isPermissionDenyText("Blocked by configuration policy")).toBe(true);
   });
 
   test("does not match unrelated errors or non-string input", () => {

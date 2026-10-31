@@ -104,6 +104,6 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 ## forge_webfetch.ts, child_git_proxy.ts, opencode-*.json, attachments.ts
 
 - Each runner's forge-host deny is proven against its installed binary, including subagents and agent-level overrides where the runner has them (#112, #135, #325).
-- Outside `type: claude`, checkout-controlled names, frontmatter, and bodies stay inert on load for every field the binary expands (#196), and checkout hooks and plugins stay out of reviewer spawns (#109). Claude runs load the checkout through the `project` setting source on purpose, because Jumi's checkouts are trusted.
+- Checkouts are trusted, so their hooks, plugins, skills, and config load on every runner. A repository still cannot lift the forge-host deny.
 - The child environment holds no forge credential (#314).
 - Parent credentials go only to the configured forge origin, and count and byte caps hold at the exact limit (#315).
