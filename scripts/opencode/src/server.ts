@@ -15,6 +15,7 @@ import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
+import { upsertWorkerComment } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
 import { enqueueFollowUpFromReview } from "./handover.ts";
 import { decideInfraRetry, engineInfraBreaker, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
@@ -38,12 +39,14 @@ import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
   hasPersistedResult,
+  isJobMode,
   isQueueUnavailable,
   QUEUE_POLL_MS,
   REVIEW_KIND,
   type ReviewJobRecord,
   type ReviewJobStore,
   renderQueueMetrics,
+  WORKER_JOB_KINDS,
 } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { orderedRunners } from "./runners.ts";
@@ -447,7 +450,58 @@ export async function reclaimExpiredJobs(
       }
     }
   }
-  return { requeued: requeued.length, published: publish.length };
+  // With no worker running, an expired worker lease blocks every job for the
+  // issue, dedupes new enqueues as `repo-mutex`, and is not counted as queued.
+  // The router reclaims worker rows too so nothing needs a worker pod to move
+  // on. `SKIP LOCKED` in `reclaimExpired` keeps this safe alongside the
+  // long-running worker's own reclaim call.
+  const worker = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, WORKER_JOB_KINDS);
+  for (const row of worker.requeued) {
+    logger(`requeued ${row.jobKey} attempt=${row.attempt}`);
+  }
+  for (const row of worker.publish) {
+    try {
+      await publishWorkerReclaimRow(store, api, config, row, logger);
+      logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
+    } catch (err) {
+      logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      try {
+        if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
+        await store.expireLease(row.id, row.leasedBy);
+      } catch (expireErr) {
+        logger(
+          `reclaim expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+        );
+      }
+    }
+  }
+  return {
+    requeued: requeued.length + worker.requeued.length,
+    published: publish.length + worker.publish.length,
+  };
+}
+
+/**
+ * Max-attempts worker rows previously got `markPublished` with no forge
+ * comment, leaving the sticky at "Jumi is implementing this issue". Publish
+ * the failure to the issue so the board and the sticky move on like review
+ * rows do.
+ */
+async function publishWorkerReclaimRow(
+  store: ReviewJobStore,
+  api: ReviewApi,
+  config: ServiceConfig,
+  row: ReviewJobRecord,
+  logger: (message: string) => void
+): Promise<void> {
+  if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+  const reason = row.error ?? row.resultReason ?? "Jumi failed: max attempts exceeded";
+  if (row.issueNumber != null) {
+    await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, reason);
+  } else {
+    logger(`reclaim-publish ${row.jobKey} has no issue number; marking failed without a forge comment`);
+  }
+  await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
 }
 
 export interface ReclaimResultSummary {
@@ -910,7 +964,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
     });
   }
 
-  const store = deps.store ?? (await createPgReviewJobStore(config.databaseUrl ?? ""));
+  const store = deps.store ?? (await createPgReviewJobStore(config.databaseUrl ?? "", { migrate: !isJobMode() }));
   deps = { ...deps, store };
 
   if (config.role === "router") {
