@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EngineFailedError } from "../src/engine.ts";
 import {
   checkQuotaDbSchema,
   clampQuotaWaitMs,
@@ -18,6 +19,7 @@ import {
   isQuotaWaitMarker,
   isResettingQuotaText,
   parseRetryAfterMs,
+  QUOTA_MESSAGE,
   QUOTA_STUCK_TEXT,
   QUOTA_WAIT_BUDGET_MS,
   QUOTA_WAIT_DEFAULT_MS,
@@ -140,6 +142,23 @@ describe("isQuotaText", () => {
   test("isQuotaError checks messages", () => {
     expect(isQuotaError(new Error("opencode stuck: usage limit exceeded"))).toBe(true);
     expect(isQuotaError(new Error("429 Too Many Requests"))).toBe(false);
+    expect(isQuotaError(new Error("Free usage exceeded"))).toBe(true);
+  });
+
+  test("engine failure quota comes from the structured field or the authored prefix", () => {
+    const echoed = new EngineFailedError(
+      `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`,
+      false
+    );
+    expect(isQuotaError(echoed)).toBe(false);
+    expect(isQuotaError(new EngineFailedError(QUOTA_MESSAGE, false))).toBe(true);
+    expect(isQuotaError(new EngineFailedError(`${QUOTA_MESSAGE}\nFree usage exceeded`, false))).toBe(true);
+    expect(
+      isQuotaError(new EngineFailedError("opencode exited with code 1:\nbad things", false, { quota: "resetting" }))
+    ).toBe(true);
+    expect(
+      isQuotaError(new EngineFailedError("opencode exited with code 1:\nbad things", false, { quota: "hard" }))
+    ).toBe(true);
   });
 });
 

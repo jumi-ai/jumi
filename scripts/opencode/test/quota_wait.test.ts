@@ -99,6 +99,33 @@ describe("throwIfQuotaWait", () => {
     ).toThrow(QuotaWaitError);
   });
 
+  test("stderr quota words on an ordinary engine failure do not wait", () => {
+    const echoed = new EngineFailedError(
+      `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`,
+      false
+    );
+    expect(isResettingQuotaError(echoed)).toBe(false);
+    expect(() =>
+      throwIfQuotaWait({
+        err: echoed,
+        model: "opencode/muse-spark",
+        random: () => 0,
+      })
+    ).not.toThrow();
+  });
+
+  test("a structured resetting engine failure still waits", () => {
+    expect(() =>
+      throwIfQuotaWait({
+        err: new EngineFailedError("opencode exited with code 1:\nFree usage exceeded", false, {
+          quota: "resetting",
+        }),
+        model: "opencode/muse-spark",
+        random: () => 0,
+      })
+    ).toThrow(QuotaWaitError);
+  });
+
   test("does not wait for hard quota", () => {
     expect(() =>
       throwIfQuotaWait({

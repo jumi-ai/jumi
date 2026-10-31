@@ -65,6 +65,12 @@ export function isQuotaText(text: string | null | undefined): boolean {
 
 export function isQuotaError(err: unknown): boolean {
   if (!err) return false;
+  // Engine failures carry captured stderr in the message. Quota for those
+  // comes from the engine's own field or the authored prefix, not a regex
+  // over that stderr. Forge and plain errors keep the text match.
+  if (err instanceof Error && err.name === "EngineFailedError") {
+    return engineFailureQuotaClass(err as Error & { quota?: QuotaClass }) != null;
+  }
   const text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
   return isQuotaText(text);
 }
@@ -90,6 +96,33 @@ export function classifyQuotaText(text: string | null | undefined): QuotaClass |
   if (HARD_QUOTA_RE.test(text)) return "hard";
   if (RESETTING_QUOTA_RE.test(text)) return "resetting";
   return "hard";
+}
+
+/**
+ * Quota class of an `EngineFailedError`. The engine's `quota` field wins.
+ * Otherwise only a message equal to, or starting with, `QUOTA_MESSAGE`
+ * counts. Stderr that `engineExitMessage` appends is not a quota signal.
+ */
+export function engineFailureQuotaClass(err: { quota?: QuotaClass; message?: string | null }): QuotaClass | undefined {
+  if (err.quota === "resetting" || err.quota === "hard") return err.quota;
+  const message = err.message ?? "";
+  if (message === QUOTA_MESSAGE || message.startsWith(QUOTA_MESSAGE)) {
+    return classifyQuotaText(QUOTA_MESSAGE) ?? "hard";
+  }
+  return undefined;
+}
+
+/** Class for a result message, or for an engine failure when `engineFailure` is set. */
+export function quotaClassOf(input: {
+  quota?: QuotaClass;
+  message?: string | null;
+  engineFailure?: boolean;
+}): QuotaClass | undefined {
+  if (input.engineFailure) return engineFailureQuotaClass(input);
+  if (input.quota === "resetting" || input.quota === "hard") return input.quota;
+  if (isResettingQuotaText(input.message)) return "resetting";
+  if (isQuotaText(input.message)) return "hard";
+  return undefined;
 }
 
 export function parseRetryAfterMs(text: string | null | undefined, nowMs = Date.now()): number | undefined {

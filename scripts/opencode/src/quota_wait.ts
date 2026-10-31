@@ -8,16 +8,10 @@ import {
   isResettingQuotaText,
   type QuotaClass,
   QuotaWaitError,
+  quotaClassOf,
 } from "./quota.ts";
 
 export { isQuotaWaitError, QuotaWaitError } from "./quota.ts";
-
-function quotaClassOf(input: { quota?: QuotaClass; message?: string | null }): QuotaClass | undefined {
-  if (input.quota === "resetting" || input.quota === "hard") return input.quota;
-  if (isResettingQuotaText(input.message)) return "resetting";
-  if (isQuotaText(input.message)) return "hard";
-  return undefined;
-}
 
 export function isResettingQuotaResult(result: EngineResult): boolean {
   return quotaClassOf({ quota: result.quota, message: result.message }) === "resetting";
@@ -26,7 +20,7 @@ export function isResettingQuotaResult(result: EngineResult): boolean {
 export function isResettingQuotaError(err: unknown): boolean {
   if (err instanceof QuotaWaitError) return true;
   if (err instanceof EngineFailedError) {
-    return quotaClassOf({ quota: err.quota, message: err.message }) === "resetting";
+    return quotaClassOf({ quota: err.quota, message: err.message, engineFailure: true }) === "resetting";
   }
   if (!isQuotaError(err)) return false;
   const text = err instanceof Error ? err.message : String(err);
@@ -103,7 +97,7 @@ export function throwIfQuotaWait(input: {
     if (input.err instanceof QuotaWaitError) throw input.err;
     if (!isQuotaError(input.err) && !isResettingQuotaError(input.err)) return;
     if (input.err instanceof EngineFailedError) {
-      kind = quotaClassOf({ quota: input.err.quota, message: input.err.message });
+      kind = quotaClassOf({ quota: input.err.quota, message: input.err.message, engineFailure: true });
       retryAfterMs = input.err.retryAfterMs;
     } else {
       const text = input.err instanceof Error ? input.err.message : String(input.err);
