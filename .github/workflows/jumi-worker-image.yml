@@ -172,6 +172,11 @@ jobs:
           # `-c` has to keep outranking a repository's `.codex` config.
           docker run --rm "${TEST_TAG}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
+          # Job pods hold no refresh token. The probe drives the installed
+          # binary at loopback with a token-only auth.json and proves it runs
+          # without refreshing and recovers from a rotated Secret volume.
+          docker run --rm "${TEST_TAG}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/codex_token_probe.ts'
           docker run --rm "${TEST_TAG}" test -f /app/review-skills/gitea-pull-review/SKILL.md
           echo "Verified gitea-pull-review skill"
 

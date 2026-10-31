@@ -183,6 +183,17 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
+      - name: Verify token-only codex auth against the installed binary
+        if: ${{ env.VERSION != '' }}
+        # Job pods hold no refresh token. The probe drives the installed binary
+        # at loopback with a token-only auth.json and proves it runs without
+        # refreshing, recovers from a rotated Secret volume after a 401, and
+        # still reports refresh failures in the text the runner hops on.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 600 bun src/codex_token_probe.ts'
+
       - name: Verify claude production flags against the installed binary
         if: ${{ env.VERSION != '' }}
         # Runs the argv `claudeArgv()` emits against a loopback stub endpoint,
