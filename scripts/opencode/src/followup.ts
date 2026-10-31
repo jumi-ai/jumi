@@ -468,11 +468,9 @@ export async function collectFollowUpItems(
     api.listIssueComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
     api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): InlineComment[] => {
-      logDefault(
-        `inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${
-          err instanceof Error ? err.message : String(err)
-        }`
-      );
+      // Forge clients throw `… → 404: …`. Anything else fails the collection.
+      if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
+      logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
       return [];
     }),
   ]);

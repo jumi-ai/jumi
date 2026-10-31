@@ -3200,7 +3200,9 @@ describe("collectFollowUpItems", () => {
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
       ],
       listPullReviewComments: async () => {
-        throw new Error("404: not found");
+        throw new Error(
+          "Gitea API GET https://gitea.example/api/v1/repos/kirmanak/demo/pulls/127/reviews/9/comments → 404: not found"
+        );
       },
     });
     const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha);
@@ -3225,7 +3227,9 @@ describe("collectFollowUpItems", () => {
     const api = makeApi({
       listIssueComments: async () => [],
       listPullReviewComments: async () => {
-        throw new Error("404: not found");
+        throw new Error(
+          "GitHub API GET https://api.github.com/repos/kirmanak/demo/pulls/127/comments → 404: Not Found"
+        );
       },
       listPullReviews: async () => [],
     });
@@ -3241,6 +3245,48 @@ describe("collectFollowUpItems", () => {
           home,
         })
       ).toBe(false);
+    });
+  });
+
+  test("rejects inline listing errors that are not a forge 404", async () => {
+    const errors = [
+      "GitHub API GET https://api.github.com/repos/kirmanak/demo/pulls/127/comments → 500: boom",
+      "GitHub API GET https://api.github.com/repos/kirmanak/demo/pulls/127/comments → 403: API rate limit exceeded",
+      "GitHub GraphQL → Something went wrong",
+      "404: not found",
+    ];
+    for (const message of errors) {
+      const api = makeApi({
+        listIssueComments: async () => [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+        ],
+        listPullReviewComments: async () => {
+          throw new Error(message);
+        },
+      });
+      await expect(collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", jumiPr().head.sha)).rejects.toThrow(
+        message
+      );
+    }
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [],
+      listPullReviewComments: async () => {
+        throw new Error("GitHub GraphQL → Something went wrong");
+      },
+    });
+    await withDirs(async (home) => {
+      await expect(
+        needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: jumiPr(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).rejects.toThrow("GitHub GraphQL → Something went wrong");
     });
   });
 
