@@ -25,7 +25,7 @@ import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
-import { standingPodRuntime } from "./runtime.ts";
+import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { isSkipLatchReason } from "./stuck.ts";
@@ -48,6 +48,8 @@ export interface RunWorkerJobExtras {
   breaker?: InfraCircuitBreaker;
   quotaCooldown?: QuotaCooldown;
   now?: () => number;
+  /** One-shot jobs inject a full-clone runtime (no shared cache). Long-running keeps the standing pod. */
+  runtime?: StandingPodRuntime;
 }
 
 function log(message: string) {
@@ -378,10 +380,23 @@ export async function processWorkerTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
-  const untrack = trackInFlightLease(async () => {
-    stopHeartbeat();
-    await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
+  let resolveJobDone!: () => void;
+  const jobDone = new Promise<void>((resolve) => {
+    resolveJobDone = resolve;
   });
+  const untrack = trackInFlightLease(
+    async () => {
+      stopHeartbeat();
+      await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
+    },
+    {
+      abort: () => {
+        abort.abort();
+        abortLocalJob(aborts, pids, key);
+      },
+      wait: () => jobDone,
+    }
+  );
 
   try {
     const job = issueJobFromRecord(row);
@@ -399,7 +414,7 @@ export async function processWorkerTick(
       tracker: api,
       forge: api,
       job,
-      runtime: standingPodRuntime,
+      runtime: extras.runtime ?? standingPodRuntime,
       giteaUrl: config.giteaUrl,
       giteaToken: config.giteaToken,
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
@@ -610,6 +625,11 @@ export async function processWorkerTick(
     return "processed";
   } finally {
     setActiveRunUsageRecording(undefined);
+    try {
+      resolveJobDone();
+    } catch {
+      // Best-effort: the shutdown wait must not throw.
+    }
     untrack();
     aborts?.delete(key);
     pids?.delete(key);

@@ -698,10 +698,17 @@ export async function processEngineTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
-  const untrack = trackInFlightLease(async () => {
-    stopHeartbeat();
-    await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
+  let resolveJobDone!: () => void;
+  const jobDone = new Promise<void>((resolve) => {
+    resolveJobDone = resolve;
   });
+  const untrack = trackInFlightLease(
+    async () => {
+      stopHeartbeat();
+      await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
+    },
+    { abort: () => abort.abort(), wait: () => jobDone }
+  );
 
   try {
     const job: ReviewJob = {
@@ -887,6 +894,11 @@ export async function processEngineTick(
     return "processed";
   } finally {
     setActiveRunUsageRecording(undefined);
+    try {
+      resolveJobDone();
+    } catch {
+      // Best-effort: the shutdown wait must not throw.
+    }
     untrack();
     stopHeartbeat();
   }

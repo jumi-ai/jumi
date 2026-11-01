@@ -2,12 +2,17 @@ import type { ReviewJobStore } from "./review_jobs.ts";
 
 type InFlightLease = {
   release: () => Promise<void>;
+  abort?: () => void;
+  wait?: () => Promise<void>;
 };
 
 const inflight = new Set<InFlightLease>();
 
-export function trackInFlightLease(release: () => Promise<void>): () => void {
-  const entry = { release };
+export function trackInFlightLease(
+  release: () => Promise<void>,
+  opts?: { abort?: () => void; wait?: () => Promise<void> }
+): () => void {
+  const entry: InFlightLease = { release, abort: opts?.abort, wait: opts?.wait };
   inflight.add(entry);
   return () => {
     inflight.delete(entry);
@@ -16,6 +21,36 @@ export function trackInFlightLease(release: () => Promise<void>): () => void {
 
 export async function releaseInFlightLeases(): Promise<void> {
   const pending = [...inflight].map((entry) => entry.release());
+  const results = await Promise.allSettled(pending);
+  const rejected = results.find((result) => result.status === "rejected");
+  if (rejected?.status === "rejected") throw rejected.reason;
+}
+
+/**
+ * Ordered shutdown: abort first, wait for the child to stop, then release.
+ * The old code released at the same moment it aborted, so the lease could be
+ * free while the child was still running and another runner could overlap the
+ * dying one. Long-running ticks now release in their own shutdown path after
+ * the awaited child settles; this helper only aborts here. One-shot mode
+ * awaits the same ordering and then exits 0 (see `src/job.ts`).
+ */
+export async function shutdownInFlightLeases(): Promise<void> {
+  const entries = [...inflight];
+  for (const entry of entries) {
+    try {
+      entry.abort?.();
+    } catch {
+      // Best-effort: abort must not block the wait below.
+    }
+  }
+  for (const entry of entries) {
+    try {
+      await entry.wait?.();
+    } catch {
+      // The job itself owns its error; shutdown only needs the child stopped.
+    }
+  }
+  const pending = entries.map((entry) => entry.release());
   const results = await Promise.allSettled(pending);
   const rejected = results.find((result) => result.status === "rejected");
   if (rejected?.status === "rejected") throw rejected.reason;
@@ -46,11 +81,11 @@ export async function releaseLeaseOnShutdown(
 export function installProcessShutdown(shutdown: AbortController, logger: (message: string) => void): void {
   const onSignal = (signal: string) => {
     logger(`received ${signal}, shutting down`);
-    const released = releaseInFlightLeases();
+    // Abort first. The tick's own shutdown path releases after the awaited
+    // child settles (abort, wait, then release), so releasing here would free
+    // the lease while the child is still running and let another runner
+    // overlap the dying one. Only abort here; the release follows the wait.
     if (!shutdown.signal.aborted) shutdown.abort();
-    void released.catch((err) => {
-      logger(`shutdown lease release failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
   };
   process.once("SIGTERM", () => onSignal("SIGTERM"));
   process.once("SIGINT", () => onSignal("SIGINT"));
