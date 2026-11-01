@@ -163,10 +163,10 @@ export async function refuseXaiOAuth(input: RefuseXaiOAuthInput): Promise<XaiRef
       ? await input.fetchRemoteImpl(input.wellKnownUrl)
       : await fetchRemoteOpenCodeConfig(input.wellKnownUrl, input.fetchImpl);
   } catch (err) {
-    input.logger?.(
-      `well-known config fetch failed, continuing without it: ${err instanceof Error ? err.message : String(err)}`
-    );
-    return { refused: false };
+    return {
+      refused: true,
+      reason: `xAI OAuth refused: cannot fetch well-known config ${input.wellKnownUrl}: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
   if (remote !== undefined && openCodeConfigUsesXai(remote)) {
     return {
