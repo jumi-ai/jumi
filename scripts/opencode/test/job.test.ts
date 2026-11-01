@@ -74,8 +74,8 @@ describe("one-shot lease conditions", () => {
       const result = await runOneShotJob({
         store,
         jobId: taken!.id,
-        engineConfig: makeConfig({ workdir: workspace, home: workspace }),
-        workerConfig: makeWorkerConfig(),
+        engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         // biome-ignore lint/suspicious/noExplicitAny: fake forge for the lease-taken path.
         api: makeReviewApi() as any,
         logger: (m) => logs.push(m),
@@ -107,8 +107,8 @@ describe("one-shot lease conditions", () => {
       const result = await runOneShotJob({
         store,
         jobId: leased!.id,
-        engineConfig: makeConfig({ workdir: workspace, home: workspace }),
-        workerConfig: makeWorkerConfig(),
+        engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         // biome-ignore lint/suspicious/noExplicitAny: fake forge for the failure path.
         api: makeReviewApi() as any,
         engineExtras: {
@@ -141,8 +141,8 @@ describe("one-shot lease conditions", () => {
     const result = await runOneShotJob({
       store: broken,
       jobId: 1,
-      engineConfig: makeConfig(),
-      workerConfig: makeWorkerConfig(),
+      engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+      workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
       // biome-ignore lint/suspicious/noExplicitAny: unreachable ledger never touches the forge.
       api: makeReviewApi() as any,
     });
@@ -320,8 +320,8 @@ describe("one-shot SIGTERM holds the lease until the child stops", () => {
     const runPromise = runOneShotJob({
       store,
       jobId: probe!.id,
-      engineConfig: makeConfig(),
-      workerConfig: makeWorkerConfig(),
+      engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+      workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
       api: {
         getRepo: async () => makeRepo(),
         getCollaboratorPermission: async () => ({ permission: "write" }),

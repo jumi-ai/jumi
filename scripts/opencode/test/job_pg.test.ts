@@ -83,8 +83,12 @@ describePg("one-shot jobs against real postgres", () => {
       const result = await runOneShotJob({
         store,
         jobId: reviewId,
-        engineConfig: makeConfig({ workdir: reviewWorkspace, home: reviewWorkspace }),
-        workerConfig: makeWorkerConfig(),
+        engineConfig: makeConfig({
+          workdir: reviewWorkspace,
+          home: reviewWorkspace,
+          opencodeWellKnownUrl: "disabled",
+        }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         api: makeReviewApi() as never,
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
@@ -109,8 +113,8 @@ describePg("one-shot jobs against real postgres", () => {
     const result = await runOneShotJob({
       store,
       jobId: workerId,
-      engineConfig: makeConfig(),
-      workerConfig: makeWorkerConfig(),
+      engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+      workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
       api: {
         getRepo: async () => makeRepo(),
         getCollaboratorPermission: async () => ({ permission: "write" }),

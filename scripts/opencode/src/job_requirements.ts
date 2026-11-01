@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { OPENCODE_WELLKNOWN_DISABLED } from "./opencode_auth.ts";
 import type { IndependentReviewConfig, NamedRunner } from "./runners.ts";
 import { isXaiModel } from "./xai_auth.ts";
 
@@ -97,7 +98,7 @@ async function fetchRemoteOpenCodeConfig(
   wellKnownUrl: string | undefined,
   fetchImpl: typeof fetch = fetch
 ): Promise<unknown | undefined> {
-  if (!wellKnownUrl) return undefined;
+  if (!wellKnownUrl || wellKnownUrl === OPENCODE_WELLKNOWN_DISABLED) return undefined;
   const base = wellKnownUrl.replace(/\/+$/, "");
   const url = `${base}/.well-known/opencode`;
   const response = await fetchImpl(url, { signal: AbortSignal.timeout(10_000) });
