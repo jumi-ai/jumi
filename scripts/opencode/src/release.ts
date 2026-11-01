@@ -30,7 +30,7 @@ const REGEX_PREFIX_RE = /^[(,=:[!&|?{};+\-*%^~<>]?$/;
 
 export type BumpKind = "major" | "minor" | "patch" | "initial";
 export type VersionDecision = BumpKind | "reuse";
-export type ImageName = "reviewer" | "worker";
+export type ImageName = "reviewer" | "worker" | "control";
 
 export interface SemVer {
   major: number;
@@ -73,6 +73,7 @@ export interface ContractEnvIssue {
 export interface DeployContract {
   reviewer: ImageContract;
   worker: ImageContract;
+  control: ImageContract;
 }
 
 export interface ReleasePlan {
@@ -541,11 +542,19 @@ export function formatContractEnvIssue(issue: ContractEnvIssue): string {
 export function contractEnvIssues(
   contract: DeployContract,
   reviewerSrc: string,
-  workerSrc: string
+  workerSrc: string,
+  controlSrc = ""
 ): ContractEnvIssue[] {
   const issues: ContractEnvIssue[] = [];
-  for (const image of ["reviewer", "worker"] as const) {
-    const expected = image === "reviewer" ? gitOpsLoaderEnv(reviewerSrc) : gitOpsLoaderEnv(workerSrc, reviewerSrc);
+  for (const image of ["reviewer", "worker", "control"] as const) {
+    const expected =
+      image === "reviewer"
+        ? gitOpsLoaderEnv(reviewerSrc)
+        : image === "worker"
+          ? gitOpsLoaderEnv(workerSrc, reviewerSrc)
+          : controlSrc
+            ? gitOpsLoaderEnv(controlSrc, reviewerSrc)
+            : { required: [], gitOps: [], optional: [], unresolved: [] };
     const listedRequired = contract[image].requiredEnv;
     const listedGitOps = contract[image].gitOpsEnv;
     const listedOptional = contract[image].optionalEnv;
@@ -592,14 +601,19 @@ export function contractEnvIssues(
 
 export function parseContract(markdown: string): DeployContract {
   if (!markdown.trim()) {
-    return { reviewer: emptyImage(), worker: emptyImage() };
+    return { reviewer: emptyImage(), worker: emptyImage(), control: emptyImage() };
   }
   const reviewer = headingSection(markdown, 3, "reviewer");
   const worker = headingSection(markdown, 3, "worker");
   if (!reviewer || !worker) {
     throw new Error("deploy/contract.md must contain ### reviewer and ### worker");
   }
-  return { reviewer: parseImage(reviewer), worker: parseImage(worker) };
+  const controlSection = headingSection(markdown, 3, "control");
+  return {
+    reviewer: parseImage(reviewer),
+    worker: parseImage(worker),
+    control: controlSection ? parseImage(controlSection) : emptyImage(),
+  };
 }
 
 function addedLines(previous: string, current: string): string[] {
@@ -683,13 +697,15 @@ export function classifyBump(previousMarkdown: string | null, currentMarkdown: s
   const current = parseContract(currentMarkdown);
   if (
     hasRequiredGitOpsChange(previous.reviewer, current.reviewer) ||
-    hasRequiredGitOpsChange(previous.worker, current.worker)
+    hasRequiredGitOpsChange(previous.worker, current.worker) ||
+    hasRequiredGitOpsChange(previous.control, current.control)
   ) {
     return "major";
   }
   if (
     hasOptionalGitOpsChange(previous.reviewer, current.reviewer) ||
-    hasOptionalGitOpsChange(previous.worker, current.worker)
+    hasOptionalGitOpsChange(previous.worker, current.worker) ||
+    hasOptionalGitOpsChange(previous.control, current.control)
   ) {
     return "minor";
   }
@@ -780,10 +796,12 @@ function formatGitOpsSection(previousMarkdown: string | null, currentMarkdown: s
   const current = parseContract(currentMarkdown);
   const reviewer = gitOpsBullets(previous.reviewer, current.reviewer);
   const worker = gitOpsBullets(previous.worker, current.worker);
-  if (reviewer.length === 0 && worker.length === 0) return "none";
+  const control = gitOpsBullets(previous.control, current.control);
+  if (reviewer.length === 0 && worker.length === 0 && control.length === 0) return "none";
   const reviewerBlock = reviewer.length > 0 ? reviewer.join("\n") : "- none";
   const workerBlock = worker.length > 0 ? worker.join("\n") : "- none";
-  return `### reviewer\n${reviewerBlock}\n### worker\n${workerBlock}`;
+  const controlBlock = control.length > 0 ? control.join("\n") : "- none";
+  return `### reviewer\n${reviewerBlock}\n### worker\n${workerBlock}\n### control\n${controlBlock}`;
 }
 
 function formatBreakingSection(previousMarkdown: string | null, currentMarkdown: string): string {
@@ -794,7 +812,7 @@ function formatBreakingSection(previousMarkdown: string | null, currentMarkdown:
   }
   const previous = parseContract(previousMarkdown);
   const current = parseContract(currentMarkdown);
-  for (const image of ["reviewer", "worker"] as const) {
+  for (const image of ["reviewer", "worker", "control"] as const) {
     for (const field of removedRequiredFields(previous[image], current[image])) {
       bullets.push(`- ${image}: removed required ${field}`);
     }

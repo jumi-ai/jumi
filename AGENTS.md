@@ -20,6 +20,8 @@ Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/o
 
 The worker image ships Temurin 21 (`JAVA_HOME=/opt/java/openjdk`). The reviewer image has no JVM. Do not add one. `type: agy` is refused unless `FORGE=github`.
 
+The `control` role (`JUMI_ROLE=control`, reviewer image, `bun run src/control.ts`) owns the Codex login: one replica, one retained volume (`/data`), no public ingress, no `DATABASE_URL`. It refreshes when remaining access-token life drops below a lifetime fraction, writes the rotated pair atomically and durably, and publishes a token-only Secret via plain HTTP. The old "one login per ordinal, never a copied auth.json" rule holds for Grok ordinals; for Codex on control deployments the only copy is the token-only Secret, never the grant. `deploy/contract.md` lists control as its own image section; a new role/env/volume/port/command there is a major bump.
+
 ## Ledger schema
 
 Only the router migrates (`PgReviewJobStore.migrate` under a Postgres advisory lock). Job-mode processes (`JUMI_JOB_MODE=1`, `openPgReviewJobStoreForJob`) never migrate; they check the schema with `assertLedgerSchema` and fail clearly when the router has not migrated yet. Schema changes stay compatible with the previous release, because a job can run on the old image for hours after a rollout.

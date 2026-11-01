@@ -419,18 +419,27 @@ describe("deploy/contract.md", () => {
     ]);
     expect(parsed.reviewer.ports).toEqual(["3000", "3001", "3010"]);
     expect(parsed.worker.ports).toEqual(["3000", "3010"]);
+    expect(parsed.control.ports).toEqual(["3000", "3010"]);
     expect(parsed.reviewer.runAs).toBe("10001:10001");
     expect(parsed.worker.runAs).toBe("10001:10001");
+    expect(parsed.control.runAs).toBe("10001:10001");
     expect(parsed.reviewer.probes).toEqual(["GET /healthz port 3000"]);
     expect(parsed.worker.probes).toEqual(["GET /healthz port 3000"]);
+    expect(parsed.control.probes).toEqual(["GET /healthz port 3000"]);
     expect(parsed.reviewer.command).toBe("bun run src/server.ts");
     expect(parsed.worker.command).toBe("bun run src/worker_server.ts");
+    expect(parsed.control.command).toBe("bun run src/control.ts");
     expect(parsed.reviewer.imageTarget).toBe("runtime");
     expect(parsed.worker.imageTarget).toBe("worker");
+    expect(parsed.control.imageTarget).toBe("runtime");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
     expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
+    expect(parsed.control.volumes).toEqual(["/data"]);
     expect(parsed.reviewer.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
     expect(parsed.worker.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
+    expect(parsed.control.requiredConstraints).toEqual([]);
+    expect(parsed.control.requiredEnv).toEqual(["JUMI_ROLE"]);
+    expect(parsed.control.gitOpsEnv).toEqual(["CONTROL_SECRET_NAME", "CONTROL_SECRET_NAMESPACE"]);
     expect(markdown).toContain("workflow_job");
   });
 
@@ -439,8 +448,10 @@ describe("deploy/contract.md", () => {
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
+    const controlSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
     const reviewer = gitOpsLoaderEnv(reviewerSrc);
     const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);
+    const control = gitOpsLoaderEnv(controlSrc, reviewerSrc);
     expect([...parsed.reviewer.requiredEnv].sort()).toEqual(reviewer.required);
     expect([...parsed.reviewer.gitOpsEnv, ...parsed.reviewer.optionalEnv].sort()).toEqual(
       [...reviewer.gitOps, ...reviewer.optional].sort()
@@ -449,13 +460,19 @@ describe("deploy/contract.md", () => {
     expect([...parsed.worker.gitOpsEnv, ...parsed.worker.optionalEnv].sort()).toEqual(
       [...worker.gitOps, ...worker.optional].sort()
     );
-    expect(contractEnvIssues(parsed, reviewerSrc, workerSrc)).toEqual([]);
+    expect([...parsed.control.requiredEnv].sort()).toEqual(control.required);
+    expect([...parsed.control.gitOpsEnv, ...parsed.control.optionalEnv].sort()).toEqual(
+      [...control.gitOps, ...control.optional].sort()
+    );
+    expect(contractEnvIssues(parsed, reviewerSrc, workerSrc, controlSrc)).toEqual([]);
     // Every name the real loaders require resolves, so nothing is skipped by the scanner.
     expect(reviewer.unresolved).toEqual([]);
     expect(worker.unresolved).toEqual([]);
+    expect(control.unresolved).toEqual([]);
     expect(reviewer.required).toContain("DATABASE_URL");
     expect(worker.optional).toContain("DATABASE_URL");
     expect(worker.required).not.toContain("DATABASE_URL");
+    expect(control.required).toEqual(["JUMI_ROLE"]);
   });
 
   test("FORGE=github keys are forge-conditional gitops env on both images", async () => {
@@ -463,6 +480,7 @@ describe("deploy/contract.md", () => {
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
+    const controlSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
     const githubKeys = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "FORGE_URL", "GITHUB_ALLOWED_ORGS"];
     const reviewer = gitOpsLoaderEnv(reviewerSrc);
     const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);
@@ -483,7 +501,7 @@ describe("deploy/contract.md", () => {
     // Dropping one from the contract fails the gate on both images.
     for (const key of githubKeys) {
       const dropped = parseContract(markdown.replaceAll(`- \`${key}\`\n`, ""));
-      expect(contractEnvIssues(dropped, reviewerSrc, workerSrc)).toEqual([
+      expect(contractEnvIssues(dropped, reviewerSrc, workerSrc, controlSrc)).toEqual([
         { image: "reviewer", name: key, kind: "missing" },
         { image: "worker", name: key, kind: "missing" },
       ]);
