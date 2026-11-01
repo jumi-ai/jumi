@@ -221,10 +221,11 @@ function scrubbedBodyText(text: string): string {
 }
 
 /**
- * Terminal refresh codes: the refresh token itself is unusable and retrying
- * will not help. Upstream uses `refresh_token_expired | reused | invalidated`
- * (401); this also treats `invalid_refresh_token` as death per the control
- * contract. Returns the matched reason, or undefined when transient.
+ * Terminal refresh codes: any 401 from the token endpoint means the refresh
+ * grant is unusable and retrying will not help (upstream treats every 401 as
+ * permanent: unknown codes become `Other` → fail fast). Known codes keep
+ * their name; an unrecognized 401 still stops refresh as `unauthorized`.
+ * Returns the matched reason, or undefined when the status is not 401.
  */
 export function codexLoginDeathReason(status: number, body: string): string | undefined {
   if (status !== 401) return undefined;
@@ -233,7 +234,7 @@ export function codexLoginDeathReason(status: number, body: string): string | un
   if (lower.includes("refresh_token_expired")) return "refresh_token_expired";
   if (lower.includes("refresh_token_invalidated")) return "refresh_token_invalidated";
   if (lower.includes("invalid_refresh_token")) return "invalid_refresh_token";
-  return undefined;
+  return "unauthorized";
 }
 
 export async function postCodexRefresh(

@@ -448,7 +448,10 @@ describe("deploy/contract.md", () => {
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
-    const controlSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
+    const controlConfigSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
+    const codexControlSrc = await readFile(join(repoRoot, "scripts/opencode/src/codex_control.ts"), "utf8");
+    const controlSrc = `${controlConfigSrc}
+${codexControlSrc}`;
     const reviewer = gitOpsLoaderEnv(reviewerSrc);
     const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);
     const control = gitOpsLoaderEnv(controlSrc, reviewerSrc);
@@ -480,7 +483,10 @@ describe("deploy/contract.md", () => {
     const parsed = parseContract(markdown);
     const reviewerSrc = await readFile(join(repoRoot, "scripts/opencode/src/config.ts"), "utf8");
     const workerSrc = await readFile(join(repoRoot, "scripts/opencode/src/worker_config.ts"), "utf8");
-    const controlSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
+    const controlConfigSrc = await readFile(join(repoRoot, "scripts/opencode/src/control_config.ts"), "utf8");
+    const codexControlSrc = await readFile(join(repoRoot, "scripts/opencode/src/codex_control.ts"), "utf8");
+    const controlSrc = `${controlConfigSrc}
+${codexControlSrc}`;
     const githubKeys = ["GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY", "FORGE_URL", "GITHUB_ALLOWED_ORGS"];
     const reviewer = gitOpsLoaderEnv(reviewerSrc);
     const worker = gitOpsLoaderEnv(workerSrc, reviewerSrc);

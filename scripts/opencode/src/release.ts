@@ -539,6 +539,7 @@ export function formatContractEnvIssue(issue: ContractEnvIssue): string {
   return `${issue.image} env \`${issue.name}\` is listed under more than one of required/gitops/optional env`;
 }
 
+/** Control runs both loaders: pass control_config.ts + codex_control.ts concatenated as controlSrc. */
 export function contractEnvIssues(
   contract: DeployContract,
   reviewerSrc: string,

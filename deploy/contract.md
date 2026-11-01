@@ -182,6 +182,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `PORT`
 - `HOME`
 - `JUMI_SECRETS_FILE`
+- `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
 - `CONTROL_K8S_API_URL`
 - `CONTROL_K8S_TOKEN_FILE`
 - `CONTROL_POLL_MS`

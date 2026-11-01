@@ -274,6 +274,8 @@ describe("codex publish retry and login death", () => {
     expect(codexLoginDeathReason(401, '{"error":"refresh_token_reused"}')).toBe("refresh_token_reused");
     expect(codexLoginDeathReason(401, "invalid_refresh_token")).toBe("invalid_refresh_token");
     expect(codexLoginDeathReason(401, "refresh_token_invalidated")).toBe("refresh_token_invalidated");
+    expect(codexLoginDeathReason(401, '{"error":"some_new_code"}')).toBe("unauthorized");
+    expect(codexLoginDeathReason(401, "")).toBe("unauthorized");
     expect(codexLoginDeathReason(500, "refresh_token_reused")).toBeUndefined();
 
     for (const body of ['{"error":"refresh_token_reused"}', "invalid_refresh_token"]) {
@@ -369,6 +371,89 @@ describe("codex publish retry and login death", () => {
       expect(metrics).toContain("codex_access_token_lifetime_seconds");
       expect(metrics).toContain("codex_last_refresh_timestamp_seconds");
       expect(codexAccessExpiryMs("bad")).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("startup publish re-reads the service-account token file on every call", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-satoken-"));
+    try {
+      const home = join(dir, "home");
+      await mkdir(join(home, ".codex"), { recursive: true });
+      const nowSec = Math.floor(Date.now() / 1000);
+      await writeFile(
+        join(home, ".codex", "auth.json"),
+        JSON.stringify(fullAuth({ accessExp: nowSec + 3600 })),
+        "utf8"
+      );
+      const tokenFile = join(dir, "sa-token");
+      await writeFile(tokenFile, "sa-v1\n", "utf8");
+      const seen: string[] = [];
+      const k8sFetch = async (_input: string, init?: RequestInit): Promise<Response> => {
+        if ((init?.method ?? "GET") === "GET") return new Response("not found", { status: 404 });
+        seen.push(String((init?.headers as Record<string, string>)?.Authorization ?? ""));
+        return new Response(JSON.stringify({}), { status: 201 });
+      };
+      resetCodexControlMetricsForTests();
+      await publishCurrentToken({
+        home,
+        k8sApiUrl: "https://k8s.example",
+        k8sNamespace: "ns",
+        k8sSecretName: "s",
+        k8sTokenFile: tokenFile,
+        k8sFetchImpl: k8sFetch,
+      });
+      await writeFile(tokenFile, "sa-v2\n", "utf8");
+      await publishCurrentToken({
+        home,
+        k8sApiUrl: "https://k8s.example",
+        k8sNamespace: "ns",
+        k8sSecretName: "s",
+        k8sTokenFile: tokenFile,
+        k8sFetchImpl: k8sFetch,
+      });
+      expect(seen).toEqual(["Bearer sa-v1", "Bearer sa-v2"]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("publish retries once with a re-read token after a 401 rotation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-sarotate-"));
+    try {
+      const home = join(dir, "home");
+      await mkdir(join(home, ".codex"), { recursive: true });
+      const nowSec = Math.floor(Date.now() / 1000);
+      await writeFile(
+        join(home, ".codex", "auth.json"),
+        JSON.stringify(fullAuth({ accessExp: nowSec + 3600 })),
+        "utf8"
+      );
+      const tokenFile = join(dir, "sa-token");
+      await writeFile(tokenFile, "sa-old\n", "utf8");
+      const seen: string[] = [];
+      const k8sFetch = async (_input: string, init?: RequestInit): Promise<Response> => {
+        if ((init?.method ?? "GET") === "GET") return new Response("not found", { status: 404 });
+        const auth = String((init?.headers as Record<string, string>)?.Authorization ?? "");
+        seen.push(auth);
+        if (auth === "Bearer sa-old") {
+          await writeFile(tokenFile, "sa-new\n", "utf8");
+          return new Response("unauthorized", { status: 401 });
+        }
+        return new Response(JSON.stringify({}), { status: 201 });
+      };
+      resetCodexControlMetricsForTests();
+      const ok = await publishCurrentToken({
+        home,
+        k8sApiUrl: "https://k8s.example",
+        k8sNamespace: "ns",
+        k8sSecretName: "s",
+        k8sTokenFile: tokenFile,
+        k8sFetchImpl: k8sFetch,
+      });
+      expect(ok).toBe(true);
+      expect(seen).toEqual(["Bearer sa-old", "Bearer sa-new"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

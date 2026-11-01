@@ -66,6 +66,8 @@ export interface ControlTickDeps {
   k8sNamespace?: string;
   k8sSecretName?: string;
   k8sToken?: string;
+  /** Projected service-account token file; re-read per tick so rotation is picked up. */
+  k8sTokenFile?: string;
   k8sFetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
   publish?: boolean;
   logger?: (message: string) => void;
@@ -84,6 +86,25 @@ async function readK8sToken(tokenFile: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+/**
+ * Projected service-account tokens rotate (default ~1h): re-read the file on
+ * every tick/publish instead of closing over the startup value, or the Secret
+ * publish 401/403s until the pod restarts. Falls back to the explicit dep
+ * token (tests, local/dev without a token file).
+ */
+async function resolveK8sToken(deps: Pick<ControlTickDeps, "k8sToken" | "k8sTokenFile">): Promise<string> {
+  if (deps.k8sTokenFile) {
+    const fresh = await readK8sToken(deps.k8sTokenFile);
+    if (fresh) return fresh;
+  }
+  return deps.k8sToken ?? "";
+}
+
+function isK8sAuthFailure(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("(401)") || message.includes("(403)");
 }
 
 /**
@@ -163,7 +184,7 @@ export async function runControlTick(state: ControlRuntimeState, deps: ControlTi
     return { refreshed: true, published: false, loginDead: false };
   }
 
-  const k8sToken = deps.k8sToken ?? "";
+  const k8sToken = await resolveK8sToken(deps);
   if (!deps.k8sApiUrl || !deps.k8sNamespace || !deps.k8sSecretName || !k8sToken) {
     logger("control: K8s publish skipped (no API, namespace, name, or token)");
     return { refreshed: true, published: false, loginDead: false };
@@ -173,15 +194,36 @@ export async function runControlTick(state: ControlRuntimeState, deps: ControlTi
   if (!isPublishableCodexAuth(tokenOnly)) {
     throw new Error("control: refusing to publish a Codex document that fails the token-only shape");
   }
-  try {
+  const publishWith = async (token: string): Promise<void> => {
     await publishTokenOnlyAuth(tokenOnly, {
-      apiUrl: deps.k8sApiUrl,
-      namespace: deps.k8sNamespace,
-      secretName: deps.k8sSecretName,
-      token: k8sToken,
+      apiUrl: deps.k8sApiUrl as string,
+      namespace: deps.k8sNamespace as string,
+      secretName: deps.k8sSecretName as string,
+      token,
       fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
     });
+  };
+  try {
+    await publishWith(k8sToken);
   } catch (err) {
+    // The token file may have rotated between the tick's read and the Secret
+    // write: re-read once and retry before counting a publish failure.
+    if (deps.k8sTokenFile && isK8sAuthFailure(err)) {
+      const retried = await resolveK8sToken(deps);
+      if (retried && retried !== k8sToken) {
+        try {
+          await publishWith(retried);
+          setCodexControlSnapshot({
+            lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000),
+          });
+          return { refreshed: true, published: true, loginDead: false };
+        } catch (retryErr) {
+          const snap = getCodexControlSnapshot();
+          setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
+          throw retryErr;
+        }
+      }
+    }
     const snap = getCodexControlSnapshot();
     setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
     throw err;
@@ -200,7 +242,7 @@ export async function publishCurrentToken(deps: ControlTickDeps): Promise<boolea
     logger("control: no Codex access token to publish at startup");
     return false;
   }
-  const k8sToken = deps.k8sToken ?? "";
+  const k8sToken = await resolveK8sToken(deps);
   if (!deps.k8sApiUrl || !deps.k8sNamespace || !deps.k8sSecretName || !k8sToken) {
     logger("control: K8s publish skipped at startup (no API, namespace, name, or token)");
     return false;
@@ -210,15 +252,32 @@ export async function publishCurrentToken(deps: ControlTickDeps): Promise<boolea
     logger("control: refusing to publish a Codex document that fails the token-only shape");
     return false;
   }
-  try {
+  const publishWith = async (token: string): Promise<void> => {
     await publishTokenOnlyAuth(tokenOnly, {
-      apiUrl: deps.k8sApiUrl,
-      namespace: deps.k8sNamespace,
-      secretName: deps.k8sSecretName,
-      token: k8sToken,
+      apiUrl: deps.k8sApiUrl as string,
+      namespace: deps.k8sNamespace as string,
+      secretName: deps.k8sSecretName as string,
+      token,
       fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
     });
+  };
+  try {
+    await publishWith(k8sToken);
   } catch (err) {
+    if (deps.k8sTokenFile && isK8sAuthFailure(err)) {
+      const retried = await resolveK8sToken(deps);
+      if (retried && retried !== k8sToken) {
+        try {
+          await publishWith(retried);
+          setCodexControlSnapshot({ lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000) });
+          return true;
+        } catch (retryErr) {
+          const snap = getCodexControlSnapshot();
+          setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
+          throw retryErr;
+        }
+      }
+    }
     const snap = getCodexControlSnapshot();
     setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
     throw err;
@@ -286,8 +345,8 @@ export async function startControl(
   const state = newControlRuntimeState();
   resetCodexControlMetricsForTests();
 
-  const k8sToken = await readK8sToken(config.k8sTokenFile);
-  if (!k8sToken) {
+  const startupToken = await readK8sToken(config.k8sTokenFile);
+  if (!startupToken) {
     logger("control: no K8s service account token; Secret publish will be skipped until the volume mounts");
   }
   const tickDeps = (): ControlTickDeps => ({
@@ -298,7 +357,9 @@ export async function startControl(
     k8sApiUrl: config.k8sApiUrl,
     k8sNamespace: config.secretNamespace,
     k8sSecretName: config.secretName,
-    k8sToken,
+    // Re-read per tick via k8sTokenFile (projected tokens rotate); the
+    // startup read above is only for this log line, never for publishing.
+    k8sTokenFile: config.k8sTokenFile,
     k8sFetchImpl: deps.fetchImpl,
     logger,
   });
