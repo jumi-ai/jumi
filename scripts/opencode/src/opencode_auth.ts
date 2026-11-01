@@ -54,7 +54,7 @@ async function readAuthFile(path: string): Promise<AuthFile> {
 async function writeAuthFile(path: string, auth: AuthFile): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(auth, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
+  await chmod(path, 0o600).catch(() => undefined);
 }
 
 function isWellKnownEntry(value: unknown): boolean {
@@ -71,6 +71,9 @@ function wellKnownCredential(value: unknown): { key: unknown; token: unknown } |
 
 export async function ensureOpenCodeWellKnownAuth(options: OpenCodeWellKnownAuthOptions): Promise<string | undefined> {
   const url = options.url === OPENCODE_WELLKNOWN_DISABLED ? undefined : options.url;
+  // A job pod starts with an empty HOME: creating it here keeps the seed from
+  // failing start when nothing else has touched the volume yet.
+  await mkdir(options.home, { recursive: true }).catch(() => undefined);
   const path = opencodeAuthPath(options.home, options.xdgDataHome);
   const auth = await readAuthFile(path);
   let changed = false;

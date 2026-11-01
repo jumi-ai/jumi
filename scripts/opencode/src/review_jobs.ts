@@ -116,6 +116,19 @@ export interface ReviewJobStore {
     now?: Date,
     kinds?: readonly JobKind[]
   ): Promise<ReviewJobRecord | undefined>;
+  /**
+   * One-shot lease for a single ledger row id. Same conditions as `lease()`:
+   * the row must be `queued`, its not-before time (`leased_until`) must have
+   * passed, no other leased worker row may hold the same issue, and the caller
+   * checks the shared role gate before calling. Returns the leased row, or the
+   * reason the row could not be leased (logged by the one-shot runner, exit 0).
+   */
+  leaseJobById(
+    id: number,
+    leasedBy: string,
+    leaseMs: number,
+    now?: Date
+  ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
   requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now?: Date): Promise<boolean>;
@@ -1032,6 +1045,31 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedUntil = ts + leaseMs;
       row.updatedAt = ts;
       return { ...row };
+    });
+  }
+
+  leaseJobById(
+    id: number,
+    leasedBy: string,
+    leaseMs: number,
+    now = new Date()
+  ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }> {
+    return this.locked(() => {
+      const ts = now.getTime();
+      const row = this.rows.find((item) => item.id === id);
+      if (!row) return { leased: false as const, reason: `row ${id} not found` };
+      if (row.state !== "queued") return { leased: false as const, reason: `row ${id} is ${row.state}, not queued` };
+      if (row.leasedUntil != null && row.leasedUntil > ts) {
+        return { leased: false as const, reason: `row ${id} not-before ${new Date(row.leasedUntil).toISOString()}` };
+      }
+      if (isWorkerKind(rowKind(row)) && workerIssueIsLeased(this.rows, row)) {
+        return { leased: false as const, reason: `issue ${row.owner}/${row.repo}#${row.issueNumber} already leased` };
+      }
+      row.state = "leased";
+      row.leasedBy = leasedBy;
+      row.leasedUntil = ts + leaseMs;
+      row.updatedAt = ts;
+      return { leased: true as const, row: { ...row } };
     });
   }
 
@@ -2562,6 +2600,76 @@ export class PgReviewJobStore implements ReviewJobStore {
     }
   }
 
+  async leaseJobById(
+    id: number,
+    leasedBy: string,
+    leaseMs: number,
+    now = new Date()
+  ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }> {
+    const until = new Date(now.getTime() + leaseMs).toISOString();
+    const nowIso = now.toISOString();
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const rows = asRows<ReviewJobRow>(
+          await this.sql.unsafe(
+            `UPDATE review_jobs
+             SET state = 'leased', leased_by = $1, leased_until = $2::timestamptz, updated_at = NOW()
+             WHERE id = $3
+               AND state = 'queued'
+               AND (leased_until IS NULL OR leased_until <= $4::timestamptz)
+               AND NOT EXISTS (
+                 SELECT 1 FROM review_jobs held
+                 WHERE held.state = 'leased'
+                   AND held.kind = ANY($5::text[])
+                   AND held.owner = review_jobs.owner
+                   AND held.repo = review_jobs.repo
+                   AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+                   AND review_jobs.kind = ANY($5::text[])
+               )
+             RETURNING *`,
+            [leasedBy, until, id, nowIso, pgTextArrayLiteral([...WORKER_JOB_KINDS])]
+          )
+        );
+        if (rows[0]) return { leased: true as const, row: mapRow(rows[0]) };
+        break;
+      } catch (err) {
+        if (!isUniqueViolation(err)) throw err;
+        if (attempt >= 1) return { leased: false as const, reason: `row ${id} already leased` };
+      }
+    }
+    const current = asRows<ReviewJobRow>(await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [id]));
+    const row = current[0];
+    if (!row) return { leased: false as const, reason: `row ${id} not found` };
+    const mapped = mapRow(row);
+    if (mapped.state !== "queued")
+      return { leased: false as const, reason: `row ${id} is ${mapped.state}, not queued` };
+    if (mapped.leasedUntil != null && mapped.leasedUntil > now.getTime()) {
+      return {
+        leased: false as const,
+        reason: `row ${id} not-before ${new Date(mapped.leasedUntil).toISOString()}`,
+      };
+    }
+    if (isWorkerKind(mapped.kind)) {
+      const held = asRows<{ id: unknown }>(
+        await this.sql.unsafe(
+          `SELECT held.id FROM review_jobs held
+           WHERE held.state = 'leased'
+             AND held.kind = ANY($1::text[])
+             AND held.owner = $2 AND held.repo = $3
+             AND held.issue_number IS NOT DISTINCT FROM $4`,
+          [pgTextArrayLiteral([...WORKER_JOB_KINDS]), mapped.owner, mapped.repo, mapped.issueNumber]
+        )
+      );
+      if (held.length > 0) {
+        return {
+          leased: false as const,
+          reason: `issue ${mapped.owner}/${mapped.repo}#${mapped.issueNumber} already leased`,
+        };
+      }
+    }
+    return { leased: false as const, reason: `row ${id} could not be leased` };
+  }
+
   async heartbeat(id: number, leasedBy: string, leaseMs: number, now = new Date()): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
@@ -2868,10 +2976,10 @@ export class PgReviewJobStore implements ReviewJobStore {
   async recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
     if (rows.length === 0) return;
     const columns =
-      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, started_at, ended_at, duration_seconds)";
+      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, started_at, ended_at, duration_seconds, clone_seconds, build_seconds)";
     const values: unknown[] = [];
     const tuples = rows.map((row, index) => {
-      const base = index * 16;
+      const base = index * 18;
       values.push(
         row.jobId,
         row.jobKey,
@@ -2888,9 +2996,11 @@ export class PgReviewJobStore implements ReviewJobStore {
         row.exitClass,
         row.startedAt.toISOString(),
         row.endedAt.toISOString(),
-        row.durationSeconds
+        row.durationSeconds,
+        row.cloneSeconds ?? null,
+        row.buildSeconds ?? null
       );
-      const refs = Array.from({ length: 16 }, (_, offset) => {
+      const refs = Array.from({ length: 18 }, (_, offset) => {
         // started_at/ended_at ride as ISO strings with an explicit cast, the
         // same way review_jobs timestamps do.
         if (offset === 13 || offset === 14) return `$${base + offset + 1}::timestamptz`;
