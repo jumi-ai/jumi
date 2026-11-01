@@ -3,7 +3,7 @@ import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "../src/auth.ts";
+import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "../src/auth.ts";
 import {
   CLAUDE_ALLOWED_TOOLS,
   CLAUDE_OUTPUT_FORMAT,
@@ -277,8 +277,9 @@ exit 1
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
         expect(result.infra).toBe(false);
-        expect(result.message).toBe(providerAuthDeathMessage());
-        expect(result.message).toContain(hostname());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
+        expect(result.message).toContain("worker");
+        expect(result.message).toContain("claude/opus");
         const text = renderRunMetrics();
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
       }
@@ -298,7 +299,7 @@ exit 1
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
         expect(result.infra).toBe(false);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
         expect(result.message).not.toContain("configuration file not found");
         expect(result.message).not.toContain("/data/.claude.json");
         expect(

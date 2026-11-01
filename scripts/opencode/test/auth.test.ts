@@ -74,11 +74,18 @@ describe("looksLikeProviderAuthDeath", () => {
 });
 
 describe("providerAuthDeathMessage", () => {
-  test("is a short hostname line", () => {
-    const message = providerAuthDeathMessage();
-    expect(message).toBe(`${hostname()}: ${AUTH_DEATH_REASON}`);
+  test("names role and runner instead of the pod hostname", () => {
+    const message = providerAuthDeathMessage({ role: "engine", runner: "opencode/xai/grok-4.6" });
+    expect(message).toBe(`engine opencode/xai/grok-4.6: ${AUTH_DEATH_REASON}`);
     expect(message).toContain("auth");
+    expect(message).not.toContain(hostname());
     expect(new TextEncoder().encode(message).byteLength).toBeLessThan(140);
+  });
+
+  test("defaults to job unknown without context", () => {
+    const message = providerAuthDeathMessage();
+    expect(message).toBe(`job unknown: ${AUTH_DEATH_REASON}`);
+    expect(looksLikeProviderAuthDeath(message)).toBe(true);
   });
 });
 

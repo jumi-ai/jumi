@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AgyStreamParser } from "./agy_usage.ts";
-import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import { looksLikeProviderAuthDeath, providerAuthDeathForRun } from "./auth.ts";
 import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
@@ -390,7 +390,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeAgyAuthDeath(message)) {
         if (stderr) log(`[agy stderr] ${stderr}`);
-        const authMessage = providerAuthDeathMessage();
+        const authMessage = providerAuthDeathForRun({ ...opts, type: "agy" });
         observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
@@ -440,7 +440,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
         status: "exit",
         exitCode,
         stdout,
-        message: providerAuthDeathMessage(),
+        message: providerAuthDeathForRun({ ...opts, type: "agy" }),
         infra: false,
         auth: true,
         durationMs,
@@ -471,7 +471,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
     const message = err instanceof Error ? err.message : String(err);
     if (looksLikeAgyAuthDeath(message)) {
-      throw new EngineFailedError(providerAuthDeathMessage(), false, { auth: true });
+      throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "agy" }), false, { auth: true });
     }
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
