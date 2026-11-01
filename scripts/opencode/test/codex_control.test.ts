@@ -270,6 +270,102 @@ describe("codex publish retry and login death", () => {
     }
   });
 
+  test("a failed tick publish is retried on the next tick without a refresh", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-tickretry-"));
+    try {
+      const home = join(dir, "home");
+      await mkdir(join(home, ".codex"), { recursive: true });
+      const nowSec = Math.floor(Date.now() / 1000);
+      await writeFile(
+        join(home, ".codex", "auth.json"),
+        JSON.stringify(
+          fullAuth({ accessExp: nowSec + 60, lastRefresh: new Date((nowSec - 3540) * 1000).toISOString() })
+        ),
+        "utf8"
+      );
+      resetCodexControlMetricsForTests();
+      const state = newControlRuntimeState();
+      const rotatedAccess = probeAccessToken(nowSec + 3600, "tick-retry");
+      let writes = 0;
+      const k8sFetch: (input: string, init?: RequestInit) => Promise<Response> = async (input, init) => {
+        if ((init?.method ?? "GET") === "GET") return new Response("not found", { status: 404 });
+        writes += 1;
+        if (writes === 1) return new Response("boom", { status: 500 });
+        const body = String(init?.body ?? "");
+        expect(body).not.toContain("refresh-live");
+        return new Response(JSON.stringify({}), { status: 201 });
+      };
+      const refreshFetch = async (input: string, init?: RequestInit): Promise<Response> => {
+        if (String(input).includes("/oauth/token")) {
+          return new Response(
+            JSON.stringify({ access_token: rotatedAccess, refresh_token: "refresh-new", id_token: probeIdToken() }),
+            { status: 200 }
+          );
+        }
+        return k8sFetch(input, init);
+      };
+      // First tick refreshes but the Secret write fails.
+      await expect(
+        runControlTick(state, {
+          home,
+          now: () => nowSec * 1000,
+          fetchImpl: refreshFetch,
+          k8sApiUrl: "https://k8s.example",
+          k8sNamespace: "ns",
+          k8sSecretName: "s",
+          k8sToken: "t",
+          k8sFetchImpl: refreshFetch,
+        })
+      ).rejects.toThrow();
+      expect(writes).toBe(1);
+      expect(state.lastPublishedAccessHash).toBeUndefined();
+      // The rotated access token is durable even though the publish failed.
+      const reread = await readCodexAuthFile(join(home, ".codex", "auth.json"));
+      expect((reread.tokens as Record<string, unknown>).access_token).toBe(rotatedAccess);
+
+      // Second tick: no refresh due, but the same access token is published.
+      let posts = 0;
+      const secondFetch = async (input: string, init?: RequestInit): Promise<Response> => {
+        if (String(input).includes("/oauth/token")) {
+          posts += 1;
+          throw new Error("must not refresh when the rotated token is fresh");
+        }
+        return k8sFetch(input, init);
+      };
+      const second = await runControlTick(state, {
+        home,
+        now: () => nowSec * 1000 + 1000,
+        fetchImpl: secondFetch,
+        k8sApiUrl: "https://k8s.example",
+        k8sNamespace: "ns",
+        k8sSecretName: "s",
+        k8sToken: "t",
+        k8sFetchImpl: secondFetch,
+      });
+      expect(posts).toBe(0);
+      expect(second.refreshed).toBe(false);
+      expect(second.published).toBe(true);
+      expect(writes).toBe(2);
+
+      // Third tick: Secret already holds this access token, so no write.
+      const third = await runControlTick(state, {
+        home,
+        now: () => nowSec * 1000 + 2000,
+        fetchImpl: secondFetch,
+        k8sApiUrl: "https://k8s.example",
+        k8sNamespace: "ns",
+        k8sSecretName: "s",
+        k8sToken: "t",
+        k8sFetchImpl: secondFetch,
+      });
+      expect(third.refreshed).toBe(false);
+      expect(third.published).toBe(false);
+      expect(writes).toBe(2);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("refresh_token_reused and invalid_refresh_token are login death", async () => {
     expect(codexLoginDeathReason(401, '{"error":"refresh_token_reused"}')).toBe("refresh_token_reused");
     expect(codexLoginDeathReason(401, "invalid_refresh_token")).toBe("invalid_refresh_token");

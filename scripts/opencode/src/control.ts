@@ -40,14 +40,20 @@ export interface ControlRuntimeState {
   loginDead: boolean;
   loginDeadReason?: string;
   deadRefreshHash?: string;
+  /** SHA-256 of the last access token successfully published to the Secret. */
+  lastPublishedAccessHash?: string;
 }
 
 export function newControlRuntimeState(): ControlRuntimeState {
   return { loginDead: false };
 }
 
+function tokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
 function refreshHash(refresh: string): string {
-  return createHash("sha256").update(refresh).digest("hex");
+  return tokenHash(refresh);
 }
 
 function readTokensRefresh(auth: CodexAuthFile): string | undefined {
@@ -55,6 +61,13 @@ function readTokensRefresh(auth: CodexAuthFile): string | undefined {
   if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return undefined;
   const refresh = (tokens as Record<string, unknown>).refresh_token;
   return typeof refresh === "string" && refresh ? refresh : undefined;
+}
+
+function readTokensAccess(auth: CodexAuthFile): string | undefined {
+  const tokens = auth.tokens;
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return undefined;
+  const access = (tokens as Record<string, unknown>).access_token;
+  return typeof access === "string" && access ? access : undefined;
 }
 
 export interface ControlTickDeps {
@@ -108,10 +121,74 @@ function isK8sAuthFailure(err: unknown): boolean {
 }
 
 /**
+ * Publish one token-only document, with a single service-account re-read
+ * retry when the projected token file rotated between the tick's read and
+ * the Secret write. Returns true on success; throws on failure (and counts
+ * one publish failure). Skips (false, no throw) when publishing is disabled
+ * or the K8s target is not configured.
+ */
+async function publishAuthDoc(
+  auth: CodexAuthFile,
+  deps: ControlTickDeps,
+  logger: (message: string) => void
+): Promise<boolean> {
+  if (deps.publish === false) return false;
+  const k8sToken = await resolveK8sToken(deps);
+  if (!deps.k8sApiUrl || !deps.k8sNamespace || !deps.k8sSecretName || !k8sToken) {
+    logger("control: K8s publish skipped (no API, namespace, name, or token)");
+    return false;
+  }
+  const tokenOnly = buildTokenOnlyAuth(auth);
+  if (!isPublishableCodexAuth(tokenOnly)) {
+    throw new Error("control: refusing to publish a Codex document that fails the token-only shape");
+  }
+  const publishWith = async (token: string): Promise<void> => {
+    await publishTokenOnlyAuth(tokenOnly, {
+      apiUrl: deps.k8sApiUrl as string,
+      namespace: deps.k8sNamespace as string,
+      secretName: deps.k8sSecretName as string,
+      token,
+      fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
+    });
+  };
+  try {
+    await publishWith(k8sToken);
+  } catch (err) {
+    // The token file may have rotated between the tick's read and the Secret
+    // write: re-read once and retry before counting a publish failure.
+    if (deps.k8sTokenFile && isK8sAuthFailure(err)) {
+      const retried = await resolveK8sToken(deps);
+      if (retried && retried !== k8sToken) {
+        try {
+          await publishWith(retried);
+          setCodexControlSnapshot({
+            lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000),
+          });
+          return true;
+        } catch (retryErr) {
+          const snap = getCodexControlSnapshot();
+          setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
+          throw retryErr;
+        }
+      }
+    }
+    const snap = getCodexControlSnapshot();
+    setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
+    throw err;
+  }
+  setCodexControlSnapshot({ lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000) });
+  return true;
+}
+
+/**
  * One control tick: refresh when the remaining access-token life drops below
- * the lifetime fraction, write the rotated pair durably, then publish the
- * token-only Secret. Login death stops refresh retries; a new device login
- * (different refresh token) clears it.
+ * the lifetime fraction, write the rotated pair durably, then ensure the
+ * token-only Secret holds the current access token. Publish is decoupled
+ * from refresh: the last successfully published access-token hash is tracked
+ * on the runtime state, and every tick publishes whenever the file's access
+ * token differs from it — so a failed publish is retried on the next tick
+ * even when no refresh is due. Login death stops refresh retries; a new
+ * device login (different refresh token) clears it.
  */
 export async function runControlTick(state: ControlRuntimeState, deps: ControlTickDeps): Promise<ControlTickResult> {
   const logger = deps.logger ?? (() => {});
@@ -145,145 +222,80 @@ export async function runControlTick(state: ControlRuntimeState, deps: ControlTi
     return { refreshed: false, published: false, loginDead: false };
   }
 
-  if (!shouldRefreshCodex(auth, now)) {
+  if (shouldRefreshCodex(auth, now)) {
+    let refreshed: { accessToken: string; refreshToken?: string; idToken?: string };
+    try {
+      refreshed = await postCodexRefresh(currentRefresh, { fetchImpl: deps.fetchImpl, tokenUrl: deps.tokenUrl });
+    } catch (err) {
+      if (err instanceof CodexLoginDeadError) {
+        state.loginDead = true;
+        state.loginDeadReason = err.reason;
+        state.deadRefreshHash = refreshHash(currentRefresh);
+        setCodexControlSnapshot({ loginDead: true, loginDeadReason: err.reason });
+        logger(`control: Codex login dead (${err.reason}); run Codex sign-in on control to restore`);
+        return { refreshed: false, published: false, loginDead: true, loginDeadReason: err.reason };
+      }
+      throw err;
+    }
+
+    const tokens = auth.tokens as Record<string, unknown>;
+    const next: CodexAuthFile = {
+      ...auth,
+      tokens: {
+        ...(tokens ?? {}),
+        access_token: refreshed.accessToken,
+        ...(refreshed.idToken ? { id_token: refreshed.idToken } : {}),
+        ...(refreshed.refreshToken ? { refresh_token: refreshed.refreshToken } : {}),
+      },
+      last_refresh: new Date(now).toISOString(),
+    };
+    await writeCodexAuthDurably(path, next);
+    const lastRefreshSec = Math.floor(now / 1000);
+    setCodexControlSnapshot({ lastRefreshTimestampSeconds: lastRefreshSec });
+    logger(`control: refreshed the Codex access token on ${path} before publishing`);
+
+    const published = await publishAuthDoc(next, deps, logger);
+    if (published) state.lastPublishedAccessHash = tokenHash(refreshed.accessToken);
+    return { refreshed: true, published, loginDead: false };
+  }
+
+  // No refresh due: still ensure the Secret holds the current access token.
+  // A failed publish (refresh-time or startup) leaves the hash unset or
+  // stale, so the next tick retries it here without waiting for the next
+  // refresh threshold.
+  const currentAccess = readTokensAccess(auth);
+  if (!currentAccess || tokenHash(currentAccess) === state.lastPublishedAccessHash) {
     return { refreshed: false, published: false, loginDead: false };
   }
-
-  let refreshed: { accessToken: string; refreshToken?: string; idToken?: string };
-  try {
-    refreshed = await postCodexRefresh(currentRefresh, { fetchImpl: deps.fetchImpl, tokenUrl: deps.tokenUrl });
-  } catch (err) {
-    if (err instanceof CodexLoginDeadError) {
-      state.loginDead = true;
-      state.loginDeadReason = err.reason;
-      state.deadRefreshHash = refreshHash(currentRefresh);
-      setCodexControlSnapshot({ loginDead: true, loginDeadReason: err.reason });
-      logger(`control: Codex login dead (${err.reason}); run Codex sign-in on control to restore`);
-      return { refreshed: false, published: false, loginDead: true, loginDeadReason: err.reason };
-    }
-    throw err;
-  }
-
-  const tokens = auth.tokens as Record<string, unknown>;
-  const next: CodexAuthFile = {
-    ...auth,
-    tokens: {
-      ...(tokens ?? {}),
-      access_token: refreshed.accessToken,
-      ...(refreshed.idToken ? { id_token: refreshed.idToken } : {}),
-      ...(refreshed.refreshToken ? { refresh_token: refreshed.refreshToken } : {}),
-    },
-    last_refresh: new Date(now).toISOString(),
-  };
-  await writeCodexAuthDurably(path, next);
-  const lastRefreshSec = Math.floor(now / 1000);
-  setCodexControlSnapshot({ lastRefreshTimestampSeconds: lastRefreshSec });
-  logger(`control: refreshed the Codex access token on ${path} before publishing`);
-
-  if (deps.publish === false) {
-    return { refreshed: true, published: false, loginDead: false };
-  }
-
-  const k8sToken = await resolveK8sToken(deps);
-  if (!deps.k8sApiUrl || !deps.k8sNamespace || !deps.k8sSecretName || !k8sToken) {
-    logger("control: K8s publish skipped (no API, namespace, name, or token)");
-    return { refreshed: true, published: false, loginDead: false };
-  }
-
-  const tokenOnly = buildTokenOnlyAuth(next, new Date(now).toISOString());
-  if (!isPublishableCodexAuth(tokenOnly)) {
-    throw new Error("control: refusing to publish a Codex document that fails the token-only shape");
-  }
-  const publishWith = async (token: string): Promise<void> => {
-    await publishTokenOnlyAuth(tokenOnly, {
-      apiUrl: deps.k8sApiUrl as string,
-      namespace: deps.k8sNamespace as string,
-      secretName: deps.k8sSecretName as string,
-      token,
-      fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
-    });
-  };
-  try {
-    await publishWith(k8sToken);
-  } catch (err) {
-    // The token file may have rotated between the tick's read and the Secret
-    // write: re-read once and retry before counting a publish failure.
-    if (deps.k8sTokenFile && isK8sAuthFailure(err)) {
-      const retried = await resolveK8sToken(deps);
-      if (retried && retried !== k8sToken) {
-        try {
-          await publishWith(retried);
-          setCodexControlSnapshot({
-            lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000),
-          });
-          return { refreshed: true, published: true, loginDead: false };
-        } catch (retryErr) {
-          const snap = getCodexControlSnapshot();
-          setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
-          throw retryErr;
-        }
-      }
-    }
-    const snap = getCodexControlSnapshot();
-    setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
-    throw err;
-  }
-  setCodexControlSnapshot({ lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000) });
-  return { refreshed: true, published: true, loginDead: false };
+  const published = await publishAuthDoc(auth, deps, logger);
+  if (published) state.lastPublishedAccessHash = tokenHash(currentAccess);
+  return { refreshed: false, published, loginDead: false };
 }
 
 /** Publish the current token-only Secret without refreshing (startup). */
-export async function publishCurrentToken(deps: ControlTickDeps): Promise<boolean> {
+export async function publishCurrentToken(deps: ControlTickDeps, state?: ControlRuntimeState): Promise<boolean> {
   const logger = deps.logger ?? (() => {});
   const path = await durableCodexAuthPath(deps.home);
   const auth = await readCodexAuthFile(path);
-  const tokens = auth.tokens as Record<string, unknown> | undefined;
-  if (!tokens || typeof tokens.access_token !== "string") {
+  const access = readTokensAccess(auth);
+  if (!access) {
     logger("control: no Codex access token to publish at startup");
     return false;
   }
-  const k8sToken = await resolveK8sToken(deps);
-  if (!deps.k8sApiUrl || !deps.k8sNamespace || !deps.k8sSecretName || !k8sToken) {
-    logger("control: K8s publish skipped at startup (no API, namespace, name, or token)");
+  let tokenOnly: CodexAuthFile;
+  try {
+    tokenOnly = buildTokenOnlyAuth(auth);
+  } catch {
+    logger("control: refusing to publish a Codex document that fails the token-only shape");
     return false;
   }
-  const tokenOnly = buildTokenOnlyAuth(auth);
   if (!isPublishableCodexAuth(tokenOnly)) {
     logger("control: refusing to publish a Codex document that fails the token-only shape");
     return false;
   }
-  const publishWith = async (token: string): Promise<void> => {
-    await publishTokenOnlyAuth(tokenOnly, {
-      apiUrl: deps.k8sApiUrl as string,
-      namespace: deps.k8sNamespace as string,
-      secretName: deps.k8sSecretName as string,
-      token,
-      fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
-    });
-  };
-  try {
-    await publishWith(k8sToken);
-  } catch (err) {
-    if (deps.k8sTokenFile && isK8sAuthFailure(err)) {
-      const retried = await resolveK8sToken(deps);
-      if (retried && retried !== k8sToken) {
-        try {
-          await publishWith(retried);
-          setCodexControlSnapshot({ lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000) });
-          return true;
-        } catch (retryErr) {
-          const snap = getCodexControlSnapshot();
-          setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
-          throw retryErr;
-        }
-      }
-    }
-    const snap = getCodexControlSnapshot();
-    setCodexControlSnapshot({ publishFailures: snap.publishFailures + 1 });
-    throw err;
-  }
-  setCodexControlSnapshot({ lastPublishTimestampSeconds: Math.floor((deps.now?.() ?? Date.now()) / 1000) });
-  return true;
+  const published = await publishAuthDoc(auth, deps, logger);
+  if (published && state) state.lastPublishedAccessHash = tokenHash(access);
+  return published;
 }
 
 export function createControlFetchHandler(opts: {
@@ -365,9 +377,10 @@ export async function startControl(
   });
 
   // Publish at startup: job pods mount the Secret, so a fresh control must
-  // publish even before the first refresh threshold is reached.
+  // publish even before the first refresh threshold is reached. The loop
+  // retries a failed startup publish via the last-published hash.
   try {
-    await publishCurrentToken(tickDeps());
+    await publishCurrentToken(tickDeps(), state);
     logger("control: published the token-only Codex Secret at startup");
   } catch (err) {
     // A failed publish is retried on the loop; startup still continues.
