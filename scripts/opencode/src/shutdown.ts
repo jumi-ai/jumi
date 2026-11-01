@@ -19,20 +19,13 @@ export function trackInFlightLease(
   };
 }
 
-export async function releaseInFlightLeases(): Promise<void> {
-  const pending = [...inflight].map((entry) => entry.release());
-  const results = await Promise.allSettled(pending);
-  const rejected = results.find((result) => result.status === "rejected");
-  if (rejected?.status === "rejected") throw rejected.reason;
-}
-
 /**
  * Ordered shutdown: abort first, wait for the child to stop, then release.
  * The old code released at the same moment it aborted, so the lease could be
  * free while the child was still running and another runner could overlap the
- * dying one. Long-running ticks now release in their own shutdown path after
- * the awaited child settles; this helper only aborts here. One-shot mode
- * awaits the same ordering and then exits 0 (see `src/job.ts`).
+ * dying one. `installProcessShutdown` only aborts here; long-running ticks
+ * release in their own shutdown path after the awaited child settles.
+ * One-shot mode awaits the same ordering and then exits 0 (see `src/job.ts`).
  */
 export async function shutdownInFlightLeases(): Promise<void> {
   const entries = [...inflight];

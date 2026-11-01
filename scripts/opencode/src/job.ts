@@ -16,7 +16,7 @@ import {
 import { patchActiveRunUsageTiming } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
 import { processEngineTick, type RunReviewJobExtras } from "./server.ts";
-import { installProcessShutdown, trackInFlightLease } from "./shutdown.ts";
+import { installProcessShutdown } from "./shutdown.ts";
 import { processWorkerTick, type RunWorkerJobExtras } from "./worker.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { loadWorkerConfig } from "./worker_config.ts";
@@ -91,6 +91,35 @@ export interface OneShotResult {
 
 function logDefault(message: string) {
   console.log(`[job] ${message}`);
+}
+
+/**
+ * A tick that returns `"processed"` swallowed its ledger errors into that
+ * status, so a dead ledger after the lease would still look like success and
+ * the Job would exit 0 while the row never reached a ledger-understood state.
+ * Re-read the row: exit non-zero when the ledger is unreachable now, or when
+ * the row is still leased to us (nothing was published, requeued, or
+ * released). A requeue (`queued`) or terminal state exits 0.
+ */
+async function verifyRowSettled(
+  store: ReviewJobStore,
+  jobId: number,
+  leasedBy: string,
+  log: (message: string) => void
+): Promise<OneShotResult> {
+  let current: ReviewJobRecord | undefined;
+  try {
+    current = await store.get(jobId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log(`ledger unreachable verifying row ${jobId}: ${message}`);
+    return { exitCode: 1, reason: "ledger unreachable" };
+  }
+  if (current && current.state === "leased" && current.leasedBy === leasedBy) {
+    log(`row ${jobId} still leased after run, ledger state unclear, exiting 1`);
+    return { exitCode: 1, reason: "ledger state unclear" };
+  }
+  return { exitCode: 0, reason: "processed" };
 }
 
 /**
@@ -234,7 +263,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
         log(lastReason.reason ?? "row could not be leased, exiting 0");
         return { exitCode: 0, reason: lastReason.reason ?? "idle" };
       }
-      return { exitCode: 0, reason: "processed" };
+      return verifyRowSettled(options.store, options.jobId, leasedBy, log);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log(`one-shot review failed: ${message}`);
@@ -283,7 +312,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
       log(lastReason.reason ?? "row could not be leased, exiting 0");
       return { exitCode: 0, reason: lastReason.reason ?? "idle" };
     }
-    return { exitCode: 0, reason: "processed" };
+    return verifyRowSettled(options.store, options.jobId, leasedBy, log);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`one-shot worker failed: ${message}`);
@@ -351,13 +380,6 @@ async function main(): Promise<void> {
   // then release the lease (the tick owns the release after its await), then
   // exit 0 so the Job does not look dead. The shared `installProcessShutdown`
   // above only aborts; the wait+release happen inside the tick.
-  const untrack = trackInFlightLease(
-    async () => {
-      // Safety net only: the tick already released after its awaited child.
-    },
-    { abort: onShutdownAbort, wait: async () => undefined }
-  );
-
   let result: OneShotResult;
   try {
     result = await runOneShotJob({
@@ -372,8 +394,6 @@ async function main(): Promise<void> {
   } catch (err) {
     console.error(`[job] failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
-  } finally {
-    untrack();
   }
 
   if (result.exitCode === 0) {
