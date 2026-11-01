@@ -148,6 +148,49 @@ describe("one-shot lease conditions", () => {
     });
     expect(result.exitCode).toBe(1);
   });
+
+  test("ledger failure mid-run exits non-zero", async () => {
+    const base = new MemoryReviewJobStore();
+    await base.enqueue(makeJob());
+    const probe = await base.lease("probe", 60_000);
+    expect(probe).toBeDefined();
+    await base.releaseLease(probe!.id, "probe");
+    const down = new Proxy(base, {
+      get(target, prop, receiver) {
+        if (prop === "markPublished" || prop === "expireLease" || prop === "requeueInfra" || prop === "saveResult") {
+          return async () => {
+            throw new Error("ledger down");
+          };
+        }
+        if (prop === "recordRoleSuccess" || prop === "recordRoleInfra" || prop === "recordRoleQuotaWait") {
+          return async () => undefined;
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as MemoryReviewJobStore;
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-ledger-down-"));
+    try {
+      const result = await runOneShotJob({
+        store: down,
+        jobId: probe!.id,
+        engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
+        // biome-ignore lint/suspicious/noExplicitAny: ledger-down path uses the fake forge.
+        api: makeReviewApi() as any,
+        engineExtras: {
+          gitRunner: frozenGitRunner() as never,
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async () => ({ status: "ok" as const, exitCode: 0, stdout: "" }),
+        },
+      });
+      expect(result.exitCode).toBe(1);
+      const row = await base.get(probe!.id);
+      expect(row?.state).toBe("leased");
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("one-shot xAI OAuth refusal", () => {
@@ -295,6 +338,30 @@ describe("one-shot xAI OAuth refusal", () => {
       opencodeConfigPath: undefined,
       wellKnownUrl: "https://example.test",
       fetchRemoteImpl: async () => ({ small_model: "xai/grok-4.6" }),
+    });
+    expect(refusal.refused).toBe(true);
+    expect(refusal.reason).toMatch(/well-known/i);
+  });
+
+  test("refuseXaiOAuth fails closed when the remote well-known fetch errors", async () => {
+    const refused = await refuseXaiOAuth({
+      chain: [{ name: "primary", type: "opencode", model: "openai/gpt-5.5" }],
+      opencodeConfigPath: undefined,
+      wellKnownUrl: "https://example.test",
+      fetchRemoteImpl: async () => {
+        throw new Error("connection reset");
+      },
+    });
+    expect(refused.refused).toBe(true);
+    expect(refused.reason).toMatch(/well-known/i);
+  });
+
+  test("refuseXaiOAuth fails closed on a well-known HTTP error", async () => {
+    const refusal = await refuseXaiOAuth({
+      chain: [{ name: "primary", type: "opencode", model: "openai/gpt-5.5" }],
+      opencodeConfigPath: undefined,
+      wellKnownUrl: "https://example.test",
+      fetchImpl: (async () => new Response("boom", { status: 500 })) as unknown as typeof fetch,
     });
     expect(refusal.refused).toBe(true);
     expect(refusal.reason).toMatch(/well-known/i);
