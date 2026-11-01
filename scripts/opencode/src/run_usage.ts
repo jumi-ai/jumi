@@ -92,7 +92,7 @@ export interface NewRunUsageRow {
   durationSeconds: number;
   /** Full-clone seconds for one-shot jobs (no shared cache). Long-running leaves this undefined. */
   cloneSeconds?: number | null;
-  /** Gradle build seconds when a build ran for the job. Null when no build ran. */
+  /** Reserved build seconds. No writer yet, so this stays null. */
   buildSeconds?: number | null;
 }
 
@@ -102,7 +102,7 @@ export interface RunUsageContext {
   kind: JobKind;
   /** Full-clone seconds measured by the one-shot runner. Undefined on long-running. */
   cloneSeconds?: number | null;
-  /** Gradle build seconds when a build ran. Undefined/null when no build ran. */
+  /** Reserved build seconds. No writer yet, so this stays null. */
   buildSeconds?: number | null;
 }
 
@@ -128,7 +128,7 @@ export function resetActiveRunUsageRecordingForTests(): void {
 }
 
 /**
- * One-shot jobs measure their full clone (and any Gradle build) before the
+ * One-shot jobs measure their full clone before the
  * first engine spawn. The tick already installed its ambient recorder by then,
  * so patch its context in place: later spawns carry the cost in their ledger
  * rows. Long-running ticks never call this and keep undefined timings.
