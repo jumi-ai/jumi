@@ -125,10 +125,25 @@ function asTrimmedString(value: unknown, max: number): string | undefined {
   return trimmed.slice(0, max);
 }
 
+function hasControlChars(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function asHttpsUrl(value: unknown): string | undefined {
   const trimmed = asTrimmedString(value, 2048);
   if (!trimmed) return undefined;
+  if (hasControlChars(trimmed)) return undefined;
   if (!/^https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+  } catch {
+    return undefined;
+  }
   return trimmed;
 }
 

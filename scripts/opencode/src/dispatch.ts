@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import type { ControlConfig } from "./control_config.ts";
 import { JOB_ID_ENV } from "./job_env.ts";
+import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import {
   type JobKind,
   REVIEW_KIND,
@@ -366,6 +367,8 @@ export interface DispatchTickDeps {
   fetchImpl?: FetchLike;
   k8sToken?: string;
   k8sTokenFile?: string;
+  k8sCaFile?: string;
+  k8sCa?: string;
   logger?: (message: string) => void;
   namespace?: string;
   startupTimeoutMs?: number;
@@ -590,6 +593,8 @@ export async function runDispatchTick(
     logger("dispatch: no K8s service account token; skipping dispatch");
     return [];
   }
+  const ca = deps.k8sCa ?? (await readK8sCa(deps.k8sCaFile ?? config.k8sCaFile));
+  const k8sFetch = ca ? withK8sCa(deps.fetchImpl ?? fetch, ca) : deps.fetchImpl;
   const results: DispatchRoleResult[] = [];
   const roles: Array<{ role: DispatchRole; enabled: boolean; maxJobs?: number; templateFile?: string }> = [
     {
@@ -623,7 +628,7 @@ export async function runDispatchTick(
         token,
         startupTimeoutMs,
         nowMs,
-        fetchImpl: deps.fetchImpl,
+        fetchImpl: k8sFetch,
         logger,
       })
     );

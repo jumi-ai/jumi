@@ -119,27 +119,63 @@ export interface DeviceLoginRecord {
  * Only the URL and the user code are returned; everything else is dropped by
  * the caller without logging.
  */
+export function stripAnsiSequences(text: string): string {
+  // OSC 8 hyperlinks carry the URL in the opening sequence
+  // (ESC ] 8 ; params ; URI ST link-text ESC ] 8 ;; ST). Keep the URI so
+  // stripping the sequence does not lose the link, then drop every other OSC.
+  // Built with String.fromCharCode so no control character appears in a regex
+  // literal (biome noControlCharactersInRegex).
+  const ESC = String.fromCharCode(27);
+  const BEL = String.fromCharCode(7);
+  const withHyperlinks = text.replace(
+    new RegExp(`${ESC}\\]8;[^${BEL}${ESC}]*?;([^${BEL}${ESC}]*)(?:${BEL}|${ESC}\\\\)`, "g"),
+    " $1 "
+  );
+  const withoutOsc = withHyperlinks.replace(new RegExp(`${ESC}\\][^${BEL}${ESC}]*(?:${BEL}|${ESC}\\\\)`, "g"), "");
+  return withoutOsc.replace(new RegExp(`${ESC}\\[[0-9;?]*[ -/]*[@-~]`, "g"), "");
+}
+
+function hasControlChars(value: string): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function isSafeDeviceUrl(value: string): boolean {
+  if (hasControlChars(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 export function parseDeviceLoginOutput(text: string): { url?: string; userCode?: string } {
+  const cleaned = stripAnsiSequences(text);
   let url: string | undefined;
   let userCode: string | undefined;
 
-  const goTo = /Go to:\s*(https?:\/\/[^\s"'<>]+)/i.exec(text);
+  const goTo = /Go to:\s*(https?:\/\/[^\s"'<>]+)/i.exec(cleaned);
   if (goTo?.[1]) url = stripTrailingPunct(goTo[1]);
   if (!url) {
-    const open = /Open\s+(https?:\/\/[^\s"'<>]+)/i.exec(text);
+    const open = /Open\s+(https?:\/\/[^\s"'<>]+)/i.exec(cleaned);
     if (open?.[1]) url = stripTrailingPunct(open[1]);
   }
   if (!url) {
     // The Codex flow prints the bare verification link without a lead-in
     // (`Open this link ... https://auth.openai.com/codex/device`). Prefer a
     // known device URL, otherwise take the first URL in the output.
-    const urls = [...text.matchAll(/https?:\/\/[^\s"'<>]+/gi)].map((m) => stripTrailingPunct(m[0]));
+    const urls = [...cleaned.matchAll(/https?:\/\/[^\s"'<>]+/gi)].map((m) => stripTrailingPunct(m[0]));
     url =
       urls.find((candidate) => candidate.toLowerCase().startsWith(CODEX_DEVICE_URL.toLowerCase())) ??
       urls.find((candidate) => /auth\.x\.ai/i.test(candidate)) ??
       urls[0];
   }
-  const code = /(?:enter code:\s*|user code:\s*|code:\s*)([A-Za-z0-9][A-Za-z0-9-]*)/i.exec(text);
+  if (url && !isSafeDeviceUrl(url)) url = undefined;
+  const code = /(?:enter code:\s*|user code:\s*|code:\s*)([A-Za-z0-9][A-Za-z0-9-]*)/i.exec(cleaned);
   if (code?.[1]) userCode = code[1].replace(/[-.,;:]+$/, "").trim() || undefined;
   if (!userCode) {
     // `Enter this one-time code (expires in 15 minutes) ABCD-EFGHI`: the code
@@ -148,7 +184,7 @@ export function parseDeviceLoginOutput(text: string): { url?: string; userCode?:
     // dash-shaped device code instead of the next word. Groups are 4-5
     // characters each.
     const oneTime = /one[- ]time code\b[\s\S]{0,120}?([A-Za-z0-9]{4,5}-[A-Za-z0-9]{4,5}(?:-[A-Za-z0-9]{4,5})?)/i.exec(
-      text
+      cleaned
     );
     if (oneTime?.[1]) userCode = oneTime[1].replace(/[-.,;:]+$/, "").trim() || undefined;
   }

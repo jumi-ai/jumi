@@ -24,6 +24,7 @@ import { scrubSecretEnv } from "./config.ts";
 import { type ControlConfig, loadControlConfig } from "./control_config.ts";
 import { createOrdinalDeviceLoginServer, deviceLoginResultLogger, ORDINAL_DEVICE_LOGIN_PORT } from "./device_login.ts";
 import { renderDispatchMetrics, runDispatchTick } from "./dispatch.ts";
+import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import { openPgReviewJobStoreForJob, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
 
@@ -83,6 +84,10 @@ export interface ControlTickDeps {
   k8sToken?: string;
   /** Projected service-account token file; re-read per tick so rotation is picked up. */
   k8sTokenFile?: string;
+  /** Cluster CA file; read once and passed as `tls.ca` on every K8s call. */
+  k8sCaFile?: string;
+  /** Test seam: CA bundle text without a file. */
+  k8sCa?: string;
   k8sFetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
   publish?: boolean;
   logger?: (message: string) => void;
@@ -117,6 +122,11 @@ async function resolveK8sToken(deps: Pick<ControlTickDeps, "k8sToken" | "k8sToke
   return deps.k8sToken ?? "";
 }
 
+async function resolveK8sCa(deps: Pick<ControlTickDeps, "k8sCa" | "k8sCaFile">): Promise<string | undefined> {
+  if (deps.k8sCa) return deps.k8sCa;
+  return readK8sCa(deps.k8sCaFile);
+}
+
 function isK8sAuthFailure(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return message.includes("(401)") || message.includes("(403)");
@@ -145,12 +155,15 @@ async function publishAuthDoc(
     throw new Error("control: refusing to publish a Codex document that fails the token-only shape");
   }
   const publishWith = async (token: string): Promise<void> => {
+    const ca = await resolveK8sCa(deps);
+    const baseFetch = deps.k8sFetchImpl ?? deps.fetchImpl;
+    const k8sFetch = ca ? withK8sCa(baseFetch ?? fetch, ca) : (baseFetch ?? fetch);
     await publishTokenOnlyAuth(tokenOnly, {
       apiUrl: deps.k8sApiUrl as string,
       namespace: deps.k8sNamespace as string,
       secretName: deps.k8sSecretName as string,
       token,
-      fetchImpl: deps.k8sFetchImpl ?? deps.fetchImpl,
+      fetchImpl: k8sFetch,
     });
   };
   try {
@@ -374,6 +387,7 @@ export async function startControl(
     // Re-read per tick via k8sTokenFile (projected tokens rotate); the
     // startup read above is only for this log line, never for publishing.
     k8sTokenFile: config.k8sTokenFile,
+    k8sCaFile: config.k8sCaFile,
     k8sFetchImpl: deps.fetchImpl,
     logger,
   });
@@ -382,8 +396,8 @@ export async function startControl(
   // publish even before the first refresh threshold is reached. The loop
   // retries a failed startup publish via the last-published hash.
   try {
-    await publishCurrentToken(tickDeps(), state);
-    logger("control: published the token-only Codex Secret at startup");
+    const published = await publishCurrentToken(tickDeps(), state);
+    if (published) logger("control: published the token-only Codex Secret at startup");
   } catch (err) {
     // A failed publish is retried on the loop; startup still continues.
     logger(`control: startup publish failed (will retry): ${err instanceof Error ? err.message : String(err)}`);
