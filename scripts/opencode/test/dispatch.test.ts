@@ -125,6 +125,7 @@ function testConfig(templateFile: string, overrides: Partial<ControlConfig> = {}
     secretNamespace: "default",
     k8sApiUrl: "https://k8s.test",
     k8sTokenFile: "/nonexistent-token-file",
+    k8sCaFile: "/nonexistent-ca.crt",
     pollMs: 60_000,
     databaseUrl: undefined,
     jobNamespace: "test-ns",

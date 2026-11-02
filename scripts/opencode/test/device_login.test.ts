@@ -15,6 +15,7 @@ import {
   ORDINAL_DEVICE_LOGIN_PORT,
   parseDeviceLoginOutput,
   SUPERGROK_SUBSCRIPTION_METHOD,
+  stripAnsiSequences,
 } from "../src/device_login.ts";
 
 describe("device login parsing", () => {
@@ -44,6 +45,25 @@ describe("device login parsing", () => {
     );
     expect(parsed.url).toBe("https://auth.openai.com/codex/device");
     expect(parsed.userCode).toBe("XXXX-XXXXX");
+  });
+
+  test("strips ANSI colours from the Codex link and code", () => {
+    const E = "\x1b";
+    const parsed = parseDeviceLoginOutput(
+      `1. Open this link in your browser and sign in to your account\n   ${E}[94mhttps://auth.openai.com/codex/device${E}[0m\n\n` +
+        `2. Enter this one-time code ${E}[90m(expires in 15 minutes)${E}[0m\n   ${E}[94mABCD-EFGHI${E}[0m\n`
+    );
+    expect(parsed.url).toBe("https://auth.openai.com/codex/device");
+    expect(parsed.userCode).toBe("ABCD-EFGHI");
+  });
+
+  test("strips OSC 8 hyperlinks without losing the URL", () => {
+    const E = "\x1b";
+    const hyperlink = `${E}]8;;https://auth.x.ai/activate${E}\\activate link${E}]8;;${E}\\`;
+    expect(stripAnsiSequences(hyperlink)).toContain("https://auth.x.ai/activate");
+    const parsed = parseDeviceLoginOutput(`Go to: ${hyperlink}\nEnter code: ABCD-1234\n`);
+    expect(parsed.url).toBe("https://auth.x.ai/activate");
+    expect(parsed.userCode).toBe("ABCD-1234");
   });
 
   test("fixed invocation uses SuperGrok method without browser callback", () => {

@@ -1,5 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
 import { SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { defaultK8sCaFile } from "./k8s_ca.ts";
 
 export interface ControlDispatchRoleConfig {
   enabled: boolean;
@@ -16,6 +17,7 @@ export interface ControlConfig {
   secretNamespace: string;
   k8sApiUrl: string;
   k8sTokenFile: string;
+  k8sCaFile: string;
   pollMs: number;
   databaseUrl?: string;
   jobNamespace: string;
@@ -135,6 +137,9 @@ export function loadControlConfig(env: Env = process.env): ControlConfig {
   if ((engineEnabled || workerEnabled) && !databaseUrl) {
     throw new Error("Missing required environment variable: DATABASE_URL");
   }
+  const k8sTokenFile =
+    optionalEnv(resolved, "CONTROL_K8S_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token") ??
+    "/var/run/secrets/kubernetes.io/serviceaccount/token";
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
@@ -143,9 +148,9 @@ export function loadControlConfig(env: Env = process.env): ControlConfig {
     secretName: optionalEnv(resolved, "CONTROL_SECRET_NAME", "codex-token") ?? "codex-token",
     secretNamespace,
     k8sApiUrl: defaultK8sApiUrl(resolved),
-    k8sTokenFile:
-      optionalEnv(resolved, "CONTROL_K8S_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token") ??
-      "/var/run/secrets/kubernetes.io/serviceaccount/token",
+    k8sTokenFile,
+    k8sCaFile:
+      optionalEnv(resolved, "CONTROL_K8S_CA_FILE", defaultK8sCaFile(k8sTokenFile)) ?? defaultK8sCaFile(k8sTokenFile),
     pollMs: intEnv(resolved, "CONTROL_POLL_MS", 60_000),
     databaseUrl,
     jobNamespace: optionalEnv(resolved, "CONTROL_JOB_NAMESPACE", secretNamespace) ?? secretNamespace,

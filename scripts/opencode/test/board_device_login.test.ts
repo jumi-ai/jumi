@@ -90,6 +90,60 @@ describe("board device login proxy", () => {
     expect(status?.userCode).toBe("XXXX-XXXXX");
   });
 
+  test("sanitize drops URLs with control characters or unparseable URLs", () => {
+    const withEscape = sanitizeDeviceLoginStatus(
+      {
+        ordinal: "w-0",
+        role: "worker",
+        hasXaiRunner: true,
+        hasCodexRunner: false,
+        authPresent: false,
+        codexAuthPresent: false,
+        leased: false,
+        state: "waiting",
+        url: "https://auth.x.ai/activate\x1b[0m",
+        userCode: "CODE-1",
+      },
+      "w-0",
+      "worker"
+    );
+    expect(withEscape?.url).toBeUndefined();
+    const withControl = sanitizeDeviceLoginStatus(
+      {
+        ordinal: "w-0",
+        role: "worker",
+        hasXaiRunner: true,
+        hasCodexRunner: false,
+        authPresent: false,
+        codexAuthPresent: false,
+        leased: false,
+        state: "waiting",
+        url: "https://auth.x.ai/activate\x00",
+        userCode: "CODE-1",
+      },
+      "w-0",
+      "worker"
+    );
+    expect(withControl?.url).toBeUndefined();
+    const valid = sanitizeDeviceLoginStatus(
+      {
+        ordinal: "w-0",
+        role: "worker",
+        hasXaiRunner: true,
+        hasCodexRunner: false,
+        authPresent: false,
+        codexAuthPresent: false,
+        leased: false,
+        state: "waiting",
+        url: "https://auth.x.ai/activate",
+        userCode: "CODE-1",
+      },
+      "w-0",
+      "worker"
+    );
+    expect(valid?.url).toBe("https://auth.x.ai/activate");
+  });
+
   test("peer factory has no device login control", async () => {
     const store = new MemoryReviewJobStore();
     const handler = createBoardFetchHandler({ store, forge: "github", peerToken: "t", logger: () => {} });

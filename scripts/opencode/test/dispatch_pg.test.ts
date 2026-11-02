@@ -106,6 +106,7 @@ function testConfig(templateFile: string, maxJobs = 5): ControlConfig {
     secretNamespace: "default",
     k8sApiUrl: "https://k8s.test",
     k8sTokenFile: "/nonexistent-token-file",
+    k8sCaFile: "/nonexistent-ca.crt",
     pollMs: 60_000,
     databaseUrl,
     jobNamespace: "test-ns",
