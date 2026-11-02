@@ -40,12 +40,18 @@ export function dispatchJobName(role: DispatchRole, row: ReviewJobRecord): strin
 
 const JOB_NAME_RE = /^jumi-(engine|worker)-(\d+)-g(\d+)-a(\d+)$/;
 
-export function parseDispatchJobName(name: string): { role: DispatchRole; rowId: number } | undefined {
+export function parseDispatchJobName(
+  name: string
+): { role: DispatchRole; rowId: number; generation: number; attempt: number } | undefined {
   const match = JOB_NAME_RE.exec(name);
   if (!match) return undefined;
   const rowId = Number(match[2]);
+  const generation = Number(match[3]);
+  const attempt = Number(match[4]);
   if (!Number.isInteger(rowId) || rowId <= 0) return undefined;
-  return { role: match[1] as DispatchRole, rowId };
+  if (!Number.isInteger(generation) || generation < 0) return undefined;
+  if (!Number.isInteger(attempt) || attempt < 0) return undefined;
+  return { role: match[1] as DispatchRole, rowId, generation, attempt };
 }
 
 // ---- metrics ----
@@ -456,7 +462,13 @@ async function dispatchOneRole(opts: {
       // path only handles Jobs the API already reports as failed.
       try {
         const row = await store.get(parsed.rowId);
-        if (row && row.state === "leased") {
+        if (row && (payloadGeneration(row) !== parsed.generation || row.attempt !== parsed.attempt)) {
+          // Stale Job for a previous run of the same row (e.g. delete of the
+          // failed Job failed, the router reclaimed, and a fresh
+          // ...-a<attempt+1> Job is now current): delete the stale object but
+          // never expire the replacement run's lease or burn its attempt.
+          logger(`dispatch ${role}: ignoring stale failed ${name} for row ${parsed.rowId}`);
+        } else if (row && row.state === "leased") {
           await store.forceExpireLease(parsed.rowId, new Date(nowMs));
         } else if (row && row.state === "queued") {
           // The pod died before leasing (startup crash, ledger-unreachable

@@ -297,6 +297,41 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
     }
   });
 
+  test("stale failed Job does not expire the replacement run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
+    try {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
+      const fake = createFakeK8s();
+      const config = testConfig(templateFile);
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      const first = [...fake.jobs.keys()][0];
+      const firstParsed = parseDispatchJobName(first)!;
+      const firstLease = await store.leaseJobById(firstParsed.rowId, "pod-1", 60000, new Date());
+      expect(firstLease.leased).toBe(true);
+      await store.forceExpireLease(firstParsed.rowId, new Date());
+      const reclaimed = await store.reclaimExpired(5, new Date(), 1000, WORKER_JOB_KINDS);
+      expect(reclaimed.requeued.length).toBe(1);
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      expect(fake.jobs.size).toBe(2);
+      const second = [...fake.jobs.keys()].find((n) => n !== first)!;
+      expect(parseDispatchJobName(second)!.attempt).toBe(1);
+      const secondLease = await store.leaseJobById(firstParsed.rowId, "pod-2", 15 * 60 * 1000, new Date());
+      expect(secondLease.leased).toBe(true);
+      (fake.jobs.get(first) as K8sJobObject).status = { failed: 1 };
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      expect(fake.jobs.has(first)).toBe(false);
+      expect(fake.jobs.has(second)).toBe(true);
+      const row = await store.get(firstParsed.rowId);
+      expect(row?.state).toBe("leased");
+      expect(row?.attempt).toBe(1);
+      expect(row?.leasedUntil).toBeGreaterThan(Date.now());
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("never-started pod is deleted with no attempt used", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
     try {

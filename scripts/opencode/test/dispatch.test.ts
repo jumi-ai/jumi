@@ -147,7 +147,7 @@ describe("dispatch job naming", () => {
     const row = (await store.peekRunnable(["review"], 1))[0];
     const name = dispatchJobName("engine", row);
     expect(name).toBe(`jumi-engine-${row.id}-g0-a0`);
-    expect(parseDispatchJobName(name)).toEqual({ role: "engine", rowId: row.id });
+    expect(parseDispatchJobName(name)).toEqual({ role: "engine", rowId: row.id, generation: 0, attempt: 0 });
     expect(parseDispatchJobName("something-else")).toBeUndefined();
   });
 
@@ -427,6 +427,49 @@ describe("dispatch idempotency and failure handling", () => {
       const reclaimed = await store.reclaimExpired(2, new Date(), 1000, WORKER_JOB_KINDS);
       expect(reclaimed.requeued.length).toBe(1);
       expect(reclaimed.requeued[0].attempt).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("stale failed Job does not expire the replacement run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
+    try {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
+      const fake = createFakeK8s();
+      const config = testConfig(templateFile, {
+        dispatchWorker: { enabled: true, maxJobs: 5, templateFile },
+      });
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      const first = [...fake.jobs.keys()][0];
+      const firstParsed = parseDispatchJobName(first)!;
+      // First run fails and is requeued: the row is now on the next attempt
+      // while the first Job object lingers (e.g. its delete failed).
+      const firstLease = await store.leaseJobById(firstParsed.rowId, "pod-1", 60000, new Date());
+      expect(firstLease.leased).toBe(true);
+      await store.forceExpireLease(firstParsed.rowId, new Date());
+      const reclaimed = await store.reclaimExpired(5, new Date(), 1000, WORKER_JOB_KINDS);
+      expect(reclaimed.requeued.length).toBe(1);
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      expect(fake.jobs.size).toBe(2);
+      const second = [...fake.jobs.keys()].find((n) => n !== first)!;
+      expect(parseDispatchJobName(second)!.attempt).toBe(1);
+      // The replacement run leased the row; the stale Job then reports failed.
+      const secondLease = await store.leaseJobById(firstParsed.rowId, "pod-2", 15 * 60 * 1000, new Date());
+      expect(secondLease.leased).toBe(true);
+      (fake.jobs.get(first) as K8sJobObject).status = { failed: 1 };
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      // Stale Job is deleted, but the current run's lease is untouched and no
+      // attempt is burned.
+      expect(fake.jobs.has(first)).toBe(false);
+      expect(fake.jobs.has(second)).toBe(true);
+      const row = await store.get(firstParsed.rowId);
+      expect(row?.state).toBe("leased");
+      expect(row?.attempt).toBe(1);
+      expect(row?.leasedUntil).toBeGreaterThan(Date.now());
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
