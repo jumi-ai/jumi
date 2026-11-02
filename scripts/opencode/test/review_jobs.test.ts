@@ -16,6 +16,32 @@ import { ISSUE_SKIP_LATCHES_SCHEMA_SQL } from "../src/skip_latches.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
 
 describe("MemoryReviewJobStore", () => {
+  test("cancel marks leased rows and cancels queued ones for the same issue", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leased?.state).toBe("leased");
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
+    expect(await store.isCancelRequested(leased!.id)).toBe(false);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(1);
+    expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("cancelled");
+    expect((await store.get(leased!.id))?.state).toBe("leased");
+    expect(await store.isCancelRequested(leased!.id)).toBe(true);
+    await store.markCancelled(leased!.id, "worker-1");
+    const settled = await store.get(leased!.id);
+    expect(settled?.state).toBe("cancelled");
+    expect(settled?.leasedBy).toBeNull();
+    expect(await store.isCancelRequested(leased!.id)).toBe(false);
+  });
+
+  test("cancel settles a queued row immediately", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(1);
+    expect(store.rows[0]?.state).toBe("cancelled");
+    expect(await store.isCancelRequested(store.rows[0]?.id ?? 0)).toBe(false);
+  });
+
   test("dedupes in-flight job_key", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeJob();
