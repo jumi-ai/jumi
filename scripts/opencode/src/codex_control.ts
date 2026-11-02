@@ -47,11 +47,11 @@ export const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV = "CODEX_REFRESH_TOKEN_URL_OVE
  * Refresh when remaining life drops below this fraction of total lifetime.
  * Total lifetime is `exp - last_refresh` (the `last_refresh` the login wrote,
  * not a hardcoded number of days: a 5-day point would refresh on every loop
- * when the real lifetime is shorter). Access tokens are ~1h, so 0.25 means
- * ~15min remaining — before the binary's own 5-minute proactive window, so
- * job pods never trigger a refresh.
+ * when the real lifetime is shorter). #351 measured `exp - iat` = 864000s, so
+ * access tokens last ~10 days; 0.5 means ~5 days remaining, leaving ~3 days of
+ * failed refreshes before the 0.2 low-lifetime alert fires — the margin #351 chose.
  */
-export const CODEX_REFRESH_THRESHOLD_FRACTION = 0.25;
+export const CODEX_REFRESH_THRESHOLD_FRACTION = 0.5;
 
 /** Cap on the one refresh POST. Runs on the control loop, not per job. */
 export const CODEX_TOKEN_TIMEOUT_MS = 30_000;

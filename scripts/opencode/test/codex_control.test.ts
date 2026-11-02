@@ -55,8 +55,7 @@ function fullAuth(opts: {
 
 describe("codex refresh threshold is a fraction", () => {
   test("fraction constant is not a hardcoded day count", () => {
-    expect(CODEX_REFRESH_THRESHOLD_FRACTION).toBeGreaterThan(0);
-    expect(CODEX_REFRESH_THRESHOLD_FRACTION).toBeLessThan(1);
+    expect(CODEX_REFRESH_THRESHOLD_FRACTION).toBe(0.5);
   });
 
   test("far-expiry token does not refresh; near-expiry does", () => {
@@ -65,7 +64,7 @@ describe("codex refresh threshold is a fraction", () => {
     const far = fullAuth({ accessExp: farExp });
     expect(shouldRefreshCodex(far, nowSec * 1000)).toBe(false);
 
-    // Remaining 5min of a 1h lifetime: 5/60 < 0.25 → refresh.
+    // Remaining 5min of a 1h lifetime: 5/60 < 0.5 → refresh.
     const nearExp = nowSec + 5 * 60;
     const near = fullAuth({ accessExp: nearExp });
     expect(shouldRefreshCodex(near, nowSec * 1000)).toBe(true);
@@ -73,14 +72,14 @@ describe("codex refresh threshold is a fraction", () => {
 
   test("short-lived token uses the same fraction", () => {
     const nowSec = Math.floor(Date.now() / 1000);
-    // 60s lifetime, 10s remaining: 10/60 < 0.25 → refresh.
+    // 60s lifetime, 10s remaining: 10/60 < 0.5 → refresh.
     const exp = nowSec + 10;
     const auth = fullAuth({ accessExp: exp, lastRefresh: new Date((exp - 60) * 1000).toISOString() });
     expect(codexTokenLifetimeMs(auth)).toBe(60_000);
     expect(codexAccessRemainingMs(auth, nowSec * 1000)).toBe(10_000);
     expect(shouldRefreshCodex(auth, nowSec * 1000)).toBe(true);
 
-    // Same 60s lifetime, 50s remaining: 50/60 > 0.25 → no refresh.
+    // Same 60s lifetime, 50s remaining: 50/60 > 0.5 → no refresh.
     const freshExp = nowSec + 50;
     const fresh = fullAuth({
       accessExp: freshExp,
