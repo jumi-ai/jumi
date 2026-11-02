@@ -42,7 +42,7 @@ import { createHash } from "node:crypto";
  *
  * Exit 0 when every case matches its expectation, 1 otherwise.
  */
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { looksLikeCodexAuthDeath } from "./codex.ts";
@@ -734,9 +734,140 @@ async function caseSecretSwap(): Promise<CaseResult[]> {
   }
 }
 
+async function casePublishedSymlink(): Promise<CaseResult[]> {
+  const dir = await mkdtemp(join(tmpdir(), "jumi-codex-token-probe-"));
+  let api: ReturnType<typeof Bun.serve> | undefined;
+  let token: ReturnType<typeof Bun.serve> | undefined;
+  try {
+    const home = join(dir, "home");
+    const codexHome = join(home, ".codex");
+    const workdir = join(dir, "work");
+    const publishedDir = join(dir, "published");
+    await mkdir(codexHome, { recursive: true });
+    await mkdir(workdir, { recursive: true });
+    await mkdir(publishedDir, { recursive: true });
+    await Bun.$`git init -q`.cwd(workdir).quiet();
+    const access = probeAccessToken(farExpiry());
+    const publishedFile = join(publishedDir, "auth.json");
+    await writeFile(publishedFile, `${JSON.stringify(tokenOnlyAuth({ accessToken: access }), null, 2)}\n`, {
+      mode: 0o600,
+    });
+    // Production shape: `$HOME/.codex/auth.json` is a symlink at the published
+    // file, `$HOME/.codex` stays writable, and the child env carries no
+    // `CODEX_HOME` override so the binary uses the HOME path.
+    await symlink(publishedFile, join(codexHome, "auth.json"));
+    const bearers: (string | null)[] = [];
+    let apiRequests = 0;
+    api = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        apiRequests += 1;
+        bearers.push(req.headers.get("authorization"));
+        return new Response(JSON.stringify({ error: { message: "jumi token probe" } }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const tokenBodies: string[] = [];
+    token = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req) {
+        tokenBodies.push(await req.text().catch(() => ""));
+        return new Response(JSON.stringify({ error: "jumi token probe: no refresh" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const origin = `http://127.0.0.1:${api.port}`;
+    const tokenOrigin = `http://127.0.0.1:${token.port}`;
+    const proc = Bun.spawn(
+      [
+        "codex",
+        "exec",
+        "--json",
+        "--color",
+        "never",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-hook-trust",
+        "-c",
+        `chatgpt_base_url="${origin}"`,
+        "-c",
+        `openai_base_url="${origin}/v1"`,
+        "-c",
+        'model_provider="openai"',
+        "-c",
+        `model="${PROBE_MODEL}"`,
+        "say ok",
+      ],
+      {
+        cwd: workdir,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+          HOME: home,
+          TMPDIR: dir,
+          CODEX_REFRESH_TOKEN_URL_OVERRIDE: `${tokenOrigin}/oauth/token`,
+        },
+      }
+    );
+    const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);
+    let stdout = "";
+    try {
+      const [out] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      stdout = out;
+    } finally {
+      clearTimeout(timer);
+    }
+    const presented = bearers.some((h) => h === `Bearer ${access}`);
+    let linkTarget = "";
+    try {
+      linkTarget = await readlink(join(codexHome, "auth.json"));
+    } catch {
+      linkTarget = "";
+    }
+    return [
+      {
+        name: "published symlink runs with the seeded bearer and no CODEX_HOME",
+        ok: presented,
+        observed: summarizeBearers(bearers, access),
+      },
+      {
+        name: "published symlink posts no token refresh",
+        ok: tokenBodies.length === 0,
+        observed: `${tokenBodies.length} token POST(s)`,
+      },
+      {
+        name: "published symlink stays a symlink at the published file",
+        ok: linkTarget === publishedFile,
+        observed: linkTarget === publishedFile ? "symlink intact" : `symlink points at ${linkTarget || "<missing>"}`,
+      },
+      {
+        name: "published symlink run reaches the model endpoint",
+        ok: threadStarted(stdout) !== undefined && apiRequests > 0,
+        observed: `${apiRequests} api request(s)`,
+      },
+    ];
+  } finally {
+    api?.stop(true);
+    token?.stop(true);
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<number> {
   const results: CaseResult[] = [];
   results.push(...(await caseFarExpiry()));
+  results.push(...(await casePublishedSymlink()));
   results.push(await caseMissingRefreshKey());
   results.push(await caseMissingLastRefresh());
   results.push(await caseBadIdToken());

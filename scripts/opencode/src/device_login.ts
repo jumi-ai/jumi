@@ -256,6 +256,15 @@ export interface DeviceLoginManagerOptions {
   logger?: (msg: string) => void;
   onResult?: (entry: DeviceLoginRecord) => Promise<void> | void;
   now?: () => number;
+  /**
+   * Run budget the published Codex token must cover for the board to report
+   * green. When `CODEX_AUTH_FILE` names a published file, presence means
+   * runnability: the token's `exp` must cover this timeout plus the binary's
+   * proactive refresh skew plus clock margin. Unset means the minimal budget
+   * (skew plus margin), which still reds an expired token, a file carrying a
+   * refresh token, or a token expiring inside the refresh window.
+   */
+  codexTimeoutMs?: number;
   /** Control refresh death: surfaced on status so the board shows re-login. */
   isLoginDead?: () => { dead: boolean; reason?: string } | Promise<{ dead: boolean; reason?: string }>;
 }
@@ -293,7 +302,9 @@ export class DeviceLoginManager {
   async getStatus(): Promise<OrdinalStatus> {
     const [authPresent, codexAuthPresent] = await Promise.all([
       isXaiOAuthPresent(this.options.home).catch(() => false),
-      isCodexChatGptPresent(this.options.home).catch(() => false),
+      isCodexChatGptPresent(this.options.home, process.env, { timeoutMs: this.options.codexTimeoutMs }).catch(
+        () => false
+      ),
     ]);
     const leased = await Promise.resolve()
       .then(() => this.options.isLeased())

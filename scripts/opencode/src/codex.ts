@@ -10,6 +10,7 @@ import {
   startChildGitProxy,
 } from "./child_git_proxy.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
+import { ensureCodexPublishedAuth } from "./codex_auth.ts";
 import { exportCodexTrace } from "./codex_tracing.ts";
 import { CodexStreamParser, type CodexTokens, codexTokensFrom } from "./codex_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
@@ -276,6 +277,27 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   }
 
   try {
+    // Published token-only mode: when `CODEX_AUTH_FILE` names a file, validate
+    // its `exp` against the run budget and symlink it into place before every
+    // spawn, including resume. A rotated token reaches a running job because
+    // Codex re-reads that path after a 401. Any failure is auth so the chain
+    // hops; never run where a refresh race is possible.
+    try {
+      const home = opts.home ?? process.env.HOME ?? opts.workdir;
+      await ensureCodexPublishedAuth({ home, timeoutMs: opts.timeoutMs });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log(`Codex published auth unusable: ${detail}`);
+      const authMessage = providerAuthDeathForRun({ ...opts, type: "codex" });
+      observeEngineRun(opts, {
+        status: "exit",
+        infra: false,
+        auth: true,
+        durationMs: Date.now() - startedAtMs,
+        message: authMessage,
+      });
+      throw new EngineFailedError(authMessage, false, { auth: true });
+    }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` Codex scans,
     // cleaned up before return so the tree stays clean.
