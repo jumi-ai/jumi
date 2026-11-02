@@ -11,9 +11,11 @@ import { dirname, join } from "node:path";
  * which is what the first real `control` deploy hit on every Secret publish
  * and every dispatch Job call.
  *
- * The CA is read once per path and cached: unlike the projected
- * service-account token it does not rotate on a short budget, and every K8s
- * call in the process should share the same trust bundle.
+ * The CA is read once per path and successful reads are cached: unlike the
+ * projected service-account token it does not rotate on a short budget, and
+ * every K8s call in the process should share the same trust bundle. Misses
+ * (absent/unreadable/empty file) are not cached, so a late service-account
+ * mount is retried on the next call instead of pinning plain `fetch`.
  */
 
 export type K8sFetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -34,16 +36,14 @@ export async function readK8sCa(caFile: string | undefined): Promise<string | un
   if (!caFile) return undefined;
   const cached = caCache.get(caFile);
   if (cached) return cached;
-  const pending = (async () => {
-    try {
-      const text = (await readFile(caFile, "utf8")).trim();
-      return text || undefined;
-    } catch {
-      return undefined;
-    }
-  })();
-  caCache.set(caFile, pending);
-  return pending;
+  try {
+    const text = (await readFile(caFile, "utf8")).trim();
+    const ca = text || undefined;
+    if (ca) caCache.set(caFile, Promise.resolve(ca));
+    return ca;
+  } catch {
+    return undefined;
+  }
 }
 
 export type K8sFetchInit = RequestInit & { tls?: { ca?: string | Buffer | Array<string | Buffer> } };

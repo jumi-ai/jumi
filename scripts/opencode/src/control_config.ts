@@ -1,6 +1,6 @@
 import { readFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { defaultK8sCaFile } from "./k8s_ca.ts";
 
 export interface ControlDispatchRoleConfig {
   enabled: boolean;
@@ -84,10 +84,6 @@ function defaultNamespace(): string {
     // Local/dev without a service account: GitOps sets CONTROL_SECRET_NAMESPACE.
   }
   return "default";
-}
-
-function defaultK8sCaFile(tokenFile: string): string {
-  return join(dirname(tokenFile), "ca.crt");
 }
 
 export function parseControlRole(value: string | undefined): "control" {
