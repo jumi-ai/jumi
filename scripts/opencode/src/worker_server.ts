@@ -214,6 +214,7 @@ async function main() {
       // skip-if-unauthed.
       hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
       hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
+      codexTimeoutMs: config.opencodeTimeoutMs,
       isLeased: async () => {
         if (aborts.size > 0) return true;
         if (!store) return false;

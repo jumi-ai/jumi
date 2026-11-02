@@ -1135,6 +1135,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         // is skip-if-unauthed.
         hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
         hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
+        codexTimeoutMs: config.opencodeTimeoutMs,
         isLeased: async () => {
           try {
             const rows = await store.listInflight(50);
