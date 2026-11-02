@@ -206,6 +206,15 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   const chain = orderedRunners(config);
   const opencodeConfigPath = (config as { opencodeConfig?: string }).opencodeConfig;
   const wellKnownUrl = (config as { opencodeWellKnownUrl?: string }).opencodeWellKnownUrl;
+  const agyRefusal = refuseAgyJobMode({
+    chain,
+    independentReview: (config as { independentReview?: import("./runners.ts").IndependentReviewConfig })
+      .independentReview,
+  });
+  if (agyRefusal.refused) {
+    log(agyRefusal.reason ?? "Antigravity refused in one-shot jobs");
+    return { exitCode: 2, reason: agyRefusal.reason ?? "Antigravity refused in one-shot jobs" };
+  }
   const refusal = await refuseXaiOAuth({
     chain,
     independentReview: (config as { independentReview?: import("./runners.ts").IndependentReviewConfig })
@@ -218,15 +227,6 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   if (refusal.refused) {
     log(refusal.reason ?? "xAI OAuth refused");
     return { exitCode: 2, reason: refusal.reason ?? "xAI OAuth refused" };
-  }
-  const agyRefusal = refuseAgyJobMode({
-    chain,
-    independentReview: (config as { independentReview?: import("./runners.ts").IndependentReviewConfig })
-      .independentReview,
-  });
-  if (agyRefusal.refused) {
-    log(agyRefusal.reason ?? "Antigravity refused in one-shot jobs");
-    return { exitCode: 2, reason: agyRefusal.reason ?? "Antigravity refused in one-shot jobs" };
   }
 
   const leasedBy = options.leasedBy ?? oneShotLeasedBy(role);

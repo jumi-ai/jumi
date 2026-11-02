@@ -393,6 +393,7 @@ describe("one-shot Antigravity refusal", () => {
       store,
       jobId: row.id,
       engineConfig: makeConfig({
+        opencodeWellKnownUrl: "disabled",
         runners: { agy: { type: "agy", model: "gemini-3-pro", effort: "high" } },
         chain: ["agy"],
       }),
@@ -415,6 +416,7 @@ describe("one-shot Antigravity refusal", () => {
       store,
       jobId: row.id,
       engineConfig: makeConfig({
+        opencodeWellKnownUrl: "disabled",
         independentReview: {
           enabled: true,
           groups: { gemini: [{ type: "agy", model: "gemini-3-pro" }] },
