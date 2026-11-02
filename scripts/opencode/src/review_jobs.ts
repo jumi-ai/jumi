@@ -94,6 +94,13 @@ export interface ReviewJobRecord {
   prUpdatedAt: number | null;
   /** A same-key review wake arrived while this row was leased; a CI-wait skip requeues instead of finishing. */
   rewakeRequested?: boolean;
+  /**
+   * Unassign arrived while this row was leased. The router sets it (see
+   * `cancelQueuedForIssue`); the one-shot job observes it on its next
+   * heartbeat, stops the child, posts the same `stopped` cleanup as
+   * `cancelIssueWork`, and settles the row via `markCancelled`.
+   */
+  cancelRequested: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -155,7 +162,22 @@ export interface ReviewJobStore {
   /** Ledger run durations by (kind, exit class), for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
   reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number, kinds?: readonly JobKind[]): Promise<ReclaimResult>;
+  /**
+   * Router cancel for one issue. Queued worker rows become `cancelled`
+   * immediately (as before); leased worker rows stay `leased` but are marked
+   * `cancel_requested` so the running one-shot job can stop its child, post
+   * the `stopped` cleanup, and settle itself via `markCancelled`. Returns the
+   * number of queued rows cancelled (leased marks are not counted: the job
+   * posts `stopped` when it settles, so the router must not post it twice).
+   */
   cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number>;
+  /** True when the router has marked a leased row cancel-requested. Polled on every heartbeat. */
+  isCancelRequested(id: number): Promise<boolean>;
+  /**
+   * One-shot settle for an observed cancel: `leased` (held by `leasedBy`) to
+   * `cancelled`, lease cleared, `cancel_requested` cleared.
+   */
+  markCancelled(id: number, leasedBy: string): Promise<void>;
   countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number>;
   countByState(): Promise<Record<ReviewJobState, number>>;
   countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
@@ -504,6 +526,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_runner TEXT;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -940,6 +963,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: incomingTs,
+        cancelRequested: false,
         createdAt: now,
         updatedAt: now,
       });
@@ -1005,6 +1029,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: null,
+        cancelRequested: false,
         createdAt: now,
         updatedAt: now,
       });
@@ -1157,6 +1182,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const ts = Date.now();
       const rewake = Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome);
       row.rewakeRequested = false;
+      row.cancelRequested = false;
       if (rewake) {
         row.state = "queued";
         row.resultReason = null;
@@ -1508,6 +1534,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: terminal.prUpdatedAt,
+        cancelRequested: false,
         createdAt: now,
         updatedAt: now,
       };
@@ -1684,6 +1711,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: null,
+        cancelRequested: false,
         createdAt: now,
         updatedAt: now,
       };
@@ -1922,6 +1950,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: null,
+        cancelRequested: false,
         createdAt: now,
         updatedAt: now,
       };
@@ -1996,15 +2025,43 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       for (const row of this.rows) {
         if (row.owner !== owner || row.repo !== repo || row.issueNumber !== issueNumber) continue;
         if (!WORKER_JOB_KINDS.includes(rowKind(row))) continue;
-        if (row.state !== "queued" && row.state !== "leased") continue;
-        row.state = "cancelled";
-        row.leasedBy = null;
-        row.leasedUntil = null;
-        row.updatedAt = now;
-        n++;
+        if (row.state === "queued") {
+          row.state = "cancelled";
+          row.leasedBy = null;
+          row.leasedUntil = null;
+          row.cancelRequested = false;
+          row.updatedAt = now;
+          n++;
+        } else if (row.state === "leased") {
+          // A running one-shot job owns this row: leave it leased so its
+          // heartbeat keeps the lease, and mark it so the job stops its own
+          // child and settles itself. The router must not post `stopped`
+          // here; the job posts it when it settles.
+          row.cancelRequested = true;
+          row.updatedAt = now;
+        }
       }
       await this.sits.clear(owner, repo, issueNumber);
       return n;
+    });
+  }
+
+  isCancelRequested(id: number): Promise<boolean> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      return row?.cancelRequested === true;
+    });
+  }
+
+  markCancelled(id: number, leasedBy: string): Promise<void> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark cancelled for job ${id}`);
+      row.state = "cancelled";
+      row.leasedBy = null;
+      row.leasedUntil = null;
+      row.cancelRequested = false;
+      row.updatedAt = Date.now();
     });
   }
 
@@ -2132,6 +2189,7 @@ type ReviewJobRow = {
   published_at: unknown;
   pr_updated_at: unknown;
   rewake_requested?: unknown;
+  cancel_requested?: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -2218,6 +2276,7 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     publishedAt: epoch(row.published_at),
     prUpdatedAt: epoch(row.pr_updated_at),
     rewakeRequested: row.rewake_requested === true || row.rewake_requested === "t",
+    cancelRequested: row.cancel_requested === true || row.cancel_requested === "t",
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
@@ -2256,6 +2315,7 @@ const REQUIRED_REVIEW_JOB_COLUMNS = [
   "payload",
   "result_runner",
   "rewake_requested",
+  "cancel_requested",
 ] as const;
 
 /**
@@ -2784,6 +2844,7 @@ export class PgReviewJobStore implements ReviewJobStore {
              result_reason = CASE WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
              published_at = CASE WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
              rewake_requested = FALSE,
+             cancel_requested = FALSE,
              leased_by = NULL,
              leased_until = NULL,
              updated_at = NOW()
@@ -2944,16 +3005,47 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
-    const rows = asRows<{ id: unknown }>(
+    const cancelled = asRows<{ id: unknown }>(
       await this.sql.unsafe(
-        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, updated_at = NOW()
-         WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
+        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
+           cancel_requested = FALSE, updated_at = NOW()
+         WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'queued'
          RETURNING id`,
         [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
       )
     );
+    // A running one-shot job owns its leased row: leave it leased so its
+    // heartbeat keeps the lease, and mark it so the job stops its own child
+    // and settles itself via markCancelled. The router must not post
+    // `stopped` for these; the job posts it when it settles.
+    await this.sql.unsafe(
+      `UPDATE review_jobs SET cancel_requested = TRUE, updated_at = NOW()
+       WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'leased'`,
+      [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
+    );
     await this.sits.clear(owner, repo, issueNumber);
-    return rows.length;
+    return cancelled.length;
+  }
+
+  async isCancelRequested(id: number): Promise<boolean> {
+    const rows = asRows<{ cancel_requested: unknown }>(
+      await this.sql.unsafe(`SELECT cancel_requested FROM review_jobs WHERE id = $1`, [id])
+    );
+    const value = rows[0]?.cancel_requested;
+    return value === true || value === "t";
+  }
+
+  async markCancelled(id: number, leasedBy: string): Promise<void> {
+    const rows = asRows<{ id: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
+           cancel_requested = FALSE, updated_at = NOW()
+         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+         RETURNING id`,
+        [id, leasedBy]
+      )
+    );
+    if (rows.length === 0) throw new Error(`cannot mark cancelled for job ${id}`);
   }
 
   async countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number> {
