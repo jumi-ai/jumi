@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { providerAuthDeathMessage } from "../src/auth.ts";
+import { AUTH_DEATH_REASON, providerAuthDeathMessage } from "../src/auth.ts";
 import { CI_ABSENT_REASON, CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
@@ -1396,10 +1396,11 @@ describe("reviewPullRequest", () => {
     });
   });
 
-  test("auth death posts a short hostname status, not OpenCode stderr", async () => {
+  test("auth death posts a short role status, not OpenCode stderr", async () => {
     await withWorkspace(async (workspace) => {
       const statuses: Array<{ state: string; description?: string }> = [];
       const grant = `opencode exited with code 1:\n${"x".repeat(400)} invalid_grant refresh token revoked`;
+      const authMessage = providerAuthDeathMessage({ role: "engine", runner: "opencode/test-model" });
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
@@ -1413,14 +1414,15 @@ describe("reviewPullRequest", () => {
             status: "exit",
             exitCode: 1,
             auth: true,
-            message: providerAuthDeathMessage(),
+            message: authMessage,
           }),
         })
-      ).rejects.toMatchObject({ auth: true, message: providerAuthDeathMessage() });
+      ).rejects.toMatchObject({ auth: true });
 
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
-      expect(statuses[1].description).toBe(`Jumi review failed: ${providerAuthDeathMessage()}`);
-      expect(statuses[1].description).toContain(hostname());
+      expect(statuses[1].description).toContain(AUTH_DEATH_REASON);
+      expect(statuses[1].description).toContain("engine");
+      expect(statuses[1].description).toContain("opencode/test-model");
       expect(statuses[1].description).toContain("auth");
       expect(statuses[1].description).not.toContain("invalid_grant");
       expect(statuses[1].description).not.toContain(grant);

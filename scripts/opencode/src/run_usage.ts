@@ -67,6 +67,9 @@ CREATE INDEX IF NOT EXISTS jumi_run_usage_job_key
 
 CREATE INDEX IF NOT EXISTS jumi_run_usage_kind_exit
   ON jumi_run_usage (kind, exit_class);
+
+ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS clone_seconds DOUBLE PRECISION NULL;
+ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS build_seconds DOUBLE PRECISION NULL;
 `;
 
 /** One per-(run, model) ledger row. Multi-model runs write one row per model. */
@@ -87,12 +90,20 @@ export interface NewRunUsageRow {
   startedAt: Date;
   endedAt: Date;
   durationSeconds: number;
+  /** Full-clone seconds for one-shot jobs (no shared cache). Long-running leaves this undefined. */
+  cloneSeconds?: number | null;
+  /** Reserved build seconds. No writer yet, so this stays null. */
+  buildSeconds?: number | null;
 }
 
 export interface RunUsageContext {
   jobId: number | null;
   jobKey: string;
   kind: JobKind;
+  /** Full-clone seconds measured by the one-shot runner. Undefined on long-running. */
+  cloneSeconds?: number | null;
+  /** Reserved build seconds. No writer yet, so this stays null. */
+  buildSeconds?: number | null;
 }
 
 export interface RunUsageRecording {
@@ -114,6 +125,24 @@ export function setActiveRunUsageRecording(recording: RunUsageRecording | undefi
 
 export function resetActiveRunUsageRecordingForTests(): void {
   activeRecording = undefined;
+}
+
+/**
+ * One-shot jobs measure their full clone before the
+ * first engine spawn. The tick already installed its ambient recorder by then,
+ * so patch its context in place: later spawns carry the cost in their ledger
+ * rows. Long-running ticks never call this and keep undefined timings.
+ */
+export function patchActiveRunUsageTiming(timing: {
+  cloneSeconds?: number | null;
+  buildSeconds?: number | null;
+}): void {
+  if (!activeRecording) return;
+  activeRecording.context = {
+    ...activeRecording.context,
+    ...(timing.cloneSeconds != null ? { cloneSeconds: timing.cloneSeconds } : {}),
+    ...(timing.buildSeconds != null ? { buildSeconds: timing.buildSeconds } : {}),
+  };
 }
 
 function escapeLabel(value: string): string {
@@ -171,6 +200,8 @@ function toRow(
     startedAt,
     endedAt,
     durationSeconds,
+    ...(context.cloneSeconds != null ? { cloneSeconds: context.cloneSeconds } : {}),
+    ...(context.buildSeconds != null ? { buildSeconds: context.buildSeconds } : {}),
   };
 }
 

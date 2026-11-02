@@ -16,7 +16,7 @@ import {
   runAgy,
 } from "../src/agy.ts";
 import { AgyStreamParser } from "../src/agy_usage.ts";
-import { providerAuthDeathMessage } from "../src/auth.ts";
+import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import { resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
@@ -591,7 +591,7 @@ exec sleep 30`
         });
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
       }
     );
   });
@@ -608,7 +608,7 @@ exec sleep 30`
       });
       expect(result.status).toBe("exit");
       expect(result.auth).toBe(true);
-      expect(result.message).toBe(providerAuthDeathMessage());
+      expect(result.message).toContain(AUTH_DEATH_REASON);
     });
   });
 
@@ -632,7 +632,7 @@ exec sleep 30`
         });
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
       }
     );
   });

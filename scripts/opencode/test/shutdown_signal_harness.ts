@@ -40,10 +40,6 @@ function spawnStubbornChild() {
   });
 }
 
-function hangForever(): Promise<never> {
-  return new Promise(() => undefined);
-}
-
 type ProbeApi = {
   comments: string[];
   statuses: Array<{ state: string }>;
@@ -101,20 +97,28 @@ const holder = role === "worker" ? "worker-1" : "engine-1";
 const kinds = role === "worker" ? WORKER_JOB_KINDS : undefined;
 let reported = false;
 const originalRelease = store.releaseLease.bind(store);
+const originalExpire = store.expireLease.bind(store);
 const workerApi = { comments: [], statuses: [] } as unknown as IssueApi & ProbeApi;
 const reviewApi = makeReviewApi();
 const api: ProbeApi = role === "worker" ? workerApi : reviewApi;
+async function reportFreed(id: number, leasedBy: string, how: string) {
+  if (reported) return;
+  reported = true;
+  const row = store.rows.find((item) => item.id === id);
+  const sibling = await store.lease("sibling", 60_000, undefined, kinds);
+  const failures = api.statuses.filter((status) => status.state === "failure").length;
+  report(
+    `FREED-${how} attempt=${row?.attempt ?? -1} sibling=${sibling?.leasedBy ?? "none"} comments=${api.comments.length} failures=${failures}`
+  );
+}
 store.releaseLease = async (id, leasedBy) => {
   const ok = await originalRelease(id, leasedBy);
-  if (ok && leasedBy === holder && !reported) {
-    reported = true;
-    const row = store.rows.find((item) => item.id === id);
-    const sibling = await store.lease("sibling", 60_000, undefined, kinds);
-    const failures = api.statuses.filter((status) => status.state === "failure").length;
-    report(
-      `FREED attempt=${row?.attempt ?? -1} sibling=${sibling?.leasedBy ?? "none"} comments=${api.comments.length} failures=${failures}`
-    );
-  }
+  if (ok && leasedBy === holder) await reportFreed(id, leasedBy, "release");
+  return ok;
+};
+store.expireLease = async (id, leasedBy) => {
+  const ok = await originalExpire(id, leasedBy);
+  if (ok && leasedBy === holder) await reportFreed(id, leasedBy, "expire");
   return ok;
 };
 
@@ -125,6 +129,12 @@ installProcessShutdown(shutdown, (message) => {
 });
 
 const child = spawnStubbornChild();
+
+function abortError(): Error {
+  const err = new Error("cancelled");
+  err.name = "AbortError";
+  return err;
+}
 
 async function run(): Promise<void> {
   if (role === "worker") {
@@ -139,7 +149,11 @@ async function run(): Promise<void> {
         implement: async (opts) => {
           await opts.onPid?.(child.pid);
           report(`READY ${child.pid}`);
-          return hangForever();
+          // Ordered shutdown: hold the lease while the child is still
+          // running. The child ignores SIGTERM, so this hangs past the
+          // shutdown abort until the test SIGKILLs the child.
+          await child.exited;
+          throw abortError();
         },
       },
       (message) => {
@@ -163,7 +177,8 @@ async function run(): Promise<void> {
       workspacePreparer: async () => undefined,
       openCodeRunner: async () => {
         report(`READY ${child.pid}`);
-        return hangForever();
+        await child.exited;
+        throw abortError();
       },
     },
     (message) => {

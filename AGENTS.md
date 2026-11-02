@@ -16,9 +16,9 @@ Reviewers: a stale line here, or a README sentence this diff makes false or leav
 
 ## Layout
 
-Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/opencode/test`. `REVIEW.md` is this repository's review rules. `README.md` documents its heading syntax, and `review_md.test.ts` pins its shape. Tool pins are `.gitea/tool-versions.env` (`agy` version and SHA-512 live as `ARG`s in `Dockerfile`, not in that env file). There is no Helm chart and no Compose file here. Cluster GitOps lives in another repository. Do not copy another deploy's hostnames, owner names, or secrets into this tree.
+Application code is `scripts/opencode` (TypeScript on Bun). Tests are `scripts/opencode/test`. One-shot Jobs run `bun run src/job.ts` with required `JUMI_JOB_ID` (`src/job.ts`, `src/job_requirements.ts`, `src/shutdown.ts` for abort-wait-release). `REVIEW.md` is this repository's review rules. `README.md` documents its heading syntax, and `review_md.test.ts` pins its shape. Tool pins are `.gitea/tool-versions.env` (`agy` version and SHA-512 live as `ARG`s in `Dockerfile`, not in that env file). There is no Helm chart and no Compose file here. Cluster GitOps lives in another repository. Do not copy another deploy's hostnames, owner names, or secrets into this tree.
 
-The worker image ships Temurin 21 (`JAVA_HOME=/opt/java/openjdk`). The reviewer image has no JVM. Do not add one. `type: agy` is refused unless `FORGE=github`.
+The worker image ships Temurin 21 (`JAVA_HOME=/opt/java/openjdk`). The reviewer image has no JVM. Do not add one. `type: agy` is refused unless `FORGE=github`. One-shot Jobs refuse xAI OAuth (chain, `independentReview`, or OpenCode `small_model`/`compaction` pinning `xai/*`); static keys such as `OPENCODE_API_KEY_FILE` keep working.
 
 ## Ledger schema
 
@@ -29,7 +29,7 @@ Only the router migrates (`PgReviewJobStore.migrate` under a Postgres advisory l
 From `scripts/opencode`, after `bun install --frozen-lockfile`:
 
 - `bun run ci` runs `biome check`, `tsc --noEmit`, and `bun test`. That is the `checks` job. It does not start Postgres.
-- `bun run test:pg` is the queue and lease suite. It needs `JUMI_TEST_DATABASE_URL`. CI runs it only in `postgres-queue`. Do not treat `bun run ci` as proof that job passed.
+- `bun run test:pg` is the queue, lease, and one-shot suite (`review_jobs_pg`, `provenance_pg`, `job_pg`). It needs `JUMI_TEST_DATABASE_URL`. CI runs it only in `postgres-queue`. Do not treat `bun run ci` as proof that job passed.
 
 Biome is 2-space indent, double quotes, semicolons, line width 120. Do not reformat unrelated files.
 
