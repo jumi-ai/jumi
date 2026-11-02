@@ -28,6 +28,7 @@ describe("board device login proxy", () => {
     expect(isValidOrdinalHost("a..b")).toBe(false);
     expect(isValidDeviceRole("engine")).toBe(true);
     expect(isValidDeviceRole("worker")).toBe(true);
+    expect(isValidDeviceRole("control")).toBe(true);
     expect(isValidDeviceRole("router")).toBe(false);
   });
 
@@ -206,16 +207,17 @@ describe("board device login proxy", () => {
     expect(html).not.toContain("Start Grok sign-in on <ordinal>");
   });
 
-  test("board page has one Codex sign-in control per ordinal beside Grok", () => {
+  test("board page sends Codex to control instead of a typed ordinal", () => {
     const html = renderBoardPage("catalog123");
     expect(html).toContain("Codex sign-in");
     expect(html).toContain("codex-link");
     expect(html).toContain("codex-code");
     expect(html).toContain("codex-expiry");
-    expect(html).toContain("write that pod's Codex auth file");
+    expect(html).toContain("control");
     expect(html).toContain("Start Codex sign-in on");
-    // Both providers coexist on the page.
+    // Grok keeps the per-ordinal flow; Codex targets the always-on control role.
     expect(html).toContain("Grok sign-in");
+    expect(html).toContain("write control's retained Codex auth file");
   });
 });
 
@@ -238,6 +240,8 @@ type ProviderCase = {
   unavailable: string;
   authNote: string;
   effect: string;
+  fixedOrdinal?: string;
+  fixedRole?: string;
 };
 
 const PROVIDERS: readonly ProviderCase[] = [
@@ -260,9 +264,11 @@ const PROVIDERS: readonly ProviderCase[] = [
     otherRunnerField: "hasXaiRunner",
     authField: "codexAuthPresent",
     otherAuthField: "authPresent",
-    unavailable: "Codex sign-in is unavailable on this ordinal (no codex runner in its chain).",
-    authNote: "That ordinal already holds a Codex ChatGPT credential (presence is not a healthy grant).",
-    effect: "This will: run a Codex device login on that pod and write that pod's Codex auth file.",
+    unavailable: "Codex sign-in is unavailable on control (the control role owns the Codex login).",
+    authNote: "Control already holds a Codex ChatGPT credential (presence is not a healthy grant).",
+    effect: "This will: run a Codex device login on control and write control's retained Codex auth file.",
+    fixedOrdinal: "control",
+    fixedRole: "control",
   },
 ];
 
@@ -625,40 +631,74 @@ describe("board device login page client", () => {
 
       ordinal.value = "";
       page.press(start);
-      expect(note.textContent).toBe(HOST_HINT);
-      expect(page.el("sheet-wrap").hidden).toBe(true);
-      page.press(page.el(`${provider.id}-check`));
-      expect(note.textContent).toBe(HOST_HINT);
-      page.press(page.el(`${provider.id}-cancel`));
-      expect(note.textContent).toBe("Enter the ordinal host first.");
-      expect(statusCalls(page.calls, provider.id)).toHaveLength(0);
-      expect(writeCalls(page.calls, "/api/board/device-login/start", provider.id)).toHaveLength(0);
-      expect(writeCalls(page.calls, "/api/board/device-login/cancel", provider.id)).toHaveLength(0);
+      if (provider.fixedOrdinal) {
+        // Codex targets control: no typed ordinal, so empty input still opens control confirm.
+        expect(page.el("sheet-wrap").hidden).toBe(false);
+        const sheetEl = page.el("sheet");
+        const closeBtn = sheetEl.children.find((child) => child.tag === "button" && child.className === "secondary");
+        if (!closeBtn) throw new Error("missing close button");
+        page.press(closeBtn);
+        expect(page.el("sheet-wrap").hidden).toBe(true);
+        const beforeCheck = page.calls.length;
+        page.press(page.el(`${provider.id}-check`));
+        await page.settle();
+        const check = page.calls[beforeCheck];
+        if (!check) throw new Error("missing status request");
+        expect(check.url).toBe("/api/board/device-login/status?ordinal=control&role=control&provider=codex");
+      } else {
+        expect(note.textContent).toBe(HOST_HINT);
+        expect(page.el("sheet-wrap").hidden).toBe(true);
+        page.press(page.el(`${provider.id}-check`));
+        expect(note.textContent).toBe(HOST_HINT);
+        page.press(page.el(`${provider.id}-cancel`));
+        expect(note.textContent).toBe("Enter the ordinal host first.");
+        expect(statusCalls(page.calls, provider.id)).toHaveLength(0);
+        expect(writeCalls(page.calls, "/api/board/device-login/start", provider.id)).toHaveLength(0);
+        expect(writeCalls(page.calls, "/api/board/device-login/cancel", provider.id)).toHaveLength(0);
+      }
 
-      ordinal.value = "  jumi-worker-0  ";
-      role.value = "nope";
-      const beforeCheck = page.calls.length;
-      page.press(page.el(`${provider.id}-check`));
-      await page.settle();
-      const check = page.calls[beforeCheck];
-      if (!check) throw new Error("missing status request");
-      const statusUrl =
-        provider.id === "codex"
-          ? "/api/board/device-login/status?ordinal=jumi-worker-0&role=worker&provider=codex"
-          : "/api/board/device-login/status?ordinal=jumi-worker-0&role=worker";
-      expect(check.url).toBe(statusUrl);
-      expect(check.init?.method).toBeUndefined();
-      expect(check.init?.cache).toBe("no-store");
-      expect(check.init?.credentials).toBe("same-origin");
-      expect(check.init?.headers).toEqual({ Accept: "application/json" });
-      expect(check.url.includes("provider=xai")).toBe(false);
+      if (provider.fixedOrdinal) {
+        ordinal.value = "ignored-ordinal";
+        role.value = "ignored-role";
+        const beforeCheck = page.calls.length;
+        page.press(page.el(`${provider.id}-check`));
+        await page.settle();
+        const check = page.calls[beforeCheck];
+        if (!check) throw new Error("missing status request");
+        expect(check.url).toBe("/api/board/device-login/status?ordinal=control&role=control&provider=codex");
+        expect(check.init?.method).toBeUndefined();
+        expect(check.init?.cache).toBe("no-store");
+        expect(check.init?.credentials).toBe("same-origin");
+        expect(check.init?.headers).toEqual({ Accept: "application/json" });
 
-      role.value = "engine";
-      role.emit("change");
-      await page.settle();
-      const roleCheck = statusCalls(page.calls, provider.id).at(-1);
-      expect(roleCheck?.url).toContain("role=engine");
-      expect(roleCheck?.url).toContain("ordinal=jumi-worker-0");
+        role.value = "engine";
+        role.emit("change");
+        await page.settle();
+        const roleCheck = statusCalls(page.calls, provider.id).at(-1);
+        expect(roleCheck?.url).toContain("role=control");
+        expect(roleCheck?.url).toContain("ordinal=control");
+      } else {
+        ordinal.value = "  jumi-worker-0  ";
+        role.value = "nope";
+        const beforeCheck = page.calls.length;
+        page.press(page.el(`${provider.id}-check`));
+        await page.settle();
+        const check = page.calls[beforeCheck];
+        if (!check) throw new Error("missing status request");
+        expect(check.url).toBe("/api/board/device-login/status?ordinal=jumi-worker-0&role=worker");
+        expect(check.init?.method).toBeUndefined();
+        expect(check.init?.cache).toBe("no-store");
+        expect(check.init?.credentials).toBe("same-origin");
+        expect(check.init?.headers).toEqual({ Accept: "application/json" });
+        expect(check.url.includes("provider=xai")).toBe(false);
+
+        role.value = "engine";
+        role.emit("change");
+        await page.settle();
+        const roleCheck = statusCalls(page.calls, provider.id).at(-1);
+        expect(roleCheck?.url).toContain("role=engine");
+        expect(roleCheck?.url).toContain("ordinal=jumi-worker-0");
+      }
 
       page.setStatus(provider.id, {
         ...baseStatus(),
@@ -735,23 +775,29 @@ describe("board device login page client", () => {
       expect(note.textContent).toBe("Ordinal unavailable. The router reaches it once the chart change lands.");
 
       page.setStatus(provider.id, { ...baseStatus(), state: "idle" });
-      ordinal.value = "jumi-worker-0";
-      role.value = "engine";
+      if (provider.fixedOrdinal) {
+        ordinal.value = "ignored-ordinal";
+        role.value = "ignored-role";
+      } else {
+        ordinal.value = "jumi-worker-0";
+        role.value = "engine";
+      }
       page.press(start);
       expect(page.el("sheet-wrap").hidden).toBe(false);
       const sheet = page.el("sheet");
+      const expectedTarget = provider.fixedOrdinal ?? "jumi-worker-0";
       expect(sheet.children.find((child) => child.tag === "h2")?.textContent).toBe(
-        `Start ${provider.label} sign-in on jumi-worker-0?`
+        `Start ${provider.label} sign-in on ${expectedTarget}?`
       );
       expect(sheet.children.find((child) => child.className === "sub")?.textContent).toBe(
-        "engine ordinal jumi-worker-0"
+        provider.fixedOrdinal ? "control role" : "engine ordinal jumi-worker-0"
       );
       expect(sheet.children.find((child) => child.className === "consequence")?.textContent).toBe(provider.effect);
       const primaryButtons = sheet.children.filter((child) => child.tag === "button" && child.className === "primary");
       const closeButtons = sheet.children.filter((child) => child.tag === "button" && child.className === "secondary");
       expect(primaryButtons).toHaveLength(1);
       expect(closeButtons).toHaveLength(1);
-      expect(primaryButtons[0]?.textContent).toBe(`Start ${provider.label} sign-in on jumi-worker-0`);
+      expect(primaryButtons[0]?.textContent).toBe(`Start ${provider.label} sign-in on ${expectedTarget}`);
       expect(primaryButtons[0]?.type).toBe("button");
       expect(closeButtons[0]?.textContent).toBe("Close");
       page.press(closeButtons[0] as FakeEl);
@@ -786,9 +832,11 @@ describe("board device login page client", () => {
       expect(startCall?.init?.credentials).toBe("same-origin");
       expect(startCall?.init?.headers).toEqual({ "Content-Type": "application/json", Accept: "application/json" });
       expect(JSON.parse(String(startCall?.init?.body))).toEqual(
-        provider.provider
-          ? { ordinal: "jumi-worker-0", role: "engine", provider: "codex" }
-          : { ordinal: "jumi-worker-0", role: "engine" }
+        provider.fixedOrdinal
+          ? { ordinal: "control", role: "control", provider: "codex" }
+          : provider.provider
+            ? { ordinal: "jumi-worker-0", role: "engine", provider: "codex" }
+            : { ordinal: "jumi-worker-0", role: "engine" }
       );
 
       page.setStart(provider.id, 200);
@@ -829,9 +877,11 @@ describe("board device login page client", () => {
       expect(cancelCall?.init?.credentials).toBe("same-origin");
       expect(cancelCall?.init?.headers).toEqual({ "Content-Type": "application/json", Accept: "application/json" });
       expect(JSON.parse(String(cancelCall?.init?.body))).toEqual(
-        provider.provider
-          ? { ordinal: "jumi-worker-0", role: "engine", provider: "codex" }
-          : { ordinal: "jumi-worker-0", role: "engine" }
+        provider.fixedOrdinal
+          ? { ordinal: "control", role: "control", provider: "codex" }
+          : provider.provider
+            ? { ordinal: "jumi-worker-0", role: "engine", provider: "codex" }
+            : { ordinal: "jumi-worker-0", role: "engine" }
       );
       expect(page.pollsFor(provider.id)).toBe(0);
       expect(note.textContent).toBe("Sign-in cancelled.");

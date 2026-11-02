@@ -52,7 +52,7 @@ export type DeviceLoginBoardState = "idle" | "waiting" | "signed-in" | "expired"
 
 export interface DeviceLoginBoardStatus {
   ordinal: string;
-  role: "engine" | "worker";
+  role: "engine" | "worker" | "control";
   hasXaiRunner: boolean;
   hasCodexRunner: boolean;
   authPresent: boolean;
@@ -66,14 +66,16 @@ export interface DeviceLoginBoardStatus {
   expiresAt?: number;
   error?: string;
   available: boolean;
+  loginDead?: boolean;
+  loginDeadReason?: string;
 }
 
 export type BoardDeviceFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
 const DNS_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
-export function isValidDeviceRole(value: unknown): value is "engine" | "worker" {
-  return value === "engine" || value === "worker";
+export function isValidDeviceRole(value: unknown): value is "engine" | "worker" | "control" {
+  return value === "engine" || value === "worker" || value === "control";
 }
 
 export function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProviderName {
@@ -144,7 +146,7 @@ function asUserCode(value: unknown): string | undefined {
 export function sanitizeDeviceLoginStatus(
   value: unknown,
   fallbackOrdinal: string,
-  fallbackRole: "engine" | "worker"
+  fallbackRole: "engine" | "worker" | "control"
 ): DeviceLoginBoardStatus | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const rec = value as Record<string, unknown>;
@@ -176,10 +178,18 @@ export function sanitizeDeviceLoginStatus(
   if (typeof rec.expiresAt === "number" && Number.isFinite(rec.expiresAt)) status.expiresAt = rec.expiresAt;
   const error = asTrimmedString(rec.error, 500);
   if (error) status.error = error;
+  if (rec.loginDead === true) {
+    status.loginDead = true;
+    const reason = asTrimmedString(rec.loginDeadReason, 64);
+    if (reason) status.loginDeadReason = reason;
+  }
   return status;
 }
 
-export function deviceLoginOrdinalUnavailable(ordinal: string, role: "engine" | "worker"): DeviceLoginBoardStatus {
+export function deviceLoginOrdinalUnavailable(
+  ordinal: string,
+  role: "engine" | "worker" | "control"
+): DeviceLoginBoardStatus {
   return {
     ordinal,
     role,

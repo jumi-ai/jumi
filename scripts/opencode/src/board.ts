@@ -1023,13 +1023,10 @@ button.secondary { opacity: 0.85; }
 </section>
 <section class="list" aria-label="Codex sign-in" id="codex">
 <h2>Codex sign-in</h2>
-<div class="sub">Start a Codex device login on one homelab engine or worker ordinal. No exec into the pod.</div>
+<div class="sub">Start a Codex device login on the always-on control role. No exec into the pod. Long-running per-ordinal logins keep working until they move.</div>
 <div class="codex-controls">
-<label>Role <select id="codex-role" aria-label="Ordinal role">
-<option value="worker">worker</option>
-<option value="engine">engine</option>
-</select></label>
-<label>Ordinal <input id="codex-ordinal" inputmode="text" autocomplete="off" spellcheck="false" placeholder="jumi-worker-0" aria-label="Ordinal host"></label>
+<label>Role <input id="codex-role" value="control" disabled aria-label="Control role"></label>
+<label>Target <input id="codex-ordinal" value="control" disabled aria-label="Control host"></label>
 <button id="codex-check" class="secondary" type="button">Check status</button>
 <button id="codex-start" class="primary" type="button">Start Codex sign-in</button>
 <button id="codex-cancel" class="secondary" type="button">Cancel sign-in</button>
@@ -1370,8 +1367,9 @@ function mountDeviceLogin(cfg) {
     };
   }
   function ordinalOf() {
+    if (cfg.fixedOrdinal) return { role: cfg.fixedRole || "control", ordinal: cfg.fixedOrdinal };
     const box = els();
-    const role = box.role ? (box.role.value === "engine" ? "engine" : "worker") : "worker";
+    const role = box.role ? (box.role.value === "engine" ? "engine" : box.role.value === "control" ? "control" : "worker") : "worker";
     const ordinal = box.ordinal ? box.ordinal.value.trim() : "";
     return { role, ordinal };
   }
@@ -1502,7 +1500,7 @@ function mountDeviceLogin(cfg) {
     sheet.appendChild(title);
     const sub = document.createElement("div");
     sub.className = "sub";
-    sub.textContent = role + " ordinal " + ordinal;
+    sub.textContent = role === "control" ? "control role" : role + " ordinal " + ordinal;
     sheet.appendChild(sub);
     const consequence = document.createElement("p");
     consequence.className = "consequence";
@@ -1569,8 +1567,8 @@ function mountDeviceLogin(cfg) {
     box.section.style.display = isGithub ? "none" : "";
   }
   const box = els();
-  if (!box.role || !box.ordinal || !box.start) return;
-  box.role.addEventListener("change", () => { fetchStatus(false); });
+  if (!box.start) return;
+  if (box.role) box.role.addEventListener("change", () => { fetchStatus(false); });
   if (box.check) box.check.addEventListener("click", () => { fetchStatus(true); });
   if (box.cancel) box.cancel.addEventListener("click", async () => {
     const picked = ordinalOf();
@@ -1622,12 +1620,14 @@ mountDeviceLogin({
 mountDeviceLogin({
   id: "codex",
   provider: "codex",
+  fixedOrdinal: "control",
+  fixedRole: "control",
   runnerField: "hasCodexRunner",
   authField: "codexAuthPresent",
-  unavailableNote: "Codex sign-in is unavailable on this ordinal (no codex runner in its chain).",
-  authPresentNote: "That ordinal already holds a Codex ChatGPT credential (presence is not a healthy grant).",
+  unavailableNote: "Codex sign-in is unavailable on control (the control role owns the Codex login).",
+  authPresentNote: "Control already holds a Codex ChatGPT credential (presence is not a healthy grant).",
   confirmPrompt: "Start Codex sign-in on ",
-  confirmEffect: "This will: run a Codex device login on that pod and write that pod's Codex auth file.",
+  confirmEffect: "This will: run a Codex device login on control and write control's retained Codex auth file.",
 });
 setInterval(load, 15000);
 load();
