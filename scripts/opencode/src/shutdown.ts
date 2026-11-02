@@ -1,54 +1,5 @@
 import type { ReviewJobStore } from "./review_jobs.ts";
 
-type InFlightLease = {
-  release: () => Promise<void>;
-  abort?: () => void;
-  wait?: () => Promise<void>;
-};
-
-const inflight = new Set<InFlightLease>();
-
-export function trackInFlightLease(
-  release: () => Promise<void>,
-  opts?: { abort?: () => void; wait?: () => Promise<void> }
-): () => void {
-  const entry: InFlightLease = { release, abort: opts?.abort, wait: opts?.wait };
-  inflight.add(entry);
-  return () => {
-    inflight.delete(entry);
-  };
-}
-
-/**
- * Ordered shutdown: abort first, wait for the child to stop, then release.
- * The old code released at the same moment it aborted, so the lease could be
- * free while the child was still running and another runner could overlap the
- * dying one. `installProcessShutdown` only aborts here; long-running ticks
- * release in their own shutdown path after the awaited child settles.
- * One-shot mode awaits the same ordering and then exits 0 (see `src/job.ts`).
- */
-export async function shutdownInFlightLeases(): Promise<void> {
-  const entries = [...inflight];
-  for (const entry of entries) {
-    try {
-      entry.abort?.();
-    } catch {
-      // Best-effort: abort must not block the wait below.
-    }
-  }
-  for (const entry of entries) {
-    try {
-      await entry.wait?.();
-    } catch {
-      // The job itself owns its error; shutdown only needs the child stopped.
-    }
-  }
-  const pending = entries.map((entry) => entry.release());
-  const results = await Promise.allSettled(pending);
-  const rejected = results.find((result) => result.status === "rejected");
-  if (rejected?.status === "rejected") throw rejected.reason;
-}
-
 export async function releaseLeaseOnShutdown(
   store: ReviewJobStore,
   id: number,
@@ -74,10 +25,13 @@ export async function releaseLeaseOnShutdown(
 export function installProcessShutdown(shutdown: AbortController, logger: (message: string) => void): void {
   const onSignal = (signal: string) => {
     logger(`received ${signal}, shutting down`);
-    // Abort first. The tick's own shutdown path releases after the awaited
-    // child settles (abort, wait, then release), so releasing here would free
-    // the lease while the child is still running and let another runner
-    // overlap the dying one. Only abort here; the release follows the wait.
+    // Ordered shutdown: abort first, wait for the child to stop, then
+    // release. The old code released at the same moment it aborted, so the
+    // lease could be free while the child was still running and another
+    // runner could overlap the dying one. Only abort here; each tick awaits
+    // its child and releases in its own shutdown path after the child
+    // settles (see the `releaseLeaseOnShutdown` calls in `src/server.ts` and
+    // `src/worker.ts`). One-shot mode then exits 0 (see `src/job.ts`).
     if (!shutdown.signal.aborted) shutdown.abort();
   };
   process.once("SIGTERM", () => onSignal("SIGTERM"));
