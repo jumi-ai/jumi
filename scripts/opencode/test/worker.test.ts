@@ -136,7 +136,7 @@ describe("handleIssueCancel", () => {
     }
   });
 
-  test("ledger cancel does not kill an unrelated claim pid", async () => {
+  test("ledger cancel marks a leased row instead of killing an unrelated claim pid", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
     try {
       const child = Bun.spawn(["sleep", "30"]);
@@ -165,10 +165,14 @@ describe("handleIssueCancel", () => {
         new Map(),
         new Map()
       );
-      expect(store.rows[0]?.state).toBe("cancelled");
+      // Leased rows stay leased with the mark; the running job posts
+      // `stopped` when it settles, so the router posts nothing here. HOME
+      // claim files are not read in ledger mode.
+      expect(store.rows[0]?.state).toBe("leased");
+      expect(store.rows[0]?.cancelRequested).toBe(true);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
       expect(isPidAlive(child.pid)).toBe(true);
-      expect(api.comments.at(-1)).toContain("stopped");
+      expect(api.comments).toEqual([]);
       child.kill();
       await child.exited;
     } finally {
@@ -206,7 +210,7 @@ describe("handleIssueCancel", () => {
     }
   });
 
-  test("kills recorded pid and cancels leased rows", async () => {
+  test("kills recorded pid and marks leased rows for the tick to settle", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
     try {
       const child = Bun.spawn(["sleep", "30"]);
@@ -219,11 +223,14 @@ describe("handleIssueCancel", () => {
       const api = makeApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store, aborts, pids);
       expect(aborts.get(key)?.signal.aborted).toBe(true);
-      expect(store.rows[0]?.state).toBe("cancelled");
-      expect(store.rows[0]?.leasedBy).toBeNull();
+      // The router marks; the running tick settles (posts `stopped` and
+      // marks cancelled) when it observes the mark.
+      expect(store.rows[0]?.state).toBe("leased");
+      expect(store.rows[0]?.cancelRequested).toBe(true);
+      expect(store.rows[0]?.leasedBy).toBe("worker-1");
       await child.exited;
       expect(child.exitCode === 0).toBe(false);
-      expect(api.comments.at(-1)).toContain("stopped");
+      expect(api.comments).toEqual([]);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -507,8 +514,12 @@ describe("processWorkerTick", () => {
         new Map(),
         new Map()
       );
-      expect(store.rows[0]?.state).toBe("cancelled");
+      // Another replica cannot reach this pod's AbortController: the row
+      // stays leased with the mark until this holder's heartbeat observes it.
+      expect(store.rows[0]?.state).toBe("leased");
+      expect(store.rows[0]?.cancelRequested).toBe(true);
       expect(await tick).toBe("processed");
+      expect(store.rows[0]?.state).toBe("cancelled");
       await child.exited;
       expect(child.exitCode === 0).toBe(false);
     } finally {

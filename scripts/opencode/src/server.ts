@@ -508,7 +508,10 @@ async function publishWorkerReclaimRow(
   } else {
     logger(`reclaim-publish ${row.jobKey} has no issue number; marking failed without a forge comment`);
   }
-  await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+  const published = await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+  if (published.cancelled && row.issueNumber != null) {
+    await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, "stopped");
+  }
 }
 
 export interface ReclaimResultSummary {
