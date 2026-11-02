@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { loadConfig, type ServiceConfig, scrubSecretEnv } from "./config.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
+import { JOB_ID_ENV } from "./job_env.ts";
 import { refuseXaiOAuth } from "./job_requirements.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewApi } from "./review.ts";
@@ -22,7 +23,7 @@ import type { WorkerConfig } from "./worker_config.ts";
 import { loadWorkerConfig } from "./worker_config.ts";
 import type { checkoutPullRequestWorkspace } from "./workspace.ts";
 
-export const JOB_ID_ENV = "JUMI_JOB_ID";
+export { JOB_ID_ENV };
 
 export function parseJobId(value: string | undefined): number {
   const raw = (value ?? "").trim();

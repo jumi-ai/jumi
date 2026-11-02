@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type { ControlConfig } from "./control_config.ts";
-import { JOB_ID_ENV } from "./job.ts";
+import { JOB_ID_ENV } from "./job_env.ts";
 import {
   type JobKind,
   REVIEW_KIND,
@@ -107,18 +107,22 @@ export function renderDispatchMetrics(): string {
   }
   lines.push("# HELP jumi_dispatch_errors_total Dispatcher errors by role and operation");
   lines.push("# TYPE jumi_dispatch_errors_total counter");
-  const entries = [...errorCounts.entries()].sort(([a], [b]) => a.localeCompare(b));
-  if (entries.length === 0) {
-    for (const role of ["engine", "worker"] as const) {
-      for (const op of ["create", "list", "delete", "template", "expire", "pods"] as const) {
-        lines.push(`jumi_dispatch_errors_total{role="${role}",op="${op}"} 0`);
-      }
+  const knownOps = ["create", "list", "delete", "template", "expire", "pods"] as const;
+  const known = new Set(knownOps);
+  for (const role of ["engine", "worker"] as const) {
+    for (const op of knownOps) {
+      lines.push(`jumi_dispatch_errors_total{role="${role}",op="${op}"} ${errorCounts.get(`${role}\0${op}`) ?? 0}`);
     }
-  } else {
-    for (const [key, value] of entries) {
-      const [role, op] = key.split("\0");
-      lines.push(`jumi_dispatch_errors_total{role="${escapeLabel(role)}",op="${escapeLabel(op)}"} ${value}`);
-    }
+  }
+  const extras = [...errorCounts.entries()]
+    .filter(([key]) => {
+      const [, op] = key.split("\0");
+      return !known.has(op as (typeof knownOps)[number]);
+    })
+    .sort(([a], [b]) => a.localeCompare(b));
+  for (const [key, value] of extras) {
+    const [role, op] = key.split("\0");
+    lines.push(`jumi_dispatch_errors_total{role="${escapeLabel(role)}",op="${escapeLabel(op)}"} ${value}`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -405,7 +409,6 @@ async function dispatchOneRole(opts: {
   } catch (err) {
     recordDispatchError(role, "list");
     logger(`dispatch ${role}: gate read failed: ${err instanceof Error ? err.message : String(err)}`);
-    setActive(role, 0);
     return { role, created: 0, active: 0, skipped: true, skipReason: "gate read failed" };
   }
 
@@ -415,7 +418,6 @@ async function dispatchOneRole(opts: {
   } catch (err) {
     recordDispatchError(role, "template");
     logger(`dispatch ${role}: template read failed: ${err instanceof Error ? err.message : String(err)}`);
-    setActive(role, 0);
     return { role, created: 0, active: 0, skipped: true, skipReason: "template read failed" };
   }
 
@@ -425,7 +427,6 @@ async function dispatchOneRole(opts: {
   } catch (err) {
     recordDispatchError(role, "list");
     logger(`dispatch ${role}: job list failed: ${err instanceof Error ? err.message : String(err)}`);
-    setActive(role, 0);
     return { role, created: 0, active: 0, skipped: true, skipReason: "job list failed" };
   }
 
@@ -443,6 +444,7 @@ async function dispatchOneRole(opts: {
         logger(
           `dispatch ${role}: delete of succeeded ${name} failed: ${err instanceof Error ? err.message : String(err)}`
         );
+        active++;
       }
       continue;
     }
@@ -456,6 +458,23 @@ async function dispatchOneRole(opts: {
         const row = await store.get(parsed.rowId);
         if (row && row.state === "leased") {
           await store.forceExpireLease(parsed.rowId, new Date(nowMs));
+        } else if (row && row.state === "queued") {
+          // The pod died before leasing (startup crash, ledger-unreachable
+          // exit 1, xAI refusal exit 2): with backoffLimit 0 each becomes a
+          // Failed Job without ever leasing, so expiring only leased rows
+          // would delete for free and recreate forever with MAX_JOB_ATTEMPTS
+          // never engaging. Lease as the dispatcher then expire at once so
+          // the next reclaim counts the attempt.
+          const leased = await store.leaseJobById(parsed.rowId, `dispatch-${role}`, 60_000, new Date(nowMs));
+          if (leased.leased) {
+            await store.forceExpireLease(parsed.rowId, new Date(nowMs));
+          } else {
+            // Not leasable (backoff or same-issue hold): the row already
+            // throttles recreate via peekRunnable, but the failed run used
+            // no attempt, so record it instead of silently deleting.
+            recordDispatchError(role, "expire");
+            logger(`dispatch ${role}: expire of failed ${name} skipped: ${leased.reason}`);
+          }
         }
       } catch (err) {
         recordDispatchError(role, "expire");
@@ -470,6 +489,7 @@ async function dispatchOneRole(opts: {
         logger(
           `dispatch ${role}: delete of failed ${name} failed: ${err instanceof Error ? err.message : String(err)}`
         );
+        active++;
       }
       continue;
     }
