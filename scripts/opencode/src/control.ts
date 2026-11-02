@@ -266,7 +266,13 @@ export async function runControlTick(state: ControlRuntimeState, deps: ControlTi
     };
     await writeCodexAuthDurably(path, next);
     const lastRefreshSec = Math.floor(now / 1000);
-    setCodexControlSnapshot({ lastRefreshTimestampSeconds: lastRefreshSec });
+    const nextRemainingMs = codexAccessRemainingMs(next, now);
+    const nextLifetimeMs = codexTokenLifetimeMs(next);
+    setCodexControlSnapshot({
+      lastRefreshTimestampSeconds: lastRefreshSec,
+      remainingSeconds: nextRemainingMs == null ? undefined : Math.floor(nextRemainingMs / 1000),
+      lifetimeSeconds: nextLifetimeMs == null ? undefined : Math.floor(nextLifetimeMs / 1000),
+    });
     logger(`control: refreshed the Codex access token on ${path} before publishing`);
 
     const published = await publishAuthDoc(next, deps, logger);
