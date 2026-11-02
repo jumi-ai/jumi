@@ -1,5 +1,5 @@
-import { mkdir, readFile, rm, symlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, readlink, rm, symlink } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 /**
  * Published token-only Codex auth.
@@ -72,7 +72,8 @@ export function hasCodexChatGptCredential(auth: unknown): boolean {
 
 export async function isCodexChatGptPresent(
   home: string,
-  env: Record<string, string | undefined> = process.env
+  env: Record<string, string | undefined> = process.env,
+  opts?: { timeoutMs?: number; nowMs?: number }
 ): Promise<boolean> {
   const published = codexPublishedAuthPath(env);
   if (published) {
@@ -90,7 +91,15 @@ export async function isCodexChatGptPresent(
     } catch {
       return false;
     }
-    return hasCodexChatGptCredential(parsed);
+    // Published mode reports runnability, not shape: an expired token, a
+    // token too short for the budget, or a file carrying a refresh token
+    // would hop as auth on every spawn, so the board shows red for those.
+    // Without a run budget the minimal budget (skew plus clock margin) still
+    // applies, so a token expiring inside the binary's proactive refresh
+    // window never reports green.
+    return (
+      publishedAuthFailureReason(parsed, codexJobBudgetMs(opts?.timeoutMs), opts?.nowMs ?? Date.now()) === undefined
+    );
   }
   let raw: string;
   try {
@@ -139,11 +148,25 @@ export function codexPublishedAccessExpiryMs(token: string | undefined): number 
   return publishedJwtExpiryMs(token);
 }
 
+function isThreePartJwt(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const parts = value.split(".");
+  return parts.length === 3 && parts.every((part) => part.length > 0);
+}
+
 /**
  * Why a parsed published document cannot run, or undefined when it can.
  * A refresh token in the file is an error (never run where a refresh race is
  * possible); anything unreadable or too short for the budget is malformed or
  * expired. Callers classify every reason as auth so the chain hops.
+ *
+ * `last_refresh` must be a non-empty string and `id_token` a three-part JWT:
+ * the pinned binary starts logged out with no bearer and zero token POSTs
+ * when either is missing or misshapen (`caseMissingLastRefresh` and
+ * `caseBadIdToken` in `src/codex_token_probe.ts`), so green-lighting such a
+ * file would waste the turn on a path that does not reliably classify as
+ * auth post-spawn. `account_id` stays unchecked: `caseMissingAccountId`
+ * proves the binary does not need it.
  */
 export function publishedAuthFailureReason(auth: unknown, budgetMs: number, nowMs: number): string | undefined {
   if (!auth || typeof auth !== "object" || Array.isArray(auth)) return "malformed";
@@ -153,8 +176,9 @@ export function publishedAuthFailureReason(auth: unknown, budgetMs: number, nowM
   const t = tokens as Record<string, unknown>;
   if (typeof t.refresh_token !== "string") return "malformed";
   if (t.refresh_token !== "") return "refresh token present";
+  if (!nonEmptyString(rec.last_refresh)) return "malformed";
   if (!nonEmptyString(t.access_token)) return "malformed";
-  if (!nonEmptyString(t.id_token)) return "malformed";
+  if (!isThreePartJwt(t.id_token)) return "malformed";
   const exp = publishedJwtExpiryMs(t.access_token as string);
   if (exp == null) return "malformed";
   if (exp <= nowMs) return "expired";
@@ -209,6 +233,21 @@ export async function ensureCodexPublishedAuth(opts: EnsureCodexPublishedAuthOpt
     throw new Error(`Codex published auth file cannot run (${reason}): ${published}`);
   }
   const dest = codexAuthPath(opts.home);
+  // A published path pointing at the destination itself (the exact path the
+  // old docs told operators to keep on the retained volume) must never reach
+  // the rm below: deleting it would destroy the only credential and leave a
+  // dangling symlink, so every later spawn fails unrecoverably.
+  if (resolve(published) === resolve(dest)) {
+    throw new Error(`Codex published auth file must not point at the destination itself: ${published}`);
+  }
+  try {
+    const current = await readlink(dest);
+    if (current === published || resolve(dirname(dest), current) === resolve(published)) {
+      return { mode: "published", publishedPath: published };
+    }
+  } catch {
+    // Not a symlink at the published file: fall through and replace it.
+  }
   await mkdir(dirname(dest), { recursive: true });
   await rm(dest, { force: true });
   await symlink(published, dest);

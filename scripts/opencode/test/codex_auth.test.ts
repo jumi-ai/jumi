@@ -215,6 +215,106 @@ describe("isCodexChatGptPresent in published mode", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test("unrunnable published files report absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-presence-"));
+    try {
+      const home = join(dir, "home");
+      const published = join(dir, "published.json");
+      const expired = accessToken(Math.floor(Date.now() / 1000) - 60);
+      await writeFile(published, JSON.stringify(tokenDoc({ access: expired })));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published })).toBe(false);
+      await writeFile(published, JSON.stringify(tokenDoc({ refresh: "secret-refresh" })));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published })).toBe(false);
+      await writeFile(published, JSON.stringify(tokenDoc({ lastRefresh: null })));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published })).toBe(false);
+      await writeFile(published, JSON.stringify(tokenDoc({ id: "only.two" })));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published })).toBe(false);
+      const soon = accessToken(Math.floor(Date.now() / 1000) + 60);
+      await writeFile(published, JSON.stringify(tokenDoc({ access: soon })));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published }, { timeoutMs: 3_600_000 })).toBe(
+        false
+      );
+      await writeFile(published, JSON.stringify(tokenDoc()));
+      expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published }, { timeoutMs: 3_600_000 })).toBe(
+        true
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("published validation matches the pinned binary", () => {
+  test("missing last_refresh cannot run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
+    try {
+      const published = join(dir, "auth.json");
+      await writeFile(published, JSON.stringify(tokenDoc({ lastRefresh: null })));
+      const doc = JSON.parse(await readFile(published, "utf8")) as unknown;
+      expect(publishedAuthFailureReason(doc, codexJobBudgetMs(60_000), Date.now())).toBe("malformed");
+      await expect(
+        ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
+      ).rejects.toThrow("malformed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("two-part id_token cannot run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
+    try {
+      const published = join(dir, "auth.json");
+      await writeFile(published, JSON.stringify(tokenDoc({ id: "only.two" })));
+      const doc = JSON.parse(await readFile(published, "utf8")) as unknown;
+      expect(publishedAuthFailureReason(doc, codexJobBudgetMs(60_000), Date.now())).toBe("malformed");
+      await expect(
+        ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
+      ).rejects.toThrow("malformed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("published path pointing at the destination throws without deleting it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
+    try {
+      const home = join(dir, "home");
+      const dest = codexAuthPath(home);
+      await mkdir(join(home, ".codex"), { recursive: true });
+      await writeFile(dest, JSON.stringify(tokenDoc()));
+      await expect(
+        ensureCodexPublishedAuth({ home, timeoutMs: 60_000, env: { [CODEX_AUTH_FILE_ENV]: dest } })
+      ).rejects.toThrow("destination itself");
+      expect(JSON.parse(await readFile(dest, "utf8"))).toMatchObject({ tokens: expect.anything() });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an already-correct symlink is left alone", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
+    try {
+      const home = join(dir, "home");
+      const published = join(dir, "published-auth.json");
+      await writeFile(published, `${JSON.stringify(tokenDoc(), null, 2)}\n`);
+      const first = await ensureCodexPublishedAuth({
+        home,
+        timeoutMs: 3_600_000,
+        env: { [CODEX_AUTH_FILE_ENV]: published },
+      });
+      expect(first.mode).toBe("published");
+      const second = await ensureCodexPublishedAuth({
+        home,
+        timeoutMs: 3_600_000,
+        env: { [CODEX_AUTH_FILE_ENV]: published },
+      });
+      expect(second.mode).toBe("published");
+      expect(await readlink(codexAuthPath(home))).toBe(published);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("published auth failures hop as auth", () => {
