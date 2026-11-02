@@ -131,6 +131,20 @@ export interface ReviewJobStore {
   ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
+  /**
+   * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
+   * expired regardless of who holds it, so the next reclaim moves it within
+   * seconds instead of waiting for `LEASE_MS`. State, attempt, and error are
+   * untouched; reclaim still counts the attempt and applies `MAX_JOB_ATTEMPTS`.
+   */
+  forceExpireLease(id: number, now?: Date): Promise<boolean>;
+  /**
+   * Dispatch peek with the same runnable conditions as `lease()` (not the
+   * `queued` count, which includes backoff rows and same-issue-held rows):
+   * `queued`, not-before passed, and no same-issue worker lease held. Oldest
+   * first. No state change: the one-shot Job leases the row itself.
+   */
+  peekRunnable(kinds: readonly JobKind[], limit: number, now?: Date): Promise<ReviewJobRecord[]>;
   requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now?: Date): Promise<boolean>;
   releaseLease(id: number, leasedBy: string): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
@@ -1093,6 +1107,38 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedBy = null;
       row.updatedAt = ts;
       return true;
+    });
+  }
+
+  forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased") return false;
+      const ts = now.getTime();
+      row.leasedUntil = ts - 1;
+      row.leasedBy = null;
+      row.updatedAt = ts;
+      return true;
+    });
+  }
+
+  peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+    return this.locked(() => {
+      const allowed = kindsOrReview(kinds);
+      const serializeWorkers = leasesWorkerKinds(allowed);
+      const ts = now.getTime();
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
+      if (cap <= 0) return [];
+      return this.rows
+        .filter((item) => {
+          if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
+          if (item.leasedUntil != null && item.leasedUntil > ts) return false;
+          if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
+          return true;
+        })
+        .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
     });
   }
 
@@ -2694,6 +2740,68 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows.length > 0;
+  }
+
+  async forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+    const rows = asRows<{ id: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs
+         SET leased_until = $2::timestamptz, leased_by = NULL, updated_at = NOW()
+         WHERE id = $1 AND state = 'leased'
+         RETURNING id`,
+        [id, new Date(now.getTime() - 1).toISOString()]
+      )
+    );
+    return rows.length > 0;
+  }
+
+  async peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+    const allowed = kindsOrReview(kinds);
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
+    if (cap <= 0) return [];
+    const nowIso = now.toISOString();
+    const serializeWorkers = leasesWorkerKinds(allowed);
+    const query = serializeWorkers
+      ? `SELECT * FROM review_jobs
+         WHERE state = 'queued' AND kind = ANY($1::text[])
+           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+           AND NOT EXISTS (
+             SELECT 1 FROM review_jobs held
+             WHERE held.state = 'leased'
+               AND held.kind = ANY($3::text[])
+               AND held.owner = review_jobs.owner
+               AND held.repo = review_jobs.repo
+               AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+           )
+         ORDER BY created_at ASC, id ASC
+         LIMIT $4`
+      : `SELECT * FROM review_jobs
+         WHERE state = 'queued' AND kind = ANY($1::text[])
+           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+         ORDER BY created_at ASC, id ASC
+         LIMIT $4`;
+    if (serializeWorkers) {
+      const rows = asRows<ReviewJobRow>(
+        await this.sql.unsafe(query, [
+          pgTextArrayLiteral(allowed),
+          nowIso,
+          pgTextArrayLiteral([...WORKER_JOB_KINDS]),
+          cap,
+        ])
+      );
+      return rows.map(mapRow);
+    }
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs
+         WHERE state = 'queued' AND kind = ANY($1::text[])
+           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+         ORDER BY created_at ASC, id ASC
+         LIMIT $3`,
+        [pgTextArrayLiteral(allowed), nowIso, cap]
+      )
+    );
+    return rows.map(mapRow);
   }
 
   async requeueInfra(

@@ -19,7 +19,8 @@ import type { RunnerStamp } from "./runners.ts";
  * - Both live factories (homelab gitea and the isolated github factory, and
  *   the opencode/claude engines behind `orderedRunners`) keep using this
  *   runtime. Same pickup, same pods, same cgroup. This module does not call
- *   the Kubernetes API, does not create Jobs, and does not run on Actions.
+ *   the Kubernetes API and does not run on Actions: one-shot Jobs are
+ *   created by the `control` dispatcher (`src/dispatch.ts`), never here.
  * - Timeout and kill belong to the runtime (engine `timeoutMs` + abort).
  *   No memory API: the pod limit stays the cgroup.
  * - Logs stream to the parent via `logger`. This is not a second trace store.
