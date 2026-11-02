@@ -23,6 +23,8 @@ import {
 import { scrubSecretEnv } from "./config.ts";
 import { type ControlConfig, loadControlConfig } from "./control_config.ts";
 import { createOrdinalDeviceLoginServer, deviceLoginResultLogger, ORDINAL_DEVICE_LOGIN_PORT } from "./device_login.ts";
+import { renderDispatchMetrics, runDispatchTick } from "./dispatch.ts";
+import { openPgReviewJobStoreForJob, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
 
 function log(message: string) {
@@ -309,7 +311,7 @@ export function createControlFetchHandler(opts: {
     if (url.pathname === "/healthz") return json(200, { ok: true });
     if (url.pathname === "/metrics") {
       if (request.method !== "GET" && request.method !== "HEAD") return json(405, { error: "method not allowed" });
-      return new Response(renderCodexControlMetrics(), {
+      return new Response(`${renderCodexControlMetrics()}${renderDispatchMetrics()}`, {
         status: 200,
         headers: { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" },
       });
@@ -442,6 +444,57 @@ export async function startControl(
     }
   };
   void run();
+
+  // One Job per ledger row (#359): the dispatcher turns runnable rows into
+  // Kubernetes Jobs from the GitOps-mounted template. It never migrates (only
+  // the router migrates); it opens job-mode and fails clearly when the router
+  // has not migrated yet. Dispatch is per-role (`CONTROL_DISPATCH_ENGINE` /
+  // `CONTROL_DISPATCH_WORKER`), each with its own required cap and template.
+  const dispatchEnabled = config.dispatchEngine.enabled || config.dispatchWorker.enabled;
+  if (dispatchEnabled) {
+    if (!config.databaseUrl) {
+      logger("dispatch: DATABASE_URL is required when dispatch is enabled; dispatch disabled");
+    } else {
+      let store: ReviewJobStore | undefined;
+      const runDispatch = async () => {
+        while (!shutdown.signal.aborted && !deps.signal?.aborted) {
+          try {
+            if (!store) {
+              try {
+                store = await openPgReviewJobStoreForJob(config.databaseUrl as string);
+              } catch (err) {
+                logger(
+                  `dispatch: ledger unavailable (will retry): ${err instanceof Error ? err.message : String(err)}`
+                );
+                await sleep(config.dispatchPollMs, shutdown.signal).catch(() => undefined);
+                if (deps.signal?.aborted) return;
+                continue;
+              }
+            }
+            try {
+              await runDispatchTick(store, config, {
+                now: deps.now,
+                fetchImpl: deps.fetchImpl,
+                logger,
+              });
+            } catch (err) {
+              logger(`dispatch tick failed: ${err instanceof Error ? err.message : String(err)}`);
+              // A lost ledger surfaces on the next tick via the store calls;
+              // drop it so the loop re-opens job-mode instead of reusing it.
+              store = undefined;
+            }
+          } catch (err) {
+            if (shutdown.signal.aborted || deps.signal?.aborted) return;
+            logger(`dispatch tick failed: ${err instanceof Error ? err.message : String(err)}`);
+            store = undefined;
+          }
+          await sleep(config.dispatchPollMs, shutdown.signal).catch(() => undefined);
+          if (deps.signal?.aborted) return;
+        }
+      };
+      void runDispatch();
+    }
+  }
 
   return {
     stop: () => {

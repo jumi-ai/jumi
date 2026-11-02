@@ -392,7 +392,7 @@ describe("createFetchHandler router mailbox", () => {
     expect(logs.some((line) => line.includes("queued implement:kirmanak/demo#12"))).toBe(true);
   });
 
-  test("cancels queued and leased worker rows on unassign and posts stopped", async () => {
+  test("marks a leased worker row on unassign; the job posts stopped when it settles", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
     await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
@@ -408,9 +408,11 @@ describe("createFetchHandler router mailbox", () => {
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", cancelled: true });
-    expect(store.rows[0]?.state).toBe("cancelled");
-    expect(store.rows[0]?.leasedBy).toBeNull();
-    expect(api.comments.at(-1)).toContain("stopped");
+    // The leased row stays leased with the mark; the running job posts
+    // `stopped` when it settles, so the router posts nothing here.
+    expect(store.rows[0]?.state).toBe("leased");
+    expect(store.rows[0]?.cancelRequested).toBe(true);
+    expect(api.comments).toEqual([]);
   });
 
   test("does not post stopped when no worker rows were cancelled", async () => {

@@ -272,6 +272,10 @@ export async function cancelLedgerWorkerJobs(opts: {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
   await opts.store.clearIssueSkipLatch(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
+  // Queued rows settle here, so the router posts `stopped` for them. Leased
+  // rows are only marked cancel_requested (not counted above): the running
+  // one-shot job posts `stopped` itself when it observes the mark and
+  // settles via markCancelled.
   if (cancelled > 0) {
     try {
       await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");

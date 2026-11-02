@@ -2,9 +2,11 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isPidAlive } from "../src/claim.ts";
 import { runOneShotJob } from "../src/job.ts";
 import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
+import { handleIssueCancel } from "../src/worker.ts";
 import {
   emptyCiMethods,
   makeComment,
@@ -132,5 +134,145 @@ describePg("one-shot jobs against real postgres", () => {
     const usage = (await sql.unsafe(`SELECT clone_seconds FROM jumi_run_usage`)) as Array<{ clone_seconds: unknown }>;
     expect(usage.length).toBeGreaterThan(0);
     expect(usage.some((r) => r.clone_seconds != null)).toBe(true);
+  });
+
+  test("unassign while the one-shot job runs stops the child and settles cancelled", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const ids = (await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`)) as Array<{ id: unknown }>;
+    const jobId = Number(ids[0]?.id);
+
+    const comments: string[] = [];
+    const api = {
+      getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getIssue: async () => makeIssue(),
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_o: string, _r: string, _n: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      updateIssueComment: async (_o: string, _r: string, _id: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      ...emptyCiMethods(),
+    } as never;
+
+    let implementRan = false;
+    let childPid = 0;
+    let childStopped = false;
+    const runPromise = runOneShotJob({
+      store,
+      jobId,
+      engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+      workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
+      api,
+      leasedBy: "one-shot-cancel-test",
+      workerExtras: {
+        heartbeatMs: 50,
+        implement: async (opts: { abortSignal?: AbortSignal; onPid?: (pid: number) => void }) => {
+          implementRan = true;
+          const child = Bun.spawn(["sleep", "30"]);
+          childPid = child.pid;
+          opts.onPid?.(child.pid);
+          await new Promise<void>((resolve) => {
+            if (opts.abortSignal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.abortSignal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          try {
+            child.kill();
+          } catch {
+            // Already exited.
+          }
+          await child.exited;
+          childStopped = true;
+          return { status: "cancelled" as const };
+        },
+      },
+    });
+
+    // Wait until the job pod holds the lease.
+    for (let i = 0; i < 250; i++) {
+      const row = await store.get(jobId);
+      if (row?.state === "leased") break;
+      await Bun.sleep(20);
+    }
+    expect((await store.get(jobId))?.state).toBe("leased");
+
+    const home = await mkdtemp(join(tmpdir(), "jumi-job-pg-cancel-"));
+    const cancelAt = Date.now();
+    try {
+      // The router path (another replica: no in-process abort, ledger only).
+      await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store);
+      // The leased row stays leased with the mark; only the running job settles it.
+      expect((await store.get(jobId))?.state).toBe("leased");
+      const result = await runPromise;
+      const settleMs = Date.now() - cancelAt;
+      expect(result.exitCode).toBe(0);
+      expect(implementRan).toBe(true);
+      expect(childPid).toBeGreaterThan(0);
+      expect(childStopped).toBe(true);
+      expect(isPidAlive(childPid)).toBe(false);
+      expect(comments.some((body) => body.includes("stopped"))).toBe(true);
+      expect((await store.get(jobId))?.state).toBe("cancelled");
+      // Prompt heartbeat poll (50ms), not lease expiry (leaseMs is hours).
+      expect(settleMs).toBeLessThan(10_000);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("unassign while the row is still queued starts no job", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const ids = (await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`)) as Array<{ id: unknown }>;
+    const jobId = Number(ids[0]?.id);
+
+    const comments: string[] = [];
+    const api = {
+      getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getIssue: async () => makeIssue(),
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_o: string, _r: string, _n: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      updateIssueComment: async (_o: string, _r: string, _id: number, body: string) => {
+        comments.push(body);
+        return makeComment({ body });
+      },
+      ...emptyCiMethods(),
+    } as never;
+
+    const home = await mkdtemp(join(tmpdir(), "jumi-job-pg-cancel-queued-"));
+    try {
+      await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store);
+      expect((await store.get(jobId))?.state).toBe("cancelled");
+
+      let ran = false;
+      const result = await runOneShotJob({
+        store,
+        jobId,
+        engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
+        api,
+        workerExtras: {
+          implement: async () => {
+            ran = true;
+            return { status: "pr" as const, prNumber: 3, htmlUrl: "https://example.test/pr/3" };
+          },
+        },
+      });
+      // The cancelled row cannot be leased, so no job starts.
+      expect(result.exitCode).toBe(0);
+      expect(ran).toBe(false);
+      expect((await store.get(jobId))?.state).toBe("cancelled");
+      expect(comments.some((body) => body.includes("stopped"))).toBe(true);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });
