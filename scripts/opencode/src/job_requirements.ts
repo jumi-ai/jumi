@@ -1,7 +1,55 @@
 import { readFile } from "node:fs/promises";
 import { OPENCODE_WELLKNOWN_DISABLED } from "./opencode_auth.ts";
-import type { IndependentReviewConfig, NamedRunner } from "./runners.ts";
+import { AGY_RUNNER_TYPE, type IndependentReviewConfig, type NamedRunner } from "./runners.ts";
 import { isXaiModel } from "./xai_auth.ts";
+
+/**
+ * Deploy-contract required constraint for one-shot Jobs. Antigravity auth is
+ * one interactive login per ordinal under `$HOME/.gemini/antigravity-cli/`
+ * (`antigravity-oauth-token`: OAuth access + refresh + `expiry` of about an
+ * hour, plus `id_token`/`auth_method`), refreshed by the CLI itself on load;
+ * job pods start with an empty `HOME` holding no grant, so no `type: agy`
+ * runner may run there. A job-mode chain must lead with a runner that has a
+ * static or published credential instead.
+ */
+export const ANTIGRAVITY_JOB_CONSTRAINT = "Antigravity refused in one-shot jobs";
+
+export interface AgyRefusal {
+  refused: boolean;
+  reason?: string;
+}
+
+function chainNamesAgy(chain: readonly NamedRunner[]): string | undefined {
+  const hit = chain.find((runner) => (runner.type ?? "opencode") === AGY_RUNNER_TYPE);
+  return hit ? `runner ${hit.name} is ${AGY_RUNNER_TYPE}/${hit.model}` : undefined;
+}
+
+function independentReviewNamesAgy(policy: IndependentReviewConfig | undefined): string | undefined {
+  if (!policy?.enabled) return undefined;
+  for (const [family, members] of Object.entries(policy.groups)) {
+    const hit = members.find((member) => member.type === AGY_RUNNER_TYPE);
+    if (hit) return `independentReview group ${family} uses ${hit.type}/${hit.model}`;
+  }
+  return undefined;
+}
+
+/**
+ * One-shot jobs refuse to start when anything the job could run is an
+ * Antigravity runner: a runner in the chain or in the `independentReview`
+ * groups. Unlike the xAI OAuth refusal there is no static-key bypass: an
+ * `agy` spawn always needs the interactive grant under its `HOME`, and job
+ * pods start with an empty one.
+ */
+export function refuseAgyJobMode(input: {
+  chain: readonly NamedRunner[];
+  independentReview?: IndependentReviewConfig;
+}): AgyRefusal {
+  const chainHit = chainNamesAgy(input.chain);
+  if (chainHit) return { refused: true, reason: `${ANTIGRAVITY_JOB_CONSTRAINT}: ${chainHit}` };
+  const groupHit = independentReviewNamesAgy(input.independentReview);
+  if (groupHit) return { refused: true, reason: `${ANTIGRAVITY_JOB_CONSTRAINT}: ${groupHit}` };
+  return { refused: false };
+}
 
 export interface XaiRefusal {
   refused: boolean;

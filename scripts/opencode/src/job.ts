@@ -4,7 +4,7 @@ import { loadConfig, type ServiceConfig, scrubSecretEnv } from "./config.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { JOB_ID_ENV } from "./job_env.ts";
-import { refuseXaiOAuth } from "./job_requirements.ts";
+import { refuseAgyJobMode, refuseXaiOAuth } from "./job_requirements.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import type { ReviewApi } from "./review.ts";
 import {
@@ -206,6 +206,15 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   const chain = orderedRunners(config);
   const opencodeConfigPath = (config as { opencodeConfig?: string }).opencodeConfig;
   const wellKnownUrl = (config as { opencodeWellKnownUrl?: string }).opencodeWellKnownUrl;
+  const agyRefusal = refuseAgyJobMode({
+    chain,
+    independentReview: (config as { independentReview?: import("./runners.ts").IndependentReviewConfig })
+      .independentReview,
+  });
+  if (agyRefusal.refused) {
+    log(agyRefusal.reason ?? "Antigravity refused in one-shot jobs");
+    return { exitCode: 2, reason: agyRefusal.reason ?? "Antigravity refused in one-shot jobs" };
+  }
   const refusal = await refuseXaiOAuth({
     chain,
     independentReview: (config as { independentReview?: import("./runners.ts").IndependentReviewConfig })
@@ -347,6 +356,9 @@ async function main(): Promise<void> {
 
   // No HTTP, no probes, no reclaim, no migration (job-mode opener above never
   // migrates). No xAI grant adoption or file sibling cleanup: HOME is empty.
+  // No Antigravity grant either: one-shot jobs refuse type:agy runners, whose
+  // login is one interactive grant per ordinal, so the chain must lead with a
+  // runner that has a static or published credential.
   // Long-running mode stays as it is.
   let engineConfig: ServiceConfig;
   let workerConfig: WorkerConfig;
