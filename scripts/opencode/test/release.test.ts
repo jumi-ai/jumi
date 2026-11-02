@@ -439,7 +439,15 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
     expect(parsed.control.requiredConstraints).toEqual([]);
     expect(parsed.control.requiredEnv).toEqual(["JUMI_ROLE"]);
-    expect(parsed.control.gitOpsEnv).toEqual(["CONTROL_SECRET_NAME", "CONTROL_SECRET_NAMESPACE"]);
+    expect(parsed.control.gitOpsEnv).toEqual([
+      "CONTROL_SECRET_NAME",
+      "CONTROL_SECRET_NAMESPACE",
+      "DATABASE_URL",
+      "CONTROL_ENGINE_MAX_JOBS",
+      "CONTROL_WORKER_MAX_JOBS",
+      "CONTROL_ENGINE_JOB_TEMPLATE_FILE",
+      "CONTROL_WORKER_JOB_TEMPLATE_FILE",
+    ]);
     expect(markdown).toContain("workflow_job");
   });
 
