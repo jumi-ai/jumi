@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { looksLikeProviderAuthDeath, providerAuthDeathMessage, stripClaudeConfigWarning } from "./auth.ts";
+import { looksLikeProviderAuthDeath, providerAuthDeathForRun, stripClaudeConfigWarning } from "./auth.ts";
 import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
@@ -360,7 +360,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
-        const authMessage = providerAuthDeathMessage();
+        const authMessage = providerAuthDeathForRun({ ...opts, type: "claude" });
         observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
@@ -404,7 +404,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         status: "exit",
         exitCode,
         stdout,
-        message: providerAuthDeathMessage(),
+        message: providerAuthDeathForRun({ ...opts, type: "claude" }),
         infra: false,
         auth: true,
         durationMs,
@@ -425,7 +425,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
     const message = err instanceof Error ? err.message : String(err);
     if (looksLikeProviderAuthDeath(message)) {
-      throw new EngineFailedError(providerAuthDeathMessage(), false, { auth: true });
+      throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "claude" }), false, { auth: true });
     }
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;

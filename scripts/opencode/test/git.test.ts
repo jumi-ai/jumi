@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { providerAuthDeathMessage } from "../src/auth.ts";
+import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
@@ -481,7 +481,7 @@ printf 'should-not-run\\n'
         });
         await expect(run).rejects.toMatchObject({ name: "EngineFailedError", auth: true, infra: false });
         await expect(run).rejects.toThrow("OPENCODE_API_KEY_FILE");
-        await expect(run).rejects.toThrow(providerAuthDeathMessage());
+        await expect(run).rejects.toThrow(AUTH_DEATH_REASON);
         expect(renderRunMetrics()).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
         expect(logs.some((line) => line.includes("OPENCODE_API_KEY_FILE"))).toBe(true);
       }
@@ -601,8 +601,8 @@ cat "$XDG_DATA_HOME/opencode/auth.json"
             logger: (message) => logs.push(message),
           });
 
-          // Public message is the hostname; the reason stays in the log.
-          await expect(run).rejects.toMatchObject({ auth: true, message: providerAuthDeathMessage() });
+          // Public message names the role and runner; the reason stays in the log.
+          await expect(run).rejects.toMatchObject({ auth: true });
           expect(logs.some((line) => line.includes("no refresh token"))).toBe(true);
           expect(renderRunMetrics()).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
 
@@ -644,7 +644,7 @@ exit 7
     );
   });
 
-  test("classifies grant rejection as auth with a short hostname message", async () => {
+  test("classifies grant rejection as auth with a short role message", async () => {
     const grant = `oauth token refresh failed: ${"x".repeat(400)} {"error":"invalid_grant","error_description":"refresh token revoked"}`;
     await withFakeOpenCode(
       `#!/bin/sh
@@ -663,8 +663,9 @@ exit 1
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
         expect(result.infra).toBe(false);
-        expect(result.message).toBe(providerAuthDeathMessage());
-        expect(result.message).toContain(hostname());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
+        expect(result.message).toContain("worker");
+        expect(result.message).toContain("opencode/model");
         expect(result.message).not.toContain("invalid_grant");
         expect(result.message).not.toContain("refresh token");
         expect(logs.some((line) => line.includes("[opencode stderr]") && line.includes("invalid_grant"))).toBe(true);
@@ -672,7 +673,6 @@ exit 1
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
         expect(text).not.toContain('kind="review",class="incomplete"} 1');
         expect(text).not.toContain("invalid_grant");
-        expect(text).not.toContain(`hostname="${hostname()}"`);
       }
     );
   });
@@ -693,7 +693,7 @@ exit 1
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
         expect(result.infra).toBe(false);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
       }
     );
   });
@@ -709,7 +709,7 @@ exit 1
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
         expect(result.infra).toBe(false);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
         const text = renderRunMetrics();
         expect(text).toContain('jumi_opencode_exits_total{kind="review",class="auth"} 1');
         expect(text).not.toContain('kind="review",class="infra"} 1');

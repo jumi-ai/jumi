@@ -12,7 +12,7 @@ async function waitForLine(path: string, needle: string, proc: Bun.Subprocess, s
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const text = await readStatus(path);
-    if (text.includes("JOB_FAILED") || text.includes("JOB_RETURNED")) {
+    if (text.includes("JOB_FAILED")) {
       throw new Error(`${text}\n${stderr()}`);
     }
     const line = text.split("\n").find((item) => item.includes(needle));
@@ -23,9 +23,9 @@ async function waitForLine(path: string, needle: string, proc: Bun.Subprocess, s
   throw new Error(`timed out waiting for ${needle}\n${await readStatus(path)}\n${stderr()}`);
 }
 
-describe("shutdown signal frees an in-flight lease", () => {
+describe("shutdown signal holds the lease until the child has stopped", () => {
   test.each(["worker", "engine"])(
-    "%s SIGTERM frees the lease while the child is still running",
+    "%s SIGTERM holds the lease until the child stops, then releases",
     async (role) => {
       const dir = await mkdtemp(join(tmpdir(), "jumi-shutdown-"));
       const statusPath = join(dir, "status");
@@ -44,18 +44,28 @@ describe("shutdown signal frees an in-flight lease", () => {
         childPid = Number(ready.slice("READY ".length));
         expect(isPidAlive(childPid)).toBe(true);
         proc.kill("SIGTERM");
-        const freed = await waitForLine(statusPath, "FREED ", proc, () => stderrText);
-        const text = await readStatus(statusPath);
-        expect(text).toContain("received SIGTERM, shutting down");
-        expect(text).toContain("released ");
-        expect(text).toContain("on shutdown");
-        expect(text).not.toContain("JOB_RETURNED");
+        // Ordered shutdown: abort first, but the lease stays held while the
+        // stubborn child is still running. Give the abort a beat, then prove
+        // the lease was not freed early.
+        await Bun.sleep(500);
+        expect(isPidAlive(childPid)).toBe(true);
+        const mid = await readStatus(statusPath);
+        expect(mid).toContain("received SIGTERM, shutting down");
+        expect(mid).not.toContain("FREED-");
+        expect(mid).not.toContain("JOB_RETURNED");
+        // Stopping the child lets the aborted tick finish: wait, then release.
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {
+          // already gone
+        }
+        const freed = await waitForLine(statusPath, "FREED-", proc, () => stderrText);
         expect(freed).toContain("attempt=0");
         expect(freed).toContain("sibling=sibling");
         expect(freed).toContain("comments=0");
         expect(freed).toContain("failures=0");
-        expect(proc.exitCode).toBeNull();
-        expect(isPidAlive(childPid)).toBe(true);
+        await waitForLine(statusPath, "JOB_RETURNED", proc, () => stderrText);
+        expect(isPidAlive(childPid)).toBe(false);
       } finally {
         proc.kill("SIGKILL");
         if (childPid > 0) {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { providerAuthDeathMessage } from "../src/auth.ts";
+import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import {
   CODEX_APPROVAL,
   CODEX_SANDBOX,
@@ -509,7 +509,7 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
         });
         expect(result.status).toBe("exit");
         expect(result.auth).toBe(true);
-        expect(result.message).toBe(providerAuthDeathMessage());
+        expect(result.message).toContain(AUTH_DEATH_REASON);
         expect(result.message).not.toContain("refresh_token_invalidated");
       }
     );

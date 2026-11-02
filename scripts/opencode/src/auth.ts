@@ -1,4 +1,3 @@
-import { hostname } from "node:os";
 import { EngineFailedError } from "./engine.ts";
 import { omitClaudeConfigWarning } from "./status_description.ts";
 
@@ -40,8 +39,40 @@ export function looksLikeProviderAuthDeath(text: string): boolean {
   return AUTH_STDERR_RE.test(signal) || signal.includes(AUTH_DEATH_REASON);
 }
 
-export function providerAuthDeathMessage(host = hostname()): string {
-  return `${host}: ${AUTH_DEATH_REASON}`;
+export interface ProviderAuthDeathContext {
+  role?: string;
+  runner?: string;
+}
+
+/**
+ * A random pod hostname tells an operator nothing, so name the role and
+ * runner instead: `engine opencode/xai/grok-4.6: provider auth death`.
+ * Callers infer the role from the job kind (review → engine, worker kinds →
+ * worker) and the runner from the spawn (`type/model`).
+ */
+export function providerAuthDeathMessage(context?: ProviderAuthDeathContext): string {
+  const role = context?.role?.trim() || "job";
+  const runner = context?.runner?.trim() || "unknown";
+  return `${role} ${runner}: ${AUTH_DEATH_REASON}`;
+}
+
+/** Role for an engine spawn: reviews run on the engine, worker kinds on the worker. */
+export function roleForTraceKind(kind: string | undefined): string {
+  return kind === "review" ? "engine" : "worker";
+}
+
+/** Runner label for an engine spawn: `type/model`. */
+export function runnerForAuthDeath(opts: { type?: string; model?: string }): string {
+  const type = (opts.type ?? "opencode").trim() || "opencode";
+  const model = (opts.model ?? "").trim() || "unknown";
+  return `${type}/${model}`;
+}
+
+export function providerAuthDeathForRun(opts: { type?: string; model?: string; trace?: { kind?: string } }): string {
+  return providerAuthDeathMessage({
+    role: roleForTraceKind(opts.trace?.kind),
+    runner: runnerForAuthDeath(opts),
+  });
 }
 
 export function isAuthFailure(err: unknown): boolean {

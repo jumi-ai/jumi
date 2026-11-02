@@ -14,7 +14,7 @@ export function codePointLength(text: string): number {
   return Array.from(text).length;
 }
 
-/** Drop OpenCode stderr from a status description. Auth-death text has no stderr and keeps the pod hostname. */
+/** Drop OpenCode stderr from a status description. Auth-death text has no stderr and already names the role and runner. */
 export function omitOpenCodeStderr(description: string, host = hostname()): string {
   const cleaned = omitClaudeConfigWarning(description);
   const match = OPENCODE_EXIT_STDERR_RE.exec(cleaned);

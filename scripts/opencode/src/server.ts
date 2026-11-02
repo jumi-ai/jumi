@@ -51,7 +51,7 @@ import {
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { renderLedgerMetrics, setActiveRunUsageRecording } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
-import { installProcessShutdown, releaseLeaseOnShutdown, trackInFlightLease } from "./shutdown.ts";
+import { installProcessShutdown, releaseLeaseOnShutdown } from "./shutdown.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   isReviewWebhookAction,
@@ -698,10 +698,6 @@ export async function processEngineTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
-  const untrack = trackInFlightLease(async () => {
-    stopHeartbeat();
-    await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
-  });
 
   try {
     const job: ReviewJob = {
@@ -887,7 +883,6 @@ export async function processEngineTick(
     return "processed";
   } finally {
     setActiveRunUsageRecording(undefined);
-    untrack();
     stopHeartbeat();
   }
 }

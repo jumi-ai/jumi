@@ -1,7 +1,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { looksLikeProviderAuthDeath, providerAuthDeathMessage } from "./auth.ts";
+import {
+  looksLikeProviderAuthDeath,
+  providerAuthDeathForRun,
+  providerAuthDeathMessage,
+  roleForTraceKind,
+  runnerForAuthDeath,
+} from "./auth.ts";
 import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
@@ -236,9 +242,9 @@ async function resolveXaiChildCredential(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`xAI credential unusable for a ${opts.model} run: ${message}`);
-    // Same shape as an auth death the child reports: the public message is the
-    // hostname, the reason stays in the log.
-    const authMessage = providerAuthDeathMessage();
+    // Same shape as an auth death the child reports: the public message names
+    // the role and runner, the reason stays in the log.
+    const authMessage = providerAuthDeathForRun(opts);
     observeEngineRun(opts, { status: "exit", infra: false, auth: true, message: authMessage });
     throw new EngineFailedError(authMessage, false, { auth: true });
   }
@@ -295,10 +301,10 @@ export function resolveOpenCodeApiKey(env: Record<string, string | undefined> = 
  * configured but no usable key from either source. Contains the provider
  * auth death phrase so hop and no-kick rules classify it as auth.
  */
-export function openCodeApiKeyConfigError(filePath: string): string {
+export function openCodeApiKeyConfigError(filePath: string, context?: { role?: string; runner?: string }): string {
   return (
     `${OPENCODE_API_KEY_FILE_ENV} is missing, unreadable, or empty (${filePath}) ` +
-    `and ${OPENCODE_API_KEY_ENV} is not set: ${providerAuthDeathMessage()}`
+    `and ${OPENCODE_API_KEY_ENV} is not set: ${providerAuthDeathMessage(context)}`
   );
 }
 
@@ -331,7 +337,14 @@ function buildEnv(
     if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
     else if (apiKey.filePath) delete env.OPENCODE_API_KEY;
     if (apiKey.filePath && !apiKey.key) {
-      throw new EngineFailedError(openCodeApiKeyConfigError(apiKey.filePath), false, { auth: true });
+      throw new EngineFailedError(
+        openCodeApiKeyConfigError(apiKey.filePath, {
+          role: roleForTraceKind(opts.trace?.kind),
+          runner: runnerForAuthDeath(opts),
+        }),
+        false,
+        { auth: true }
+      );
     }
     if (configPath) env.OPENCODE_CONFIG = configPath;
     applyOpenCodeInlineConfig(env, opts);
@@ -351,7 +364,14 @@ function buildEnv(
 
   if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
   if (apiKey.filePath && !apiKey.key) {
-    throw new EngineFailedError(openCodeApiKeyConfigError(apiKey.filePath), false, { auth: true });
+    throw new EngineFailedError(
+      openCodeApiKeyConfigError(apiKey.filePath, {
+        role: roleForTraceKind(opts.trace?.kind),
+        runner: runnerForAuthDeath(opts),
+      }),
+      false,
+      { auth: true }
+    );
   }
   if (configPath) env.OPENCODE_CONFIG = configPath;
   if (opts.extraEnv) {
@@ -608,7 +628,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           status: "exit",
           infra: false,
           auth: true,
-          message: providerAuthDeathMessage(),
+          message: providerAuthDeathForRun(opts),
         });
         throw err;
       }
@@ -851,7 +871,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[opencode stderr] ${stderr}`);
-        const authMessage = providerAuthDeathMessage();
+        const authMessage = providerAuthDeathForRun(opts);
         observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
@@ -887,7 +907,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         status: "exit",
         exitCode,
         stdout,
-        message: providerAuthDeathMessage(),
+        message: providerAuthDeathForRun(opts),
         infra: false,
         auth: true,
         durationMs,
@@ -908,7 +928,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
     const message = err instanceof Error ? err.message : String(err);
     if (looksLikeProviderAuthDeath(message)) {
-      throw new EngineFailedError(providerAuthDeathMessage(), false, { auth: true });
+      throw new EngineFailedError(providerAuthDeathForRun(opts), false, { auth: true });
     }
     if (looksLikeInfraStderr(message)) throw new EngineFailedError(message, true);
     throw err;
