@@ -3,7 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJobId, runOneShotJob } from "../src/job.ts";
-import { openCodeConfigUsesXai, refuseXaiOAuth } from "../src/job_requirements.ts";
+import {
+  ANTIGRAVITY_JOB_CONSTRAINT,
+  openCodeConfigUsesXai,
+  refuseAgyJobMode,
+  refuseXaiOAuth,
+} from "../src/job_requirements.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import {
   emptyCiMethods,
@@ -365,6 +370,88 @@ describe("one-shot xAI OAuth refusal", () => {
     });
     expect(refusal.refused).toBe(true);
     expect(refusal.reason).toMatch(/well-known/i);
+  });
+});
+
+describe("one-shot Antigravity refusal", () => {
+  test("refuseAgyJobMode names the chain runner", () => {
+    expect(refuseAgyJobMode({ chain: [{ name: "agy", type: "agy", model: "gemini-3-pro" }] }).refused).toBe(true);
+    expect(refuseAgyJobMode({ chain: [{ name: "agy", type: "agy", model: "gemini-3-pro" }] }).reason).toMatch(
+      /one-shot jobs.*runner agy/i
+    );
+    expect(refuseAgyJobMode({ chain: [{ name: "primary", type: "opencode", model: "openai/gpt-5.5" }] }).refused).toBe(
+      false
+    );
+  });
+
+  test("refuses a runner in the chain", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const row = (await store.lease("probe", 60_000))!;
+    await store.releaseLease(row.id, "probe");
+    const result = await runOneShotJob({
+      store,
+      jobId: row.id,
+      engineConfig: makeConfig({
+        runners: { agy: { type: "agy", model: "gemini-3-pro", effort: "high" } },
+        chain: ["agy"],
+      }),
+      workerConfig: makeWorkerConfig(),
+      // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
+      api: makeReviewApi() as any,
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.reason).toContain(ANTIGRAVITY_JOB_CONSTRAINT);
+    const current = await store.get(row.id);
+    expect(current?.state).toBe("queued");
+  });
+
+  test("refuses a runner in independentReview groups", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const row = (await store.lease("probe", 60_000))!;
+    await store.releaseLease(row.id, "probe");
+    const result = await runOneShotJob({
+      store,
+      jobId: row.id,
+      engineConfig: makeConfig({
+        independentReview: {
+          enabled: true,
+          groups: { gemini: [{ type: "agy", model: "gemini-3-pro" }] },
+        },
+      }),
+      workerConfig: makeWorkerConfig(),
+      // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
+      api: makeReviewApi() as any,
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.reason).toMatch(/independentReview/i);
+  });
+
+  test("a chain without agy proceeds past the gate", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const row = (await store.lease("probe", 60_000))!;
+    await store.releaseLease(row.id, "probe");
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-no-agy-"));
+    try {
+      const result = await runOneShotJob({
+        store,
+        jobId: row.id,
+        engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig(),
+        // biome-ignore lint/suspicious/noExplicitAny: agy-free chain uses the fake forge.
+        api: makeReviewApi() as any,
+        engineExtras: {
+          gitRunner: frozenGitRunner() as never,
+          workspacePreparer: async () => undefined,
+          openCodeRunner: async () => ({ status: "ok" as const, exitCode: 0, stdout: "" }),
+        },
+      });
+      expect(result.exitCode).toBe(0);
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   });
 });
 

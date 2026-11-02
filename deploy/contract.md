@@ -2,7 +2,7 @@
 
 GitOps runtime contract for `jumi-reviewer`, `jumi-worker`, `control` (reviewer image, `JUMI_ROLE=control`), and one-shot Jobs. Not the application API.
 
-This file is the semver source of truth. Unchanged vs the last `vX.Y.Z` tag → patch. New optional GitOps (env/port/volume) → minor. Required GitOps change (new or removed required or gitops env, required constraint, UID, probe, command, port, or image target), or a `BREAKING` heading/marker → major. Reviewer, worker, control, and one-shot Jobs share one version. Adding the one-shot `bun run src/job.ts` command, its required `JUMI_JOB_ID` row id, and its xAI OAuth runner constraint is a major bump.
+This file is the semver source of truth. Unchanged vs the last `vX.Y.Z` tag → patch. New optional GitOps (env/port/volume) → minor. Required GitOps change (new or removed required or gitops env, required constraint, UID, probe, command, port, or image target), or a `BREAKING` heading/marker → major. Reviewer, worker, control, and one-shot Jobs share one version. Adding the one-shot `bun run src/job.ts` command, its required `JUMI_JOB_ID` row id, and its xAI OAuth runner constraint is a major bump; refusing Antigravity (`type: agy`) runners in one-shot Jobs is a major bump.
 
 Env headings: `required env` fails process start when unset. `gitops env` must be set by GitOps/chart, but process start tolerates unset (local/dev only, or a `FORGE` that does not use the key). `optional env` has a default. CI checks these headings against the loaders (`requireEnv` / `requirePem` → required env; the same call reached only under `FORGE=github` → gitops env; any other read → gitops or optional env). The scanner resolves constant env names and constant maps (`GITHUB_ENV.appId`), reads the shared `loadForgeBind` for both images, treats both `if (forge === "github") { … }` and `forge === "github" ? … : …` as forge-conditional (braces, colons, and quotes inside strings, comments, and regexes do not move those ranges), and fails the check on any unlisted key. A name handed to `requireEnv` / `requirePem` that is neither a literal nor a constant fails the check as well, instead of being skipped: a variable cannot hide behind an identifier or a computed key. Required constraints (heading `required constraints`, not env keys) fail process start when violated. Adding or removing one is a required GitOps change, so a later removal is a major bump.
 
@@ -232,7 +232,7 @@ Required RBAC on the Job namespace: `jobs` create, get, list, watch, delete; `po
 
 ### job
 
-One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassign path). `bun run src/job.ts` takes one `JUMI_JOB_ID` row id, leases that row with the same conditions as the queue (not-before time, per-issue serialization, shared role gates from `#354`), runs it, and exits. Requires `DATABASE_URL`; there is no in-process queue path. Serves no HTTP (`HOST`/`PORT` unused, no `:3000`, no `:3010`, no probes). Does not migrate and does not run reclaim; the router still migrates and reclaims. Long-running `server.ts` / `worker_server.ts` stay as they are for local use. Exit 0 whenever the row reached a state the ledger understands (including a failed job or a requeue); non-zero only when the process itself could not finish (ledger unreachable, bad config, xAI OAuth refusal). SIGTERM aborts, waits for the child to stop, then releases the lease, then exits 0. Skips xAI grant adoption and file sibling cleanup (`HOME` is empty). Refuses to start when anything the job could run needs xAI OAuth (chain runner, `independentReview` group, or an OpenCode `small_model`/`compaction` pinning `xai/*` including the remote well-known config); static keys such as `OPENCODE_API_KEY_FILE` keep working. Every job starts empty and does a full clone with no shared cache; clone time is recorded in the per-run `jumi_run_usage` data.
+One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassign path). `bun run src/job.ts` takes one `JUMI_JOB_ID` row id, leases that row with the same conditions as the queue (not-before time, per-issue serialization, shared role gates from `#354`), runs it, and exits. Requires `DATABASE_URL`; there is no in-process queue path. Serves no HTTP (`HOST`/`PORT` unused, no `:3000`, no `:3010`, no probes). Does not migrate and does not run reclaim; the router still migrates and reclaims. Long-running `server.ts` / `worker_server.ts` stay as they are for local use. Exit 0 whenever the row reached a state the ledger understands (including a failed job or a requeue); non-zero only when the process itself could not finish (ledger unreachable, bad config, xAI OAuth or Antigravity refusal). SIGTERM aborts, waits for the child to stop, then releases the lease, then exits 0. Skips xAI grant adoption and file sibling cleanup (`HOME` is empty). Refuses to start when anything the job could run needs xAI OAuth (chain runner, `independentReview` group, or an OpenCode `small_model`/`compaction` pinning `xai/*` including the remote well-known config); static keys such as `OPENCODE_API_KEY_FILE` keep working. Refuses to start when anything the job could run is `type: agy` (chain runner or `independentReview` group): Antigravity auth is one interactive login per ordinal under `$HOME/.gemini/antigravity-cli/` (`antigravity-oauth-token` holding OAuth access, refresh, and `expiry` of about an hour plus `id_token`, refreshed by the CLI itself on load), and job pods start with an empty `HOME` holding no grant. A token-only copy without the refresh grant authenticates while unexpired, but the hour-long token cannot cover multi-hour jobs and the CLI has no documented control-side refresh, so a job-mode chain must lead with a runner that has a static or published credential, such as an OpenCode runner with a static key (which itself must not use an xAI OAuth model for `small_model` or compaction). Every job starts empty and does a full clone with no shared cache; clone time is recorded in the per-run `jumi_run_usage` data.
 
 #### required env
 - `GITEA_URL`
@@ -281,6 +281,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
+- `Antigravity refused in one-shot jobs`
 - `xAI OAuth refused in one-shot jobs`
 
 #### ports
@@ -301,7 +302,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 #### volumes
 - `/work`
 
-`HOME` is an emptyDir (empty `HOME`, no grant adoption). No shared cache across Jobs; each Job clones full history into its own emptyDir. `/data` is not mounted.
+`HOME` is an emptyDir (empty `HOME`, no xAI or Antigravity grant adoption). No shared cache across Jobs; each Job clones full history into its own emptyDir. `/data` is not mounted.
 
 ## Metrics
 
