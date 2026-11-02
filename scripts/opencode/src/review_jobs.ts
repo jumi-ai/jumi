@@ -145,7 +145,7 @@ export interface ReviewJobStore {
     id: number,
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<void>;
+  ): Promise<{ cancelled: boolean }>;
   /**
    * Durable per-run usage: one row per (runner spawn, model). Called by the
    * engine wrapper before the job completes, so a pod that exits after one
@@ -1175,11 +1175,23 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     id: number,
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<void> {
+  ): Promise<{ cancelled: boolean }> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
       const ts = Date.now();
+      // A cancel that lands after the tick's final `isCancelRequested` poll
+      // must not publish a normal result: settle atomically like the rewake
+      // branch below so the late mark wins and the caller posts `stopped`.
+      if (row.cancelRequested) {
+        row.rewakeRequested = false;
+        row.cancelRequested = false;
+        row.state = "cancelled";
+        row.leasedBy = null;
+        row.leasedUntil = null;
+        row.updatedAt = ts;
+        return { cancelled: true };
+      }
       const rewake = Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome);
       row.rewakeRequested = false;
       row.cancelRequested = false;
@@ -1189,7 +1201,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         row.leasedBy = null;
         row.leasedUntil = null;
         row.updatedAt = ts;
-        return;
+        return { cancelled: false };
       }
       row.state = outcome.state;
       if (outcome.reason) row.resultReason = outcome.reason;
@@ -1197,6 +1209,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedBy = null;
       row.leasedUntil = null;
       row.updatedAt = ts;
+      return { cancelled: false };
     });
   }
 
@@ -2836,24 +2849,27 @@ export class PgReviewJobStore implements ReviewJobStore {
     id: number,
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<void> {
-    const rows = asRows<{ id: unknown }>(
+  ): Promise<{ cancelled: boolean }> {
+    // Cancel wins atomically like the rewake branch: a mark that lands after
+    // the tick's final poll settles to `cancelled` instead of publishing.
+    const rows = asRows<{ state: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET state = CASE WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
-             result_reason = CASE WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
-             published_at = CASE WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
+         SET state = CASE WHEN cancel_requested THEN 'cancelled' WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
+             result_reason = CASE WHEN cancel_requested THEN result_reason WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
+             published_at = CASE WHEN cancel_requested THEN published_at WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
              rewake_requested = FALSE,
              cancel_requested = FALSE,
              leased_by = NULL,
              leased_until = NULL,
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-         RETURNING id`,
+         RETURNING state`,
         [id, leasedBy, outcome.state, outcome.reason ?? null, isCiRewakeOutcome(outcome)]
       )
     );
     if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);
+    return { cancelled: str(rows[0].state) === "cancelled" };
   }
 
   async reclaimExpired(

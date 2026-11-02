@@ -298,14 +298,28 @@ export async function reclaimExpiredWorkerJobs(
       if (opts?.api && row.issueNumber != null) {
         const reason = row.error ?? row.resultReason ?? "Jumi failed: max attempts exceeded";
         await upsertWorkerComment(opts.api, row.owner, row.repo, row.issueNumber, opts.botUsername ?? "jumi", reason);
-        await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+        const published = await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+        if (published.cancelled) {
+          await upsertWorkerComment(
+            opts.api,
+            row.owner,
+            row.repo,
+            row.issueNumber,
+            opts.botUsername ?? "jumi",
+            "stopped"
+          );
+          logger(`reclaim-cancelled ${row.jobKey}`);
+        } else {
+          logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
+        }
       } else {
-        await store.markPublished(row.id, row.leasedBy, {
+        const published = await store.markPublished(row.id, row.leasedBy, {
           state: "failed",
           reason: row.error ?? row.resultReason ?? undefined,
         });
+        if (published.cancelled) logger(`reclaim-cancelled ${row.jobKey}`);
+        else logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
       }
-      logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
     } catch (err) {
       logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
       try {
@@ -472,7 +486,23 @@ export async function processWorkerTick(
     const latch = await store.readIssueSkipLatch(job.owner, job.repo, job.issueNumber);
     await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
     if (isSkipLatchReason(latch.skipReason)) {
-      await store.markPublished(row.id, leasedBy, { state: "skipped", reason: latch.skipReason ?? undefined });
+      const published = await store.markPublished(row.id, leasedBy, {
+        state: "skipped",
+        reason: latch.skipReason ?? undefined,
+      });
+      if (published.cancelled) {
+        await cancelIssueWork({
+          api,
+          owner: job.owner,
+          repo: job.repo,
+          issueNumber: job.issueNumber,
+          botUsername: config.botUsername,
+          home: config.home,
+          killPid: () => undefined,
+        });
+        logger(`${issueJobKey(job)} cancelled`);
+        return "processed";
+      }
       recordJobCompleted(row.kind, "skipped");
       logger(`${issueJobKey(job)} skipped: ${latch.skipReason}`);
       await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latch.skipReason, logger);
@@ -595,7 +625,24 @@ export async function processWorkerTick(
       }
     }
     const state = workerPublishedState(result.status);
-    await store.markPublished(row.id, leasedBy, { state, reason });
+    const published = await store.markPublished(row.id, leasedBy, { state, reason });
+    if (published.cancelled) {
+      try {
+        await cancelIssueWork({
+          api,
+          owner: job.owner,
+          repo: job.repo,
+          issueNumber: job.issueNumber,
+          botUsername: config.botUsername,
+          home: config.home,
+          killPid: () => undefined,
+        });
+      } catch (err) {
+        logger(`cancel cleanup failed ${issueJobKey(job)}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      logger(`${issueJobKey(job)} cancelled`);
+      return "processed";
+    }
     recordJobCompleted(row.kind, state);
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
     if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
@@ -677,9 +724,33 @@ export async function processWorkerTick(
         const decision = decideInfraRetry(row.error, Date.now());
         if (decision.action === "exhaust") {
           await store.saveResult(row.id, leasedBy, { kind: "error", error: decision.reason });
-          await store.markPublished(row.id, leasedBy, { state: "failed", reason: decision.reason });
-          recordJobCompleted(row.kind, "failed");
-          logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
+          const published = await store.markPublished(row.id, leasedBy, {
+            state: "failed",
+            reason: decision.reason,
+          });
+          if (published.cancelled) {
+            if (row.issueNumber != null) {
+              try {
+                await cancelIssueWork({
+                  api,
+                  owner: row.owner,
+                  repo: row.repo,
+                  issueNumber: row.issueNumber,
+                  botUsername: config.botUsername,
+                  home: config.home,
+                  killPid: () => undefined,
+                });
+              } catch (cancelErr) {
+                logger(
+                  `cancel cleanup failed ${row.jobKey}: ${cancelErr instanceof Error ? cancelErr.message : String(cancelErr)}`
+                );
+              }
+            }
+            logger(`${row.jobKey} cancelled`);
+          } else {
+            recordJobCompleted(row.kind, "failed");
+            logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
+          }
         } else {
           await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
