@@ -471,6 +471,67 @@ describe("codex publish retry and login death", () => {
     }
   });
 
+  test("refresh updates the remaining and lifetime gauges to the new token", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-refresh-gauges-"));
+    try {
+      const home = join(dir, "home");
+      await mkdir(join(home, ".codex"), { recursive: true });
+      const nowSec = Math.floor(Date.now() / 1000);
+      const oldExp = nowSec + 60;
+      await writeFile(
+        join(home, ".codex", "auth.json"),
+        JSON.stringify(fullAuth({ accessExp: oldExp, lastRefresh: "2020-01-01T00:00:00.000Z" })),
+        "utf8"
+      );
+      resetCodexControlMetricsForTests();
+      const beforeAuth = await readCodexAuthFile(join(home, ".codex", "auth.json"));
+      const oldRemaining = Math.floor(codexAccessRemainingMs(beforeAuth, nowSec * 1000)! / 1000);
+      const oldLifetime = Math.floor(codexTokenLifetimeMs(beforeAuth)! / 1000);
+      expect(oldRemaining).toBe(60);
+      expect(oldLifetime).not.toBe(864_000);
+
+      const newExp = nowSec + 864_000;
+      const newAccess = probeAccessToken(newExp, "refreshed");
+      const fetchImpl = async (input: string): Promise<Response> => {
+        if (String(input).includes("/oauth/token")) {
+          return new Response(
+            JSON.stringify({
+              access_token: newAccess,
+              refresh_token: "refresh-new",
+              id_token: probeIdToken(),
+            }),
+            { status: 200 }
+          );
+        }
+        throw new Error(`unexpected fetch to ${input}`);
+      };
+      const state = newControlRuntimeState();
+      const result = await runControlTick(state, {
+        home,
+        now: () => nowSec * 1000,
+        fetchImpl,
+        publish: false,
+      });
+      expect(result.refreshed).toBe(true);
+
+      const reread = await readCodexAuthFile(join(home, ".codex", "auth.json"));
+      expect((reread.tokens as Record<string, unknown>).access_token).toBe(newAccess);
+      const expectedRemaining = Math.floor(codexAccessRemainingMs(reread, nowSec * 1000)! / 1000);
+      const expectedLifetime = Math.floor(codexTokenLifetimeMs(reread)! / 1000);
+      expect(expectedRemaining).toBe(864_000);
+      expect(expectedLifetime).toBe(864_000);
+
+      const snap = getCodexControlSnapshot();
+      expect(snap.lastRefreshTimestampSeconds).toBe(nowSec);
+      expect(snap.remainingSeconds).toBe(expectedRemaining);
+      expect(snap.lifetimeSeconds).toBe(expectedLifetime);
+      expect(snap.remainingSeconds).not.toBe(oldRemaining);
+      expect(snap.lifetimeSeconds).not.toBe(oldLifetime);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("startup publish re-reads the service-account token file on every call", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-codex-satoken-"));
     try {
