@@ -491,15 +491,19 @@ export async function processWorkerTick(
         reason: latch.skipReason ?? undefined,
       });
       if (published.cancelled) {
-        await cancelIssueWork({
-          api,
-          owner: job.owner,
-          repo: job.repo,
-          issueNumber: job.issueNumber,
-          botUsername: config.botUsername,
-          home: config.home,
-          killPid: () => undefined,
-        });
+        try {
+          await cancelIssueWork({
+            api,
+            owner: job.owner,
+            repo: job.repo,
+            issueNumber: job.issueNumber,
+            botUsername: config.botUsername,
+            home: config.home,
+            killPid: () => undefined,
+          });
+        } catch (err) {
+          logger(`cancel cleanup failed ${issueJobKey(job)}: ${err instanceof Error ? err.message : String(err)}`);
+        }
         logger(`${issueJobKey(job)} cancelled`);
         return "processed";
       }
