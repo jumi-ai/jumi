@@ -192,7 +192,6 @@ export async function handleIssueCancel(
     queue.drop(key);
     abortIssueJob(queue, key);
   }
-  abortLocalJob(aborts, pids, key);
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
@@ -201,21 +200,45 @@ export async function handleIssueCancel(
     await latches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
   }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
+  // The ledger mark lands before the in-process abort below: a tick woken by
+  // the abort always observes the mark in its settle check instead of racing
+  // it and publishing a normal result.
+  abortLocalJob(aborts, pids, key);
+  if (store) {
+    // Ledger/job mode: no HOME claim files exist (ledger ticks run with
+    // useClaim:false), so there is no claim pid to kill and no terminal
+    // claim to honor. The in-process abort above stops a long-running child
+    // in this pod; a one-shot child in another pod observes the
+    // cancel_requested mark on its next heartbeat and runs the same
+    // cancelIssueWork cleanup itself. Post `stopped` here only for rows
+    // that were still queued (the job posts it for leased rows when it
+    // settles, so posting here would double-post).
+    if (latch) {
+      await syncHomeSkipLatch(config.home, owner, repo, issueNumber, latch.generation);
+    }
+    if (cancelledQueued > 0) {
+      await cancelIssueWork({
+        api,
+        owner,
+        repo,
+        issueNumber,
+        botUsername: config.botUsername,
+        home: config.home,
+        killPid: () => undefined,
+      });
+    }
+    return { key, cancelled: true };
+  }
   const claimPath = claimFilePath(config.home, owner, repo, issueNumber);
   const claim = await readClaim(claimPath);
-  if (latch) {
-    await syncHomeSkipLatch(config.home, owner, repo, issueNumber, latch.generation);
-  } else {
-    await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
-    await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
-    await deleteClaim(ciStatePath(config.home, owner, repo, issueNumber));
-    await deleteClaim(stuckStatePath(config.home, owner, repo, issueNumber));
-  }
+  await deleteClaim(followUpStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(conflictStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(ciStatePath(config.home, owner, repo, issueNumber));
+  await deleteClaim(stuckStatePath(config.home, owner, repo, issueNumber));
   if (claim?.terminal) {
     await deleteClaim(claimPath);
     return { key, cancelled: true };
   }
-  const skipClaimKill = store ? { killPid: () => undefined } : {};
   if (!claim) {
     if (cancelledQueued > 0) {
       await cancelIssueWork({
@@ -225,7 +248,6 @@ export async function handleIssueCancel(
         issueNumber,
         botUsername: config.botUsername,
         home: config.home,
-        ...skipClaimKill,
       });
     }
     return { key, cancelled: true };
@@ -237,7 +259,6 @@ export async function handleIssueCancel(
     issueNumber,
     botUsername: config.botUsername,
     home: config.home,
-    ...skipClaimKill,
   });
   return { key, cancelled: true };
 }
@@ -345,6 +366,7 @@ export async function processWorkerTick(
     context: { jobId: row.id, jobKey: row.jobKey, kind: row.kind },
     recordRunUsageRows: (rows) => store.recordRunUsageRows(rows),
   });
+  const rowId = row.id;
 
   const key = issueJobKey({
     owner: row.owner,
@@ -367,11 +389,33 @@ export async function processWorkerTick(
     abort.abort();
     abortLocalJob(aborts, pids, key);
   };
+  // Unassign while a one-shot job runs: the router marks the leased row
+  // cancel_requested (it cannot reach the pod's AbortController). Observe
+  // the mark on every heartbeat, abort the child, and let the await below
+  // wait for the child to stop before the tick settles the row as
+  // cancelled. Long-running mode keeps its in-process abort above; this
+  // poll is the backstop that also settles the ledger either way.
+  let cancelObserved = false;
+  const observeCancel = () => {
+    if (cancelObserved || heartbeatStopped) return;
+    cancelObserved = true;
+    abort.abort();
+    abortLocalJob(aborts, pids, key);
+  };
+  const checkCancelMark = async () => {
+    if (cancelObserved || heartbeatStopped) return;
+    try {
+      if (await store.isCancelRequested(rowId)) observeCancel();
+    } catch {
+      // Ledger blip: the next heartbeat retries; never fail the job on a read.
+    }
+  };
   const heartbeat = setInterval(() => {
     if (heartbeatStopped) return;
-    void store.heartbeat(row.id, leasedBy, config.leaseMs).then(
+    void store.heartbeat(rowId, leasedBy, config.leaseMs).then(
       (ok) => {
         if (!ok) loseLease();
+        else void checkCancelMark();
       },
       () => undefined
     );
@@ -380,6 +424,48 @@ export async function processWorkerTick(
     heartbeatStopped = true;
     clearInterval(heartbeat);
   };
+
+  async function settleObservedCancel(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    jobKey: string
+  ): Promise<boolean> {
+    if (!cancelObserved) {
+      try {
+        if (!(await store.isCancelRequested(rowId))) return false;
+        cancelObserved = true;
+      } catch {
+        return false;
+      }
+    }
+    // The child already stopped: the heartbeat aborted it and the run await
+    // waited for it (or it never started). Abort again defensively, then run
+    // the same cleanup as handleIssueCancel's cancelIssueWork and settle.
+    abort.abort();
+    abortLocalJob(aborts, pids, key);
+    try {
+      await cancelIssueWork({
+        api,
+        owner,
+        repo,
+        issueNumber,
+        botUsername: config.botUsername,
+        home: config.home,
+        killPid: () => undefined,
+      });
+    } catch (err) {
+      logger(`cancel cleanup failed ${jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    try {
+      await store.markCancelled(rowId, leasedBy);
+    } catch (err) {
+      logger(`cancel settle failed ${jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      return true;
+    }
+    logger(`${jobKey} cancelled`);
+    return true;
+  }
 
   try {
     const job = issueJobFromRecord(row);
@@ -390,6 +476,18 @@ export async function processWorkerTick(
       recordJobCompleted(row.kind, "skipped");
       logger(`${issueJobKey(job)} skipped: ${latch.skipReason}`);
       await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, latch.skipReason, logger);
+      return "processed";
+    }
+    // Cancel that landed between the lease and the first heartbeat: settle
+    // without starting a child at all.
+    try {
+      if (await store.isCancelRequested(row.id)) cancelObserved = true;
+    } catch {
+      // Fall through and run; the heartbeat poll retries the read.
+    }
+    if (cancelObserved) {
+      stopHeartbeat();
+      await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job));
       return "processed";
     }
     const shared = {
@@ -468,6 +566,7 @@ export async function processWorkerTick(
               maxConflictRounds: config.maxConflictRounds,
             });
     stopHeartbeat();
+    if (await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job))) return "processed";
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
       logger(`${issueJobKey(job)} cancelled`);
@@ -532,6 +631,9 @@ export async function processWorkerTick(
     return "processed";
   } catch (err) {
     stopHeartbeat();
+    if (await settleObservedCancel(row.owner, row.repo, row.issueNumber ?? 0, row.jobKey).catch(() => false)) {
+      return "processed";
+    }
     if (extras.abortSignal?.aborted) {
       logger(`worker job ${row.jobKey} interrupted`);
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
