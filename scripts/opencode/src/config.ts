@@ -42,6 +42,7 @@ export interface ServiceConfig {
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
   opencodeWellKnownToken: string;
+  codexAuthFile?: string;
   home: string;
   workdir: string;
   queueConcurrency: number;
@@ -244,6 +245,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     opencodeWellKnownKey:
       optionalEnv(resolved, "OPENCODE_WELLKNOWN_KEY", "OPENCODE_WELLKNOWN_TOKEN") ?? "OPENCODE_WELLKNOWN_TOKEN",
     opencodeWellKnownToken: optionalEnv(resolved, "OPENCODE_WELLKNOWN_TOKEN", "unused") ?? "unused",
+    codexAuthFile: optionalEnv(resolved, "CODEX_AUTH_FILE"),
     home: optionalEnv(resolved, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(resolved, "WORKDIR", "/work") ?? "/work",
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),
