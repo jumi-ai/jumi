@@ -510,6 +510,9 @@ describe("ordinal listener", () => {
       hasXaiRunner: false,
       isLeased: () => false,
       logger: () => {},
+      // Test seam: this sandbox already holds the constant 3010, so bind a
+      // free port. Production engine/worker callers never set it.
+      port: 31012,
     });
     try {
       const base = `http://127.0.0.1:${server.port}`;

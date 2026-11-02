@@ -79,7 +79,7 @@ export interface DeviceLoginState {
 
 export interface OrdinalStatus {
   ordinal: string;
-  role: "engine" | "worker";
+  role: "engine" | "worker" | "control";
   hasXaiRunner: boolean;
   hasCodexRunner: boolean;
   authPresent: boolean;
@@ -93,6 +93,9 @@ export interface OrdinalStatus {
   expiresAt?: number;
   error?: string;
   available?: boolean;
+  /** Set by `control` when the refresh grant is dead (re-login required). */
+  loginDead?: boolean;
+  loginDeadReason?: string;
 }
 
 export type DeviceLoginResult = "started" | "succeeded" | "expired" | "denied" | "cancelled" | "error";
@@ -242,7 +245,7 @@ export const defaultSpawnLogin: SpawnLoginFn = (opts) => {
 
 export interface DeviceLoginManagerOptions {
   ordinal: string;
-  role: "engine" | "worker";
+  role: "engine" | "worker" | "control";
   home: string;
   hasXaiRunner: boolean;
   hasCodexRunner?: boolean;
@@ -253,6 +256,8 @@ export interface DeviceLoginManagerOptions {
   logger?: (msg: string) => void;
   onResult?: (entry: DeviceLoginRecord) => Promise<void> | void;
   now?: () => number;
+  /** Control refresh death: surfaced on status so the board shows re-login. */
+  isLoginDead?: () => { dead: boolean; reason?: string } | Promise<{ dead: boolean; reason?: string }>;
 }
 
 export interface DeviceLoginStartOutcome {
@@ -308,6 +313,19 @@ export class DeviceLoginManager {
     if (this.state.userCode) status.userCode = this.state.userCode;
     if (this.state.expiresAt != null) status.expiresAt = this.state.expiresAt;
     if (this.state.error) status.error = this.state.error;
+    try {
+      const dead = await this.options.isLoginDead?.();
+      if (dead?.dead) {
+        status.loginDead = true;
+        if (dead.reason) status.loginDeadReason = dead.reason;
+        if (status.state === "idle" || status.state === "cancelled" || status.state === "error") {
+          status.state = "error";
+          status.error = `Codex login dead (${dead.reason ?? "refresh grant refused"}); run Codex sign-in again`;
+        }
+      }
+    } catch {
+      // Best-effort: a dead-check failure never breaks status.
+    }
     return status;
   }
 
