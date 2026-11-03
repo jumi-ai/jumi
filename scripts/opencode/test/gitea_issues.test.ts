@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 import {
   extractClosingIssueNumber,
   extractClosingIssueNumbers,
+  extractWorkingIssueNumber,
   findOpenClosingPullRequest,
   findOpenJumiClosingPullRequest,
   isAssignedForeignPR,
   isEligibleWorkerPR,
   isForeignPrIdentity,
+  isInScopeJumiPR,
   pullRequestClosesIssue,
+  refsIssuePattern,
   resolveWorkerPullRequest,
 } from "../src/gitea_issues.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
@@ -267,5 +270,85 @@ describe("resolveWorkerPullRequest", () => {
     });
     const api = { listOpenPulls: async () => [foreign] };
     expect((await resolveWorkerPullRequest(api, "kirmanak", "demo", 50, "jumi", 50))?.number).toBe(50);
+  });
+});
+
+describe("extractWorkingIssueNumber", () => {
+  test("returns the branch issue for Refs, Fixes, or bare jumi branches", () => {
+    for (const body of ["Refs #12", "Fixes #12", "no keyword here"]) {
+      expect(
+        extractWorkingIssueNumber({
+          title: "x",
+          body,
+          head: { ref: "jumi/issue-12-fix-the-thing" },
+        })
+      ).toBe(12);
+    }
+  });
+
+  test("stays routed by the branch when the body names a different issue", () => {
+    expect(
+      extractWorkingIssueNumber({
+        title: "x",
+        body: "Fixes #13",
+        head: { ref: "jumi/issue-12-fix-the-thing" },
+      })
+    ).toBe(12);
+    expect(
+      extractWorkingIssueNumber({
+        title: "x",
+        body: "Refs #13",
+        head: { ref: "jumi/issue-12-fix-the-thing" },
+      })
+    ).toBe(12);
+  });
+
+  test("falls back to the closer off a jumi branch", () => {
+    expect(extractWorkingIssueNumber({ title: "x", body: "Fixes #12" })).toBe(12);
+    expect(extractWorkingIssueNumber({ title: "x", body: "no keyword" })).toBeUndefined();
+  });
+
+  test("refsIssuePattern matches Refs #n", () => {
+    expect(refsIssuePattern(12).test("Refs #12")).toBe(true);
+    expect(refsIssuePattern(12).test("refs #12")).toBe(true);
+    expect(refsIssuePattern(12).test("Ref #12")).toBe(true);
+    expect(refsIssuePattern(12).test("Fixes #12")).toBe(false);
+    expect(refsIssuePattern(12).test("Refs #13")).toBe(false);
+  });
+
+  test("a Refs jumi branch PR is in scope and never foreign", () => {
+    const repo = makeRepo();
+    const pr = makePR({
+      user: makeUser({ login: "jumi" }),
+      body: "Refs #12",
+      head: {
+        label: "kirmanak:jumi/issue-12-x",
+        ref: "jumi/issue-12-x",
+        sha: "abc",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+    expect(isInScopeJumiPR(pr, "kirmanak", "demo", "jumi")).toBe(true);
+    expect(isForeignPrIdentity(pr, "kirmanak", "demo", "jumi")).toBe(false);
+  });
+
+  test("resolves a Refs worker PR by branch issue", async () => {
+    const repo = makeRepo();
+    const pr = makePR({
+      number: 8,
+      user: makeUser({ login: "jumi" }),
+      body: "Refs #12",
+      head: {
+        label: "kirmanak:jumi/issue-12-x",
+        ref: "jumi/issue-12-x",
+        sha: "abc",
+        repo,
+        repo_id: repo.id,
+      },
+    });
+    const api = { listOpenPulls: async () => [pr] };
+    expect((await resolveWorkerPullRequest(api, "kirmanak", "demo", 12, "jumi"))?.number).toBe(8);
+    expect((await findOpenJumiClosingPullRequest(api, "kirmanak", "demo", 12, "jumi"))?.number).toBe(8);
   });
 });

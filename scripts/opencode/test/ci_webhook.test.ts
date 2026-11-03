@@ -100,6 +100,64 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     expect(decision.jobs[0]?.trigger).toEqual({ event: "workflow_job", sender: "alice", workflowJobId: 99 });
   });
 
+  test("enqueues follow-up for a jumi branch PR whose body says Refs #N", async () => {
+    const decision = await shouldEnqueueWorkflowJobFollowUp(
+      makeWorkflowJobPayload(),
+      policy,
+      makeApi({
+        listOpenPulls: async () => [
+          makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Refs #12",
+            user: makeUser({ login: "jumi" }),
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo,
+              repo_id: repo.id,
+            },
+          }),
+        ],
+      })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs).toHaveLength(1);
+    expect(decision.jobs[0]?.issueNumber).toBe(12);
+    expect(decision.jobs[0]?.prNumber).toBe(127);
+  });
+
+  test("stays routed by the branch when a jumi body names a different issue", async () => {
+    const decision = await shouldEnqueueWorkflowJobFollowUp(
+      makeWorkflowJobPayload(),
+      policy,
+      makeApi({
+        listOpenPulls: async () => [
+          makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Fixes #13",
+            user: makeUser({ login: "jumi" }),
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo,
+              repo_id: repo.id,
+            },
+          }),
+        ],
+      })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.issueNumber).toBe(12);
+  });
+
   test("matches head branch when sha differs from live PR head", async () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload({

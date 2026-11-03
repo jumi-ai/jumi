@@ -154,6 +154,11 @@ describe("buildPullRequestBody", () => {
     expect(buildPullRequestBody(12, "Fixed #12")).toBe("Fixed #12");
   });
 
+  test("keeps an existing Refs #n instead of appending Fixes #n", () => {
+    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12")).toBe("Caches categories.\n\nRefs #12");
+    expect(buildPullRequestBody(12, "Refs #12")).toBe("Refs #12");
+  });
+
   test("still appends Fixes #n when a different issue is mentioned", () => {
     expect(buildPullRequestBody(12, "Fixes #13")).toBe("Fixes #13\n\nFixes #12");
   });
@@ -247,6 +252,54 @@ describe("implementIssue", () => {
             number: 127,
             user: makeUser({ login: "jumi" }),
             body: "Fixes #12",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo,
+              repo_id: repo.id,
+            },
+          }),
+        ],
+        listIssueComments: async () => {
+          commentsListed++;
+          return [makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) })];
+        },
+      });
+      await expect(
+        implementIssue({
+          api,
+          job: makeIssueJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async () => {
+            throw new Error("follow-up git");
+          },
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run before git");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("follow-up git");
+      expect(commentsListed).toBeGreaterThan(0);
+    });
+  });
+
+  test("re-picking finds a Refs jumi branch PR instead of opening a second one", async () => {
+    await withDirs(async (home, workdir) => {
+      let commentsListed = 0;
+      const repo = makeRepo();
+      const api = makeApi({
+        listOpenPulls: async () => [
+          makePR({
+            number: 127,
+            user: makeUser({ login: "jumi" }),
+            body: "Refs #12",
             head: {
               label: "kirmanak:jumi/issue-12-fix-the-thing",
               ref: "jumi/issue-12-fix-the-thing",

@@ -316,6 +316,82 @@ describe("shouldEnqueueIssueCommentFollowUp", () => {
     }
   });
 
+  test("enqueues a comment on a jumi branch PR whose body says Refs #N", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        repository,
+        issue: makeIssue({
+          number: 127,
+          title: "Fix the thing",
+          body: "Refs #12",
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+          user: makeUser({ login: "jumi" }),
+          pull_request: { merged_at: null },
+        }),
+        pull_request: makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Refs #12",
+          user: makeUser({ login: "jumi" }),
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+        sender: makeUser({ login: "alice" }),
+      }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(12);
+      expect(decision.job.prNumber).toBe(127);
+    }
+  });
+
+  test("stays routed by the branch when the body names a different issue", () => {
+    const repository = makeRepo();
+    const decision = shouldEnqueueIssueCommentFollowUp(
+      makeIssueCommentPayload({
+        repository,
+        issue: makeIssue({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #13",
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+          user: makeUser({ login: "jumi" }),
+          pull_request: { merged_at: null },
+        }),
+        pull_request: makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #13",
+          user: makeUser({ login: "jumi" }),
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha: "headsha",
+            repo: repository,
+            repo_id: repository.id,
+          },
+        }),
+        sender: makeUser({ login: "alice" }),
+      }),
+      policy,
+      "issue_comment"
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type === "enqueue") {
+      expect(decision.job.issueNumber).toBe(12);
+      expect(decision.job.prNumber).toBe(127);
+    }
+  });
+
   test("enqueues a comment on a labeled GitHub foreign PR keyed by the PR number", () => {
     const repository = makeRepo({
       html_url: "https://github.com/kirmanak/demo",
@@ -793,7 +869,7 @@ describe("shouldEnqueuePullAssign", () => {
     expect(decision).toEqual({ type: "skip", reason: "closing issue already assigned" });
   });
 
-  test("does not treat a jumi branch without a close-keyword as a closer", async () => {
+  test("treats a jumi branch without a close-keyword as working on the branch issue", async () => {
     const loaded: number[] = [];
     const decision = await shouldEnqueuePullAssign(
       assignedCloserPayload({ body: "no closer here", title: "WIP-free title" }),
@@ -805,12 +881,8 @@ describe("shouldEnqueuePullAssign", () => {
         },
       }
     );
-    expect(decision.type).toBe("enqueue");
-    if (decision.type === "enqueue") {
-      expect(decision.job.issueNumber).toBe(127);
-      expect(decision.job.prNumber).toBe(127);
-    }
-    expect(loaded).toEqual([]);
+    expect(decision).toEqual({ type: "skip", reason: "closing issue already assigned" });
+    expect(loaded).toEqual([12]);
   });
 });
 

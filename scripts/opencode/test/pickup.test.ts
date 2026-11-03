@@ -198,6 +198,13 @@ describe("isJumiCloserForIssue", () => {
       )
     ).toBe(false);
   });
+
+  test("matches a Refs jumi branch PR so re-picking finds it", () => {
+    expect(isJumiCloserForIssue(jumiCloser({ body: "Refs #12" }), "kirmanak", "demo", 12, "jumi")).toBe(true);
+    expect(isJumiCloserForIssue(jumiCloser({ body: "no keyword here" }), "kirmanak", "demo", 12, "jumi")).toBe(true);
+    expect(isJumiCloserForIssue(jumiCloser({ body: "Fixes #13" }), "kirmanak", "demo", 12, "jumi")).toBe(true);
+    expect(isJumiCloserForIssue(jumiCloser({ body: "Fixes #13" }), "kirmanak", "demo", 13, "jumi")).toBe(false);
+  });
 });
 
 describe("conflictJobIfUnmergeable", () => {
