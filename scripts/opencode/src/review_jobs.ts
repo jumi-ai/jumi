@@ -1,4 +1,4 @@
-import { isCiLookupRetryMarker, isCiWaitSkipReason } from "./ci.ts";
+import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
 import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
@@ -69,6 +69,22 @@ export const RECLAIM_LEASED_BY = "reclaim";
 
 export type { PersistReviewResult };
 
+/**
+ * Router-side CI gating for review rows. When set, the row is stored as
+ * waiting for CI (`leased_until` in the future + wait marker in `error`) so
+ * control's `peekRunnable`/`lease` skips it without forge access. A later
+ * CI-completion wake for the same head promotes it via a plain `enqueue`
+ * (no wait opts). No schema change: reuses the existing not-before column.
+ */
+export interface EnqueueReviewOpts {
+  /** Not-before ms for a waiting row. */
+  waitUntilMs?: number;
+  /** `ci-wait-pending:*` or `ci-wait-absent:*` marker for a waiting row. */
+  waitMarker?: string;
+  /** Test seam for `Date.now()`. */
+  nowMs?: number;
+}
+
 export interface ReviewJobRecord {
   id: number;
   jobKey: string;
@@ -114,7 +130,7 @@ export interface ReviewJobStore {
   migrate(): Promise<void>;
   /** Job-mode check: fail clearly when the schema is too old. Never migrates. */
   assertSchema?(): Promise<void>;
-  enqueue(job: ReviewJob): Promise<EnqueueResult>;
+  enqueue(job: ReviewJob, opts?: EnqueueReviewOpts): Promise<EnqueueResult>;
   enqueueIssue(job: IssueJob): Promise<EnqueueResult>;
   drop(key: string): Promise<boolean>;
   lease(
@@ -196,6 +212,13 @@ export interface ReviewJobStore {
   countByState(): Promise<Record<ReviewJobState, number>>;
   countByKindState(): Promise<Record<JobKind, Record<ReviewJobState, number>>>;
   oldestQueuedAgeSeconds(now?: Date): Promise<Record<JobKind, number>>;
+  /**
+   * Durable count of skip-only review rows (`skipped: CI still pending`).
+   * Backstop races still publish these; the CI gate keeps them near zero.
+   */
+  countCiPendingSkips(): Promise<number>;
+  /** Queued review rows currently waiting for CI (not dispatchable). */
+  countCiWaiting(now?: Date): Promise<number>;
   get(id: number): Promise<ReviewJobRecord | undefined>;
   /** Queued or leased rows for the operator board. No forge calls. Throws when the ledger is down. */
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
@@ -910,10 +933,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     // Memory ledger is always current.
   }
 
-  enqueue(job: ReviewJob): Promise<EnqueueResult> {
+  enqueue(job: ReviewJob, opts?: EnqueueReviewOpts): Promise<EnqueueResult> {
     return this.locked(async () => {
       const key = reviewJobKey(job);
-      const now = Date.now();
+      const now = opts?.nowMs ?? Date.now();
+      const waitUntil = opts?.waitUntilMs;
+      const waitMarker = opts?.waitMarker;
+      const wantsWait = waitUntil != null && waitMarker != null;
       // A reopen means the pull is open again: drop the closed marker even
       // when this enqueue dedupes against the terminal row (same SHA).
       if (isPullReopenAction(job.action)) {
@@ -927,13 +953,36 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
         for (const row of sameKey) {
           if (row.state === "leased") row.rewakeRequested = true;
-          if (
-            row.state === "queued" &&
-            row.leasedUntil != null &&
-            row.leasedUntil > now &&
-            isCiLookupRetryMarker(row.error)
-          ) {
-            row.leasedUntil = null;
+          if (row.state !== "queued") continue;
+          if (isCiWaitMarker(row.error)) {
+            if (wantsWait) {
+              // Still waiting (e.g. duplicate PR webhook while CI pending):
+              // refresh the wait instead of promoting.
+              row.leasedUntil = waitUntil;
+              row.error = waitMarker;
+              row.updatedAt = now;
+            } else {
+              // CI-completion wake for the same head: make it dispatchable.
+              row.leasedUntil = null;
+              row.error = null;
+              row.updatedAt = now;
+            }
+            continue;
+          }
+          if (row.leasedUntil != null && row.leasedUntil > now && isCiLookupRetryMarker(row.error)) {
+            if (wantsWait) {
+              row.leasedUntil = waitUntil;
+              row.error = waitMarker;
+              row.updatedAt = now;
+            } else {
+              row.leasedUntil = null;
+              row.updatedAt = now;
+            }
+          } else if (wantsWait) {
+            // A dispatchable row that is now known to be pending (race where
+            // CI regressed after the first enqueue): hide it until the wake.
+            row.leasedUntil = waitUntil;
+            row.error = waitMarker;
             row.updatedAt = now;
           }
         }
@@ -970,10 +1019,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         state: "queued",
         attempt: 0,
         leasedBy: null,
-        leasedUntil: null,
+        leasedUntil: wantsWait ? (waitUntil as number) : null,
         resultMarkdown: null,
         resultReason: null,
-        error: null,
+        error: wantsWait ? (waitMarker as string) : null,
         pendingStatusAt: null,
         publishedAt: null,
         prUpdatedAt: incomingTs,
@@ -1403,6 +1452,21 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         if (createdAt != null) ages[kind] = Math.max(0, (nowMs - createdAt) / 1000);
       }
       return ages;
+    });
+  }
+
+  countCiPendingSkips(): Promise<number> {
+    return this.locked(
+      () => this.rows.filter((row) => row.state === "skipped" && row.resultReason === CI_PENDING_REASON).length
+    );
+  }
+
+  countCiWaiting(now = new Date()): Promise<number> {
+    return this.locked(() => {
+      const ts = now.getTime();
+      return this.rows.filter(
+        (row) => row.state === "queued" && row.leasedUntil != null && row.leasedUntil > ts && isCiWaitMarker(row.error)
+      ).length;
     });
   }
 
@@ -2468,10 +2532,14 @@ export class PgReviewJobStore implements ReviewJobStore {
     await tx.unsafe(`DELETE FROM router_sits WHERE owner = $1 AND repo = $2 AND number = $3`, [owner, repo, number]);
   }
 
-  async enqueue(job: ReviewJob): Promise<EnqueueResult> {
+  async enqueue(job: ReviewJob, opts?: EnqueueReviewOpts): Promise<EnqueueResult> {
     const key = reviewJobKey(job);
     const prUpdatedAt = job.prUpdatedAt ?? null;
     const reopened = isPullReopenAction(job.action);
+    const waitUntilIso =
+      opts?.waitUntilMs != null && opts?.waitMarker != null ? new Date(opts.waitUntilMs).toISOString() : null;
+    const waitMarker = opts?.waitUntilMs != null && opts?.waitMarker != null ? opts.waitMarker : null;
+    const wantsWait = waitUntilIso != null && waitMarker != null;
     return this.sql.begin(async (tx) => {
       if (reopened) {
         await tx.unsafe(`DELETE FROM closed_pulls WHERE owner = $1 AND repo = $2 AND number = $3`, [
@@ -2501,18 +2569,43 @@ export class PgReviewJobStore implements ReviewJobStore {
         )
       );
       if (inflight.some((row) => str(row.job_key) === key)) {
-        await tx.unsafe(
-          `UPDATE review_jobs
-           SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
-               leased_until = CASE
-                 WHEN state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%' THEN NULL
-                 ELSE leased_until
-               END,
-               updated_at = NOW()
-           WHERE job_key = $1
-             AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW() AND error LIKE 'ci-lookup-retry:%'))`,
-          [key]
-        );
+        if (wantsWait) {
+          // Still waiting: refresh the wait instead of promoting.
+          await tx.unsafe(
+            `UPDATE review_jobs
+             SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
+                 leased_until = CASE WHEN state = 'queued' THEN $2::timestamptz ELSE leased_until END,
+                 error = CASE WHEN state = 'queued' THEN $3 ELSE error END,
+                 updated_at = NOW()
+             WHERE job_key = $1 AND state IN ('queued', 'leased')`,
+            [key, waitUntilIso, waitMarker]
+          );
+        } else {
+          // CI-completion wake for the same head: promote waiting rows and
+          // clear legacy lookup backoffs. Waiting markers clear fully; legacy
+          // backoffs keep their marker for the budget accounting.
+          await tx.unsafe(
+            `UPDATE review_jobs
+             SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
+                 leased_until = CASE
+                   WHEN state = 'queued' AND leased_until > NOW()
+                     AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                   THEN NULL
+                   ELSE leased_until
+                 END,
+                 error = CASE
+                   WHEN state = 'queued' AND leased_until > NOW()
+                     AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                   THEN NULL
+                   ELSE error
+                 END,
+                 updated_at = NOW()
+             WHERE job_key = $1
+               AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW()
+                 AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')))`,
+            [key]
+          );
+        }
         await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
@@ -2530,12 +2623,12 @@ export class PgReviewJobStore implements ReviewJobStore {
       const inserted = asRows<{ id: unknown }>(
         await tx.unsafe(
           `INSERT INTO review_jobs (
-             job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0, $7::timestamptz)
+             job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at, leased_until, error
+           ) VALUES ($1, $2, $3, $4, $5, $6, 'queued', 0, $7::timestamptz, $8::timestamptz, $9)
            ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
            DO NOTHING
            RETURNING id`,
-          [key, job.owner, job.repo, job.prNumber, job.headSha, job.delivery, prUpdatedAt]
+          [key, job.owner, job.repo, job.prNumber, job.headSha, job.delivery, prUpdatedAt, waitUntilIso, waitMarker]
         )
       );
       if (inserted.length === 0) {
@@ -3104,6 +3197,28 @@ export class PgReviewJobStore implements ReviewJobStore {
   async get(id: number): Promise<ReviewJobRecord | undefined> {
     const rows = asRows<ReviewJobRow>(await this.sql.unsafe(`SELECT * FROM review_jobs WHERE id = $1`, [id]));
     return rows[0] ? mapRow(rows[0]) : undefined;
+  }
+
+  async countCiPendingSkips(): Promise<number> {
+    const rows = asRows<{ n: unknown }>(
+      await this.sql.unsafe(
+        `SELECT COUNT(*)::bigint AS n FROM review_jobs WHERE state = 'skipped' AND result_reason = $1`,
+        [CI_PENDING_REASON]
+      )
+    );
+    return rows[0] ? num(rows[0].n) : 0;
+  }
+
+  async countCiWaiting(now = new Date()): Promise<number> {
+    const rows = asRows<{ n: unknown }>(
+      await this.sql.unsafe(
+        `SELECT COUNT(*)::bigint AS n FROM review_jobs
+         WHERE state = 'queued' AND leased_until > $1::timestamptz
+           AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')`,
+        [now.toISOString()]
+      )
+    );
+    return rows[0] ? num(rows[0].n) : 0;
   }
 
   async listInflight(limit = 200): Promise<ReviewJobRecord[]> {
@@ -4424,5 +4539,23 @@ export async function renderQueueMetrics(store: ReviewJobStore, now = new Date()
   for (const kind of JOB_KINDS) {
     lines.push(`jumi_review_jobs_oldest_queued_age_seconds{kind="${kind}"} ${ages[kind]}`);
   }
+  let pendingSkips = 0;
+  let waiting = 0;
+  try {
+    pendingSkips = await store.countCiPendingSkips();
+  } catch {
+    pendingSkips = 0;
+  }
+  try {
+    waiting = await store.countCiWaiting(now);
+  } catch {
+    waiting = 0;
+  }
+  lines.push("# HELP jumi_review_ci_pending_skips_total Skip-only review Jobs that exited `skipped: CI still pending`");
+  lines.push("# TYPE jumi_review_ci_pending_skips_total counter");
+  lines.push(`jumi_review_ci_pending_skips_total ${pendingSkips}`);
+  lines.push("# HELP jumi_review_ci_waiting_queued Reviews waiting for CI, not dispatchable");
+  lines.push("# TYPE jumi_review_ci_waiting_queued gauge");
+  lines.push(`jumi_review_ci_waiting_queued ${waiting}`);
   return `${lines.join("\n")}\n`;
 }

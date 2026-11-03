@@ -529,8 +529,12 @@ describe("PgReviewJobStore.enqueue", () => {
     const wake = queries.find((query) => query.includes("rewake_requested"));
     expect(wake).toContain("state = 'leased' THEN TRUE");
     expect(wake).toContain("ci-lookup-retry:%");
+    expect(wake).toContain("ci-wait-pending:%");
+    expect(wake).toContain("ci-wait-absent:%");
     expect(wake).toContain("leased_until");
-    expect(wake).not.toContain("error = CASE");
+    // Waiting markers clear fully on a CI-completion wake; the legacy
+    // lookup backoff marker is preserved for its budget accounting.
+    expect(wake).toContain("error = CASE");
     expect(queries.some((query) => query.includes("INSERT INTO review_jobs"))).toBe(false);
   });
 

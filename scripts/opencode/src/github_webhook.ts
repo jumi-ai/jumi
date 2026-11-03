@@ -25,6 +25,7 @@ import {
 } from "./issue_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
 import type { GiteaIssuePayload, IssueJob, ReviewJob } from "./types.ts";
@@ -59,7 +60,7 @@ export type GithubMailboxConfig = {
 };
 
 export type GithubReviewQueue = {
-  enqueue(job: ReviewJob): EnqueueResult | Promise<EnqueueResult>;
+  enqueue(job: ReviewJob, opts?: import("./review_jobs.ts").EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 };
 
 export type GithubWebhookDeps = {
@@ -68,6 +69,8 @@ export type GithubWebhookDeps = {
   getPR?: (owner: string, repo: string, index: number) => Promise<{ head: { sha: string } }>;
   logger?: (message: string) => void;
   rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
+  ciApi?: import("./worker_webhook.ts").HandleWorkerWebhookDeps["ciApi"];
+  ciHome?: string;
 };
 
 export type GithubWebhookPolicy = WorkerWebhookPolicy & {
@@ -393,8 +396,19 @@ export async function handleGithubWebhookEvent(
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const reviewResults: EnqueueResult[] = [];
+      const ciApi = deps.ciApi ?? deps.worker?.ciApi;
+      const ciHome = deps.ciHome ?? deps.worker?.ciHome ?? "/data";
       for (const partial of decision.jobs) {
-        const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+        const gated = await enqueueCiWakeWithGate(
+          deps.review,
+          { ...partial, delivery, receivedAt },
+          { ciApi, home: ciHome, logger }
+        );
+        if ("waiting" in gated) {
+          logger(`waiting ${gated.key} delivery=${delivery}`);
+          continue;
+        }
+        const result = gated;
         reviewResults.push(result);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         if (result.queued) {
@@ -409,7 +423,8 @@ export async function handleGithubWebhookEvent(
         }
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
-      return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      if (reviewResults.length > 0) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      return skipped("CI still pending", logger);
     } catch (err) {
       if (isQueueUnavailable(err)) {
         logger(`queue unavailable: ${err.message}`);
@@ -453,7 +468,11 @@ export async function handleGithubWebhookEvent(
             logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
-        const result = await deps.review.enqueue(job);
+        const result = await enqueueReviewWithCiGate(deps.review, job, {
+          ciApi: deps.ciApi ?? deps.worker?.ciApi,
+          home: deps.ciHome ?? deps.worker?.ciHome ?? "/data",
+          logger,
+        });
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         if (result.queued) {
           const cleared = await clearGithubSit(reviewSitsFor(deps), job.owner, job.repo, job.prNumber, logger);
@@ -567,8 +586,19 @@ export async function handleGithubWebhookEvent(
       if (deps.review) {
         const reviewDecision = await shouldEnqueueWorkflowJobReview(payload, policy, deps.worker.api, logger);
         if (reviewDecision.type === "enqueue") {
+          const ciApi = deps.ciApi ?? deps.worker?.ciApi;
+          const ciHome = deps.ciHome ?? deps.worker?.ciHome ?? "/data";
           for (const partial of reviewDecision.jobs) {
-            const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+            const gated = await enqueueCiWakeWithGate(
+              deps.review,
+              { ...partial, delivery, receivedAt },
+              { ciApi, home: ciHome, logger }
+            );
+            if ("waiting" in gated) {
+              logger(`waiting ${gated.key} delivery=${delivery}`);
+              continue;
+            }
+            const result = gated;
             reviewResults.push(result);
             logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
             if (result.queued) {
@@ -590,6 +620,9 @@ export async function handleGithubWebhookEvent(
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      if (reviewResults.length === 0 && deps.review) {
+        return skipped("CI still pending", logger);
+      }
       return skipped(decision.reason, logger);
     }
 

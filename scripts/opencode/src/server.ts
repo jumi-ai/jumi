@@ -1,6 +1,12 @@
 import { hostname } from "node:os";
 import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
-import { CI_ABSENT_NOTE, CI_ABSENT_REASON, CI_LOOKUP_FAILED_REASON, decideCiLookupRetry } from "./ci.ts";
+import {
+  CI_ABSENT_NOTE,
+  CI_ABSENT_REASON,
+  CI_LOOKUP_FAILED_REASON,
+  CI_PENDING_REASON,
+  decideCiLookupRetry,
+} from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
 import { meterWebhook, recordJobCompleted, renderEphemeralMetrics, renderWebhookMetrics } from "./control_metrics.ts";
@@ -35,6 +41,7 @@ import {
   skipReasonForOtherChecks,
   skipReasonForPR,
 } from "./review.ts";
+import { enqueueReviewWithCiGate } from "./review_gate.ts";
 import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
@@ -86,7 +93,7 @@ export function shouldSeedOpenCodeAuth(role: ServiceConfig["role"]): boolean {
 }
 
 export interface ReviewQueueLike {
-  enqueue(job: ReviewJob): EnqueueResult | Promise<EnqueueResult>;
+  enqueue(job: ReviewJob, opts?: import("./review_jobs.ts").EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 }
 
 export interface FetchHandlerDeps {
@@ -96,6 +103,10 @@ export interface FetchHandlerDeps {
   webhookEnabled?: boolean;
   getPR?: ReviewApi["getPR"];
   worker?: HandleWorkerWebhookDeps;
+  /** Full forge for router-side CI gating (pending -> waiting, not dispatchable). */
+  ciApi?: Pick<ReviewApi, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
+  /** HOME for CI latch reads (defaults to config.home). */
+  ciHome?: string;
 }
 
 export interface RunReviewJobExtras {
@@ -288,6 +299,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           worker: deps.worker,
           getPR: deps.getPR,
           logger,
+          ciApi: deps.ciApi,
+          ciHome: deps.ciHome ?? config.home,
         })
       );
     }
@@ -364,7 +377,11 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
             }
           }
-          const result = await deps.queue.enqueue(job);
+          const result = await enqueueReviewWithCiGate(deps.queue, job, {
+            ciApi: deps.ciApi,
+            home: deps.ciHome ?? config.home,
+            logger,
+          });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
           return json(202, result);
         } catch (err) {
@@ -764,6 +781,16 @@ export async function processEngineTick(
     const state = publishedState(result);
     await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
+    if (result.status === "skipped" && result.reason === CI_PENDING_REASON) {
+      // Backstop race: the router gate should have held this row until CI
+      // completed. Counts via the ledger (`jumi_review_ci_pending_skips_total`)
+      // so an operator sees it stay near zero; this diag is the per-Job trail.
+      logDiagnostic(logger, "ci_pending_skip", {
+        review: row.jobKey,
+        row_id: row.id,
+        job_mode: isJobMode() ? 1 : 0,
+      });
+    }
     if (result.status === "skipped" && result.reason) {
       await rememberSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, result.reason, logger);
     } else {
@@ -1016,10 +1043,14 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         renderMetrics: async () =>
           `${await renderQueueMetrics(store)}${renderWebhookMetrics()}${await renderLedgerMetrics(store)}`,
         getPR: (owner, repo, index) => api.getPR(owner, repo, index),
+        ciApi: api,
+        ciHome: config.home,
         worker: {
           queue: { enqueue: (job) => store.enqueueIssue(job) },
           review: store,
           api: workerMailboxApi(api),
+          ciApi: api,
+          ciHome: config.home,
           cancel: (owner, repo, issueNumber) =>
             cancelLedgerWorkerJobs({
               store,

@@ -23,6 +23,7 @@ import {
 } from "./issue_webhook.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
@@ -56,7 +57,7 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
   };
 
 export interface WorkerReviewQueue {
-  enqueue(job: ReviewJob): EnqueueResult | Promise<EnqueueResult>;
+  enqueue(job: ReviewJob, opts?: import("./review_jobs.ts").EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 }
 
 export interface HandleWorkerWebhookDeps {
@@ -66,6 +67,12 @@ export interface HandleWorkerWebhookDeps {
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
   sits?: RouterSitStore;
+  /** Full forge for router-side CI gating (pending -> waiting). */
+  ciApi?: Pick<
+    import("./review.ts").ReviewApi,
+    "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs"
+  >;
+  ciHome?: string;
 }
 
 /** Gitea HookEventType.Event() maps issues/issue_assign/issue_label/issue_milestone → "issues". */
@@ -413,8 +420,18 @@ export async function handleWorkerWebhookEvent(
       if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const reviewResults: EnqueueResult[] = [];
+      const ciHome = deps.ciHome ?? "/data";
       for (const partial of decision.jobs) {
-        const result = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+        const gated = await enqueueCiWakeWithGate(
+          deps.review,
+          { ...partial, delivery, receivedAt },
+          { ciApi: deps.ciApi, home: ciHome, logger }
+        );
+        if ("waiting" in gated) {
+          logger(`waiting ${gated.key} delivery=${delivery}`);
+          continue;
+        }
+        const result = gated;
         reviewResults.push(result);
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         if (result.queued && deps.sits) {
@@ -423,7 +440,8 @@ export async function handleWorkerWebhookEvent(
         }
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
-      return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      if (reviewResults.length > 0) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      return skipped("CI still pending", logger);
     } catch (err) {
       if (isQueueUnavailable(err)) {
         logger(`queue unavailable: ${err.message}`);
@@ -465,8 +483,18 @@ export async function handleWorkerWebhookEvent(
       if (deps.review) {
         const reviewDecision = await shouldEnqueueWorkflowJobReview(payload, policy, deps.api, logger);
         if (reviewDecision.type === "enqueue") {
+          const ciHome = deps.ciHome ?? "/data";
           for (const partial of reviewDecision.jobs) {
-            const result: EnqueueResult = await deps.review.enqueue({ ...partial, delivery, receivedAt });
+            const gated = await enqueueCiWakeWithGate(
+              deps.review,
+              { ...partial, delivery, receivedAt },
+              { ciApi: deps.ciApi, home: ciHome, logger }
+            );
+            if ("waiting" in gated) {
+              logger(`waiting ${gated.key} delivery=${delivery}`);
+              continue;
+            }
+            const result: EnqueueResult = gated;
             reviewResults.push(result);
             logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
             if (result.queued && deps.sits) {
@@ -485,6 +513,13 @@ export async function handleWorkerWebhookEvent(
       if (keys.length > 0) return json(202, { queued: true, keys });
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
+      if (reviewResults.length === 0 && deps.review) {
+        // All review wakes are still waiting for CI: no Job yet, not a skip.
+        const waitingSkip = decision.type === "skip" ? decision.reason : "CI still pending";
+        // Keep the follow-up keys response when follow-ups were queued; otherwise
+        // report the CI wait so the delivery is visible but not counted as done.
+        if (keys.length === 0) return skipped(waitingSkip, logger);
+      }
       return skipped(decision.type === "skip" ? decision.reason : "no matching pull request", logger);
     } catch (err) {
       if (isQueueUnavailable(err)) {
