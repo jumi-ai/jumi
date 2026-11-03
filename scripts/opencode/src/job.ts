@@ -1,6 +1,6 @@
 import { mkdir, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { loadConfig, type ServiceConfig, scrubSecretEnv } from "./config.ts";
+import { loadConfig, overlaySecretsFromFile, SECRETS_FILE_ENV, type ServiceConfig, scrubSecretEnv } from "./config.ts";
 import { createForge } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { JOB_ID_ENV } from "./job_env.ts";
@@ -330,6 +330,28 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   }
 }
 
+type JobEnv = Record<string, string | undefined>;
+
+/**
+ * Load the engine and worker configs from a single secrets-file read.
+ *
+ * `entrypoint.sh` writes forge secrets to `$JUMI_SECRETS_FILE` and execs the
+ * job. The shared overlay unlinks the file on read, so calling `loadConfig`
+ * then `loadWorkerConfig` against `process.env` would delete the file on the
+ * first call and fail the second with ENOENT. Resolve once here and hand the
+ * resolved env (without `JUMI_SECRETS_FILE`) to both loaders.
+ */
+export function loadJobConfigs(env: JobEnv = process.env): {
+  engineConfig: ServiceConfig;
+  workerConfig: WorkerConfig;
+} {
+  const resolved = overlaySecretsFromFile(env);
+  delete process.env[SECRETS_FILE_ENV];
+  const engineConfig = loadConfig({ ...resolved, JUMI_ROLE: "engine" });
+  const workerConfig = loadWorkerConfig(resolved);
+  return { engineConfig, workerConfig };
+}
+
 async function main(): Promise<void> {
   const logger = (message: string) => console.log(`[job] ${message}`);
   let jobId: number;
@@ -342,7 +364,27 @@ async function main(): Promise<void> {
     console.error(`[job] ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
+  // No HTTP, no probes, no reclaim, no migration (job-mode opener below never
+  // migrates). No xAI grant adoption or file sibling cleanup: HOME is empty.
+  // No Antigravity grant either: one-shot jobs refuse type:agy runners, whose
+  // login is one interactive grant per ordinal, so the chain must lead with a
+  // runner that has a static or published credential.
+  // Long-running mode stays as it is.
+  // Load configs before opening the ledger so a bad config fails fast and the
+  // single secrets-file read happens before anything else can reopen it.
+  // Scrub only after loading, like server/worker/control: the configs hold
+  // copies and process.env must still carry the secrets (or the file path)
+  // while they load.
+  let engineConfig: ServiceConfig;
+  let workerConfig: WorkerConfig;
+  try {
+    ({ engineConfig, workerConfig } = loadJobConfigs(process.env));
+  } catch (err) {
+    console.error(`[job] bad config: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
   scrubSecretEnv();
+
   const shutdown = new AbortController();
   installProcessShutdown(shutdown, logger);
 
@@ -351,22 +393,6 @@ async function main(): Promise<void> {
     store = await openPgReviewJobStoreForJob(databaseUrl!);
   } catch (err) {
     console.error(`[job] ledger unreachable: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
-
-  // No HTTP, no probes, no reclaim, no migration (job-mode opener above never
-  // migrates). No xAI grant adoption or file sibling cleanup: HOME is empty.
-  // No Antigravity grant either: one-shot jobs refuse type:agy runners, whose
-  // login is one interactive grant per ordinal, so the chain must lead with a
-  // runner that has a static or published credential.
-  // Long-running mode stays as it is.
-  let engineConfig: ServiceConfig;
-  let workerConfig: WorkerConfig;
-  try {
-    engineConfig = loadConfig({ ...process.env, JUMI_ROLE: "engine" });
-    workerConfig = loadWorkerConfig();
-  } catch (err) {
-    console.error(`[job] bad config: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
 

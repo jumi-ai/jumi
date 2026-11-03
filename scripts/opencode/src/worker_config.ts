@@ -1,5 +1,4 @@
-import { readFileSync, unlinkSync } from "node:fs";
-import { GITHUB_ENV, loadForgeBind, SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile } from "./config.ts";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 import {
@@ -59,24 +58,6 @@ export interface WorkerConfig {
 }
 
 type Env = Record<string, string | undefined>;
-
-function overlaySecretsFromFile(env: Env): Env {
-  const path = env[SECRETS_FILE_ENV];
-  if (!path) return env;
-  const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-  try {
-    unlinkSync(path);
-  } catch {
-    // Best-effort: the file is 0600 and lives on tmpfs.
-  }
-  const merged: Env = { ...env };
-  for (const key of SECRET_ENV_KEYS) {
-    const value = parsed[key];
-    if (typeof value === "string" && value) merged[key] = value;
-  }
-  delete merged[SECRETS_FILE_ENV];
-  return merged;
-}
 
 function requireEnv(env: Env, name: string): string {
   const value = env[name];

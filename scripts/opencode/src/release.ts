@@ -23,6 +23,8 @@ const CONST_ENV_LIST_ENTRY_RE = /"([A-Za-z_][A-Za-z0-9_]*)"/g;
 const FOR_OF_CONST_RE = /\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s+of\s+([A-Za-z_$][\w$]*)\s*\)/g;
 /** Shared forge bind the worker loader delegates to; its env belongs to both images. */
 const FORGE_BIND_FN = "loadForgeBind";
+/** Shared secrets overlay the worker loader delegates to; its env belongs to both images. */
+const SECRETS_OVERLAY_FN = "overlaySecretsFromFile";
 /** Guard whose branch is reached only when `FORGE=github`: an `if` block or a ternary. */
 const FORGE_GITHUB_GUARD_RE = /\b(?:\w+\.)?forge\s*===\s*"github"/g;
 /** A `/` right after one of these (or at the start of the file) opens a regex literal, not a division. */
@@ -380,10 +382,14 @@ function functionBlock(source: string, name: string): string {
 
 /** A loader that calls the shared forge bind reads its env too, even across files. */
 function withSharedForgeBind(source: string, shared: string): string {
-  if (!new RegExp(`\\b${FORGE_BIND_FN}\\s*\\(`).test(source)) return source;
-  if (new RegExp(`function\\s+${FORGE_BIND_FN}\\b`).test(source)) return source;
-  const block = functionBlock(shared, FORGE_BIND_FN);
-  return block ? `${source}\n${block}` : source;
+  let out = source;
+  for (const name of [FORGE_BIND_FN, SECRETS_OVERLAY_FN]) {
+    if (!new RegExp(`\\b${name}\\s*\\(`).test(out)) continue;
+    if (new RegExp(`function\\s+${name}\\b`).test(out)) continue;
+    const block = functionBlock(shared, name);
+    if (block) out = `${out}\n${block}`;
+  }
+  return out;
 }
 
 /** Index of the `:` closing the true branch of the ternary whose `?` sits at `open`, else `-1`. */
