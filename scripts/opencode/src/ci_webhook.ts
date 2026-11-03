@@ -1,7 +1,7 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { isJumiReviewContext } from "./ci.ts";
 import {
-  extractClosingIssueNumber,
+  extractWorkingIssueNumber,
   type IssueApi,
   isAssignedForeignPR,
   isInScopeJumiPR,
@@ -124,7 +124,7 @@ export async function shouldEnqueueWorkflowJobFollowUp(
       continue;
     }
     if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
-    const issueNumber = extractClosingIssueNumber(pr);
+    const issueNumber = extractWorkingIssueNumber(pr);
     if (issueNumber === undefined) continue;
     try {
       const issue = await api.getIssue(owner, repo, issueNumber);

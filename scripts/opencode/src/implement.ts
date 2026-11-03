@@ -41,7 +41,7 @@ import {
 } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
-import { closesIssuePattern, pullRequestClosesIssue, upsertWorkerComment } from "./gitea_issues.ts";
+import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
@@ -360,6 +360,7 @@ function pullRequestText(issueNumber: number, fileContents: string | null | unde
   const text = parentOwnedProse(fileContents);
   if (!text) return fallback;
   if (closesIssuePattern(issueNumber).test(text)) return text;
+  if (refsIssuePattern(issueNumber).test(text)) return text;
   return `${text}\n\n${fallback}`;
 }
 

@@ -1,5 +1,5 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
-import { extractClosingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
+import { extractWorkingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import { ignoreConflictsReason, isLeftToAuthor, normalizeIgnoreConflictsLabel } from "./ignore_conflicts.ts";
 import type { Pull } from "./ports.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
@@ -115,7 +115,7 @@ export async function shouldEnqueuePushConflicts(
       continue;
     }
     if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
-    const issueNumber = extractClosingIssueNumber(pr);
+    const issueNumber = extractWorkingIssueNumber(pr);
     if (issueNumber === undefined) continue;
     try {
       const issue = await api.getIssue(owner, repo, issueNumber);

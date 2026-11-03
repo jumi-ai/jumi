@@ -1,6 +1,6 @@
 import { hasLabel, isAssignedToBot, isIssuePickedUp, isPullRequestIssue, type PickupPolicy } from "./assignee.ts";
 import {
-  extractClosingIssueNumber,
+  extractWorkingIssueNumber,
   type IssueApi,
   isEligibleWorkerPR,
   isInScopeJumiPR,
@@ -148,8 +148,8 @@ export function followUpIssueNumber(
 ): number | undefined {
   const pickup = policy ?? { botUsername };
   if (isJumiPrIdentity(pr, botUsername)) {
-    const closer = extractClosingIssueNumber(pr);
-    if (closer !== undefined) return closer;
+    const working = extractWorkingIssueNumber(pr);
+    if (working !== undefined) return working;
   }
   if (issue && isIssuePickedUp(issue, pickup)) return pr.number;
   if (isIssuePickedUp(pr, pickup)) return pr.number;
@@ -169,10 +169,10 @@ export function followUpSkipReason(
   if (isWipOrDraft(pr)) return "draft or WIP pull request";
   if (pr.head?.repo && pr.head.repo.full_name !== `${owner}/${repo}`) return "fork pull request";
 
-  const closer = isJumiPrIdentity(pr, botUsername) ? extractClosingIssueNumber(pr) : undefined;
-  if (closer !== undefined) {
+  const working = isJumiPrIdentity(pr, botUsername) ? extractWorkingIssueNumber(pr) : undefined;
+  if (working !== undefined) {
     if (issue) {
-      if (issue.number !== closer) return "closing issue mismatch";
+      if (issue.number !== working) return "closing issue mismatch";
       if (issue.state !== "open") return "issue not open";
       if (!isIssuePickedUp(issue, pickup)) return pickup.isPickedUp ? "not labeled jumi" : "not assigned to bot";
     }
@@ -259,7 +259,7 @@ export function shouldEnqueueIssueCommentFollowUp(
   }
 
   const skipIssue =
-    isJumiPrIdentity(pr, policy.botUsername) && extractClosingIssueNumber(pr) !== undefined
+    isJumiPrIdentity(pr, policy.botUsername) && extractWorkingIssueNumber(pr) !== undefined
       ? closingIssue
       : (closingIssue ?? payload.issue);
   const skip = followUpSkipReason(pr, skipIssue, owner, repo, policy.botUsername, policy);
@@ -403,11 +403,11 @@ export async function shouldEnqueuePullAssign(
   const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };
 
-  const closer = extractClosingIssueNumber(pr);
-  if (closer !== undefined) {
+  const working = extractWorkingIssueNumber(pr);
+  if (working !== undefined) {
     if (!api) return { type: "skip", reason: "failed to load issue" };
     try {
-      const issue = await api.getIssue(owner, repo, closer);
+      const issue = await api.getIssue(owner, repo, working);
       if (issue.state === "open" && isAssignedToBot(issue, policy.botUsername)) {
         return { type: "skip", reason: "closing issue already assigned" };
       }
@@ -465,11 +465,11 @@ export async function shouldEnqueuePullLabel(
   const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };
 
-  const closer = extractClosingIssueNumber(pr);
-  if (closer !== undefined) {
+  const working = extractWorkingIssueNumber(pr);
+  if (working !== undefined) {
     if (!api) return { type: "skip", reason: "failed to load issue" };
     try {
-      const issue = await api.getIssue(owner, repo, closer);
+      const issue = await api.getIssue(owner, repo, working);
       if (issue.state === "open" && isIssuePickedUp(issue, policy)) {
         return { type: "skip", reason: "closing issue already assigned" };
       }

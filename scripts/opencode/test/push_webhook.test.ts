@@ -96,6 +96,35 @@ describe("shouldEnqueuePushConflicts", () => {
     expect(decision.jobs[0]?.trigger).toEqual({ event: "push", sender: "alice" });
   });
 
+  test("enqueues for a jumi branch PR whose body says Refs #N", async () => {
+    const decision = await shouldEnqueuePushConflicts(
+      makePushPayload(),
+      policy,
+      makeApi({
+        listOpenPulls: async () => [
+          makePR({
+            number: 127,
+            title: "Fix the thing",
+            body: "Refs #12",
+            user: makeUser({ login: "jumi" }),
+            html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix-the-thing",
+              ref: "jumi/issue-12-fix-the-thing",
+              sha: "headsha",
+              repo,
+              repo_id: repo.id,
+            },
+          }),
+        ],
+      })
+    );
+    expect(decision.type).toBe("enqueue");
+    if (decision.type !== "enqueue") return;
+    expect(decision.jobs[0]?.issueNumber).toBe(12);
+    expect(decision.jobs[0]?.prNumber).toBe(127);
+  });
+
   test("skips push to a non-default branch", async () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload({ ref: "refs/heads/jumi/issue-12-x" }),

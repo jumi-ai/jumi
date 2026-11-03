@@ -1,6 +1,6 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
-import { extractClosingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
+import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewResult } from "./review.ts";
@@ -100,7 +100,7 @@ export async function enqueueFollowUpFromReview(
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
-  const closer = extractClosingIssueNumber(pr);
+  const closer = extractWorkingIssueNumber(pr);
   const foreign =
     closer === undefined &&
     isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, opts) &&

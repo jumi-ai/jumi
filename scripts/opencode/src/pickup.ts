@@ -1,7 +1,7 @@
 import { needsCiFollowUp } from "./ci.ts";
 import { type ConflictResult, implementConflict, needsConflict } from "./conflict.ts";
 import { type FollowUpResult, implementFollowUp, needsFollowUp } from "./followup.ts";
-import { extractClosingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
+import { extractWorkingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
 import { hasIgnoreConflictsLabel, hasJumiCommitOnPull } from "./ignore_conflicts.ts";
 import type { ImplementOptions } from "./implement.ts";
 import type { Forge, IssueApi, Pull } from "./ports.ts";
@@ -17,7 +17,7 @@ export function isJumiCloserForIssue(
   issueNumber: number,
   botUsername: string
 ): boolean {
-  return isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber;
+  return isInScopeJumiPR(pr, owner, repo, botUsername) && extractWorkingIssueNumber(pr) === issueNumber;
 }
 
 export async function classifyCloserWork(opts: {

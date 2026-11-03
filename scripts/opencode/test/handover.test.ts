@@ -315,7 +315,7 @@ describe("enqueueFollowUpFromReview", () => {
     expect(allowedApi.comments).toEqual([]);
   });
 
-  test("assigned jumi-identity PR with no closer stays no closer", async () => {
+  test("assigned jumi-identity PR with no closer follows the branch issue", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
@@ -340,10 +340,38 @@ describe("enqueueFollowUpFromReview", () => {
       markdown: "blocking\n<!-- jumi-check: failure -->",
       logger: (message) => logs.push(message),
     });
-    expect(result).toBeUndefined();
-    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(true);
+    expect(store.rows.find((row) => row.kind === "follow-up")?.issueNumber).toBe(12);
     expect(api.comments).toEqual([]);
-    expect(logs).toEqual(["persist-insert skipped: no closer"]);
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("inserts a follow-up when the body says Refs #N on the branch issue", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const repo = makeRepo();
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          body: "Refs #12",
+          user: makeUser({ login: "jumi" }),
+          assignee: makeUser({ login: "jumi" }),
+          assignees: [makeUser({ login: "jumi" })],
+          head: { label: "kirmanak:jumi/issue-12-x", ref: "jumi/issue-12-x", sha: "headsha", repo, repo_id: repo.id },
+        }),
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.issueNumber).toBe(12);
   });
 
   test("does not insert without a closing issue", async () => {

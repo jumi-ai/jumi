@@ -12,6 +12,11 @@ export function closesIssuePattern(issueNumber: number): RegExp {
   return new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#${issueNumber}\b`, "i");
 }
 
+export function refsIssuePattern(issueNumber: number): RegExp {
+  // Non-closing reference: `Refs #N` keeps the issue open after merge.
+  return new RegExp(String.raw`\brefs?\s*:?\s*#${issueNumber}\b`, "i");
+}
+
 export const JUMI_ISSUE_BRANCH = /^jumi\/issue-(\d+)-/;
 
 export function pullRequestClosesIssue(
@@ -76,6 +81,19 @@ export function extractClosingIssueNumber(pr: {
   return fromClose;
 }
 
+export function extractWorkingIssueNumber(pr: {
+  title: string;
+  body?: string | null;
+  head?: { ref?: string };
+}): number | undefined {
+  // Which issue this PR works on, independent of whether merging closes it.
+  // A `jumi/issue-N-` branch always means N, even when the body says
+  // `Refs #N` or names no issue at all. Otherwise fall back to the closer.
+  const fromBranch = jumiIssueBranchNumber(pr.head?.ref);
+  if (fromBranch !== undefined) return fromBranch;
+  return extractClosingIssueNumber(pr);
+}
+
 function loginEquals(login: string | undefined, botUsername: string): boolean {
   return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
 }
@@ -103,7 +121,7 @@ export function isEligibleWorkerPR(pr: Pull, owner: string, repo: string): boole
 export function isInScopeJumiPR(pr: Pull, owner: string, repo: string, botUsername: string): boolean {
   if (!isEligibleWorkerPR(pr, owner, repo)) return false;
   if (!isJumiPrIdentity(pr, botUsername)) return false;
-  return extractClosingIssueNumber(pr) !== undefined;
+  return extractWorkingIssueNumber(pr) !== undefined;
 }
 
 export function isForeignPrIdentity(
@@ -120,7 +138,7 @@ export function isForeignPrIdentity(
 ): boolean {
   if (isWipOrDraft(pr)) return false;
   if (!pr.head?.repo || pr.head.repo.full_name !== `${owner}/${repo}`) return false;
-  if (isJumiPrIdentity(pr, botUsername) && extractClosingIssueNumber(pr) !== undefined) return false;
+  if (isJumiPrIdentity(pr, botUsername) && extractWorkingIssueNumber(pr) !== undefined) return false;
   return true;
 }
 
@@ -160,7 +178,7 @@ export async function findOpenJumiClosingPullRequest(
 ): Promise<Pull | undefined> {
   const pulls = await api.listOpenPulls(owner, repo);
   return pulls.find(
-    (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber
+    (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractWorkingIssueNumber(pr) === issueNumber
   );
 }
 
@@ -178,7 +196,7 @@ export async function resolveWorkerPullRequest(
     if (byNumber) return byNumber;
   }
   return pulls.find(
-    (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractClosingIssueNumber(pr) === issueNumber
+    (pr) => isInScopeJumiPR(pr, owner, repo, botUsername) && extractWorkingIssueNumber(pr) === issueNumber
   );
 }
 
