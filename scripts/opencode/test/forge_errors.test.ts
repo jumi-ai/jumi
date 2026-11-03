@@ -133,4 +133,18 @@ describe("stickyFailureDetail", () => {
       "forge API request failed"
     );
   });
+
+  test("names distinct runners that share type+model and notes the hop", () => {
+    const err = Object.assign(new Error("claude exploded"), {
+      runner: { type: "codex", model: "gpt-6.1-sol", effort: "high" },
+      contributors: [
+        { type: "codex", model: "gpt-6.1-sol", effort: "low" },
+        { type: "codex", model: "gpt-6.1-sol", effort: "high" },
+      ],
+      chainIndex: 1,
+    });
+    expect(stickyFailureDetail(err)).toBe(
+      "claude exploded (tried codex:gpt-6.1-sol(low)->codex:gpt-6.1-sol(high); hop attempted)"
+    );
+  });
 });

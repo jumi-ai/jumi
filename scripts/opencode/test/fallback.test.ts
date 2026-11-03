@@ -62,6 +62,15 @@ describe("looksLikeProviderUnavailable", () => {
     expect(looksLikeProviderUnavailable("unknown model")).toBe(true);
   });
 
+  test("hops on the exact live 500 string from #396", () => {
+    const live =
+      "API Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.";
+    expect(looksLikeProviderUnavailable(live)).toBe(true);
+    expect(looksLikeProviderUnavailable(`claude exited with code 1:\n${live}`)).toBe(true);
+    expect(looksLikeProviderUnavailable("internal server error")).toBe(true);
+    expect(looksLikeProviderUnavailable("500 Internal server error")).toBe(true);
+  });
+
   test("does not hop on infra, variant, timeout chatter, or generic errors", () => {
     expect(looksLikeProviderUnavailable("EACCES: mkdir '/data/.local/state'")).toBe(false);
     expect(looksLikeProviderUnavailable("missing API key")).toBe(false);
@@ -116,6 +125,19 @@ describe("isProviderUnavailableResult", () => {
         message: "opencode exited with code 1",
       })
     ).toBe(false);
+  });
+
+  test("treats the live Claude 500 as provider-unavailable", () => {
+    const live: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message:
+        "claude exited with code 1:\nAPI Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+    };
+    expect(isProviderUnavailableResult(live)).toBe(true);
+    expect(isProviderUnavailableResult({ ...live, infra: true })).toBe(false);
+    expect(isProviderUnavailableResult({ ...live, auth: true })).toBe(false);
+    expect(isProviderUnavailableResult({ ...live, exitCode: 143 })).toBe(false);
   });
 });
 
@@ -542,6 +564,54 @@ describe("withEngineChain", () => {
     const second = await run({ model: spark.model, variant: spark.variant, workdir: "/tmp" });
     expect(first.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
     expect(second.runner).toEqual({ type: "opencode", model: grok.model, variant: grok.variant });
+  });
+
+  test("Claude 500 on a fresh run hops to the next runner and succeeds", async () => {
+    const live: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message:
+        "claude exited with code 1:\nAPI Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+    };
+    const claude = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" as const };
+    const codex = { name: "codex", type: "codex" as const, model: "gpt-6.1-sol", effort: "high" as const };
+    const calls: Array<{ type?: string; model: string }> = [];
+    const engine: Engine = async (opts) => {
+      calls.push({ type: opts.type, model: opts.model });
+      if (opts.type === "claude") return live;
+      return ok(opts.model);
+    };
+    const result = await withEngineChain(engine, { chain: [claude, codex] })({
+      model: claude.model,
+      workdir: "/tmp",
+    });
+    expect(result).toMatchObject(ok(codex.model));
+    expect(result.runner).toEqual({ type: "codex", model: codex.model, effort: "high" });
+    expect(calls).toEqual([
+      { type: "claude", model: claude.model },
+      { type: "codex", model: codex.model },
+    ]);
+  });
+
+  test("Claude 500 with continueSession set does not hop", async () => {
+    const live: EngineResult = {
+      status: "exit",
+      exitCode: 1,
+      message:
+        "claude exited with code 1:\nAPI Error: 500 Internal server error. This is a server-side issue, usually temporary — try again in a moment.",
+    };
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return live;
+    };
+    const result = await withEngineChain(engine, { chain: [spark, grok] })({
+      model: spark.model,
+      workdir: "/tmp",
+      continueSession: true,
+    });
+    expect(result).toMatchObject(live);
+    expect(n).toBe(1);
   });
 
   test("continueSession does not hop", async () => {
