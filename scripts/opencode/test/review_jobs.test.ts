@@ -395,6 +395,40 @@ describe("MemoryReviewJobStore", () => {
     expect(retry.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
   });
 
+  test("expireLease overwrites a stale runner and clears it when the runner is unknown", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const first = await store.lease("engine-1", 60_000, new Date(1_000));
+    expect(await store.expireLease(first!.id, "engine-1", new Date(2_000), "grok")).toBe(true);
+    expect(store.rows[0]?.resultRunner).toBe("grok");
+    const reclaimed = await store.reclaimExpired(5, new Date(3_000));
+    expect(reclaimed.requeued).toHaveLength(1);
+    expect(reclaimed.requeued[0]?.resultRunner).toBe("grok");
+    const second = await store.lease("engine-2", 60_000, new Date(3_000));
+    expect(second?.resultRunner).toBe("grok");
+    // The second attempt fails without an attached runner stamp: the stale
+    // name must clear so the next retry draws fresh instead of rotating
+    // after the previous attempt's runner again.
+    expect(await store.expireLease(second!.id, "engine-2", new Date(4_000))).toBe(true);
+    expect(store.rows[0]?.resultRunner).toBeNull();
+  });
+
+  test("requeueInfra records the failed runner and clears it for a non-runner backoff", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000, new Date(1_000));
+    expect(await store.requeueInfra(leased!.id, "engine-1", 60_000, "quota-wait:1:1000", new Date(1_000), "grok")).toBe(
+      true
+    );
+    expect(store.rows[0]?.resultRunner).toBe("grok");
+    const retry = await store.lease("engine-2", 60_000, new Date(70_000));
+    expect(retry?.resultRunner).toBe("grok");
+    expect(await store.requeueInfra(retry!.id, "engine-2", 60_000, "infra-retry:1:1000", new Date(70_000), null)).toBe(
+      true
+    );
+    expect(store.rows[0]?.resultRunner).toBeNull();
+  });
+
   test("skip latch is shared and kill-switch clear bumps generation", async () => {
     const store = new MemoryReviewJobStore();
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 0, skipReason: null });

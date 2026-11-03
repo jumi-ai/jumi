@@ -19,6 +19,7 @@ import {
 } from "./device_login.ts";
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
+import { thrownRunner } from "./engine.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { upsertWorkerComment } from "./gitea_issues.ts";
@@ -57,8 +58,9 @@ import {
 } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { renderLedgerMetrics, setActiveRunUsageRecording } from "./run_usage.ts";
-import { orderedRunners } from "./runners.ts";
+import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown } from "./shutdown.ts";
+import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   isReviewWebhookAction,
@@ -128,6 +130,8 @@ export interface RunReviewJobExtras {
   now?: () => number;
   /** Previous job error (quota-wait marker) for the wait-budget decision. */
   previousError?: string | null;
+  /** Runner name that failed the previous attempt; retry starts on the next runner under random-start. */
+  failedRunner?: string | null;
   /** Durable writer provenance. ProcessEngineTick wires `store.provenance`; unset fails closed only when the policy is enabled. */
   provenance?: import("./provenance.ts").ProvenanceStore;
   /** Postgres ledger for review stuck state. ProcessEngineTick wires `store.skipLatches`; without it review falls back to the HOME file. */
@@ -235,6 +239,7 @@ export async function runReviewJob(
       inspectOtherChecks: false,
       noCiNote,
       previousError: extras.previousError,
+      failedRunner: extras.failedRunner,
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -424,6 +429,16 @@ function publishedState(result: ReviewResult): "succeeded" | "skipped" {
   return result.status === "skipped" ? "skipped" : "succeeded";
 }
 
+function failedRunnerNameForRetry(config: ServiceConfig, err: unknown): string | null {
+  try {
+    const stamp = thrownRunner(err);
+    if (!stamp) return null;
+    return runnerNameForStamp(orderedRunners(config), stamp) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function publishPersistedJob(
   api: ReviewApi,
   config: ServiceConfig,
@@ -601,7 +616,7 @@ async function settleCiLookupFailure(
   }
   const decision = decideCiLookupRetry(row.error, nowMs);
   if (decision.action === "requeue") {
-    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs), null);
     if (!ok) {
       logger(`ci-lookup requeue failed ${row.jobKey}`);
       return;
@@ -638,7 +653,7 @@ async function settleCiAbsent(
   }
   const decision = decideCiLookupRetry(row.error, nowMs);
   if (decision.action === "requeue") {
-    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs), null);
     if (!ok) {
       logger(`ci-absent requeue failed ${row.jobKey}`);
       return undefined;
@@ -734,6 +749,7 @@ export async function processEngineTick(
       abortSignal: abort.signal,
       jobId: String(row.id),
       previousError: row.error ?? extras.previousError ?? null,
+      failedRunner: row.resultRunner ?? extras.failedRunner ?? null,
       provenance: extras.provenance ?? store.provenance,
       skipLatches: extras.skipLatches ?? store.skipLatches,
       remainingLeaseMs: async () => {
@@ -802,24 +818,27 @@ export async function processEngineTick(
     return "processed";
   } catch (err) {
     const shutdown = Boolean(extras.abortSignal?.aborted);
+    const triedSuffix = describeTriedRunnersSuffix(err);
+    const baseMessage = err instanceof Error ? err.message : String(err);
     logger(
       shutdown
         ? `engine job ${row.jobKey} interrupted`
         : abort.signal.aborted || isAbortError(err)
           ? `engine job ${row.jobKey} cancelled`
-          : `engine job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`
+          : `engine job ${row.jobKey} failed: ${baseMessage}${triedSuffix ? ` ${triedSuffix}` : ""}`
     );
     stopHeartbeat();
     if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
+      const failedRunner = failedRunnerNameForRetry(config, err);
       try {
-        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
         const quotaUntil = Date.now() + err.backoffMs;
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(quotaUntil);
         else await store.recordRoleQuotaWait("engine", quotaUntil);
         if (!ok) {
           logger(`engine quota requeue failed ${row.jobKey}: lease lost or result persisted`);
           try {
-            await store.expireLease(row.id, leasedBy);
+            await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
           } catch (expireErr) {
             logger(
               `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -838,7 +857,7 @@ export async function processEngineTick(
           `engine quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -848,6 +867,7 @@ export async function processEngineTick(
       return "processed";
     }
     if (!shutdown && !abort.signal.aborted && isInfraFailure(err)) {
+      const failedRunner = failedRunnerNameForRetry(config, err);
       if (extras.breaker) extras.breaker.recordInfra();
       else await store.recordRoleInfra("engine");
       try {
@@ -861,7 +881,7 @@ export async function processEngineTick(
           }
           logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
         } else {
-          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, undefined, failedRunner);
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
@@ -869,7 +889,7 @@ export async function processEngineTick(
           `engine infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -902,7 +922,7 @@ export async function processEngineTick(
         await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "engine expire failed");
       } else if (!abort.signal.aborted) {
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunnerNameForRetry(config, err));
         } catch (expireErr) {
           logger(
             `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`

@@ -152,6 +152,12 @@ export interface ImplementOptions extends PickupPolicy {
   runnerSelection?: string;
   /** Injectable randomness for deterministic tests. Defaults to `Math.random`. */
   runnerRandom?: () => number;
+  /**
+   * Runner name that failed the previous attempt (ledger `result_runner`).
+   * With `random-start` the retry starts on the next runner, independent of
+   * the random source; `ordered` keeps configured order.
+   */
+  failedRunner?: string | null;
   /** Independence groups for sticky writer selection. Unset/disabled keeps ordinary selection. */
   independentReview?: import("./runners.ts").IndependentReviewConfig;
   remainingLeaseMs?: () => number | Promise<number>;

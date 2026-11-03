@@ -14,12 +14,14 @@ import {
   describeAttemptOrder,
   type NamedRunner,
   orderChainForJob,
+  orderChainForRetry,
   orderedRunners,
   parseRunnersCatalog,
   RUNNER_SELECTION_ORDERED,
   RUNNER_SELECTION_RANDOM_START,
   resolveRunnerSelection,
   rotateChainForStart,
+  runnerNameForStamp,
 } from "../src/runners.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
 import { emptyCiMethods, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
@@ -178,7 +180,7 @@ describe("rotation helpers", () => {
     expect(describeAttemptOrder([spark])).toBe("spark");
   });
 
-  test("rotation does not mutate input and jobs do not share state", () => {
+  test("rotation does not mutate input and jobs do not share state", async () => {
     const original = [spark, grok, claude];
     const snapshot = original.map((r) => r.name);
     const first = orderChainForJob(original, "random-start", () => 0.5);
@@ -209,6 +211,82 @@ describe("rotation helpers", () => {
       expect(ordered.map((r) => r.name).includes("dormant")).toBe(false);
       expect(ordered.length).toBe(2);
     }
+  });
+});
+
+describe("orderChainForRetry", () => {
+  test("random-start retry starts after the failed runner regardless of the random source", () => {
+    const chain = [spark, grok, claude];
+    for (const random of [() => 0, () => 0.5, () => 0.99, () => 0.123]) {
+      expect(orderChainForRetry(chain, "random-start", random, "spark").map((r) => r.name)).toEqual([
+        "grok",
+        "claude",
+        "spark",
+      ]);
+      expect(orderChainForRetry(chain, "random-start", random, "grok").map((r) => r.name)).toEqual([
+        "claude",
+        "spark",
+        "grok",
+      ]);
+      expect(orderChainForRetry(chain, "random-start", random, "claude").map((r) => r.name)).toEqual([
+        "spark",
+        "grok",
+        "claude",
+      ]);
+    }
+  });
+
+  test("two-runner random-start retry after A starts on B for every random draw", () => {
+    const chain = [spark, grok];
+    for (const random of [() => 0, () => 0.49, () => 0.5, () => 0.99]) {
+      expect(orderChainForRetry(chain, "random-start", random, "spark").map((r) => r.name)).toEqual(["grok", "spark"]);
+      expect(orderChainForRetry(chain, "random-start", random, "grok").map((r) => r.name)).toEqual(["spark", "grok"]);
+    }
+  });
+
+  test("ordered retries keep configured order", () => {
+    const chain = [spark, grok, claude];
+    expect(orderChainForRetry(chain, "ordered", () => 0.99, "grok").map((r) => r.name)).toEqual([
+      "spark",
+      "grok",
+      "claude",
+    ]);
+    expect(orderChainForRetry(chain, undefined, () => 0.99, "grok").map((r) => r.name)).toEqual([
+      "spark",
+      "grok",
+      "claude",
+    ]);
+  });
+
+  test("unknown or absent failed runner falls back to a fresh draw", () => {
+    const chain = [spark, grok, claude];
+    expect(orderChainForRetry(chain, "random-start", () => 0, undefined).map((r) => r.name)).toEqual([
+      "spark",
+      "grok",
+      "claude",
+    ]);
+    expect(orderChainForRetry(chain, "random-start", () => 0, "missing").map((r) => r.name)).toEqual([
+      "spark",
+      "grok",
+      "claude",
+    ]);
+    expect(orderChainForRetry([spark], "random-start", () => 0.99, "spark").map((r) => r.name)).toEqual(["spark"]);
+  });
+});
+
+describe("runnerNameForStamp", () => {
+  test("distinguishes runners that share type+model but differ in variant/effort", () => {
+    const first: NamedRunner = { name: "codex-low", type: "codex", model: "gpt-6.1-sol", effort: "low" };
+    const second: NamedRunner = { name: "codex-high", type: "codex", model: "gpt-6.1-sol", effort: "high" };
+    const chain = [first, second];
+    expect(runnerNameForStamp(chain, { type: "codex", model: "gpt-6.1-sol", effort: "low" })).toBe("codex-low");
+    expect(runnerNameForStamp(chain, { type: "codex", model: "gpt-6.1-sol", effort: "high" })).toBe("codex-high");
+    expect(runnerNameForStamp(chain, { type: "codex", model: "gpt-6.1-sol" })).toBeUndefined();
+
+    const openA: NamedRunner = { name: "open-a", type: "opencode", model: "m", variant: "high" };
+    const openB: NamedRunner = { name: "open-b", type: "opencode", model: "m", variant: "xhigh" };
+    expect(runnerNameForStamp([openA, openB], { type: "opencode", model: "m", variant: "xhigh" })).toBe("open-b");
+    expect(runnerNameForStamp([openA, openB], { type: "opencode", model: "m", variant: "high" })).toBe("open-a");
   });
 });
 

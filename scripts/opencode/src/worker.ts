@@ -12,6 +12,7 @@ import {
 import { implementConflict } from "./conflict.ts";
 import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
+import { thrownRunner } from "./engine.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -24,10 +25,11 @@ import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
-import { orderedRunners } from "./runners.ts";
+import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
+import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -267,6 +269,16 @@ function workerPublishedState(status: string): "succeeded" | "skipped" | "failed
   if (status === "skipped" || status === "cancelled" || status === "no-changes") return "skipped";
   if (status === "failed") return "failed";
   return "succeeded";
+}
+
+function failedRunnerNameForWorkerRetry(config: WorkerConfig, err: unknown): string | null {
+  try {
+    const stamp = thrownRunner(err);
+    if (!stamp) return null;
+    return runnerNameForStamp(orderedRunners(config), stamp) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function skipLatchReasonFromResult(result: { status: string; reason?: string }): string | undefined {
@@ -563,6 +575,7 @@ export async function processWorkerTick(
       logger: (message: string) => logger(message),
       jobId: String(row.id),
       previousError: row.error,
+      failedRunner: row.resultRunner,
       provenance: store.provenance,
       provenanceJob: {
         jobId: row.id,
@@ -694,11 +707,16 @@ export async function processWorkerTick(
       logger(`${row.jobKey} cancelled`);
       return "processed";
     }
-    logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    {
+      const baseMessage = err instanceof Error ? err.message : String(err);
+      const triedSuffix = describeTriedRunnersSuffix(err);
+      logger(`worker job ${row.jobKey} failed: ${baseMessage}${triedSuffix ? ` ${triedSuffix}` : ""}`);
+    }
     if (isQuotaWaitError(err)) {
+      const failedRunner = failedRunnerNameForWorkerRetry(config, err);
       try {
         const now = Date.now();
-        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(now + err.backoffMs);
         else await store.recordRoleQuotaWait("worker", now + err.backoffMs);
         logDiagnostic(logger, "opencode_quota_wait", {
@@ -712,7 +730,7 @@ export async function processWorkerTick(
           `worker quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -722,6 +740,7 @@ export async function processWorkerTick(
       return "processed";
     }
     if (isInfraFailure(err)) {
+      const failedRunner = failedRunnerNameForWorkerRetry(config, err);
       if (extras.breaker) extras.breaker.recordInfra();
       else await store.recordRoleInfra("worker");
       try {
@@ -756,7 +775,7 @@ export async function processWorkerTick(
             logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
           }
         } else {
-          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, undefined, failedRunner);
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
@@ -764,7 +783,7 @@ export async function processWorkerTick(
           `worker infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -776,7 +795,7 @@ export async function processWorkerTick(
     if (extras.breaker) extras.breaker.recordModelReached();
     else await store.recordRoleSuccess("worker");
     try {
-      await store.expireLease(row.id, leasedBy);
+      await store.expireLease(row.id, leasedBy, new Date(), failedRunnerNameForWorkerRetry(config, err));
     } catch (expireErr) {
       logger(
         `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`

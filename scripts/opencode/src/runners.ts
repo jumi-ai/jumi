@@ -388,6 +388,53 @@ export function describeAttemptOrder(chain: readonly NamedRunner[]): string {
   return chain.map((runner) => runner.name).join("->");
 }
 
+/**
+ * Position of `name` in `chain` by runner name. Matches the `name` stored on
+ * the ledger row when a previous attempt failed; `-1` when unknown so the
+ * caller falls back to a fresh draw.
+ */
+export function indexOfRunnerByName(chain: readonly NamedRunner[], name: string | null | undefined): number {
+  if (!name) return -1;
+  return chain.findIndex((runner) => runner.name === name);
+}
+
+/** Runner name for a spawn stamp, matched by full identity (type+model+variant/effort). */
+export function runnerNameForStamp(
+  chain: readonly NamedRunner[],
+  stamp: { type: string; model: string; variant?: string; effort?: string } | null | undefined
+): string | undefined {
+  if (!stamp) return undefined;
+  const wantLevel = stamp.effort ?? stamp.variant ?? null;
+  return chain.find((runner) => {
+    if (runner.type !== stamp.type || runner.model !== stamp.model) return false;
+    const stamped = runnerStamp(runner);
+    return (stamped.effort ?? stamped.variant ?? null) === wantLevel;
+  })?.name;
+}
+
+/**
+ * Effective attempt order for a retried job after a runner failure.
+ * `random-start` starts on the runner after `failedRunnerName` in configured
+ * order (wrapping), independent of the random source, so a runner that is
+ * down for a few minutes cannot consume every attempt. `ordered` keeps
+ * configured order. Unknown/absent names and single-runner chains fall back
+ * to the fresh-job draw.
+ */
+export function orderChainForRetry(
+  chain: readonly NamedRunner[],
+  selection?: RunnerSelectionMode | string | undefined,
+  random: () => number = Math.random,
+  failedRunnerName?: string | null | undefined
+): NamedRunner[] {
+  const copy = [...chain];
+  const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
+  if (mode !== RUNNER_SELECTION_RANDOM_START) return copy;
+  if (copy.length <= 1) return copy;
+  const failedIndex = indexOfRunnerByName(copy, failedRunnerName);
+  if (failedIndex < 0) return orderChainForJob(copy, selection, random);
+  return rotateChainForStart(copy, failedIndex + 1);
+}
+
 export function modelsFromCatalog(catalog: RunnersCatalog): SynthesizeRunnersInput {
   const ordered = orderedRunners(catalog);
   const primary = ordered[0];
