@@ -82,7 +82,8 @@ export function scrubSecretEnv(env: Env = process.env): void {
   }
 }
 
-function overlaySecretsFromFile(env: Env): Env {
+/** Read forge secrets from JUMI_SECRETS_FILE once (unlinking it) and merge them into a copy of env. */
+export function overlaySecretsFromFile(env: Env): Env {
   const path = env[SECRETS_FILE_ENV];
   if (!path) return env;
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;

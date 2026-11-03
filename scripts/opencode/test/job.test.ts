@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseJobId, runOneShotJob } from "../src/job.ts";
+import { SECRETS_FILE_ENV } from "../src/config.ts";
+import { loadJobConfigs, parseJobId, runOneShotJob } from "../src/job.ts";
 import {
   ANTIGRAVITY_JOB_CONSTRAINT,
   openCodeConfigUsesXai,
@@ -509,5 +512,81 @@ describe("one-shot SIGTERM holds the lease until the child stops", () => {
     expect(result.exitCode).toBe(0);
     const done = await store.get(probe!.id);
     expect(done?.state).not.toBe("leased");
+  });
+});
+
+describe("one-shot job secrets file", () => {
+  test("loadJobConfigs reads the secrets file once for both configs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-job-secrets-"));
+    const file = join(dir, "secrets.json");
+    await writeFile(
+      file,
+      JSON.stringify({
+        GITEA_BOT_TOKEN: "file-bot-token",
+        GITEA_WEBHOOK_SECRET: "file-webhook-secret",
+        GITEA_WEBHOOK_AUTH_TOKEN: "file-auth-token",
+      }),
+      { mode: 0o600 }
+    );
+    const prevFile = process.env[SECRETS_FILE_ENV];
+    const prevBot = process.env.GITEA_BOT_TOKEN;
+    const prevSecret = process.env.GITEA_WEBHOOK_SECRET;
+    const prevAuth = process.env.GITEA_WEBHOOK_AUTH_TOKEN;
+    delete process.env.GITEA_BOT_TOKEN;
+    delete process.env.GITEA_WEBHOOK_SECRET;
+    delete process.env.GITEA_WEBHOOK_AUTH_TOKEN;
+    process.env[SECRETS_FILE_ENV] = file;
+    try {
+      const { engineConfig, workerConfig } = loadJobConfigs({
+        GITEA_URL: "https://gitea.kirmanak.stream",
+        DATABASE_URL: "postgres://jumi",
+        [SECRETS_FILE_ENV]: file,
+      });
+      expect(engineConfig.giteaToken).toBe("file-bot-token");
+      expect(engineConfig.webhookAuthToken).toBe("file-auth-token");
+      expect(workerConfig.giteaToken).toBe("file-bot-token");
+      expect(workerConfig.webhookSecret).toBe("file-webhook-secret");
+      expect(workerConfig.webhookAuthToken).toBe("file-auth-token");
+      expect(existsSync(file)).toBe(false);
+      expect(process.env[SECRETS_FILE_ENV]).toBeUndefined();
+    } finally {
+      if (prevFile === undefined) delete process.env[SECRETS_FILE_ENV];
+      else process.env[SECRETS_FILE_ENV] = prevFile;
+      if (prevBot === undefined) delete process.env.GITEA_BOT_TOKEN;
+      else process.env.GITEA_BOT_TOKEN = prevBot;
+      if (prevSecret === undefined) delete process.env.GITEA_WEBHOOK_SECRET;
+      else process.env.GITEA_WEBHOOK_SECRET = prevSecret;
+      if (prevAuth === undefined) delete process.env.GITEA_WEBHOOK_AUTH_TOKEN;
+      else process.env.GITEA_WEBHOOK_AUTH_TOKEN = prevAuth;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("entrypoint delivers secrets to job mode past config loading", () => {
+    const entrypoint = join(import.meta.dir, "../entrypoint.sh");
+    chmodSync(entrypoint, 0o755);
+    const result = spawnSync(process.execPath, ["run", "src/job.ts"], {
+      cwd: join(import.meta.dir, ".."),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: process.env.HOME ?? tmpdir(),
+        TMPDIR: process.env.TMPDIR ?? "/tmp",
+        GITEA_URL: "https://gitea.kirmanak.stream",
+        GITEA_BOT_TOKEN: "entry-bot-token",
+        GITEA_WEBHOOK_SECRET: "entry-webhook-secret",
+        DATABASE_URL: "postgres://127.0.0.1:1/jumi",
+        JUMI_JOB_ID: "1",
+        OPENCODE_WELLKNOWN_URL: "disabled",
+      },
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    // Config loading passed (no ENOENT from a second secrets-file read), so
+    // the stubbed ledger is what fails.
+    expect(output).toContain("ledger unreachable");
+    expect(output).not.toContain("bad config");
+    expect(output).not.toContain("ENOENT");
+    expect(result.status).toBe(1);
   });
 });
