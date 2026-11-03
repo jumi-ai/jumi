@@ -153,7 +153,7 @@ export interface ReviewJobStore {
     now?: Date
   ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
-  expireLease(id: number, leasedBy: string, now?: Date): Promise<boolean>;
+  expireLease(id: number, leasedBy: string, now?: Date, failedRunner?: string | null): Promise<boolean>;
   /**
    * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
    * expired regardless of who holds it, so the next reclaim moves it within
@@ -1172,7 +1172,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  expireLease(id: number, leasedBy: string, now = new Date()): Promise<boolean> {
+  expireLease(id: number, leasedBy: string, now = new Date(), failedRunner?: string | null): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) return false;
@@ -1180,6 +1180,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
       row.updatedAt = ts;
+      if (failedRunner) row.resultRunner = failedRunner;
       return true;
     });
   }
@@ -2895,14 +2896,14 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async expireLease(id: number, leasedBy: string, now = new Date()): Promise<boolean> {
+  async expireLease(id: number, leasedBy: string, now = new Date(), failedRunner?: string | null): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET leased_until = $3::timestamptz, leased_by = NULL, updated_at = NOW()
+         SET leased_until = $3::timestamptz, leased_by = NULL, result_runner = COALESCE($4, result_runner), updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
          RETURNING id`,
-        [id, leasedBy, new Date(now.getTime() - 1).toISOString()]
+        [id, leasedBy, new Date(now.getTime() - 1).toISOString(), failedRunner ?? null]
       )
     );
     return rows.length > 0;

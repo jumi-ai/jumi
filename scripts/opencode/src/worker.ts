@@ -12,6 +12,7 @@ import {
 import { implementConflict } from "./conflict.ts";
 import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
+import { thrownRunner } from "./engine.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -24,10 +25,11 @@ import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
-import { orderedRunners } from "./runners.ts";
+import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
+import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import { isSkipLatchReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -267,6 +269,16 @@ function workerPublishedState(status: string): "succeeded" | "skipped" | "failed
   if (status === "skipped" || status === "cancelled" || status === "no-changes") return "skipped";
   if (status === "failed") return "failed";
   return "succeeded";
+}
+
+function failedRunnerNameForWorkerRetry(config: WorkerConfig, err: unknown): string | null {
+  try {
+    const stamp = thrownRunner(err);
+    if (!stamp) return null;
+    return runnerNameForStamp(orderedRunners(config), stamp) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function skipLatchReasonFromResult(result: { status: string; reason?: string }): string | undefined {
@@ -563,6 +575,7 @@ export async function processWorkerTick(
       logger: (message: string) => logger(message),
       jobId: String(row.id),
       previousError: row.error,
+      failedRunner: row.resultRunner,
       provenance: store.provenance,
       provenanceJob: {
         jobId: row.id,
@@ -694,7 +707,11 @@ export async function processWorkerTick(
       logger(`${row.jobKey} cancelled`);
       return "processed";
     }
-    logger(`worker job ${row.jobKey} failed: ${err instanceof Error ? err.message : String(err)}`);
+    {
+      const baseMessage = err instanceof Error ? err.message : String(err);
+      const triedSuffix = describeTriedRunnersSuffix(err);
+      logger(`worker job ${row.jobKey} failed: ${baseMessage}${triedSuffix ? ` ${triedSuffix}` : ""}`);
+    }
     if (isQuotaWaitError(err)) {
       try {
         const now = Date.now();
@@ -776,7 +793,7 @@ export async function processWorkerTick(
     if (extras.breaker) extras.breaker.recordModelReached();
     else await store.recordRoleSuccess("worker");
     try {
-      await store.expireLease(row.id, leasedBy);
+      await store.expireLease(row.id, leasedBy, new Date(), failedRunnerNameForWorkerRetry(config, err));
     } catch (expireErr) {
       logger(
         `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`

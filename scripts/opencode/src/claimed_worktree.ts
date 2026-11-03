@@ -10,7 +10,13 @@ import { withEngineChain } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaWaitError } from "./quota.ts";
-import { describeAttemptOrder, type NamedRunner, orderChainForJob, resolveRunnerSelection } from "./runners.ts";
+import {
+  describeAttemptOrder,
+  type NamedRunner,
+  orderChainForJob,
+  orderChainForRetry,
+  resolveRunnerSelection,
+} from "./runners.ts";
 import {
   type GitAuth,
   type GitAuthResolver,
@@ -70,6 +76,12 @@ export interface BeginClaimedWorktreeOpts {
   chain?: NamedRunner[];
   runnerSelection?: string;
   runnerRandom?: () => number;
+  /**
+   * Runner name that failed the previous attempt (ledger `result_runner`).
+   * With `random-start` the retry starts on the next runner, independent of
+   * the random source; `ordered` keeps configured order.
+   */
+  failedRunner?: string | null;
   remainingLeaseMs?: () => number | Promise<number>;
   extendLease?: () => Promise<boolean>;
   logger?: (message: string) => void;
@@ -108,7 +120,9 @@ export async function beginClaimedWorktree(
   const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
   const effectiveChain =
     opts.chain && opts.chain.length > 1
-      ? orderChainForJob(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random)
+      ? opts.failedRunner
+        ? orderChainForRetry(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random, opts.failedRunner)
+        : orderChainForJob(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random)
       : opts.chain
         ? [...opts.chain]
         : undefined;

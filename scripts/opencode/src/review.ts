@@ -50,6 +50,7 @@ import {
   type NamedRunner,
   OPENCODE_RUNNER_TYPE,
   orderChainForJob,
+  orderChainForRetry,
   resolveRunnerSelection,
 } from "./runners.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
@@ -188,6 +189,12 @@ export interface ReviewOptions {
   noCiNote?: string;
   /** Previous job error (e.g. quota-wait marker) for the wait-budget decision. */
   previousError?: string | null;
+  /**
+   * Runner name that failed the previous attempt (ledger `result_runner`).
+   * With `random-start` the retry starts on the next runner, independent of
+   * the random source; `ordered` keeps configured order.
+   */
+  failedRunner?: string | null;
 }
 
 export type PersistReviewResult =
@@ -1186,11 +1193,14 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   }
 
   // Opt-in random-start distribution: exclusions first, then uniformly pick a
-  // start from the eligible chain and rotate. Continuations and
+  // start from the eligible chain and rotate. A retry after a runner failure
+  // starts on the next runner instead of drawing again. Continuations and
   // artifact-recovery calls reuse this order via the engine wrapper.
   const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
   if (effectiveChain && effectiveChain.length > 1) {
-    const rotated = orderChainForJob(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random);
+    const rotated = opts.failedRunner
+      ? orderChainForRetry(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random, opts.failedRunner)
+      : orderChainForJob(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random);
     if (rotated.length === effectiveChain.length) {
       logDiagnostic(log, "runner_selection", {
         review: `${repoFullName}#${pr.number}`,
