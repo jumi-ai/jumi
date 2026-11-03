@@ -91,7 +91,16 @@ export async function enqueueCiWakeWithGate(
       issueNumber: job.prNumber,
       log: opts.logger,
     });
-  } catch {
+  } catch (err) {
+    opts.logger?.(
+      `CI wake lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, keeping budget wait: ${err instanceof Error ? err.message : String(err)}`
+    );
+    const nowMs = opts.nowMs ?? Date.now();
+    await queue.enqueue(job, {
+      waitUntilMs: nowMs + CI_LOOKUP_BUDGET_MS,
+      waitMarker: encodeCiAbsentWait(nowMs),
+      nowMs,
+    });
     return { key, queued: false, waiting: true };
   }
   if (ci.pending) {
@@ -99,6 +108,15 @@ export async function enqueueCiWakeWithGate(
     return { key, queued: false, waiting: true };
   }
   if ((ci.empty || ci.lookupFailed) && ci.failed.length === 0) {
+    const nowMs = opts.nowMs ?? Date.now();
+    opts.logger?.(
+      `CI wake lookup incomplete for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)}, keeping budget wait`
+    );
+    await queue.enqueue(job, {
+      waitUntilMs: nowMs + CI_LOOKUP_BUDGET_MS,
+      waitMarker: encodeCiAbsentWait(nowMs),
+      nowMs,
+    });
     return { key, queued: false, waiting: true };
   }
   return queue.enqueue(job);
