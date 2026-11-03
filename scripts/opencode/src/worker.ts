@@ -713,9 +713,10 @@ export async function processWorkerTick(
       logger(`worker job ${row.jobKey} failed: ${baseMessage}${triedSuffix ? ` ${triedSuffix}` : ""}`);
     }
     if (isQuotaWaitError(err)) {
+      const failedRunner = failedRunnerNameForWorkerRetry(config, err);
       try {
         const now = Date.now();
-        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(now + err.backoffMs);
         else await store.recordRoleQuotaWait("worker", now + err.backoffMs);
         logDiagnostic(logger, "opencode_quota_wait", {
@@ -729,7 +730,7 @@ export async function processWorkerTick(
           `worker quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -739,6 +740,7 @@ export async function processWorkerTick(
       return "processed";
     }
     if (isInfraFailure(err)) {
+      const failedRunner = failedRunnerNameForWorkerRetry(config, err);
       if (extras.breaker) extras.breaker.recordInfra();
       else await store.recordRoleInfra("worker");
       try {
@@ -773,7 +775,7 @@ export async function processWorkerTick(
             logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
           }
         } else {
-          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, undefined, failedRunner);
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
@@ -781,7 +783,7 @@ export async function processWorkerTick(
           `worker infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`

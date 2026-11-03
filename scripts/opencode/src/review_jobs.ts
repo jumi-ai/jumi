@@ -168,7 +168,14 @@ export interface ReviewJobStore {
    * first. No state change: the one-shot Job leases the row itself.
    */
   peekRunnable(kinds: readonly JobKind[], limit: number, now?: Date): Promise<ReviewJobRecord[]>;
-  requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now?: Date): Promise<boolean>;
+  requeueInfra(
+    id: number,
+    leasedBy: string,
+    backoffMs: number,
+    marker: string,
+    now?: Date,
+    failedRunner?: string | null
+  ): Promise<boolean>;
   releaseLease(id: number, leasedBy: string): Promise<boolean>;
   saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void>;
   markPublished(
@@ -1180,7 +1187,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
       row.updatedAt = ts;
-      if (failedRunner) row.resultRunner = failedRunner;
+      // Overwrite (clearing to null when the runner is unknown) so a stale
+      // name from an earlier attempt cannot steer the next retry.
+      row.resultRunner = failedRunner ?? null;
       return true;
     });
   }
@@ -1217,7 +1226,14 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  requeueInfra(id: number, leasedBy: string, backoffMs: number, marker: string, now = new Date()): Promise<boolean> {
+  requeueInfra(
+    id: number,
+    leasedBy: string,
+    backoffMs: number,
+    marker: string,
+    now = new Date(),
+    failedRunner?: string | null
+  ): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) return false;
@@ -1228,6 +1244,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       row.leasedUntil = ts + backoffMs;
       row.error = marker;
       row.updatedAt = ts;
+      // Record the runner that just failed (or clear when unknown) so the
+      // next attempt rotates past it instead of reusing a stale name. A
+      // non-runner backoff clears to null for a fresh draw.
+      row.resultRunner = failedRunner ?? null;
       return true;
     });
   }
@@ -2900,7 +2920,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
-         SET leased_until = $3::timestamptz, leased_by = NULL, result_runner = COALESCE($4, result_runner), updated_at = NOW()
+         SET leased_until = $3::timestamptz, leased_by = NULL, result_runner = $4, updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
          RETURNING id`,
         [id, leasedBy, new Date(now.getTime() - 1).toISOString(), failedRunner ?? null]
@@ -2976,7 +2996,8 @@ export class PgReviewJobStore implements ReviewJobStore {
     leasedBy: string,
     backoffMs: number,
     marker: string,
-    now = new Date()
+    now = new Date(),
+    failedRunner?: string | null
   ): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
@@ -2985,12 +3006,13 @@ export class PgReviewJobStore implements ReviewJobStore {
              leased_by = NULL,
              leased_until = $3::timestamptz,
              error = $4,
+             result_runner = $5,
              updated_at = NOW()
          WHERE id = $1 AND leased_by = $2 AND state = 'leased'
             AND result_markdown IS NULL AND result_reason IS NULL
             AND ${BACKOFF_ERROR_PREDICATE}
            RETURNING id`,
-        [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker]
+        [id, leasedBy, new Date(now.getTime() + backoffMs).toISOString(), marker, failedRunner ?? null]
       )
     );
     return rows.length > 0;

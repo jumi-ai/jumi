@@ -398,13 +398,18 @@ export function indexOfRunnerByName(chain: readonly NamedRunner[], name: string 
   return chain.findIndex((runner) => runner.name === name);
 }
 
-/** Runner name for a spawn stamp, matched by type+model against the chain. */
+/** Runner name for a spawn stamp, matched by full identity (type+model+variant/effort). */
 export function runnerNameForStamp(
   chain: readonly NamedRunner[],
-  stamp: { type: string; model: string } | null | undefined
+  stamp: { type: string; model: string; variant?: string; effort?: string } | null | undefined
 ): string | undefined {
   if (!stamp) return undefined;
-  return chain.find((runner) => runner.type === stamp.type && runner.model === stamp.model)?.name;
+  const wantLevel = stamp.effort ?? stamp.variant ?? null;
+  return chain.find((runner) => {
+    if (runner.type !== stamp.type || runner.model !== stamp.model) return false;
+    const stamped = runnerStamp(runner);
+    return (stamped.effort ?? stamped.variant ?? null) === wantLevel;
+  })?.name;
 }
 
 /**

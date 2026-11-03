@@ -16,8 +16,9 @@ export function stickyFailureDetail(err: unknown, secrets: readonly (string | un
   return suffix ? `${detail} ${suffix}` : detail;
 }
 
-function stampShort(stamp: { type: string; model: string }): string {
-  return `${stamp.type}:${stamp.model}`;
+function stampShort(stamp: { type: string; model: string; variant?: string; effort?: string }): string {
+  const level = stamp.effort ?? stamp.variant;
+  return level ? `${stamp.type}:${stamp.model}(${level})` : `${stamp.type}:${stamp.model}`;
 }
 
 /**
@@ -28,13 +29,13 @@ function stampShort(stamp: { type: string; model: string }): string {
 export function describeTriedRunnersSuffix(err: unknown): string {
   if (err === null || typeof err !== "object") return "";
   const rec = err as {
-    runner?: { type: string; model: string };
+    runner?: { type: string; model: string; variant?: string; effort?: string };
     contributors?: unknown;
     chainIndex?: unknown;
     hopRefused?: unknown;
   };
   const contributors = Array.isArray(rec.contributors)
-    ? (rec.contributors as Array<{ type: string; model: string }>)
+    ? (rec.contributors as Array<{ type: string; model: string; variant?: string; effort?: string }>)
     : [];
   const tried = contributors.length > 0 ? contributors : rec.runner ? [rec.runner] : [];
   if (tried.length === 0) return "";

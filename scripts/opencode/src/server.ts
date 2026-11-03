@@ -616,7 +616,7 @@ async function settleCiLookupFailure(
   }
   const decision = decideCiLookupRetry(row.error, nowMs);
   if (decision.action === "requeue") {
-    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs), null);
     if (!ok) {
       logger(`ci-lookup requeue failed ${row.jobKey}`);
       return;
@@ -653,7 +653,7 @@ async function settleCiAbsent(
   }
   const decision = decideCiLookupRetry(row.error, nowMs);
   if (decision.action === "requeue") {
-    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs));
+    const ok = await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, new Date(nowMs), null);
     if (!ok) {
       logger(`ci-absent requeue failed ${row.jobKey}`);
       return undefined;
@@ -829,15 +829,16 @@ export async function processEngineTick(
     );
     stopHeartbeat();
     if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
+      const failedRunner = failedRunnerNameForRetry(config, err);
       try {
-        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker);
+        const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
         const quotaUntil = Date.now() + err.backoffMs;
         if (extras.quotaCooldown) extras.quotaCooldown.recordWaitUntil(quotaUntil);
         else await store.recordRoleQuotaWait("engine", quotaUntil);
         if (!ok) {
           logger(`engine quota requeue failed ${row.jobKey}: lease lost or result persisted`);
           try {
-            await store.expireLease(row.id, leasedBy);
+            await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
           } catch (expireErr) {
             logger(
               `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -856,7 +857,7 @@ export async function processEngineTick(
           `engine quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
@@ -866,6 +867,7 @@ export async function processEngineTick(
       return "processed";
     }
     if (!shutdown && !abort.signal.aborted && isInfraFailure(err)) {
+      const failedRunner = failedRunnerNameForRetry(config, err);
       if (extras.breaker) extras.breaker.recordInfra();
       else await store.recordRoleInfra("engine");
       try {
@@ -879,7 +881,7 @@ export async function processEngineTick(
           }
           logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
         } else {
-          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker);
+          await store.requeueInfra(row.id, leasedBy, decision.backoffMs, decision.marker, undefined, failedRunner);
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
@@ -887,7 +889,7 @@ export async function processEngineTick(
           `engine infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
         );
         try {
-          await store.expireLease(row.id, leasedBy);
+          await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
           logger(
             `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
