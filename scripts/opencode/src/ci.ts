@@ -56,6 +56,82 @@ export const CI_LOOKUP_MAX_ATTEMPTS = 8;
 export const CI_LOOKUP_BUDGET_MS = 10 * 60 * 1000;
 export const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
 
+/**
+ * Router-side waiting markers for review rows whose CI is not yet ready.
+ * Stored in `review_jobs.error` with `leased_until` in the future so control's
+ * `peekRunnable`/`lease` (which already filter on `leased_until`) skips them
+ * without any forge access. The CI-completion wake promotes the same row to
+ * dispatchable; the Job's own CI check stays as a race backstop.
+ */
+export const CI_PENDING_WAIT_PREFIX = "ci-wait-pending:";
+export const CI_ABSENT_WAIT_PREFIX = "ci-wait-absent:";
+/** Fallback so a missed wake does not hide a pending row forever. */
+export const CI_PENDING_WAIT_FALLBACK_MS = 24 * 60 * 60 * 1000;
+
+export function isCiPendingWaitMarker(error: string | null | undefined): boolean {
+  return Boolean(error?.startsWith(CI_PENDING_WAIT_PREFIX));
+}
+
+export function isCiAbsentWaitMarker(error: string | null | undefined): boolean {
+  return Boolean(error?.startsWith(CI_ABSENT_WAIT_PREFIX));
+}
+
+/** Any router waiting marker (pending or absent). Distinct from `ci-lookup-retry`. */
+export function isCiWaitMarker(error: string | null | undefined): boolean {
+  return isCiPendingWaitMarker(error) || isCiAbsentWaitMarker(error);
+}
+
+export function encodeCiPendingWait(firstSeenMs: number): string {
+  return `${CI_PENDING_WAIT_PREFIX}${firstSeenMs}`;
+}
+
+export function encodeCiAbsentWait(firstSeenMs: number): string {
+  return `${CI_ABSENT_WAIT_PREFIX}${firstSeenMs}`;
+}
+
+export function parseCiWaitMarker(
+  error: string | null | undefined
+): { kind: "pending" | "absent"; firstSeen: number } | undefined {
+  if (!error) return undefined;
+  let kind: "pending" | "absent" | undefined;
+  let rest: string | undefined;
+  if (error.startsWith(CI_PENDING_WAIT_PREFIX)) {
+    kind = "pending";
+    rest = error.slice(CI_PENDING_WAIT_PREFIX.length);
+  } else if (error.startsWith(CI_ABSENT_WAIT_PREFIX)) {
+    kind = "absent";
+    rest = error.slice(CI_ABSENT_WAIT_PREFIX.length);
+  } else {
+    return undefined;
+  }
+  const firstSeen = Number(rest);
+  if (!Number.isFinite(firstSeen)) return undefined;
+  return { kind, firstSeen };
+}
+
+export interface CiWaitPlan {
+  untilMs: number;
+  marker: string;
+}
+
+/**
+ * Decide whether a fresh `CiInspection` (same shape the review path uses)
+ * should make the new review row wait instead of dispatchable.
+ * - pending -> wait with long fallback (wake promotes early).
+ * - empty / lookupFailed -> wait until the lookup budget expires (wake promotes early).
+ * - failed / success -> no wait; existing failed handling applies.
+ */
+export function ciWaitForInspection(ci: CiInspection, nowMs: number): CiWaitPlan | undefined {
+  if (ci.pending) {
+    return { untilMs: nowMs + CI_PENDING_WAIT_FALLBACK_MS, marker: encodeCiPendingWait(nowMs) };
+  }
+  if (ci.failed.length > 0) return undefined;
+  if (ci.empty || ci.lookupFailed) {
+    return { untilMs: nowMs + CI_LOOKUP_BUDGET_MS, marker: encodeCiAbsentWait(nowMs) };
+  }
+  return undefined;
+}
+
 /** Non-terminal review skips that wait for a later sibling-check wake. */
 export function isCiWaitSkipReason(reason: string | null | undefined): boolean {
   return (
