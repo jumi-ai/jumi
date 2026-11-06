@@ -124,6 +124,7 @@ export async function enqueueFollowUpFromReview(
   // keep the follow-up alive.
   const earlySkip = persistInsertSkipReason(opts.markdown);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
+  if (earlySkip === "success trailer" && !opts.blockingQuestionAuthors?.length) return logSkip(earlySkip);
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
