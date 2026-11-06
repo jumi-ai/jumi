@@ -140,6 +140,8 @@ export interface ImplementOptions extends PickupPolicy {
   giteaToken: string;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
+  /** Opt-in logins whose open `❓` questions count as follow-up feedback. */
+  blockingQuestionAuthors?: readonly string[];
   model: string;
   variant?: string;
   fallbackModel?: string;

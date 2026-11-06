@@ -90,7 +90,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { parseCheckLine, trailerSuggestionCount } from "./verdict.ts";
+import { blockingOpenQuestionCount, parseCheckLine, trailerSuggestionCount } from "./verdict.ts";
 import { workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
@@ -316,7 +316,11 @@ export function isJumiPullReviewFinding(
   opts: ReviewFindingMatchOpts = {}
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
-  if (!isFindingCheck(lastCheckTrailer(pullReviewBody(review)))) return false;
+  if (
+    !isFindingCheck(lastCheckTrailer(pullReviewBody(review))) &&
+    !isBlockingQuestionFinding(pullReviewBody(review), opts)
+  )
+    return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -343,6 +347,14 @@ function asReviewComment(review: PullReview): Comment {
 export interface ReviewFindingMatchOpts {
   extraHeadShas?: readonly string[];
   anyReviewedCommit?: boolean;
+  /** Opt-in logins whose open `❓` questions count as findings. Unset/empty preserves today's behavior. */
+  blockingQuestionAuthors?: readonly string[];
+  /** Author of the pull under review; required together with `blockingQuestionAuthors` to match. */
+  prAuthor?: string | undefined | null;
+}
+
+function isBlockingQuestionFinding(body: string, opts: ReviewFindingMatchOpts = {}): boolean {
+  return blockingOpenQuestionCount(body, opts.prAuthor, opts.blockingQuestionAuthors) > 0;
 }
 
 export function isJumiReviewFinding(
@@ -352,7 +364,8 @@ export function isJumiReviewFinding(
   botUsername?: string
 ): boolean {
   if (!isJumiReviewSticky(comment, botUsername)) return false;
-  if (!isFindingCheck(lastCheckTrailer(comment.body ?? ""))) return false;
+  if (!isFindingCheck(lastCheckTrailer(comment.body ?? "")) && !isBlockingQuestionFinding(comment.body ?? "", opts))
+    return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -603,6 +616,7 @@ export async function needsFollowUp(opts: {
   maxFollowupRounds?: number;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
+  blockingQuestionAuthors?: readonly string[];
   skipLatches?: SkipLatchStore;
 }): Promise<boolean> {
   const state = await readFollowUpLatch(skipLatchesFor(opts), {
@@ -619,7 +633,10 @@ export async function needsFollowUp(opts: {
     opts.botUsername,
     opts.pr.head.sha,
     opts.followupIgnoreLogins,
-    {},
+    {
+      prAuthor: opts.pr.user?.login,
+      ...(opts.blockingQuestionAuthors ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+    },
     opts.trustedSenderLogins
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
@@ -790,11 +807,18 @@ function triggerBodyFromItems(
   return "";
 }
 
-function reviewFindingMatchOptsForJob(job: IssueJob, headSha: string): ReviewFindingMatchOpts {
+function reviewFindingMatchOptsForJob(
+  job: IssueJob,
+  headSha: string,
+  prAuthor?: string | undefined | null,
+  blockingQuestionAuthors?: readonly string[] | undefined | null
+): ReviewFindingMatchOpts {
   const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
   return {
     extraHeadShas,
     anyReviewedCommit: job.trigger?.event === "review-failure",
+    ...(prAuthor ? { prAuthor } : {}),
+    ...(blockingQuestionAuthors ? { blockingQuestionAuthors } : {}),
   };
 }
 
@@ -838,7 +862,7 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha);
+  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha, pr.user?.login, opts.blockingQuestionAuthors);
 
   const branch = pr.head.ref;
   claim.branch = branch;

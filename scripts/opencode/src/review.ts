@@ -74,10 +74,13 @@ import {
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
 import {
+  countQuestionFindings,
   findingFingerprint,
   hasColonEndingFinding,
   hasPublishedFindings,
+  isBlockingQuestionAuthor,
   keepReviewFindingLines,
+  openQuestionDescription,
   parseReviewFindings,
   parseReviewOutput,
   stripFindingLines,
@@ -157,6 +160,8 @@ export interface ReviewOptions {
   giteaUrl: string;
   giteaToken: string;
   botUsername: string;
+  /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
+  blockingQuestionAuthors?: readonly string[];
   gitAuthResolver?: GitAuthResolver;
   home?: string;
   /** Postgres ledger for review stuck state. When present (production always
@@ -216,6 +221,8 @@ export interface PublishReviewOptions {
   prNumber: number;
   expectedHeadSha: string;
   botUsername: string;
+  /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
+  blockingQuestionAuthors?: readonly string[];
   resultMarkdown?: string | null;
   resultReason?: string | null;
   /** Formatted stamp for the runner that produced `resultMarkdown`. */
@@ -1018,6 +1025,27 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // Publish finding blocks and the trailer only; the child's tour is not published.
   // A finding keeps its indented/list continuation; unrelated prose is dropped.
   const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  // Opt-in blocking questions: when the deployment lists this PR author, a
+  // questions-only success still fails the required check so automerge waits,
+  // and the worker follow-up below answers the questions. With the setting
+  // off (or an unlisted author) the count is zero and nothing changes.
+  const blockingQuestions =
+    !parsed.verdict.incomplete &&
+    parsed.verdict.state === "success" &&
+    isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors)
+      ? countQuestionFindings(comment, { singleFilePath })
+      : 0;
+  const effectiveVerdict =
+    blockingQuestions > 0
+      ? { state: "failure" as const, description: openQuestionDescription(blockingQuestions), incomplete: false }
+      : parsed.verdict;
+  if (blockingQuestions > 0) {
+    logDiagnostic(log, "review_blocking_questions", {
+      review: reviewLabel,
+      questions: blockingQuestions,
+      author: (pr.user?.login ?? "").toLowerCase() || null,
+    });
+  }
   if (hasColonEndingFinding(comment, { singleFilePath })) {
     logDiagnostic(log, "review_finding_truncated", {
       review: reviewLabel,
@@ -1047,7 +1075,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         comment,
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
-        event: reviewEventForVerdict(parsed.verdict.state, pr.user?.login, opts.botUsername),
+        event: reviewEventForVerdict(effectiveVerdict.state, pr.user?.login, opts.botUsername),
         body: writeup,
         checkLine: parsed.checkLine,
         runner: opts.resultRunner,
@@ -1083,7 +1111,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     }
   }
 
-  const { state, description } = statusForResult(result, parsed.verdict);
+  const { state, description } = statusForResult(result, effectiveVerdict);
   await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
@@ -1464,6 +1492,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       thread: fitted.thread,
       delta,
       reviewMd,
+      blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors),
     });
 
     logDiagnostic(log, "review_prompt", {
@@ -1658,6 +1687,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               prNumber: opts.prNumber,
               expectedHeadSha: reviewedHeadSha,
               botUsername: opts.botUsername,
+              blockingQuestionAuthors: opts.blockingQuestionAuthors,
               resultMarkdown: markdown,
               resultRunner: runner,
               logger: log,

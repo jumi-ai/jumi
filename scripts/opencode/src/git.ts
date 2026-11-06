@@ -114,9 +114,10 @@ ${WORKER_SCOPE}
 Address the feedback in this repository on the current branch.
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
-If JUMI_PR.md is present, it is the pull-request description already posted. Update it so it describes the branch tip after your changes: what changed, why, and what you ran to verify. Do not commit JUMI_PR.md.
+JUMI_FEEDBACK.md may contain reviewer ❓ questions. Answer each one: gather evidence you can actually get (the upstream changelog or compare across the version range, the rendered chart, a command run in this checkout — cite links or commands), or push a change that makes the question moot (a test or CI check that pins the behaviour, or an explicit config value). You hold no forge credentials, so you cannot reply inline yourself; leave the answer in the tree (code, test, or config) and describe the evidence in JUMI_PR.md so the parent posts it and the next review can close the question. If the answer needs live facts you cannot get, say what is missing and that a human must answer, and do not guess; the question stays open.
+If JUMI_PR.md is present, it is the pull-request description already posted. Update it so it describes the branch tip after your changes: what changed, why, what evidence answers each reviewer question, and what you ran to verify. Do not commit JUMI_PR.md.
 ${WORKER_COMMIT}
-Do not ask questions. Do not open a pull request.
+Do not ask questions of your own. Do not open a pull request.
 When the feedback is addressed, stop.`;
 
 export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).

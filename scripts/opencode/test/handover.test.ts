@@ -129,6 +129,43 @@ describe("shouldHandoverFollowUp", () => {
       })
     ).toBe(false);
   });
+
+  test("questions-only success hands over only for a listed author", () => {
+    const markdown = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    expect(shouldHandoverFollowUp({ published: { status: "posted" }, markdown })).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown,
+        prAuthor: "renovate-bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(true);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown,
+        prAuthor: "alice",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown,
+        prAuthor: "renovate-bot",
+        blockingQuestionAuthors: [],
+      })
+    ).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "updated" },
+        markdown,
+        prAuthor: "Renovate-Bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(true);
+  });
 });
 
 describe("enqueueFollowUpFromReview", () => {
@@ -313,6 +350,72 @@ describe("enqueueFollowUpFromReview", () => {
     });
     expect(allowed).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
     expect(allowedApi.comments).toEqual([]);
+  });
+
+  test("questions-only success enqueues follow-up for a listed author", async () => {
+    const markdown = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          body: "Fixes #12",
+          user: makeUser({ login: "renovate-bot" }),
+          head: { ...makePR().head, ref: "renovate/x", sha: "headsha" },
+        }),
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+      blockingQuestionAuthors: ["renovate-bot"],
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("queued");
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("questions-only success does not enqueue for an unlisted author or with the setting off", async () => {
+    const markdown = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    for (const opts of [
+      { blockingQuestionAuthors: ["renovate-bot"], login: "alice" },
+      { blockingQuestionAuthors: [] as string[], login: "renovate-bot" },
+      { blockingQuestionAuthors: undefined, login: "renovate-bot" },
+    ]) {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const leased = await store.lease("engine-1", 60_000);
+      const api = makeApi({
+        getPR: async () =>
+          makePR({
+            body: "Fixes #12",
+            user: makeUser({ login: opts.login }),
+            head: { ...makePR().head, ref: "renovate/x", sha: "headsha" },
+          }),
+      });
+      const logs: string[] = [];
+      const result = await enqueueFollowUpFromReview({
+        store,
+        api,
+        row: leased!,
+        botUsername: "jumi",
+        published: { status: "posted", commentId: 1 },
+        markdown,
+        ...(opts.blockingQuestionAuthors === undefined
+          ? {}
+          : { blockingQuestionAuthors: opts.blockingQuestionAuthors }),
+        logger: (message) => logs.push(message),
+      });
+      expect(result).toBeUndefined();
+      expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+      expect(logs).toEqual(["persist-insert skipped: success trailer"]);
+    }
   });
 
   test("assigned jumi-identity PR with no closer follows the branch issue", async () => {

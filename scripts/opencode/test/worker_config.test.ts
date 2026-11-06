@@ -227,6 +227,15 @@ describe("loadWorkerConfig", () => {
     ).toEqual(["tapio", "renovate-bot"]);
   });
 
+  test("parses REVIEW_BLOCKING_QUESTION_AUTHORS CSV and treats empty as off", () => {
+    expect(loadWorkerConfig(required).blockingQuestionAuthors).toEqual([]);
+    expect(loadWorkerConfig({ ...required, REVIEW_BLOCKING_QUESTION_AUTHORS: "" }).blockingQuestionAuthors).toEqual([]);
+    expect(
+      loadWorkerConfig({ ...required, REVIEW_BLOCKING_QUESTION_AUTHORS: "renovate-bot, Renovate[bot], " })
+        .blockingQuestionAuthors
+    ).toEqual(["renovate-bot", "Renovate[bot]"]);
+  });
+
   const githubPem = "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----";
   const githubRequired = {
     FORGE: "github",

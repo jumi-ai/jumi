@@ -8,7 +8,7 @@ import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { parseReviewOutput, trailerSuggestionCount } from "./verdict.ts";
+import { blockingOpenQuestionCount, parseReviewOutput, trailerSuggestionCount } from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
 
@@ -28,18 +28,40 @@ export function isLeftoverSimplificationTrailer(markdown: string | null | undefi
   );
 }
 
-export function shouldHandoverFollowUp(opts: { published: ReviewResult; markdown?: string | null }): boolean {
-  if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
-  return isCurrentHeadFailureTrailer(opts.markdown) || isLeftoverSimplificationTrailer(opts.markdown);
+export function isBlockingQuestionTrailer(
+  markdown: string | null | undefined,
+  prAuthorLogin: string | undefined | null,
+  blockingAuthors: readonly string[] | undefined | null
+): boolean {
+  return blockingOpenQuestionCount(markdown, prAuthorLogin, blockingAuthors) > 0;
 }
 
-function persistInsertSkipReason(markdown: string | null | undefined): string | undefined {
+export function shouldHandoverFollowUp(opts: {
+  published: ReviewResult;
+  markdown?: string | null;
+  prAuthor?: string | undefined | null;
+  blockingQuestionAuthors?: readonly string[] | undefined | null;
+}): boolean {
+  if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
+  return (
+    isCurrentHeadFailureTrailer(opts.markdown) ||
+    isLeftoverSimplificationTrailer(opts.markdown) ||
+    isBlockingQuestionTrailer(opts.markdown, opts.prAuthor, opts.blockingQuestionAuthors)
+  );
+}
+
+function persistInsertSkipReason(
+  markdown: string | null | undefined,
+  prAuthorLogin?: string | undefined | null,
+  blockingAuthors?: readonly string[] | undefined | null
+): string | undefined {
   if (!markdown) return "incomplete";
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete) return "incomplete";
   if (parsed.verdict.state === "failure") return undefined;
   if (parsed.verdict.state === "success") {
     if (trailerSuggestionCount(parsed.verdict.description) > 0) return undefined;
+    if (blockingOpenQuestionCount(markdown, prAuthorLogin, blockingAuthors) > 0) return undefined;
     return "success trailer";
   }
   return "incomplete";
@@ -85,6 +107,7 @@ export async function enqueueFollowUpFromReview(
     published: ReviewResult;
     markdown?: string | null;
     maxFollowupRounds?: number;
+    blockingQuestionAuthors?: readonly string[];
     logger?: (message: string) => void;
   } & PickupPolicy
 ): Promise<EnqueueResult | undefined> {
@@ -94,11 +117,21 @@ export async function enqueueFollowUpFromReview(
   };
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
-  const trailerSkip = persistInsertSkipReason(opts.markdown);
-  if (trailerSkip) return logSkip(trailerSkip);
+
+  // Cheap trailer gate first: incomplete skips without a PR fetch, and a
+  // failure or leftover-simplification success enqueues. Only a plain success
+  // trailer needs the PR author to decide whether opt-in blocking questions
+  // keep the follow-up alive.
+  const earlySkip = persistInsertSkipReason(opts.markdown);
+  if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
+
+  if (earlySkip === "success trailer") {
+    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, opts.blockingQuestionAuthors);
+    if (trailerSkip) return logSkip(trailerSkip);
+  }
 
   const closer = extractWorkingIssueNumber(pr);
   const foreign =
