@@ -22,6 +22,8 @@ import {
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
   implementFollowUp,
+  isJumiPullReviewFinding,
+  isJumiReviewFinding,
   needsFollowUp,
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
@@ -3957,6 +3959,114 @@ describe("collectFollowUpItems", () => {
           owner: "kirmanak",
           repo: "demo",
           pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(false);
+    });
+  });
+
+  test("blocking questions count as findings only for a listed author", async () => {
+    const questionsSticky = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: ❓ q: is the timeout intentional?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const comment = { body: questionsSticky, user: makeUser({ login: "jumi" }) };
+    expect(isJumiReviewFinding(comment, HEAD_SHA, {}, "jumi")).toBe(false);
+    expect(
+      isJumiReviewFinding(
+        comment,
+        HEAD_SHA,
+        { prAuthor: "renovate-bot", blockingQuestionAuthors: ["renovate-bot"] },
+        "jumi"
+      )
+    ).toBe(true);
+    expect(
+      isJumiReviewFinding(comment, HEAD_SHA, { prAuthor: "alice", blockingQuestionAuthors: ["renovate-bot"] }, "jumi")
+    ).toBe(false);
+    expect(
+      isJumiReviewFinding(comment, HEAD_SHA, { prAuthor: "renovate-bot", blockingQuestionAuthors: [] }, "jumi")
+    ).toBe(false);
+
+    const review = makeReview({
+      id: 90,
+      body: questionsSticky,
+      state: "APPROVED",
+      commit_id: HEAD_SHA,
+      user: makeUser({ login: "jumi" }),
+    });
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA)).toBe(false);
+    expect(
+      isJumiPullReviewFinding(review, "jumi", HEAD_SHA, {
+        prAuthor: "renovate-bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(true);
+    expect(
+      isJumiPullReviewFinding(review, "jumi", HEAD_SHA, {
+        prAuthor: "alice",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(false);
+  });
+
+  test("needsFollowUp is true for questions-only success when the author is listed", async () => {
+    const questionsSticky = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: ❓ q: is the timeout intentional?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38022,
+          body: questionsSticky,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const listedPr = { ...prWithHead(), user: makeUser({ login: "renovate-bot" }) };
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(true);
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(false);
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
           issueNumber: 12,
           botUsername: "jumi",
           home,

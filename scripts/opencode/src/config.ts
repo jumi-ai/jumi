@@ -30,6 +30,7 @@ export interface ServiceConfig {
   followupIgnoreLogins: string[];
   trustedSenderLogins: string[];
   ignoreConflictsLabel: string;
+  blockingQuestionAuthors: string[];
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -236,6 +237,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     followupIgnoreLogins: csvEnv(resolved, "FOLLOWUP_IGNORE_LOGINS"),
     trustedSenderLogins: csvEnv(resolved, "TRUSTED_SENDER_LOGINS"),
     ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",
+    blockingQuestionAuthors: csvEnv(resolved, "REVIEW_BLOCKING_QUESTION_AUTHORS"),
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,

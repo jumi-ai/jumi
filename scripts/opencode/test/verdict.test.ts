@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  blockingOpenQuestionCount,
+  countQuestionFindings,
   findingFingerprint,
   hasPublishedFindings,
+  isBlockingQuestionAuthor,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
@@ -305,5 +308,62 @@ describe("keepReviewFindingLines", () => {
   test("requires at least one published finding block for a failure trailer", () => {
     expect(hasPublishedFindings("tour only, no findings")).toBe(false);
     expect(hasPublishedFindings("src/a.ts:1: 🔴 bug: null deref.\n  - detail kept")).toBe(true);
+  });
+});
+
+describe("blocking questions", () => {
+  test("counts question findings and ignores other markers", () => {
+    const text = [
+      "src/foo.ts:12: ❓ q: is the timeout intentional?",
+      "src/bar.ts:7: 🟡 risk: retry swallows the error.",
+      "❓ question: was the pg upgrade validated with vchord preloaded?",
+      "src/baz.ts:3: 💡 simpler: drop the helper.",
+      "L9: ❓ q: does this start a new service when the env var is unset?",
+    ].join("\n");
+    expect(countQuestionFindings(text)).toBe(3);
+  });
+
+  test("counts questions with backticked, bolded, and ranged locations", () => {
+    expect(countQuestionFindings("`src/foo.ts:12`: ❓ q: why?")).toBe(1);
+    expect(countQuestionFindings("**src/foo.ts:12**: ❓ q: why?")).toBe(1);
+    expect(countQuestionFindings("src/foo.ts:12-14: ❓ q: why?")).toBe(1);
+    expect(countQuestionFindings("src/foo.ts:12: 🔴 bug: broken.")).toBe(0);
+    expect(countQuestionFindings("tour only, no findings")).toBe(0);
+  });
+
+  test("matches blocking authors case-insensitively and treats empty as off", () => {
+    expect(isBlockingQuestionAuthor("renovate-bot", ["renovate-bot"])).toBe(true);
+    expect(isBlockingQuestionAuthor("Renovate-Bot", ["renovate-bot"])).toBe(true);
+    expect(isBlockingQuestionAuthor(" renovate-bot ", ["renovate-bot"])).toBe(true);
+    expect(isBlockingQuestionAuthor("alice", ["renovate-bot"])).toBe(false);
+    expect(isBlockingQuestionAuthor("renovate-bot", [])).toBe(false);
+    expect(isBlockingQuestionAuthor("renovate-bot", undefined)).toBe(false);
+    expect(isBlockingQuestionAuthor(undefined, ["renovate-bot"])).toBe(false);
+  });
+
+  test("blockingOpenQuestionCount is zero with the setting off, unlisted, or non-success", () => {
+    const questions = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    expect(blockingOpenQuestionCount(questions, "renovate-bot", [])).toBe(0);
+    expect(blockingOpenQuestionCount(questions, "renovate-bot", undefined)).toBe(0);
+    expect(blockingOpenQuestionCount(questions, "alice", ["renovate-bot"])).toBe(0);
+    expect(blockingOpenQuestionCount("tour only\n<!-- jumi-check: success -->", "renovate-bot", ["renovate-bot"])).toBe(
+      0
+    );
+    expect(
+      blockingOpenQuestionCount("src/foo.ts:12: ❓ q: why?\n<!-- jumi-check: failure; 1 risk -->", "renovate-bot", [
+        "renovate-bot",
+      ])
+    ).toBe(0);
+    expect(blockingOpenQuestionCount("no trailer", "renovate-bot", ["renovate-bot"])).toBe(0);
+  });
+
+  test("blockingOpenQuestionCount counts questions for a listed author on success", () => {
+    const markdown = [
+      "src/foo.ts:12: ❓ q: is the timeout intentional?",
+      "src/bar.ts:7: ❓ question: was the upgrade validated?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    expect(blockingOpenQuestionCount(markdown, "renovate-bot", ["renovate-bot"])).toBe(2);
+    expect(blockingOpenQuestionCount(markdown, "Renovate-Bot", ["RENOVATE-bot"])).toBe(2);
   });
 });

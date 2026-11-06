@@ -220,6 +220,7 @@ export async function runReviewJob(
       giteaToken: config.giteaToken,
       gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
       botUsername: config.botUsername,
+      blockingQuestionAuthors: config.blockingQuestionAuthors,
       home: config.home,
       ...(extras.skipLatches ? { skipLatches: extras.skipLatches } : {}),
       sanitizeOpenCodeEnv: true,
@@ -452,6 +453,7 @@ export async function publishPersistedJob(
     prNumber: row.prNumber,
     expectedHeadSha: row.headSha,
     botUsername: config.botUsername,
+    blockingQuestionAuthors: config.blockingQuestionAuthors,
     resultMarkdown: row.resultMarkdown,
     resultRunner: row.resultRunner,
     resultReason: row.resultReason,
@@ -569,6 +571,7 @@ async function handoverFollowUp(
       published,
       markdown: current?.resultMarkdown ?? row.resultMarkdown,
       maxFollowupRounds: config.maxFollowupRounds,
+      blockingQuestionAuthors: config.blockingQuestionAuthors,
       logger,
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);

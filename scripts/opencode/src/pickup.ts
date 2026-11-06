@@ -32,6 +32,7 @@ export async function classifyCloserWork(opts: {
   maxConflictRounds?: number;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
+  blockingQuestionAuthors?: readonly string[];
   skipLatches?: SkipLatchStore;
   ignoreConflictsLabel?: string;
 }): Promise<CloserWorkMode | undefined> {
@@ -46,6 +47,7 @@ export async function classifyCloserWork(opts: {
     maxFollowupRounds: opts.maxFollowupRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
     trustedSenderLogins: opts.trustedSenderLogins,
+    blockingQuestionAuthors: opts.blockingQuestionAuthors,
     skipLatches: opts.skipLatches,
   });
   const ci = await needsCiFollowUp({
@@ -96,6 +98,7 @@ export async function runCloserWork(
     maxConflictRounds: opts.maxConflictRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
     trustedSenderLogins: opts.trustedSenderLogins,
+    blockingQuestionAuthors: opts.blockingQuestionAuthors,
     skipLatches: opts.skipLatches,
     ignoreConflictsLabel: opts.ignoreConflictsLabel,
   });

@@ -3520,4 +3520,128 @@ describe("publishReviewResult", () => {
       },
     ]);
   });
+
+  test("questions-only stays success with the setting off", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+  });
+
+  test("questions-only fails with N open questions for a listed author", async () => {
+    const reviews: Array<{ event?: string }> = [];
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["renovate-bot"],
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ q: is the timeout intentional?",
+        "src/bar.ts:7: ❓ question: was the upgrade validated?",
+        "<!-- jumi-check: success -->",
+      ].join("\n"),
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(reviews[0]?.event).toBe("REQUEST_CHANGES");
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "2 open questions" });
+  });
+
+  test("questions-only stays success for an unlisted author", async () => {
+    const reviews: Array<{ event?: string }> = [];
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["renovate-bot"],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "alice" }) }),
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(reviews[0]?.event).toBe("APPROVED");
+    expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+  });
+
+  test("a single open question uses the singular description", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["Renovate-Bot"],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+
+  test("an answered question clears the block on re-review", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["renovate-bot"],
+      resultMarkdown: "Verified the timeout against the upstream changelog.\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+  });
+
+  test("a human-needed answer keeps the status failing while the question stays open", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["renovate-bot"],
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ q: was the coordinator-drop recovery re-checked against the new zigbee-herdsman?",
+        "<!-- jumi-check: success -->",
+      ].join("\n"),
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
 });

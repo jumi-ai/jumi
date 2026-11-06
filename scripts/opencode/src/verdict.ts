@@ -333,6 +333,10 @@ export function hasColonEndingFinding(text: string, opts?: { singleFilePath?: st
 const FINDING_MARKER_RE =
   /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🔴|🟡|💡|❓|(?:bug|risk|simpler|suggestion|q|question)\s*:)/iu;
 
+// Same location prefix, but only the question marker: `❓` or `q:` / `question:`.
+const QUESTION_MARKER_RE =
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:❓|(?:q|question)\s*:)/iu;
+
 function isFindingMarkerLine(original: string): boolean {
   return FINDING_MARKER_RE.test(stripFindingPrefix(original));
 }
@@ -398,4 +402,60 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
  */
 export function hasPublishedFindings(text: string, opts?: { singleFilePath?: string }): boolean {
   return keepReviewFindingLines(text, opts).trim() !== "";
+}
+
+function isQuestionFindingFirstLine(original: string): boolean {
+  return QUESTION_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+/**
+ * Count the open `❓` questions in a review body: one per finding block
+ * whose first line carries the question marker. Continuation lines stay
+ * attached to their question and are never double-counted.
+ */
+export function countQuestionFindings(text: string, opts?: { singleFilePath?: string }): number {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isQuestionFindingFirstLine(block.first)) count++;
+  }
+  return count;
+}
+
+export function openQuestionDescription(count: number): string {
+  return `${count} open question${count === 1 ? "" : "s"}`;
+}
+
+function normalizeAuthorLogin(login: string | undefined | null): string {
+  return (login ?? "").trim().toLowerCase();
+}
+
+/** Case-insensitive exact login match against the blocking-questions allowlist. */
+export function isBlockingQuestionAuthor(
+  authorLogin: string | undefined | null,
+  blockingAuthors: readonly string[] | undefined | null
+): boolean {
+  const author = normalizeAuthorLogin(authorLogin);
+  if (!author || !blockingAuthors) return false;
+  return blockingAuthors.some((entry) => normalizeAuthorLogin(entry) === author);
+}
+
+/**
+ * Open questions that block the status: the trailer must be a complete
+ * success (questions are allowed with success), the PR author must be on the
+ * opt-in list, and at least one `❓` finding must remain. With the setting off
+ * (no authors) or an unlisted author this is always zero, so today's
+ * questions-only success behavior is unchanged.
+ */
+export function blockingOpenQuestionCount(
+  markdown: string | null | undefined,
+  prAuthorLogin: string | undefined | null,
+  blockingAuthors: readonly string[] | undefined | null,
+  opts?: { singleFilePath?: string }
+): number {
+  if (!markdown || !isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
+  return countQuestionFindings(parsed.comment, opts);
 }

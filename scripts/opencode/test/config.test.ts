@@ -279,6 +279,16 @@ describe("loadConfig", () => {
     ]);
   });
 
+  test("parses REVIEW_BLOCKING_QUESTION_AUTHORS CSV and treats empty as off", () => {
+    expect(loadConfig(required).blockingQuestionAuthors).toEqual([]);
+    expect(loadConfig({ ...required, REVIEW_BLOCKING_QUESTION_AUTHORS: "" }).blockingQuestionAuthors).toEqual([]);
+    expect(loadConfig({ ...required, REVIEW_BLOCKING_QUESTION_AUTHORS: " , " }).blockingQuestionAuthors).toEqual([]);
+    expect(
+      loadConfig({ ...required, REVIEW_BLOCKING_QUESTION_AUTHORS: "renovate-bot, Renovate[bot], " })
+        .blockingQuestionAuthors
+    ).toEqual(["renovate-bot", "Renovate[bot]"]);
+  });
+
   test("parses wildcard owner allowlist", () => {
     const config = loadConfig({
       ...required,
