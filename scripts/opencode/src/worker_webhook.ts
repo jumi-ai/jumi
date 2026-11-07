@@ -67,6 +67,8 @@ export interface HandleWorkerWebhookDeps {
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
   sits?: RouterSitStore;
+  /** Previous-round handoff notes; deleted when an issue closes. Best-effort. */
+  handoffs?: Pick<import("./handoff.ts").HandoffStore, "deleteForIssue">;
   /** Full forge for router-side CI gating (pending -> waiting). */
   ciApi?: Pick<
     import("./review.ts").ReviewApi,
@@ -317,6 +319,14 @@ export async function handleWorkerWebhookEvent(
       const payload = parsePullRequestPayload(rawBody);
       if (action === "closed" || action === "merged") {
         assertRepositoryPolicy(payload.repository, policy);
+        if (deps.handoffs) {
+          try {
+            const [owner, repo] = payload.repository.full_name.split("/");
+            if (owner && repo) await deps.handoffs.deleteForIssue(owner, repo, payload.pull_request.number);
+          } catch {
+            // Best-effort handoff cleanup only.
+          }
+        }
         try {
           const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
           if (jobs.length === 0) {
@@ -328,6 +338,14 @@ export async function handleWorkerWebhookEvent(
                 const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.pull_request.number, logger);
                 if (cleared) return cleared;
               }
+            }
+            try {
+              const [owner, repo] = payload.repository.full_name.split("/");
+              if (owner && repo && deps.handoffs) {
+                await deps.handoffs.deleteForIssue(owner, repo, payload.pull_request.number);
+              }
+            } catch {
+              // Best-effort handoff cleanup only.
             }
             return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
           }
@@ -616,6 +634,15 @@ export async function handleWorkerWebhookEvent(
     }
 
     const payload = parseIssuesPayload(rawBody);
+    if ((payload.action === "closed" || payload.action === "merged") && deps.handoffs) {
+      try {
+        const owner = payload.repository.full_name.split("/")[0] ?? "";
+        const repo = payload.repository.full_name.split("/")[1] ?? "";
+        if (owner && repo) await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+      } catch {
+        // Best-effort handoff cleanup only.
+      }
+    }
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
     const decision = await requireSenderPush(
       shouldEnqueueIssue(payload, policy),
@@ -683,6 +710,15 @@ export async function handleWorkerWebhookEvent(
             }
           } catch {
             // Repository policy failures already return 400; never sit here.
+          }
+          try {
+            const owner = payload.repository.full_name.split("/")[0] ?? "";
+            const repo = payload.repository.full_name.split("/")[1] ?? "";
+            if (owner && repo && deps.handoffs) {
+              await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+            }
+          } catch {
+            // Best-effort handoff cleanup only.
           }
           return skipped(decision.reason, logger);
         }

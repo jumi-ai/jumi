@@ -17,6 +17,7 @@ import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
+import { type HandoffStore, handoffsFor } from "./handoff.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
@@ -62,7 +63,8 @@ export function createIssueQueue(
   config: WorkerConfig,
   api: IssueApi = createForge(config),
   logger: (message: string) => void = log,
-  skipLatches?: SkipLatchStore
+  skipLatches?: SkipLatchStore,
+  handoffs?: HandoffStore
 ): ReviewQueue<IssueJob> {
   const aborts = new Map<string, AbortController>();
 
@@ -99,6 +101,7 @@ export function createIssueQueue(
           independentReview: config.independentReview,
           home: config.home,
           skipLatches,
+          handoffs: handoffs ?? handoffsFor({ home: config.home }),
           workdir: config.workdir,
           maxOutputBytes: config.maxOutputBytes,
           sanitizeOpenCodeEnv: true,
@@ -188,7 +191,8 @@ export async function handleIssueCancel(
   store?: ReviewJobStore,
   aborts?: Map<string, AbortController>,
   pids?: Map<string, number>,
-  skipLatches?: SkipLatchStore
+  skipLatches?: SkipLatchStore,
+  handoffs?: HandoffStore
 ): Promise<{ key: string; cancelled: true }> {
   const key = issueJobKey({ owner, repo, issueNumber });
   if (queue) {
@@ -196,11 +200,15 @@ export async function handleIssueCancel(
     abortIssueJob(queue, key);
   }
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
+  const handoffStore = handoffs ?? store?.handoffs ?? handoffsFor({ home: config.home });
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
     // Worker cancel clears only worker cells; review stuck lives in
     // review_stuck on the same row and must survive.
     await latches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
+  }
+  if (!store || handoffStore !== store.handoffs) {
+    await handoffStore.deleteForIssue(owner, repo, issueNumber);
   }
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   // The ledger mark lands before the in-process abort below: a tick woken by
@@ -566,6 +574,7 @@ export async function processWorkerTick(
       extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
       home: config.home,
       skipLatches: store.skipLatches,
+      handoffs: store.handoffs,
       workdir: config.workdir,
       maxOutputBytes: config.maxOutputBytes,
       sanitizeOpenCodeEnv: true,
