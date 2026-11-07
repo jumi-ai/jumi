@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
@@ -243,6 +243,81 @@ export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<s
     GRADLE_USER_HOME: join(workRoot, ".gradle"),
     GRADLE_OPTS: "-Dorg.gradle.daemon=false",
   };
+}
+
+/**
+ * Optional read-only Gradle seed (`GRADLE_SEED_HOME`): a read-only directory the
+ * deploy mounts, laid out as a Gradle user home that a trusted seeder populated.
+ * When set and usable the worker child gets `GRADLE_RO_DEP_CACHE` pointing at the
+ * seed's `caches` (Gradle expects `modules-2` under it); before spawn the parent
+ * copies `$SEED/wrapper/dists` into `$GRADLE_USER_HOME/wrapper/dists` (copy, never
+ * symlink: the wrapper writes lock and marker files there). The child never gets
+ * write access to the seed.
+ *
+ * Fail open: unset means today's behaviour exactly (no env, no copy, no log). A
+ * missing, non-directory, unreadable, or empty seed, or a copy error, logs one
+ * line and the job continues cold (no extra env).
+ */
+export async function prepareGradleSeed(
+  gradleUserHome: string,
+  opts?: { seedHome?: string; logger?: (message: string) => void }
+): Promise<Record<string, string>> {
+  const raw = opts?.seedHome ?? process.env.GRADLE_SEED_HOME;
+  const seedHome = raw?.trim();
+  if (!seedHome) return {};
+  const log = opts?.logger;
+  let seedStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    seedStat = await lstat(seedHome);
+  } catch {
+    log?.(`gradle seed unavailable: ${seedHome} missing, continuing without cache`);
+    return {};
+  }
+  if (!seedStat.isDirectory()) {
+    log?.(`gradle seed unavailable: ${seedHome} is not a directory, continuing without cache`);
+    return {};
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(seedHome);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log?.(`gradle seed unavailable: ${seedHome} unreadable (${detail}), continuing without cache`);
+    return {};
+  }
+  if (entries.length === 0) {
+    log?.(`gradle seed unavailable: ${seedHome} is empty, continuing without cache`);
+    return {};
+  }
+  const src = join(seedHome, "wrapper", "dists");
+  let srcStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    srcStat = await lstat(src);
+  } catch {
+    srcStat = undefined;
+  }
+  if (srcStat?.isDirectory()) {
+    try {
+      await mkdir(dirname(join(gradleUserHome, "wrapper", "dists")), { recursive: true });
+      await cp(src, join(gradleUserHome, "wrapper", "dists"), { recursive: true });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
+      return {};
+    }
+  }
+  return { GRADLE_RO_DEP_CACHE: join(seedHome, "caches") };
+}
+
+/** Base worker child env plus the Gradle seed (copy + `GRADLE_RO_DEP_CACHE`) when set. */
+export async function workerOpenCodeChildEnvWithGradleSeed(
+  auth: GitAuth,
+  workdir: string,
+  logger?: (message: string) => void
+): Promise<Record<string, string>> {
+  const base = workerOpenCodeChildEnv(auth, workdir);
+  const seedEnv = await prepareGradleSeed(base.GRADLE_USER_HOME, { logger });
+  return { ...base, ...seedEnv };
 }
 
 export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
