@@ -1,4 +1,4 @@
-import { cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
@@ -246,6 +246,22 @@ export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<s
 }
 
 /**
+ * The seed mount is read-only, so `cp` preserves its read-only mode bits.
+ * The wrapper must write lock and marker files under `wrapper/dists`, so
+ * add owner-write throughout the copied tree.
+ */
+async function makeCopiedTreeOwnerWritable(root: string): Promise<void> {
+  const info = await lstat(root);
+  if (info.isSymbolicLink()) return;
+  await chmod(root, (info.mode & 0o7777) | 0o200);
+  if (!info.isDirectory()) return;
+  const entries = await readdir(root);
+  for (const entry of entries) {
+    await makeCopiedTreeOwnerWritable(join(root, entry));
+  }
+}
+
+/**
  * Optional read-only Gradle seed (`GRADLE_SEED_HOME`): a read-only directory the
  * deploy mounts, laid out as a Gradle user home that a trusted seeder populated.
  * When set and usable the worker child gets `GRADLE_RO_DEP_CACHE` pointing at the
@@ -255,8 +271,11 @@ export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<s
  * write access to the seed.
  *
  * Fail open: unset means today's behaviour exactly (no env, no copy, no log). A
- * missing, non-directory, unreadable, or empty seed, or a copy error, logs one
- * line and the job continues cold (no extra env).
+ * missing, non-directory, unreadable, or empty seed, a seed without
+ * `caches/modules-2`, or a copy error, logs one line and the job continues
+ * cold (no extra env). The wrapper copy is kept when only the dependency
+ * cache is missing; a failed copy is removed so later jobs do not reuse a
+ * truncated tree.
  */
 export async function prepareGradleSeed(
   gradleUserHome: string,
@@ -297,14 +316,29 @@ export async function prepareGradleSeed(
     srcStat = undefined;
   }
   if (srcStat?.isDirectory()) {
+    const dest = join(gradleUserHome, "wrapper", "dists");
     try {
-      await mkdir(dirname(join(gradleUserHome, "wrapper", "dists")), { recursive: true });
-      await cp(src, join(gradleUserHome, "wrapper", "dists"), { recursive: true });
+      await mkdir(dirname(dest), { recursive: true });
+      await cp(src, dest, { recursive: true });
+      await makeCopiedTreeOwnerWritable(dest);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
+      await rm(dest, { recursive: true, force: true }).catch(() => {});
       return {};
     }
+  }
+  let modulesStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    modulesStat = await lstat(join(seedHome, "caches", "modules-2"));
+  } catch {
+    modulesStat = undefined;
+  }
+  if (!modulesStat?.isDirectory()) {
+    log?.(
+      `gradle seed has no dependency cache: ${join(seedHome, "caches", "modules-2")} missing, continuing without cache`
+    );
+    return {};
   }
   return { GRADLE_RO_DEP_CACHE: join(seedHome, "caches") };
 }

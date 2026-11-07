@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import {
@@ -948,7 +948,94 @@ describe("prepareGradleSeed", () => {
       });
       expect(seedEnv).toEqual({});
       expect(logged.length).toBe(1);
+      await expect(lstat(join(gradleUserHome, "wrapper", "dists"))).rejects.toThrow();
     } finally {
+      await rm(seed, { recursive: true, force: true });
+      await rm(gradleUserHome, { recursive: true, force: true });
+    }
+  });
+
+  test("copy failure removes a leftover destination tree", async () => {
+    const seed = await makeTempDir("jumi-gradle-seed-");
+    const gradleUserHome = await makeTempDir("jumi-gradle-home-");
+    const logged: string[] = [];
+    try {
+      await mkdir(join(seed, "caches", "modules-2"), { recursive: true });
+      await writeFile(join(seed, "caches", "modules-2", "metadata.bin"), "deps");
+      await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
+      await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
+      // A stale file where the destination directory must be makes `cp(dir, file)`
+      // fail; the failed copy must not leave it behind for later jobs to reuse.
+      const dest = join(gradleUserHome, "wrapper", "dists");
+      await mkdir(join(gradleUserHome, "wrapper"), { recursive: true });
+      await writeFile(dest, "stale");
+      const seedEnv = await prepareGradleSeed(gradleUserHome, {
+        seedHome: seed,
+        logger: (m) => logged.push(m),
+      });
+      expect(seedEnv).toEqual({});
+      expect(logged.length).toBe(1);
+      await expect(lstat(dest)).rejects.toThrow();
+    } finally {
+      await rm(seed, { recursive: true, force: true });
+      await rm(gradleUserHome, { recursive: true, force: true });
+    }
+  });
+
+  test("seed without modules-2 keeps the wrapper copy but stays cold", async () => {
+    const seed = await makeTempDir("jumi-gradle-seed-");
+    const gradleUserHome = await makeTempDir("jumi-gradle-home-");
+    const logged: string[] = [];
+    try {
+      await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
+      await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
+      const seedEnv = await prepareGradleSeed(gradleUserHome, {
+        seedHome: seed,
+        logger: (m) => logged.push(m),
+      });
+      expect(seedEnv).toEqual({});
+      expect(logged.length).toBe(1);
+      expect(await readFile(join(gradleUserHome, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "utf8")).toBe(
+        "zip"
+      );
+    } finally {
+      await rm(seed, { recursive: true, force: true });
+      await rm(gradleUserHome, { recursive: true, force: true });
+    }
+  });
+
+  test("copied wrapper tree is owner-writable", async () => {
+    const seed = await makeTempDir("jumi-gradle-seed-");
+    const gradleUserHome = await makeTempDir("jumi-gradle-home-");
+    const logged: string[] = [];
+    try {
+      await mkdir(join(seed, "caches", "modules-2"), { recursive: true });
+      await writeFile(join(seed, "caches", "modules-2", "metadata.bin"), "deps");
+      const seedDist = join(seed, "wrapper", "dists", "gradle-8.10-bin");
+      await mkdir(seedDist, { recursive: true });
+      const seedFile = join(seedDist, "gradle.zip");
+      await writeFile(seedFile, "zip");
+      await chmod(seedFile, 0o444);
+      await chmod(seedDist, 0o555);
+      await chmod(join(seed, "wrapper", "dists"), 0o555);
+      const seedEnv = await prepareGradleSeed(gradleUserHome, {
+        seedHome: seed,
+        logger: (m) => logged.push(m),
+      });
+      expect(seedEnv).toEqual({ GRADLE_RO_DEP_CACHE: join(seed, "caches") });
+      expect(logged).toEqual([]);
+      const destFile = join(gradleUserHome, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip");
+      const destDist = join(gradleUserHome, "wrapper", "dists", "gradle-8.10-bin");
+      expect(((await stat(destFile)).mode & 0o200) !== 0).toBe(true);
+      expect(((await stat(destDist)).mode & 0o200) !== 0).toBe(true);
+      expect(((await stat(join(gradleUserHome, "wrapper", "dists"))).mode & 0o200) !== 0).toBe(true);
+      await writeFile(join(destDist, "lock-writes-work"), "ok");
+    } finally {
+      const seedFilePath = join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip");
+      const seedDistPath = join(seed, "wrapper", "dists", "gradle-8.10-bin");
+      await chmod(seedFilePath, 0o644).catch(() => {});
+      await chmod(seedDistPath, 0o755).catch(() => {});
+      await chmod(join(seed, "wrapper", "dists"), 0o755).catch(() => {});
       await rm(seed, { recursive: true, force: true });
       await rm(gradleUserHome, { recursive: true, force: true });
     }
