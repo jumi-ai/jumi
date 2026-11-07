@@ -139,7 +139,7 @@ describe("worker child env for each runner type", () => {
           const out: Record<string, string> = {
             HOME: home,
             PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-            TMPDIR: join(workdir, ".jumi-tmp"),
+            TMPDIR: join(workdir, ".jumi-tmp", "scratch"),
           };
           for (const [k, v] of Object.entries(runnerExtra)) {
             if (k.startsWith("GITEA_") || k.startsWith("GITHUB_APP_")) continue;

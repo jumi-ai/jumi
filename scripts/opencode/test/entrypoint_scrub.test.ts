@@ -83,4 +83,55 @@ describe("entrypoint secret scrub", () => {
     expect(payload.scrubbed).toBe("1");
     expect(payload.fileGone).toBe(false);
   });
+
+  test("JUMI_SECRETS_DIR set puts the secrets file there", () => {
+    chmodSync(entrypoint, 0o755);
+    const secretsDir = mkdtempSync(join(tmpdir(), "jumi-secrets-dir-"));
+    const probeDir = mkdtempSync(join(tmpdir(), "jumi-secrets-probe-"));
+    const probePath = join(probeDir, "probe.ts");
+    writeFileSync(probePath, `process.stdout.write(process.env.JUMI_SECRETS_FILE ?? "");`);
+    try {
+      const result = spawnSync(entrypoint, [process.execPath, probePath], {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TMPDIR: process.env.TMPDIR ?? "/tmp",
+          JUMI_SECRETS_DIR: secretsDir,
+          GITEA_BOT_TOKEN: "secret-token",
+        },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout.startsWith(secretsDir)).toBe(true);
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+      rmSync(secretsDir, { recursive: true, force: true });
+    }
+  });
+
+  test("JUMI_SECRETS_DIR unset keeps the TMPDIR behaviour", () => {
+    chmodSync(entrypoint, 0o755);
+    const fallback = mkdtempSync(join(tmpdir(), "jumi-secrets-tmp-"));
+    const probeDir = mkdtempSync(join(tmpdir(), "jumi-secrets-probe-"));
+    const probePath = join(probeDir, "probe.ts");
+    writeFileSync(probePath, `process.stdout.write(process.env.JUMI_SECRETS_FILE ?? "");`);
+    try {
+      const result = spawnSync(entrypoint, [process.execPath, probePath], {
+        encoding: "utf8",
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TMPDIR: fallback,
+          GITEA_BOT_TOKEN: "secret-token",
+        },
+      });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout.startsWith(fallback)).toBe(true);
+    } finally {
+      rmSync(probeDir, { recursive: true, force: true });
+      rmSync(fallback, { recursive: true, force: true });
+    }
+  });
 });

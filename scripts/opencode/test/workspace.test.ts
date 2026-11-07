@@ -789,7 +789,8 @@ describe("workerOpenCodeChildEnv", () => {
       expect(env.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(env.JAVA_HOME).toBe("/opt/java/openjdk");
       expect(env.PATH.startsWith("/opt/java/openjdk/bin:")).toBe(true);
-      expect(env.JAVA_TOOL_OPTIONS).toBe("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp");
+      expect(env.JAVA_TOOL_OPTIONS).toBe("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp/scratch");
+      expect(env.TMPDIR).toBe("/work/kirmanak/demo/12/.jumi-tmp/scratch");
       expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
       expect(env.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
       expect(env.HOME).toBeUndefined();
