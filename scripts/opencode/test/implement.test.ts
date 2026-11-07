@@ -1166,8 +1166,9 @@ describe("implementIssue", () => {
       expect(openCodeOpts?.extraEnv?.GRADLE_USER_HOME).toBe(join(process.env.WORKDIR || "/work", ".gradle"));
       expect(openCodeOpts?.extraEnv?.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
       expect(openCodeOpts?.extraEnv?.JAVA_TOOL_OPTIONS).toBe(
-        `-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp")}`
+        `-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp/scratch")}`
       );
+      expect(openCodeOpts?.extraEnv?.TMPDIR).toBe(join(workdir, "kirmanak/demo/12/.jumi-tmp/scratch"));
       expect(openCodeOpts?.extraEnv?.PATH?.startsWith(`${openCodeOpts?.extraEnv?.JAVA_HOME}/bin:`)).toBe(true);
       expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
       expect(gitCalls.some((args) => args[0] === "commit")).toBe(false);

@@ -1,16 +1,28 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runAgy } from "../src/agy.ts";
+import {
+  isEngineTempPath,
+  porcelainPaths,
+  STAGE_ALL_ARGS,
+  withoutEngineTempPorcelain,
+} from "../src/claimed_worktree.ts";
+import { runClaude } from "../src/claude.ts";
+import { runCodex } from "../src/codex.ts";
 import {
   assertEngineScratchIgnored,
+  CHILD_SCRATCH_DIR,
+  childScratchDir,
   ENGINE_TEMP_DIR,
   engineScratchUntrackedNotIgnored,
+  ensureChildScratchDir,
   ensureEngineScratchIgnored,
 } from "../src/engine_scratch.ts";
 import { runOpenCode } from "../src/git.ts";
-import { type GitAuth, workerOpenCodeChildEnv } from "../src/workspace.ts";
+import { type GitAuth, gitOpenCodeChildEnv, workerOpenCodeChildEnv } from "../src/workspace.ts";
 
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
@@ -197,5 +209,123 @@ echo IGNORED_END
         await rm(binDir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+describe("child scratch dir", () => {
+  const auth: GitAuth = { giteaUrl: "https://gitea.example/", username: "jumi", token: "secret-token" };
+
+  test("shared and worker child env point TMPDIR under .jumi-tmp", () => {
+    const workdir = "/work/acme/demo/12";
+    const scratch = join(workdir, ENGINE_TEMP_DIR, CHILD_SCRATCH_DIR);
+    expect(childScratchDir(workdir)).toBe(scratch);
+    expect(gitOpenCodeChildEnv(auth, workdir).TMPDIR).toBe(scratch);
+    expect(gitOpenCodeChildEnv(auth).TMPDIR).toBeUndefined();
+    const worker = workerOpenCodeChildEnv(auth, workdir);
+    expect(worker.TMPDIR).toBe(scratch);
+    expect(worker.JAVA_TOOL_OPTIONS).toBe(`-Djava.io.tmpdir=${scratch}`);
+  });
+
+  test("ensureChildScratchDir creates the dir", async () => {
+    await withRoot(async (root) => {
+      const workdir = await realpath(await mkdtemp(join(root, "wt-")));
+      const dir = await ensureChildScratchDir(workdir);
+      expect(dir).toBe(childScratchDir(workdir));
+      await access(dir);
+    });
+  });
+
+  test("a file under scratch is engine temp, filtered from porcelain, and never staged", async () => {
+    expect(isEngineTempPath(`${ENGINE_TEMP_DIR}/${CHILD_SCRATCH_DIR}/uv-cache`)).toBe(true);
+    expect(porcelainPaths(`?? ${ENGINE_TEMP_DIR}/${CHILD_SCRATCH_DIR}/tool`).every(isEngineTempPath)).toBe(true);
+    const status = `?? ${ENGINE_TEMP_DIR}/${CHILD_SCRATCH_DIR}/\n M src/demo.ts\n?? JUMI_REVIEW.md`;
+    expect(withoutEngineTempPorcelain(status)).toBe("M src/demo.ts\n?? JUMI_REVIEW.md");
+    // Review's dirty-tree check allows only the artifact plus engine temp.
+    const reviewPorcelain = `?? ${ENGINE_TEMP_DIR}/${CHILD_SCRATCH_DIR}/tool\n?? JUMI_REVIEW.md`;
+    for (const line of reviewPorcelain.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      expect(porcelainPaths(line).some((path) => path !== "JUMI_REVIEW.md" && !isEngineTempPath(path))).toBe(false);
+    }
+    expect(STAGE_ALL_ARGS).toContain(`:(exclude)${ENGINE_TEMP_DIR}`);
+    await withRoot(async (root) => {
+      const worktree = await linkedWorktree(root, "wt");
+      await ensureEngineScratchIgnored(worktree);
+      const scratch = await ensureChildScratchDir(worktree);
+      await writeFile(join(scratch, "tool"), "binary\n");
+      await writeFile(join(worktree, "src.txt"), "change\n");
+      git(worktree, ["add", "-A"]);
+      const staged = git(worktree, ["diff", "--cached", "--name-only"])
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      expect(staged).toEqual(["src.txt"]);
+    });
+  });
+
+  test("every runner spawn gets TMPDIR under .jumi-tmp for each job kind", async () => {
+    const kinds = ["review", "implement", "follow-up", "conflict"] as const;
+    const runners = ["opencode", "claude", "agy", "codex"] as const;
+    const binDir = await mkdtemp(join(tmpdir(), "jumi-scratch-bins-"));
+    try {
+      await writeFile(join(binDir, "opencode"), `#!/bin/sh\nprintf 'TMPDIR=%s\\n' "$TMPDIR"\n`);
+      await writeFile(join(binDir, "claude"), `#!/bin/sh\nprintf 'TMPDIR=%s\\n' "$TMPDIR"\n`);
+      await writeFile(
+        join(binDir, "agy"),
+        `#!/bin/sh\nprintf '{"event":"result","status":"SUCCESS","response":"TMPDIR=%s"}\\n' "$TMPDIR"\n`
+      );
+      await writeFile(
+        join(binDir, "codex"),
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"type":"thread.started","thread_id":"t1"}\'\n' +
+          'printf \'%s\\n\' "{\\"type\\":\\"item.completed\\",\\"item\\":{\\"id\\":\\"m1\\",\\"type\\":\\"agent_message\\",\\"text\\":\\"TMPDIR=$TMPDIR\\"}}"\n'
+      );
+      for (const name of ["opencode", "claude", "agy", "codex"]) {
+        await chmod(join(binDir, name), 0o755);
+      }
+      process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+      for (const kind of kinds) {
+        for (const runner of runners) {
+          const workdir = await realpath(await mkdtemp(join(tmpdir(), "jumi-scratch-run-")));
+          const home = await mkdtemp(join(tmpdir(), "jumi-scratch-home-"));
+          try {
+            process.env.HOME = home;
+            const isReview = kind === "review";
+            const extraEnv = isReview ? undefined : workerOpenCodeChildEnv(auth, workdir);
+            if (runner === "codex" && isReview) {
+              await writeFile(join(workdir, "JUMI_REVIEW.md"), "review artifact\n");
+            }
+            const opts = {
+              prompt: "probe",
+              model: runner === "claude" ? "opus" : "openai/gpt-5.5",
+              workdir,
+              home,
+              sanitizeEnv: true as const,
+              ...(extraEnv ? { extraEnv } : {}),
+              trace: { kind, owner: "acme", repo: "demo" } as {
+                kind: "review" | "implement" | "follow-up" | "conflict";
+                owner: string;
+                repo: string;
+              },
+            };
+            const result =
+              runner === "opencode"
+                ? await runOpenCode(opts)
+                : runner === "claude"
+                  ? await runClaude(opts)
+                  : runner === "agy"
+                    ? await runAgy(opts)
+                    : await runCodex(opts);
+            expect(result.status).toBe("ok");
+            const expected = childScratchDir(workdir);
+            expect(result.stdout).toContain(`TMPDIR=${expected}`);
+            await access(expected);
+          } finally {
+            await rm(workdir, { recursive: true, force: true });
+            await rm(home, { recursive: true, force: true });
+          }
+        }
+      }
+    } finally {
+      await rm(binDir, { recursive: true, force: true });
+    }
   });
 });

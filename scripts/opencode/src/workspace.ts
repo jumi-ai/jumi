@@ -1,6 +1,6 @@
 import { lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
@@ -206,7 +206,7 @@ export function gitConfigArgs(): string[] {
   ];
 }
 
-export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
+export function gitOpenCodeChildEnv(auth: GitAuth, workdir?: string): Record<string, string> {
   const env = gitEnv(auth);
   return {
     GIT_TERMINAL_PROMPT: "0",
@@ -228,6 +228,10 @@ export function gitOpenCodeChildEnv(auth: GitAuth): Record<string, string> {
     GIT_CONFIG_VALUE_1: gitCredentialHelper(),
     GIT_CONFIG_KEY_2: "core.symlinks",
     GIT_CONFIG_VALUE_2: "false",
+    // Agent scratch under the worktree's `.jumi-tmp`: `/tmp` may be a small
+    // RAM disk, so downloaded tools, venvs, and caches must never use a
+    // hard-coded `/tmp/...` path.
+    ...(workdir ? { TMPDIR: childScratchDir(workdir) } : {}),
   };
 }
 
@@ -235,11 +239,12 @@ export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<s
   const javaHome = process.env.JAVA_HOME || "/opt/java/openjdk";
   const workRoot = process.env.WORKDIR || "/work";
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  const scratch = childScratchDir(workdir);
   return {
-    ...gitOpenCodeChildEnv(auth),
+    ...gitOpenCodeChildEnv(auth, workdir),
     JAVA_HOME: javaHome,
     PATH: `${join(javaHome, "bin")}:${path}`,
-    JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${join(workdir, ".jumi-tmp")}`,
+    JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${scratch}`,
     GRADLE_USER_HOME: join(workRoot, ".gradle"),
     GRADLE_OPTS: "-Dorg.gradle.daemon=false",
   };

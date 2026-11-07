@@ -21,7 +21,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { codexThreadPath, codexThreadUsagePath, looksLikeProviderUnavailable } from "./fallback.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
@@ -167,13 +167,14 @@ function redactApiKeys(text: string): string {
 }
 
 function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   const base = opts.sanitizeEnv
     ? {
         HOME: opts.home ?? process.env.HOME ?? opts.workdir,
         PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        TMPDIR: tempRoot,
+        TMPDIR: scratchDir,
       }
-    : ({ ...process.env, TMPDIR: tempRoot } as Record<string, string>);
+    : ({ ...process.env, TMPDIR: scratchDir } as Record<string, string>);
   const env: Record<string, string> = { ...base };
   if (opts.sanitizeEnv && opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
@@ -263,6 +264,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
+  await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "codex-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");

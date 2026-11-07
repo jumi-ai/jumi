@@ -8,7 +8,7 @@ if [ "${JUMI_ENV_SCRUBBED:-}" = "1" ]; then
   exec "$@"
 fi
 
-tmp_root="${TMPDIR:-/tmp}"
+tmp_root="${JUMI_SECRETS_DIR:-${TMPDIR:-/tmp}}"
 file=$(mktemp "${tmp_root}/jumi-secrets.XXXXXX")
 chmod 600 "$file"
 

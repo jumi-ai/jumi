@@ -19,7 +19,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
@@ -157,8 +157,9 @@ export function scrubbedKey(key: string): boolean {
 
 function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
+  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
-    const env = { ...process.env, TMPDIR: tempRoot, ...tracing } as Record<string, string>;
+    const env = { ...process.env, TMPDIR: scratchDir, ...tracing } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
     return env;
   }
@@ -166,7 +167,7 @@ function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: str
   const env: Record<string, string> = {
     HOME: opts.home ?? process.env.HOME ?? opts.workdir,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    TMPDIR: tempRoot,
+    TMPDIR: scratchDir,
     DISABLE_AUTOUPDATER: "1",
   };
   if (process.env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -249,6 +250,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
+  await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "claude-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");
