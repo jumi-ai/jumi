@@ -341,6 +341,23 @@ function isFindingMarkerLine(original: string): boolean {
   return FINDING_MARKER_RE.test(stripFindingPrefix(original));
 }
 
+function isQuestionFindingFirstLine(original: string): boolean {
+  return QUESTION_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+/**
+ * Whether a published Jumi inline holds an open `❓` question: the marker is
+ * in the inline `path` (e.g. `❓ q: <file>` when the publisher could not map a
+ * `file:line:` location) or in the inline `body` (the usual
+ * `file`-path + `❓ q: …` body). Uses the same `QUESTION_MARKER_RE` rule the
+ * engine used to set `N open questions`, so the two counts cannot disagree.
+ */
+export function isQuestionInline(path: string | undefined | null, body: string | undefined | null): boolean {
+  if (typeof path === "string" && path.trim() && isQuestionFindingFirstLine(path)) return true;
+  if (typeof body === "string" && body.trim() && countQuestionFindings(body) > 0) return true;
+  return false;
+}
+
 /**
  * The published review body: finding blocks only. A finding keeps its
  * continuation lines: nested or indented list items, indented paragraphs, and
@@ -402,10 +419,6 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
  */
 export function hasPublishedFindings(text: string, opts?: { singleFilePath?: string }): boolean {
   return keepReviewFindingLines(text, opts).trim() !== "";
-}
-
-function isQuestionFindingFirstLine(original: string): boolean {
-  return QUESTION_MARKER_RE.test(stripFindingPrefix(original));
 }
 
 /**
