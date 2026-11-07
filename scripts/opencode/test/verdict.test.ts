@@ -5,6 +5,7 @@ import {
   findingFingerprint,
   hasPublishedFindings,
   isBlockingQuestionAuthor,
+  isQuestionInline,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
@@ -365,5 +366,13 @@ describe("blocking questions", () => {
     ].join("\n");
     expect(blockingOpenQuestionCount(markdown, "renovate-bot", ["renovate-bot"])).toBe(2);
     expect(blockingOpenQuestionCount(markdown, "Renovate-Bot", ["RENOVATE-bot"])).toBe(2);
+  });
+
+  test("isQuestionInline uses the same marker rule for path or body", () => {
+    expect(isQuestionInline("❓ q: k3s/garm/values.yaml", "Was the default re-checked?")).toBe(true);
+    expect(isQuestionInline("src/foo.ts", "❓ q: is the timeout intentional?")).toBe(true);
+    expect(isQuestionInline("src/foo.ts", "🔴 bug: null deref.")).toBe(false);
+    expect(isQuestionInline("src/foo.ts", "Was the default re-checked?")).toBe(false);
+    expect(isQuestionInline(undefined, "❓ q: is the timeout intentional?")).toBe(true);
   });
 });
