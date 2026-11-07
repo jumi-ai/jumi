@@ -61,6 +61,60 @@
       "autoReplaceStringTemplate": "CODEX_ARM64_TAG={{{newValue}}}\nCODEX_SHA256_ARM64={{{newDigest}}}"
     },
     {
+      "description": "yq amd64 binary checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "YQ_AMD64_TAG=(?<currentValue>v[^\\s]+)\\nYQ_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "mikefarah/yq",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "YQ_AMD64_TAG={{{newValue}}}\nYQ_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "yq arm64 binary checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "YQ_ARM64_TAG=(?<currentValue>v[^\\s]+)\\nYQ_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "mikefarah/yq",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "YQ_ARM64_TAG={{{newValue}}}\nYQ_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
+      "description": "uv amd64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Tags are plain semver so getDigest requests releases/tags/X.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "UV_AMD64_TAG=(?<currentValue>[^\\s]+)\\nUV_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "astral-sh/uv",
+      "autoReplaceStringTemplate": "UV_AMD64_TAG={{{newValue}}}\nUV_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "uv arm64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Tags are plain semver so getDigest requests releases/tags/X.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "UV_ARM64_TAG=(?<currentValue>[^\\s]+)\\nUV_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "astral-sh/uv",
+      "autoReplaceStringTemplate": "UV_ARM64_TAG={{{newValue}}}\nUV_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -98,6 +152,55 @@
       "allowedVersions": "/^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$/",
       "groupName": "codex",
       "groupSlug": "codex"
+    },
+    {
+      "description": "yq numeric version via github-releases: vX.Y.Z tags map to YQ_VERSION, only stable numeric releases, grouped so version and both binary checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "mikefarah/yq"
+      ],
+      "extractVersion": "^v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "yq",
+      "groupSlug": "yq"
+    },
+    {
+      "description": "yq tag-form binary checksums via github-release-attachments stay on vX.Y.Z tags so getDigest requests releases/tags/vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "mikefarah/yq"
+      ],
+      "allowedVersions": "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "yq",
+      "groupSlug": "yq"
+    },
+    {
+      "description": "uv numeric version via github-releases: plain X.Y.Z tags map to UV_VERSION, only stable numeric releases, grouped so version and both tarball checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "astral-sh/uv"
+      ],
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "uv",
+      "groupSlug": "uv"
+    },
+    {
+      "description": "uv tag-form tarball checksums via github-release-attachments stay on plain X.Y.Z tags so getDigest requests releases/tags/X.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "astral-sh/uv"
+      ],
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "uv",
+      "groupSlug": "uv"
     },
     {
       "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",

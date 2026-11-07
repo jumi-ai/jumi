@@ -3,6 +3,12 @@ ARG HELM_VERSION
 ARG CODEX_VERSION
 ARG CODEX_SHA256_AMD64
 ARG CODEX_SHA256_ARM64
+ARG YQ_VERSION
+ARG YQ_SHA256_AMD64
+ARG YQ_SHA256_ARM64
+ARG UV_VERSION
+ARG UV_SHA256_AMD64
+ARG UV_SHA256_ARM64
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
 FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS tools
@@ -120,14 +126,71 @@ FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca0
 
 ARG VERSION=dev
 ARG REVISION=unknown
+ARG YQ_VERSION
+ARG YQ_SHA256_AMD64
+ARG YQ_SHA256_ARM64
+ARG UV_VERSION
+ARG UV_SHA256_AMD64
+ARG UV_SHA256_ARM64
+ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://gitea.kirmanak.stream/personal/jumi" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates git ripgrep jq file findutils libstdc++6 python3 \
+  && apt-get install -y --no-install-recommends ca-certificates curl file findutils git jq libstdc++6 procps python3 python-is-python3 python3-yaml ripgrep shellcheck unzip \
   && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    : "${YQ_VERSION:?YQ_VERSION build-arg is required}"; \
+    : "${YQ_SHA256_AMD64:?YQ_SHA256_AMD64 build-arg is required}"; \
+    : "${YQ_SHA256_ARM64:?YQ_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) yq_bin="yq_linux_amd64"; yq_sha256="${YQ_SHA256_AMD64}" ;; \
+      arm64) yq_bin="yq_linux_arm64"; yq_sha256="${YQ_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${yq_sha256}" in \
+      *[!0-9a-f]*|"") echo "yq sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#yq_sha256}" -ne 64 ]; then echo "yq sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/${yq_bin}" -o "${tmp_dir}/yq"; \
+    echo "${yq_sha256}  ${tmp_dir}/yq" | sha256sum -c -; \
+    install -m 755 "${tmp_dir}/yq" /usr/local/bin/yq; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    : "${UV_VERSION:?UV_VERSION build-arg is required}"; \
+    : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 build-arg is required}"; \
+    : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) uv_target="x86_64-unknown-linux-gnu"; uv_sha256="${UV_SHA256_AMD64}" ;; \
+      arm64) uv_target="aarch64-unknown-linux-gnu"; uv_sha256="${UV_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${uv_sha256}" in \
+      *[!0-9a-f]*|"") echo "uv sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#uv_sha256}" -ne 64 ]; then echo "uv sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_target}.tar.gz" -o "${tmp_dir}/uv.tar.gz"; \
+    echo "${uv_sha256}  ${tmp_dir}/uv.tar.gz" | sha256sum -c -; \
+    tar -xzf "${tmp_dir}/uv.tar.gz" -C "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/uv-${uv_target}/uv" /usr/local/bin/uv; \
+    install -m 755 "${tmp_dir}/uv-${uv_target}/uvx" /usr/local/bin/uvx; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    export UV_PYTHON_INSTALL_DIR=/opt/cpython; \
+    /usr/local/bin/uv python install 3.13 --install-dir /opt/cpython --no-bin; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) py_bin="/opt/cpython/cpython-3.13-linux-x86_64-gnu/bin/python3.13" ;; \
+      arm64) py_bin="/opt/cpython/cpython-3.13-linux-aarch64-gnu/bin/python3.13" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    if [ ! -x "${py_bin}" ]; then py_bin="$(echo /opt/cpython/cpython-3.13-*/bin/python3.13)"; fi; \
+    test -x "${py_bin}"; \
+    ln -sfn "${py_bin}" /usr/local/bin/python3.13; \
+    /usr/local/bin/python3.13 --version
 COPY --from=tools /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=tools /usr/local/bin/claude /usr/local/bin/claude
@@ -145,7 +208,16 @@ RUN git --version \
   && /usr/local/bin/opencode --version \
   && /usr/local/bin/claude --version \
   && /usr/local/bin/agy --version \
-  && /usr/local/bin/codex --version
+  && /usr/local/bin/codex --version \
+  && curl --version \
+  && yq --version \
+  && uv --version \
+  && ps --version \
+  && unzip -v \
+  && shellcheck --version \
+  && python --version \
+  && python3 -c 'import yaml' \
+  && UV_OFFLINE=1 uv run --no-project --python 3.13 python -V
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./

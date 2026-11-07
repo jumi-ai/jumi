@@ -17,6 +17,12 @@ fi
 : "${CODEX_VERSION:?CODEX_VERSION is required}"
 : "${CODEX_SHA256_AMD64:?CODEX_SHA256_AMD64 is required}"
 : "${CODEX_SHA256_ARM64:?CODEX_SHA256_ARM64 is required}"
+: "${YQ_VERSION:?YQ_VERSION is required}"
+: "${YQ_SHA256_AMD64:?YQ_SHA256_AMD64 is required}"
+: "${YQ_SHA256_ARM64:?YQ_SHA256_ARM64 is required}"
+: "${UV_VERSION:?UV_VERSION is required}"
+: "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
+: "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
 
 primary_tag="$1"
 shift
@@ -54,6 +60,12 @@ buildah bud \
   --build-arg "CODEX_VERSION=${CODEX_VERSION}" \
   --build-arg "CODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}" \
   --build-arg "CODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}" \
+  --build-arg "YQ_VERSION=${YQ_VERSION}" \
+  --build-arg "YQ_SHA256_AMD64=${YQ_SHA256_AMD64}" \
+  --build-arg "YQ_SHA256_ARM64=${YQ_SHA256_ARM64}" \
+  --build-arg "UV_VERSION=${UV_VERSION}" \
+  --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
+  --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
@@ -97,6 +109,51 @@ verify_reviewer_runtime() {
   if ! buildah run "${ctr}" -- helm version --short; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "helm missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- curl --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "curl missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- yq --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "yq missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- uv --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "uv missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- ps --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "procps (ps) missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- unzip -v; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "unzip missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- shellcheck --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "shellcheck missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "python (python-is-python3) missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python3 -c 'import yaml'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "python3-yaml missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "pre-installed CPython 3.13 not usable offline via uv in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- test -f /app/review-skills/gitops-apply-review/SKILL.md; then
@@ -231,7 +288,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, claude flags, agy forge read_url deny, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
