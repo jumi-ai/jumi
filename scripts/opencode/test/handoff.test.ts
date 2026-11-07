@@ -8,6 +8,7 @@ import {
   HANDOFF_FILE,
   HANDOFF_MAX_BYTES,
   handoffKey,
+  handoffKeyForJob,
   injectStoredHandoff,
   MemoryHandoffStore,
   readHandoffFromWorktree,
@@ -15,9 +16,10 @@ import {
   writeHandoffToWorktree,
 } from "../src/handoff.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { isExternalIssueJob, makeExternalIssueJob } from "../src/tracker.ts";
 import { handleIssueCancel } from "../src/worker.ts";
 import { handleWorkerWebhookEvent } from "../src/worker_webhook.ts";
-import { makeComment, makeWorkerConfig } from "./fixtures.ts";
+import { makeComment, makePayload, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
 
 describe("handoff note", () => {
   test("write and read round-trip a worktree file", async () => {
@@ -191,5 +193,73 @@ describe("handoff note", () => {
       botUsername: "jumi",
     });
     expect(await store.handoffs.get(handoffKey("gitea", "kirmanak", "demo", 12))).toBeNull();
+  });
+
+  test("pull_request close does not delete the issue-numbered handoff", async () => {
+    const store = new MemoryHandoffStore();
+    await store.put(handoffKey("gitea", "kirmanak", "demo", 12), "round one");
+    const body = new TextEncoder().encode(
+      JSON.stringify(
+        makePayload({
+          action: "closed",
+          repository: {
+            ...makeRepo(),
+            html_url: "https://gitea.example/kirmanak/demo",
+            clone_url: "https://gitea.example/kirmanak/demo.git",
+          },
+          pull_request: makePR({ number: 12, state: "closed", merged: true }),
+        })
+      )
+    );
+    const res = await handleWorkerWebhookEvent(
+      new Uint8Array(body),
+      "pull_request",
+      "pull_request",
+      "d-pr",
+      {
+        giteaUrl: "https://gitea.example",
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "jumi",
+      },
+      {
+        queue: { enqueue: () => ({ key: "k", queued: false }) },
+        handoffs: store,
+      }
+    );
+    expect(res.status).toBe(202);
+    expect(await store.get(handoffKey("gitea", "kirmanak", "demo", 12))).toBe("round one");
+  });
+
+  test("external briefs share one handoff key, so the implement path skips them", async () => {
+    const first = makeExternalIssueJob({
+      tracker: "fake",
+      trackerId: "FAKE-123",
+      trackerUrl: "https://tracker.example/items/FAKE-123",
+      title: "Fix the thing",
+      body: "Please implement this.\n\nRepository: kirmanak/demo\n",
+      owner: "kirmanak",
+      repo: "demo",
+      defaultBranch: "main",
+      cloneUrl: "https://gitea.example/kirmanak/demo.git",
+    });
+    const second = makeExternalIssueJob({
+      tracker: "fake",
+      trackerId: "FAKE-456",
+      trackerUrl: "https://tracker.example/items/FAKE-456",
+      title: "Fix another thing",
+      body: "Please implement this.\n\nRepository: kirmanak/demo\n",
+      owner: "kirmanak",
+      repo: "demo",
+      defaultBranch: "main",
+      cloneUrl: "https://gitea.example/kirmanak/demo.git",
+    });
+    expect(first.issueNumber).toBe(0);
+    expect(isExternalIssueJob(first)).toBe(true);
+    expect(isExternalIssueJob(second)).toBe(true);
+    // Both briefs resolve to the same forge/owner/repo#0 key: sharing it
+    // would leak notes between unrelated trackers, so implementExternalIssue
+    // skips the handoff round-trip for external jobs instead of using it.
+    expect(handoffKeyForJob(first)).toEqual(handoffKeyForJob(second));
   });
 });

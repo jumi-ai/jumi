@@ -319,14 +319,9 @@ export async function handleWorkerWebhookEvent(
       const payload = parsePullRequestPayload(rawBody);
       if (action === "closed" || action === "merged") {
         assertRepositoryPolicy(payload.repository, policy);
-        if (deps.handoffs) {
-          try {
-            const [owner, repo] = payload.repository.full_name.split("/");
-            if (owner && repo) await deps.handoffs.deleteForIssue(owner, repo, payload.pull_request.number);
-          } catch {
-            // Best-effort handoff cleanup only.
-          }
-        }
+        // Handoffs are keyed by issue number, not PR number: a PR close must
+        // not delete an unrelated issue's note that shares the number.
+        // Issue close cleans the right key on the issues closed path.
         try {
           const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
           if (jobs.length === 0) {
@@ -338,14 +333,6 @@ export async function handleWorkerWebhookEvent(
                 const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.pull_request.number, logger);
                 if (cleared) return cleared;
               }
-            }
-            try {
-              const [owner, repo] = payload.repository.full_name.split("/");
-              if (owner && repo && deps.handoffs) {
-                await deps.handoffs.deleteForIssue(owner, repo, payload.pull_request.number);
-              }
-            } catch {
-              // Best-effort handoff cleanup only.
             }
             return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
           }

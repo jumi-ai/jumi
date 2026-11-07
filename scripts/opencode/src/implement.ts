@@ -520,9 +520,16 @@ async function implementExternalIssue(
       await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
       await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
       await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
-      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
-      const handoffKey = handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts));
-      await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+      // External briefs have no stable issue number (issueNumber is always 0),
+      // so every brief targeting the same owner/repo would share
+      // forge/owner/repo#0. Skip the handoff round-trip for external jobs
+      // rather than leak notes between unrelated trackers.
+      const skipHandoff = isExternalIssueJob(job);
+      const handoffStore = skipHandoff ? undefined : handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+      const handoffKey = handoffStore ? handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts)) : undefined;
+      if (handoffStore && handoffKey) {
+        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+      }
 
       log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
       const runOpts: EngineRunOptions = {
@@ -563,7 +570,9 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
       const validatedSkip = await readValidatedSkip(worktree);
-      await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+      if (handoffStore && handoffKey) {
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+      }
       await stripSentinels(worktree, [
         PR_DESCRIPTION_FILE,
         SKIP_FILE,
