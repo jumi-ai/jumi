@@ -1,6 +1,6 @@
 import { lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { ensureEngineScratchIgnored, childScratchDir } from "./engine_scratch.ts";
+import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";

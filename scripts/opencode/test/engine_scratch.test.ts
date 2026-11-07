@@ -3,15 +3,6 @@ import { spawnSync } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  assertEngineScratchIgnored,
-  CHILD_SCRATCH_DIR,
-  childScratchDir,
-  ENGINE_TEMP_DIR,
-  engineScratchUntrackedNotIgnored,
-  ensureChildScratchDir,
-  ensureEngineScratchIgnored,
-} from "../src/engine_scratch.ts";
 import { runAgy } from "../src/agy.ts";
 import {
   isEngineTempPath,
@@ -21,6 +12,15 @@ import {
 } from "../src/claimed_worktree.ts";
 import { runClaude } from "../src/claude.ts";
 import { runCodex } from "../src/codex.ts";
+import {
+  assertEngineScratchIgnored,
+  CHILD_SCRATCH_DIR,
+  childScratchDir,
+  ENGINE_TEMP_DIR,
+  engineScratchUntrackedNotIgnored,
+  ensureChildScratchDir,
+  ensureEngineScratchIgnored,
+} from "../src/engine_scratch.ts";
 import { runOpenCode } from "../src/git.ts";
 import { type GitAuth, gitOpenCodeChildEnv, workerOpenCodeChildEnv } from "../src/workspace.ts";
 
@@ -275,8 +275,8 @@ describe("child scratch dir", () => {
       );
       await writeFile(
         join(binDir, "codex"),
-        "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"t1\"}'\n" +
-          "printf '%s\\n' \"{\\\"type\\\":\\\"item.completed\\\",\\\"item\\\":{\\\"id\\\":\\\"m1\\\",\\\"type\\\":\\\"agent_message\\\",\\\"text\\\":\\\"TMPDIR=$TMPDIR\\\"}}\"\n"
+        '#!/bin/sh\nprintf \'%s\\n\' \'{"type":"thread.started","thread_id":"t1"}\'\n' +
+          'printf \'%s\\n\' "{\\"type\\":\\"item.completed\\",\\"item\\":{\\"id\\":\\"m1\\",\\"type\\":\\"agent_message\\",\\"text\\":\\"TMPDIR=$TMPDIR\\"}}"\n'
       );
       for (const name of ["opencode", "claude", "agy", "codex"]) {
         await chmod(join(binDir, name), 0o755);
