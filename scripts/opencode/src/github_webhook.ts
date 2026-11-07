@@ -734,6 +734,15 @@ export async function handleGithubWebhookEvent(
     if (event !== "issues") return skipped(`unsupported event ${event ?? "unknown"}`, logger);
 
     const payload = parseIssuesPayload(rawBody);
+    if ((payload.action === "closed" || payload.action === "merged") && deps.worker.handoffs) {
+      try {
+        const owner = payload.repository.full_name.split("/")[0] ?? "";
+        const repo = payload.repository.full_name.split("/")[1] ?? "";
+        if (owner && repo) await deps.worker.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+      } catch {
+        // Best-effort handoff cleanup only.
+      }
+    }
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
     const decision = await requireSenderPush(
       shouldEnqueueGithubIssue(payload, policy),
@@ -791,6 +800,13 @@ export async function handleGithubWebhookEvent(
     if (jobs.length === 0) {
       if (decision.type === "skip") {
         if (payload.action === "closed" || payload.action === "merged") {
+          try {
+            const owner = payload.repository.full_name.split("/")[0] ?? "";
+            const repo = payload.repository.full_name.split("/")[1] ?? "";
+            if (owner && repo) await deps.worker.handoffs?.deleteForIssue(owner, repo, payload.issue.number);
+          } catch {
+            // Best-effort handoff cleanup only.
+          }
           const cleared = await clearGithubSit(
             deps.worker.sits,
             payload.repository.full_name.split("/")[0] ?? "",

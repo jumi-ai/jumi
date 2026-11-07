@@ -75,19 +75,23 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
 const WORKER_SCOPE = `Stay in this clone. Start from the parent-injected JUMI_*.md files; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the task, feedback, conflict, and CI. Public upstream docs are fine.
 Grep is ripgrep syntax, not JavaScript.
-Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, JUMI_CI.md, JUMI_PR.md, and JUMI_ATTACHMENTS.md at the repository root.
+Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt. The only Jumi files to read are JUMI_TASK.md, JUMI_QUEUE.md, JUMI_FEEDBACK.md, JUMI_CONFLICT.md, JUMI_CI.md, JUMI_PR.md, JUMI_HANDOFF.md, and JUMI_ATTACHMENTS.md at the repository root.
 When JUMI_ATTACHMENTS.md exists, its staged inputs live under .jumi-attachments/ (ignored, never committed); copy a file out explicitly if the task needs to vendor it.
+When JUMI_HANDOFF.md exists, it is the previous round's notes and may be stale: verify every claim against the code before reusing it.
 Verify once at the end, not after every edit.`;
 
 const WORKER_COMMIT = `Commit at each coherent logical step with a descriptive message that says what the step does; a small task can be a single commit. No \`wip\` / \`fix lint\` / \`oops\` commits. Do not commit a broken intermediate state just to save progress.
 Do not push. The parent pushes once after this run exits.
 Do not force-push. Do not amend or rebase commits already on the remote branch. Do not commit JUMI_*.md sentinels.`;
 
+const HANDOFF_INSTRUCTION = `Before finishing, write JUMI_HANDOFF.md at the repository root with notes for the next round: the key files and why they matter, commands that built and tested successfully, environment workarounds, and what is left or risky. If JUMI_HANDOFF.md is already present it is the previous round's notes and may be stale: verify against the code, then replace it. Keep it short (a few KiB at most). Never include forge tokens or secrets. Do not commit JUMI_HANDOFF.md.`;
+
 const IMPLEMENT_FINISH = `Edit, write, and commit as needed.
 ${WORKER_COMMIT}
 Do not ask questions.
 If there is nothing to change, write JUMI_SKIP.md at the repository root with a short reason. Do not commit JUMI_SKIP.md.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
+${HANDOFF_INSTRUCTION}
 Then stop.`;
 
 export const IMPLEMENT_PROMPT = `Read JUMI_TASK.md and implement the requested changes in this repository.
@@ -118,6 +122,7 @@ JUMI_FEEDBACK.md may contain reviewer ❓ questions. Answer each one: gather evi
 If JUMI_PR.md is present, it is the pull-request description already posted. Update it so it describes the branch tip after your changes: what changed, why, what evidence answers each reviewer question, and what you ran to verify. Do not commit JUMI_PR.md.
 ${WORKER_COMMIT}
 Do not ask questions of your own. Do not open a pull request.
+${HANDOFF_INSTRUCTION}
 When the feedback is addressed, stop.`;
 
 export const CONFLICT_PROMPT = `Read JUMI_TASK.md (original issue) and JUMI_CONFLICT.md (merge vs the default branch).
@@ -129,6 +134,7 @@ Do not drop either side to “win.” Do not reopen product decisions in JUMI_TA
 ${WORKER_COMMIT}
 Keep the merge commit flow: resolve in place and commit the resolution; do not merge, rebase, or force-push.
 Do not ask questions. Do not open a pull request.
+${HANDOFF_INSTRUCTION}
 When conflicts are resolved and no <<<<<<< markers remain, stop.`;
 
 async function pathExists(path: string): Promise<boolean> {

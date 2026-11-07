@@ -42,6 +42,15 @@ import {
 import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
+import {
+  HANDOFF_FILE,
+  type HandoffStore,
+  handoffKeyForJob,
+  handoffsFor,
+  injectStoredHandoff,
+  saveWorktreeHandoff,
+  writeHandoffToWorktree,
+} from "./handoff.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
@@ -188,6 +197,8 @@ export interface ImplementOptions extends PickupPolicy {
   onPid?: (pid: number) => void | Promise<void>;
   jobId?: string;
   skipLatches?: SkipLatchStore;
+  /** Previous-round handoff notes. Unset keeps the per-HOME memory fallback (tests, local/dev). */
+  handoffs?: HandoffStore;
   previousError?: string | null;
   /** Durable writer provenance. Unset keeps the legacy in-memory path (tests, local/dev). */
   provenance?: ProvenanceStore;
@@ -509,6 +520,16 @@ async function implementExternalIssue(
       await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
       await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
       await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
+      // External briefs have no stable issue number (issueNumber is always 0),
+      // so every brief targeting the same owner/repo would share
+      // forge/owner/repo#0. Skip the handoff round-trip for external jobs
+      // rather than leak notes between unrelated trackers.
+      const skipHandoff = isExternalIssueJob(job);
+      const handoffStore = skipHandoff ? undefined : handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+      const handoffKey = handoffStore ? handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts)) : undefined;
+      if (handoffStore && handoffKey) {
+        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+      }
 
       log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
       const runOpts: EngineRunOptions = {
@@ -549,12 +570,16 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
       const validatedSkip = await readValidatedSkip(worktree);
+      if (handoffStore && handoffKey) {
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+      }
       await stripSentinels(worktree, [
         PR_DESCRIPTION_FILE,
         SKIP_FILE,
         "JUMI_TASK.md",
         QUEUE_FILE,
         BLOCKED_BY_FILE,
+        HANDOFF_FILE,
         ATTACHMENTS_MANIFEST,
       ]);
       const porcelain = await worktreePorcelain(loop);
@@ -743,6 +768,14 @@ export async function implementIssue(
       await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
       throwIfAborted(opts.abortSignal);
+      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+      const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+      const restoreHandoffForFreshRun = async () => {
+        // A runner hop inside one job reuses the stored previous-round note;
+        // the hop must not inherit the failed run's partial file.
+        await writeHandoffToWorktree(worktree, injectedHandoff);
+      };
       const writeTaskFiles = async (job: IssueJob) => {
         await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(job));
         if (queue.length > 0) {
@@ -785,6 +818,7 @@ export async function implementIssue(
         extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
       ): Promise<ImplementResult | undefined> => {
         throwIfAborted(opts.abortSignal);
+        if (!extra?.continueSession) await restoreHandoffForFreshRun();
         log(label);
         const runOpts: EngineRunOptions = {
           model: opts.model,
@@ -937,6 +971,7 @@ export async function implementIssue(
         // A half-deleted tree fails here, in `clearLeftoverWorktree`, before the next spawn.
         await addWorktreeFromDefault();
         await writeTaskFiles(liveJob);
+        await restoreHandoffForFreshRun();
       };
 
       const handleYield = async (rejectedOnce: boolean): Promise<ImplementResult | "continue" | "retry"> => {
@@ -1031,12 +1066,14 @@ export async function implementIssue(
         throwIfAborted(opts.abortSignal);
         prFileContents = await readPullRequestDescription(worktree);
         const validatedSkip = await readValidatedSkip(worktree);
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
         await stripSentinels(worktree, [
           PR_DESCRIPTION_FILE,
           SKIP_FILE,
           "JUMI_TASK.md",
           QUEUE_FILE,
           BLOCKED_BY_FILE,
+          HANDOFF_FILE,
           ATTACHMENTS_MANIFEST,
         ]);
         porcelain = await worktreePorcelain(loop);
@@ -1053,6 +1090,7 @@ export async function implementIssue(
             // at the top of the next round when there is no runner left.
             incompleteHopped = true;
             await writeTaskFiles(liveJob);
+            await restoreHandoffForFreshRun();
             continue;
           }
           return skipIncomplete();

@@ -1,2 +1,4 @@
 .DS_Store
 node_modules/
+# Parent-injected worker sentinels: never committed (AGENTS.md).
+JUMI_*.md
