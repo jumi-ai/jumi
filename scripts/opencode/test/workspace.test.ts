@@ -856,8 +856,10 @@ describe("prepareGradleSeed", () => {
 
   test("set seed returns RO cache and copies wrapper dists", async () => {
     const original = process.env.GRADLE_SEED_HOME;
+    const originalWorkdir = process.env.WORKDIR;
     const seed = await makeTempDir("jumi-gradle-seed-");
     const gradleUserHome = await makeTempDir("jumi-gradle-home-");
+    const workRoot = await makeTempDir("jumi-gradle-work-");
     const logged: string[] = [];
     try {
       await mkdir(join(seed, "caches", "modules-2"), { recursive: true });
@@ -865,6 +867,10 @@ describe("prepareGradleSeed", () => {
       await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
       await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
       process.env.GRADLE_SEED_HOME = seed;
+      // Pin WORKDIR so workerOpenCodeChildEnvWithGradleSeed copies into a
+      // writable temp GRADLE_USER_HOME instead of the host's /work/.gradle
+      // (unwritable for the CI runner user, which failed the copy and went cold).
+      process.env.WORKDIR = workRoot;
       const seedEnv = await prepareGradleSeed(gradleUserHome, { logger: (m) => logged.push(m) });
       expect(seedEnv).toEqual({ GRADLE_RO_DEP_CACHE: join(seed, "caches") });
       expect(logged).toEqual([]);
@@ -873,13 +879,22 @@ describe("prepareGradleSeed", () => {
       const info = await lstat(join(gradleUserHome, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"));
       expect(info.isSymbolicLink()).toBe(false);
       const withSeed = await workerOpenCodeChildEnvWithGradleSeed(auth, "/work/owner/repo/1", (m) => logged.push(m));
+      expect(withSeed.GRADLE_USER_HOME).toBe(join(workRoot, ".gradle"));
       expect(withSeed.GRADLE_RO_DEP_CACHE).toBe(join(seed, "caches"));
       expect((withSeed as Record<string, string>).GRADLE_SEED_HOME).toBeUndefined();
+      const copiedViaWorkdir = await readFile(
+        join(workRoot, ".gradle", "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"),
+        "utf8"
+      );
+      expect(copiedViaWorkdir).toBe("zip");
     } finally {
       if (original === undefined) delete process.env.GRADLE_SEED_HOME;
       else process.env.GRADLE_SEED_HOME = original;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
       await rm(seed, { recursive: true, force: true });
       await rm(gradleUserHome, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
     }
   });
 
