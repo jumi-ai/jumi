@@ -74,6 +74,7 @@ export const SECRET_ENV_KEYS = [
   "BOARD_PEER_TOKEN",
 ] as const;
 export const SECRETS_FILE_ENV = "JUMI_SECRETS_FILE";
+export const SECRETS_DIR_ENV = "JUMI_SECRETS_DIR";
 export const ENV_SCRUBBED_FLAG = "JUMI_ENV_SCRUBBED";
 
 /** Drop forge secrets from the libc environment. Does not rewrite /proc/pid/environ. */
@@ -218,6 +219,9 @@ const MAX_INCOMPLETE_RETRIES_ENV = "MAX_INCOMPLETE_RETRIES";
 export function loadConfig(env: Env = process.env): ServiceConfig {
   const resolved = overlaySecretsFromFile(env);
   const role = parseJumiRole(requireEnv(resolved, "JUMI_ROLE"));
+  // Owned by the image entrypoint (secrets tmpfs dir); read here so the
+  // contract gate sees the optional key.
+  void optionalEnv(resolved, SECRETS_DIR_ENV);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: role !== "engine" });
   const fromEnv = {

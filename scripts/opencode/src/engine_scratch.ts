@@ -2,6 +2,7 @@ import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 export const ENGINE_TEMP_DIR = ".jumi-tmp";
+export const CHILD_SCRATCH_DIR = "scratch";
 export const ATTACHMENTS_DIR = ".jumi-attachments";
 
 const ENGINE_SCRATCH_EXCLUDE = `${ENGINE_TEMP_DIR}/`;
@@ -46,6 +47,18 @@ function excludeListsAttachments(text: string): boolean {
       trimmed === `/${ATTACHMENTS_SCRATCH_EXCLUDE}`
     );
   });
+}
+
+/** Agent scratch under the engine temp dir: `$TMPDIR` for every runner spawn. */
+export function childScratchDir(workdir: string): string {
+  return join(workdir, ENGINE_TEMP_DIR, CHILD_SCRATCH_DIR);
+}
+
+/** Created before spawn so tool, venv, and cache writes never hit small `/tmp`. */
+export async function ensureChildScratchDir(workdir: string): Promise<string> {
+  const dir = childScratchDir(workdir);
+  await mkdir(dir, { recursive: true });
+  return dir;
 }
 
 export async function engineScratchExcludePath(worktree: string): Promise<string | undefined> {
