@@ -135,6 +135,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `CODEX_AUTH_FILE`
 - `HOME`
 - `WORKDIR`
+- `GRADLE_SEED_HOME`
 - `QUEUE_CONCURRENCY`
 - `MAX_OUTPUT_BYTES`
 - `MAX_WEBHOOK_BYTES`
@@ -171,6 +172,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 #### volumes
 - `/data`
 - `/work`
+- `/gradle-seed`
+
+`/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set (see `GRADLE_SEED_HOME`); without it the worker runs cold.
 
 ### control
 
@@ -275,6 +279,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `CODEX_AUTH_FILE`
 - `HOME`
 - `WORKDIR`
+- `GRADLE_SEED_HOME`
 - `MAX_OUTPUT_BYTES`
 - `OPENCODE_TIMEOUT_MS`
 - `FOLLOWUP_TIMEOUT_MS`
@@ -308,8 +313,9 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 
 #### volumes
 - `/work`
+- `/gradle-seed`
 
-`HOME` is an emptyDir (empty `HOME`, no xAI or Antigravity grant adoption). No shared cache across Jobs; each Job clones full history into its own emptyDir. `/data` is not mounted.
+`HOME` is an emptyDir (empty `HOME`, no xAI or Antigravity grant adoption). No shared cache across Jobs; each Job clones full history into its own emptyDir. `/data` is not mounted. `/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set; without it the job runs cold.
 
 ## Metrics
 

@@ -69,7 +69,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitRunner, workerOpenCodeChildEnv } from "./workspace.ts";
+import { type GitRunner, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export { CONFLICT_PROMPT } from "./git.ts";
 
@@ -770,7 +770,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           variant: opts.variant,
           home: opts.home,
           sanitizeOpenCodeEnv: sanitizeEnv,
-          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
           maxOutputBytes: opts.maxOutputBytes,
           timeoutMs,
           openCodeRunner: activeEngine,
@@ -851,7 +851,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               workdir: worktree,
               home: opts.home,
               sanitizeEnv,
-              extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+              extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
               timeoutMs,
               maxOutputBytes: opts.maxOutputBytes,
               reviewLabel: `${owner}/${repo}#${issueNumber}`,

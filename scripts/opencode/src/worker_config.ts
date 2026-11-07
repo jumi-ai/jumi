@@ -44,6 +44,7 @@ export interface WorkerConfig {
   codexAuthFile?: string;
   home: string;
   workdir: string;
+  gradleSeedHome?: string;
   queueConcurrency: number;
   maxOutputBytes: number;
   maxWebhookBytes: number;
@@ -140,6 +141,7 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     codexAuthFile: optionalEnv(resolved, "CODEX_AUTH_FILE"),
     home: optionalEnv(resolved, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(resolved, "WORKDIR", "/work") ?? "/work",
+    gradleSeedHome: optionalEnv(resolved, "GRADLE_SEED_HOME"),
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),

@@ -72,7 +72,12 @@ import {
   trackerRefOfJob,
 } from "./tracker.ts";
 import type { IssueJob } from "./types.ts";
-import { type GitAuthResolver, type GitRunner, redactGitSecrets, workerOpenCodeChildEnv } from "./workspace.ts";
+import {
+  type GitAuthResolver,
+  type GitRunner,
+  redactGitSecrets,
+  workerOpenCodeChildEnvWithGradleSeed,
+} from "./workspace.ts";
 
 export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
 export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
@@ -517,7 +522,7 @@ async function implementExternalIssue(
         workdir: worktree,
         home: opts.home,
         sanitizeEnv,
-        extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+        extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
@@ -792,7 +797,7 @@ export async function implementIssue(
           workdir: worktree,
           home: opts.home,
           sanitizeEnv,
-          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
           timeoutMs: opts.timeoutMs,
           maxOutputBytes: opts.maxOutputBytes,
           reviewLabel: `${owner}/${repo}#${issueNumber}`,
