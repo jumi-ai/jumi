@@ -41,22 +41,17 @@ export async function tipAddedSentinels(
   git: GitRunner,
   opts: { cwd: string; env: Record<string, string | undefined>; defaultBranch: string }
 ): Promise<string[]> {
-  let base = "";
-  try {
-    base = (await git(["merge-base", `origin/${opts.defaultBranch}`, "HEAD"], { cwd: opts.cwd, env: opts.env })).trim();
-  } catch {
-    return [];
-  }
+  // Fail closed: a lookup error on the merge base or the tip must abort the
+  // push path (like tipTracksEngineScratch / tipTracksAttachments), never
+  // read as "the branch adds nothing".
+  const base = (
+    await git(["merge-base", `origin/${opts.defaultBranch}`, "HEAD"], { cwd: opts.cwd, env: opts.env })
+  ).trim();
   if (!base) return [];
-  let tipListed = "";
-  try {
-    tipListed = await git(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...JUMI_SENTINEL_FILES], {
-      cwd: opts.cwd,
-      env: opts.env,
-    });
-  } catch {
-    return [];
-  }
+  const tipListed = await git(["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...JUMI_SENTINEL_FILES], {
+    cwd: opts.cwd,
+    env: opts.env,
+  });
   const tip = new Set(splitNulPaths(tipListed));
   if (tip.size === 0) return [];
   let baseListed = "";
@@ -66,6 +61,7 @@ export async function tipAddedSentinels(
       env: opts.env,
     });
   } catch {
+    // Safe direction: an unreadable base counts tip files as added.
     baseListed = "";
   }
   const onBase = new Set(splitNulPaths(baseListed));

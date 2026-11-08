@@ -106,7 +106,7 @@ function conflictJob(overrides: Parameters<typeof makeIssueJob>[0] = {}) {
 function notAncestorGit(extra: GitRunner = async () => ""): GitRunner {
   return async (args, opts) => {
     const gitArgs = stripGitConfigArgs(args);
-    if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+    if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
       throw new Error("git merge-base --is-ancestor failed with exit code 1");
     }
     if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
@@ -232,7 +232,8 @@ describe("implementConflict", () => {
       let mergeBase = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor")) mergeBase = true;
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD"))
+          mergeBase = true;
         if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
         if (gitArgs[0] === "rev-parse") return "headsha";
         return "";
@@ -788,7 +789,7 @@ describe("implementConflict", () => {
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         gitCalls.push(gitArgs);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           if (openCodeRan) return "";
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
@@ -1361,7 +1362,7 @@ describe("implementConflict", () => {
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         gitCalls.push(gitArgs);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge-base") return "basesha";

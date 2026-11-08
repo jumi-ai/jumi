@@ -64,11 +64,38 @@ describe("sentinels", () => {
     await expect(tipAddedSentinels(git, { cwd: "/work", env: {}, defaultBranch: "main" })).resolves.toEqual([]);
   });
 
-  test("tipAddedSentinels is empty when the merge base is unknown", async () => {
+  test("tipAddedSentinels throws when the merge base is unknown", async () => {
     const git: GitRunner = async (args) => {
       if (args[0] === "merge-base") throw new Error("no merge base");
       throw new Error(`unexpected git ${args.join(" ")}`);
     };
-    await expect(tipAddedSentinels(git, { cwd: "/work", env: {}, defaultBranch: "main" })).resolves.toEqual([]);
+    // Fail closed: a lookup error must abort the push path, never read as
+    // "the branch adds nothing".
+    await expect(tipAddedSentinels(git, { cwd: "/work", env: {}, defaultBranch: "main" })).rejects.toThrow(
+      "no merge base"
+    );
+  });
+
+  test("tipAddedSentinels throws when the tip listing fails", async () => {
+    const git: GitRunner = async (args) => {
+      if (args[0] === "merge-base") return "basesha";
+      if (args[0] === "ls-tree") throw new Error("tip unreadable");
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    };
+    await expect(tipAddedSentinels(git, { cwd: "/work", env: {}, defaultBranch: "main" })).rejects.toThrow(
+      "tip unreadable"
+    );
+  });
+
+  test("tipAddedSentinels counts tip files as added when the base listing fails", async () => {
+    const git: GitRunner = async (args) => {
+      if (args[0] === "merge-base") return "basesha";
+      if (args[0] === "ls-tree" && args.includes("HEAD")) return "JUMI_HANDOFF.md\0";
+      if (args[0] === "ls-tree") throw new Error("base unreadable");
+      throw new Error(`unexpected git ${args.join(" ")}`);
+    };
+    await expect(tipAddedSentinels(git, { cwd: "/work", env: {}, defaultBranch: "main" })).resolves.toEqual([
+      "JUMI_HANDOFF.md",
+    ]);
   });
 });
