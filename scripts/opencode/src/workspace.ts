@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
@@ -248,6 +248,144 @@ export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<s
     GRADLE_USER_HOME: join(workRoot, ".gradle"),
     GRADLE_OPTS: "-Dorg.gradle.daemon=false",
   };
+}
+
+/**
+ * The seed mount is read-only, so `cp` preserves its read-only mode bits.
+ * The wrapper must write lock and marker files under `wrapper/dists`, so
+ * add owner-write throughout the copied tree.
+ */
+async function makeCopiedTreeOwnerWritable(root: string): Promise<void> {
+  const info = await lstat(root);
+  if (info.isSymbolicLink()) return;
+  await chmod(root, (info.mode & 0o7777) | 0o200);
+  if (!info.isDirectory()) return;
+  const entries = await readdir(root);
+  for (const entry of entries) {
+    await makeCopiedTreeOwnerWritable(join(root, entry));
+  }
+}
+
+/**
+ * Optional read-only Gradle seed (`GRADLE_SEED_HOME`): a read-only directory the
+ * deploy mounts, laid out as a Gradle user home that a trusted seeder populated.
+ * When set and usable the worker child gets `GRADLE_RO_DEP_CACHE` pointing at the
+ * seed's `caches` (Gradle expects `modules-2` under it); before spawn the parent
+ * copies `$SEED/wrapper/dists` into `$GRADLE_USER_HOME/wrapper/dists` (copy, never
+ * symlink: the wrapper writes lock and marker files there). The child never gets
+ * write access to the seed.
+ *
+ * Fail open: unset means today's behaviour exactly (no env, no copy, no log). A
+ * missing, non-directory, unreadable, or empty seed, a seed without
+ * `caches/modules-2`, or a copy error, logs one line and the job continues
+ * cold (no extra env). The wrapper copy is kept when only the dependency
+ * cache is missing; a failed copy never touches the live destination, so one
+ * job's copy error never deletes the shared
+ * `$GRADLE_USER_HOME/wrapper/dists` another concurrent job populated and may
+ * be running Gradle from (`GRADLE_USER_HOME` is shared by every worker job on
+ * the host and the queue runs jobs concurrently). The seed is first copied to
+ * a temp sibling (`wrapper/.dists.seed-*`) and only merged/renamed over
+ * `dists` on success. Merging into a pre-existing destination is intentional:
+ * stale dists from a rotated seed accumulate rather than risk deleting a live
+ * tree.
+ */
+export async function prepareGradleSeed(
+  gradleUserHome: string,
+  opts?: { seedHome?: string; logger?: (message: string) => void }
+): Promise<Record<string, string>> {
+  const raw = opts?.seedHome ?? process.env.GRADLE_SEED_HOME;
+  const seedHome = raw?.trim();
+  if (!seedHome) return {};
+  const log = opts?.logger;
+  let seedStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    seedStat = await lstat(seedHome);
+  } catch {
+    log?.(`gradle seed unavailable: ${seedHome} missing, continuing without cache`);
+    return {};
+  }
+  if (!seedStat.isDirectory()) {
+    log?.(`gradle seed unavailable: ${seedHome} is not a directory, continuing without cache`);
+    return {};
+  }
+  let entries: string[];
+  try {
+    entries = await readdir(seedHome);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    log?.(`gradle seed unavailable: ${seedHome} unreadable (${detail}), continuing without cache`);
+    return {};
+  }
+  if (entries.length === 0) {
+    log?.(`gradle seed unavailable: ${seedHome} is empty, continuing without cache`);
+    return {};
+  }
+  const src = join(seedHome, "wrapper", "dists");
+  let srcStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    srcStat = await lstat(src);
+  } catch {
+    srcStat = undefined;
+  }
+  if (srcStat?.isDirectory()) {
+    const dest = join(gradleUserHome, "wrapper", "dists");
+    // GRADLE_USER_HOME is shared by every worker job on the host, so dest may
+    // already hold a live tree another concurrent job populated. Stage the copy
+    // in a temp sibling and only touch dest on success: a failed copy removes
+    // just the staging dir, never the live tree (no `destExisted` check, which
+    // races when two cold-start jobs both see a missing dest).
+    let tmpRoot: string | undefined;
+    let staging: string | undefined;
+    try {
+      await mkdir(dirname(dest), { recursive: true });
+      tmpRoot = await mkdtemp(join(dirname(dest), ".dists.seed-"));
+      staging = join(tmpRoot, "dists");
+      await cp(src, staging, { recursive: true });
+      await makeCopiedTreeOwnerWritable(staging);
+      const destNow = await lstat(dest).catch(() => undefined);
+      if (!destNow) {
+        try {
+          await rename(staging, dest);
+        } catch {
+          // Dest appeared concurrently between the check and the rename (or
+          // rename cannot replace it): fall back to merging.
+          await cp(staging, dest, { recursive: true });
+        }
+      } else {
+        await cp(staging, dest, { recursive: true });
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
+      return {};
+    } finally {
+      if (tmpRoot) await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  let modulesStat: Awaited<ReturnType<typeof lstat>> | undefined;
+  try {
+    modulesStat = await lstat(join(seedHome, "caches", "modules-2"));
+  } catch {
+    modulesStat = undefined;
+  }
+  if (!modulesStat?.isDirectory()) {
+    log?.(
+      `gradle seed has no dependency cache: ${join(seedHome, "caches", "modules-2")} missing, continuing without cache`
+    );
+    return {};
+  }
+  return { GRADLE_RO_DEP_CACHE: join(seedHome, "caches") };
+}
+
+/** Base worker child env plus the Gradle seed (copy + `GRADLE_RO_DEP_CACHE`) when set. */
+export async function workerOpenCodeChildEnvWithGradleSeed(
+  auth: GitAuth,
+  workdir: string,
+  logger?: (message: string) => void
+): Promise<Record<string, string>> {
+  const base = workerOpenCodeChildEnv(auth, workdir);
+  const seedEnv = await prepareGradleSeed(base.GRADLE_USER_HOME, { logger });
+  return { ...base, ...seedEnv };
 }
 
 export function gitEnv(auth: GitAuth): Record<string, string | undefined> {

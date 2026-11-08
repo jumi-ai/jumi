@@ -411,6 +411,7 @@ describe("deploy/contract.md", () => {
       "CODEX_AUTH_FILE",
       "HOME",
       "WORKDIR",
+      "GRADLE_SEED_HOME",
       "QUEUE_CONCURRENCY",
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
@@ -439,7 +440,7 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.imageTarget).toBe("worker");
     expect(parsed.control.imageTarget).toBe("runtime");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
-    expect(parsed.worker.volumes).toEqual(["/data", "/work"]);
+    expect(parsed.worker.volumes).toEqual(["/data", "/work", "/gradle-seed"]);
     expect(parsed.control.volumes).toEqual(["/data"]);
     expect(parsed.reviewer.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
     expect(parsed.worker.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);

@@ -99,7 +99,7 @@ import {
   parseCheckLine,
   trailerSuggestionCount,
 } from "./verdict.ts";
-import { workerOpenCodeChildEnv } from "./workspace.ts";
+import { workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
 
@@ -1263,7 +1263,7 @@ export async function implementFollowUp(
             variant: opts.variant,
             home: opts.home,
             sanitizeOpenCodeEnv: sanitizeEnv,
-            extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+            extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
             maxOutputBytes: opts.maxOutputBytes,
             timeoutMs: conflictTimeoutMs,
             openCodeRunner: activeEngine,
@@ -1428,7 +1428,7 @@ export async function implementFollowUp(
           workdir: worktree,
           home: opts.home,
           sanitizeEnv,
-          extraEnv: workerOpenCodeChildEnv(loop.auth, worktree),
+          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
           timeoutMs,
           maxOutputBytes: opts.maxOutputBytes,
           reviewLabel: `${owner}/${repo}#${issueNumber}`,
