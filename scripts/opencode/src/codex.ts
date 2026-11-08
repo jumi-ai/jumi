@@ -48,7 +48,7 @@ function codexHardeningArgs(effort: string): string[] {
     "-c",
     `model_reasoning_effort="${effort}"`,
     "-c",
-    'web_search="disabled"',
+    'web_search="live"',
     "-c",
     "features.context_management.experimental_mode=false",
     // `--disable` is not a documented `codex exec` flag (it is a global flag
@@ -116,8 +116,8 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * without it an extra turn would run on the binary's default model. Every
  * `-c` override is per-invocation config reloaded from scratch on each `exec resume`, not
  * per-thread state, so the full turn-1 hardening list is repeated here —
- * otherwise turn 2+ would silently re-enable web-search and experimental
- * context management, which turn 1 disabled.
+ * otherwise turn 2+ would silently turn web search back off and re-enable
+ * experimental context management, undoing what turn 1 pinned.
  */
 function codexResumePreArgs(model: string): string[] {
   return [
