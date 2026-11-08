@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { buildIncompleteWritePrompt, buildPROpenedPrompt } from "../src/prompt.ts";
+import {
+  buildIncompleteWritePrompt,
+  buildPROpenedPrompt,
+  CI_RESULTS_MAX_BYTES,
+  formatCiResults,
+} from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("buildPROpenedPrompt", () => {
@@ -288,6 +293,102 @@ describe("buildPROpenedPrompt", () => {
     );
     expect(prompt).toContain("later explicit writer correction supersedes");
     expect(prompt).toContain("dismissed or stale review is not a retraction");
+  });
+});
+
+describe("formatCiResults", () => {
+  test("renders one escaped line per check with the head SHA", () => {
+    const block = formatCiResults("43cbc3a0f6a679a112d6fdc4c4b9c69d52d3ef25", [
+      {
+        name: "check / check (pull_request)",
+        conclusion: "success",
+        duration: "20m7s",
+        url: "https://example/actions/runs/42037/jobs/92860",
+      },
+      {
+        name: "format / format (pull_request)",
+        conclusion: "success",
+        duration: "47s",
+        url: "https://example/actions/runs/42038/jobs/92861",
+      },
+    ]);
+    expect(block).toContain('<ci_results head="43cbc3a0f6a679a112d6fdc4c4b9c69d52d3ef25">');
+    expect(block).toContain(
+      '<check name="check / check (pull_request)" conclusion="success" duration="20m7s" url="https://example/actions/runs/42037/jobs/92860"/>'
+    );
+    expect(block).toContain("format / format (pull_request)");
+    expect(block).not.toContain("<truncated");
+  });
+
+  test("omits missing duration and url attributes", () => {
+    const block = formatCiResults("abc123", [{ name: "image", conclusion: "success" }]);
+    expect(block).toContain('<check name="image" conclusion="success"/>');
+    expect(block).not.toContain("duration=");
+    expect(block).not.toContain("url=");
+  });
+
+  test("escapes attribute characters", () => {
+    const block = formatCiResults("abc123", [
+      { name: 'weird "name" <tag>', conclusion: "success", url: "https://example/?a=1&b=2" },
+    ]);
+    expect(block).toContain('name="weird &quot;name&quot; &lt;tag&gt;"');
+    expect(block).toContain('url="https://example/?a=1&amp;b=2"');
+    expect(block).not.toContain('"name" <tag>');
+  });
+
+  test("caps sixty checks at fifty lines with a truncation marker", () => {
+    const checks = Array.from({ length: 60 }, (_, i) => ({
+      name: `job-${String(i).padStart(2, "0")}`,
+      conclusion: "success",
+    }));
+    const block = formatCiResults("abc123", checks);
+    expect(block.match(/<check /g)).toHaveLength(50);
+    expect(block).toContain('<truncated count="10"/>');
+  });
+
+  test("keeps non-success entries first past the cap and stays within the byte budget", () => {
+    const checks = [
+      { name: "zzz-failing", conclusion: "failure" },
+      ...Array.from({ length: 59 }, (_, i) => ({
+        name: `job-${String(i).padStart(2, "0")}`,
+        conclusion: "success",
+        url: `https://example/actions/runs/1/jobs/${i}?pad=${"x".repeat(200)}`,
+      })),
+    ];
+    const block = formatCiResults("abc123", checks);
+    expect(block).toContain('name="zzz-failing"');
+    expect(block).toContain("<truncated");
+    expect(new TextEncoder().encode(block).byteLength).toBeLessThanOrEqual(CI_RESULTS_MAX_BYTES);
+  });
+
+  test("returns no block when there are no checks", () => {
+    expect(formatCiResults("abc123", [])).toBe("");
+  });
+});
+
+describe("buildPROpenedPrompt ci_results", () => {
+  test("embeds the inspected checks next to review notes with the prompt rule", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      reviewNotes: ["Patch budget exhausted"],
+      ciResults: {
+        headSha: "43cbc3a0f6a679a112d6fdc4c4b9c69d52d3ef25",
+        checks: [{ name: "check / check (pull_request)", conclusion: "success", duration: "20m7s" }],
+      },
+    });
+    expect(prompt).toContain("<review_notes>");
+    expect(prompt).toContain('<ci_results head="43cbc3a0f6a679a112d6fdc4c4b9c69d52d3ef25">');
+    expect(prompt).toContain('name="check / check (pull_request)" conclusion="success" duration="20m7s"');
+    expect(prompt).toContain("whose answer is in that block");
+  });
+
+  test("emits no block without checks but keeps the rule", () => {
+    const prompt = buildPROpenedPrompt({ repo: makeRepo(), pr: makePR(), prFiles: [] });
+    expect(prompt).not.toContain("<ci_results head=");
+    expect(prompt).not.toContain("</ci_results>");
+    expect(prompt).toContain("whose answer is in that block");
   });
 });
 

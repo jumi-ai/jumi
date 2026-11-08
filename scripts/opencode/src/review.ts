@@ -3,6 +3,8 @@ import { join } from "node:path";
 import {
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
+  type CiCheckSummary,
+  type CiInspection,
   inspectCi,
   isCiLookupRetryMarker,
   isCiWaitMarker,
@@ -197,6 +199,10 @@ export interface ReviewOptions {
   ciRelistDelayMs?: number;
   /** When false, the caller already applied `skipReasonForOtherChecks`. */
   inspectOtherChecks?: boolean;
+  /** Inspected non-Jumi checks on the head, forwarded when the caller already ran the CI inspection. */
+  ciChecks?: CiCheckSummary[];
+  /** Head the forwarded `ciChecks` were inspected on. Defaults to the reviewed head. */
+  ciHeadSha?: string;
   /** Prepended to the review when the lookup budget expired with no checks at all. */
   noCiNote?: string;
   /** Previous job error (e.g. quota-wait marker) for the wait-budget decision. */
@@ -744,13 +750,13 @@ export function skipReasonForPR(pr: Pull): string | undefined {
 /** Production wait before the one CI re-list; tests default to no wait. */
 export const CI_RELIST_DELAY_MS = 5_000;
 
-export async function skipReasonForOtherChecks(
+export async function inspectOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
   },
   sha: string,
   log: (message: string) => void
-): Promise<string | undefined> {
+): Promise<CiInspection> {
   const inspectOpts = {
     api: opts.api,
     owner: opts.owner,
@@ -760,16 +766,26 @@ export async function skipReasonForOtherChecks(
     issueNumber: opts.prNumber,
     log,
   };
+  let ci = await inspectCi(inspectOpts);
+  if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
+    // Actions may not have created the push's jobs yet, or a list call blipped;
+    // give it one short beat, then re-list once. Still no checks is not green:
+    // the engine waits on the CI lookup budget, then reviews and says so.
+    await delay(opts.ciRelistDelayMs ?? 0, opts.abortSignal);
+    ci = await inspectCi(inspectOpts);
+  }
+  return ci;
+}
+
+export async function skipReasonForOtherChecks(
+  opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
+    relist?: boolean;
+  },
+  sha: string,
+  log: (message: string) => void
+): Promise<string | undefined> {
   try {
-    let ci = await inspectCi(inspectOpts);
-    if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
-      // Actions may not have created the push's jobs yet, or a list call blipped;
-      // give it one short beat, then re-list once. Still no checks is not green:
-      // the engine waits on the CI lookup budget, then reviews and says so.
-      await delay(opts.ciRelistDelayMs ?? 0, opts.abortSignal);
-      ci = await inspectCi(inspectOpts);
-    }
-    return reviewSkipReasonForCi(ci);
+    return reviewSkipReasonForCi(await inspectOtherChecks(opts, sha, log));
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
@@ -1173,9 +1189,21 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
   }
 
+  let ciResults: { headSha: string; checks: CiCheckSummary[] } | undefined;
   if (opts.inspectOtherChecks !== false) {
-    const ciSkip = await skipReasonForOtherChecks({ ...opts, api: forgeApi }, reviewedHeadSha, log);
+    let ci: CiInspection;
+    try {
+      ci = await inspectOtherChecks({ ...opts, api: forgeApi }, reviewedHeadSha, log);
+    } catch (err) {
+      if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
+      log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
+      return { status: "skipped", reason: CI_LOOKUP_FAILED_REASON };
+    }
+    const ciSkip = reviewSkipReasonForCi(ci);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
+    if (ci.checks.length > 0) ciResults = { headSha: reviewedHeadSha, checks: ci.checks };
+  } else if (opts.ciChecks && opts.ciChecks.length > 0) {
+    ciResults = { headSha: opts.ciHeadSha ?? reviewedHeadSha, checks: opts.ciChecks };
   }
 
   // Parent-owned independent reviewer selection from exact-head writer provenance.
@@ -1502,6 +1530,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       pr,
       prFiles: delta ? prFiles.slice(0, maxFiles) : files,
       reviewNotes: notes,
+      ...(ciResults ? { ciResults } : {}),
       thread: fitted.thread,
       delta,
       reviewMd,

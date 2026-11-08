@@ -5,7 +5,9 @@ import {
   CI_ABSENT_REASON,
   CI_LOOKUP_FAILED_REASON,
   CI_PENDING_REASON,
+  type CiCheckSummary,
   decideCiLookupRetry,
+  reviewSkipReasonForCi,
 } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
 import { loadConfig, scrubSecretEnv } from "./config.ts";
@@ -34,12 +36,12 @@ import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
+  inspectOtherChecks,
   PR_AUTHOR_CANNOT_PUSH,
   publishReviewResult,
   reviewJobKey,
   reviewPullRequest,
   skipReasonForHeadChange,
-  skipReasonForOtherChecks,
   skipReasonForPR,
 } from "./review.ts";
 import { enqueueReviewWithCiGate } from "./review_gate.ts";
@@ -156,38 +158,41 @@ export async function runReviewJob(
     return { status: "skipped", reason: PR_AUTHOR_CANNOT_PUSH };
   }
   let noCiNote: string | undefined;
+  let ciChecks: CiCheckSummary[] | undefined;
+  const inspectHeadCi = async (relist?: boolean): Promise<string | undefined> => {
+    try {
+      const ci = await inspectOtherChecks(
+        {
+          api,
+          owner: job.owner,
+          repo: job.repo,
+          prNumber: job.prNumber,
+          home: config.home,
+          abortSignal: extras.abortSignal,
+          ciRelistDelayMs: extras.ciRelistDelayMs,
+          ...(relist === false ? { relist: false as const } : {}),
+        },
+        job.headSha,
+        logger
+      );
+      if (ci.checks.length > 0) ciChecks = ci.checks;
+      return reviewSkipReasonForCi(ci);
+    } catch (err) {
+      if (isAbortError(err) || extras.abortSignal?.aborted) throw err;
+      logger(
+        `CI inspect failed for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return CI_LOOKUP_FAILED_REASON;
+    }
+  };
   if (!extras.assumeNoCi) {
-    const ciSkip = await skipReasonForOtherChecks(
-      {
-        api,
-        owner: job.owner,
-        repo: job.repo,
-        prNumber: job.prNumber,
-        home: config.home,
-        abortSignal: extras.abortSignal,
-        ciRelistDelayMs: extras.ciRelistDelayMs,
-      },
-      job.headSha,
-      logger
-    );
+    const ciSkip = await inspectHeadCi();
     if (ciSkip) {
       logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
       return { status: "skipped", reason: ciSkip };
     }
   } else {
-    const ciSkip = await skipReasonForOtherChecks(
-      {
-        api,
-        owner: job.owner,
-        repo: job.repo,
-        prNumber: job.prNumber,
-        home: config.home,
-        abortSignal: extras.abortSignal,
-        relist: false,
-      },
-      job.headSha,
-      logger
-    );
+    const ciSkip = await inspectHeadCi(false);
     if (ciSkip && ciSkip !== CI_ABSENT_REASON) {
       logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${ciSkip}`);
       return { status: "skipped", reason: ciSkip };
@@ -238,6 +243,7 @@ export async function runReviewJob(
       jobId: extras.jobId ?? job.delivery,
       ciRelistDelayMs: extras.ciRelistDelayMs,
       inspectOtherChecks: false,
+      ...(ciChecks ? { ciChecks, ciHeadSha: job.headSha } : {}),
       noCiNote,
       previousError: extras.previousError,
       failedRunner: extras.failedRunner,

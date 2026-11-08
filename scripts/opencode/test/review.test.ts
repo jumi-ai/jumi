@@ -2259,6 +2259,106 @@ optionalEnv(resolved, "DATABASE_URL");
       expect(reviews[0]?.body).not.toContain("MAX_FOLLOWUP_ROUNDS");
     });
   });
+
+  test("green review embeds ci_results without fetching logs or extra lists", async () => {
+    await withWorkspace(async (workspace) => {
+      const calls = { statuses: 0, checkRuns: 0, jobs: 0, logs: 0 };
+      let task = "";
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        api: makeApi({
+          listCommitStatuses: async () => {
+            calls.statuses++;
+            return [
+              {
+                id: 1,
+                context: "check / check (pull_request)",
+                status: "success",
+                target_url: "https://gitea.example/owner/repo/actions/runs/42037/jobs/92860",
+                created_at: "2026-11-08T08:15:00.000Z",
+                updated_at: "2026-11-08T08:35:07.000Z",
+              },
+              { id: 2, context: "format / format (pull_request)", status: "success" },
+              { id: 3, context: "jumi/opencode-review", state: "success" },
+            ];
+          },
+          listCheckRuns: async () => {
+            calls.checkRuns++;
+            return [];
+          },
+          listActionJobs: async () => {
+            calls.jobs++;
+            return [];
+          },
+          getActionJobLogs: async () => {
+            calls.logs++;
+            return "";
+          },
+        }),
+        openCodeRunner: async (opts: { workdir: string }) => {
+          task = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(calls).toEqual({ statuses: 1, checkRuns: 1, jobs: 1, logs: 0 });
+      expect(task).toContain('<ci_results head="headsha">');
+      expect(task).toContain('name="check / check (pull_request)" conclusion="success" duration="20m7s"');
+      expect(task).toContain('name="format / format (pull_request)" conclusion="success"');
+      expect(task).not.toContain("jumi/opencode-review");
+      expect(task).toContain("whose answer is in that block");
+    });
+  });
+
+  test("forwarded ci checks render without any forge CI lists", async () => {
+    await withWorkspace(async (workspace) => {
+      const calls = { statuses: 0, checkRuns: 0, jobs: 0, logs: 0 };
+      let task = "";
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace),
+        inspectOtherChecks: false,
+        ciChecks: [
+          {
+            name: "check / check (pull_request)",
+            conclusion: "success",
+            duration: "20m7s",
+            url: "https://gitea.example/owner/repo/actions/runs/42037/jobs/92860",
+          },
+        ],
+        ciHeadSha: "headsha",
+        api: makeApi({
+          listCommitStatuses: async () => {
+            calls.statuses++;
+            return [];
+          },
+          listCheckRuns: async () => {
+            calls.checkRuns++;
+            return [];
+          },
+          listActionJobs: async () => {
+            calls.jobs++;
+            return [];
+          },
+          getActionJobLogs: async () => {
+            calls.logs++;
+            return "";
+          },
+        }),
+        openCodeRunner: async (opts: { workdir: string }) => {
+          task = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(calls).toEqual({ statuses: 0, checkRuns: 0, jobs: 0, logs: 0 });
+      expect(task).toContain('<ci_results head="headsha">');
+      expect(task).toContain(
+        'name="check / check (pull_request)" conclusion="success" duration="20m7s" url="https://gitea.example/owner/repo/actions/runs/42037/jobs/92860"'
+      );
+    });
+  });
 });
 
 describe("applyContractEnvGate", () => {
