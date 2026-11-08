@@ -676,10 +676,10 @@ export function roleGateStatusFromMs(input: {
 }
 
 const BACKOFF_ERROR_PREDICATE =
-  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%')";
+  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')";
 
 function isBackoffMarker(error: string | null | undefined): boolean {
-  return isInfraRetryMarker(error) || isQuotaWaitMarker(error) || isCiLookupRetryMarker(error);
+  return isInfraRetryMarker(error) || isQuotaWaitMarker(error) || isCiLookupRetryMarker(error) || isCiWaitMarker(error);
 }
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
