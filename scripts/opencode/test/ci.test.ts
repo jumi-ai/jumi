@@ -12,6 +12,7 @@ import {
   CI_LOOKUP_FAILED_REASON,
   CI_LOOKUP_MAX_ATTEMPTS,
   capFailedJobLog,
+  checkDurationMs,
   classifyInfraFlake,
   decideCiLookupRetry,
   dropUnpackNoise,
@@ -19,6 +20,7 @@ import {
   encodeCiLookupMarker,
   encodeCiPendingWait,
   flakeSkipReason,
+  formatCheckDuration,
   hashText,
   infraFlakeReason,
   inspectCi,
@@ -28,6 +30,7 @@ import {
   needsCiFollowUp,
   recordCiHandled,
   reviewSkipReasonForCi,
+  summarizeCiChecks,
 } from "../src/ci.ts";
 import { followUpStatePath } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
@@ -984,5 +987,138 @@ describe("buildCiMarkdown", () => {
     expect(md).toContain("## build");
     expect(md).toContain("##[error]nope");
     expect(md).toContain("Do not call tea");
+  });
+});
+
+describe("ci check summaries", () => {
+  test("gitea green head reports deduped non-Jumi checks with duration and url", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [
+            {
+              id: 1,
+              context: "check / check (pull_request)",
+              status: "failure",
+              target_url: "https://gitea.example/owner/repo/actions/runs/1/jobs/1",
+              created_at: "2026-11-08T08:00:00.000Z",
+              updated_at: "2026-11-08T08:10:00.000Z",
+            },
+            {
+              id: 3,
+              context: "check / check (pull_request)",
+              status: "success",
+              target_url: "https://gitea.example/owner/repo/actions/runs/42037/jobs/92860",
+              created_at: "2026-11-08T08:15:00.000Z",
+              updated_at: "2026-11-08T08:35:07.000Z",
+            },
+            {
+              id: 2,
+              context: "format / format (pull_request)",
+              status: "success",
+              target_url: "https://gitea.example/owner/repo/actions/runs/42038/jobs/92861",
+              created_at: "2026-11-08T08:34:00.000Z",
+              updated_at: "2026-11-08T08:34:47.000Z",
+            },
+            { id: 4, context: "jumi/opencode-review", state: "success" },
+          ],
+          listActionJobs: async () => [],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+      expect(inspection.checks).toEqual([
+        {
+          name: "check / check (pull_request)",
+          conclusion: "success",
+          duration: "20m7s",
+          url: "https://gitea.example/owner/repo/actions/runs/42037/jobs/92860",
+        },
+        {
+          name: "format / format (pull_request)",
+          conclusion: "success",
+          duration: "47s",
+          url: "https://gitea.example/owner/repo/actions/runs/42038/jobs/92861",
+        },
+      ]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("github check runs and statuses share the same shape", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
+          listCheckRuns: async () => [
+            {
+              id: 11,
+              context: "checks",
+              status: "success",
+              target_url: "https://github.com/kirmanak/demo/actions/runs/9/job/11",
+              created_at: "2026-11-08T08:00:00.000Z",
+              updated_at: "2026-11-08T08:01:02.000Z",
+            },
+            {
+              id: 12,
+              context: "image",
+              status: "success",
+              target_url: "https://github.com/kirmanak/demo/actions/runs/9/job/12",
+            },
+          ],
+          listActionJobs: async () => [],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+      expect(inspection.checks).toEqual([
+        {
+          name: "checks",
+          conclusion: "success",
+          duration: "1m2s",
+          url: "https://github.com/kirmanak/demo/actions/runs/9/job/11",
+        },
+        {
+          name: "image",
+          conclusion: "success",
+          url: "https://github.com/kirmanak/demo/actions/runs/9/job/12",
+        },
+      ]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("summarizeCiChecks keeps non-success entries first and drops the Jumi context", () => {
+    expect(
+      summarizeCiChecks([
+        { id: 2, context: "zzz", status: "success" },
+        { id: 3, context: "jumi/opencode-review", state: "success" },
+        { id: 1, context: "aaa", status: "warning" },
+      ]).map((check) => check.name)
+    ).toEqual(["aaa", "zzz"]);
+  });
+
+  test("check duration formats hours, minutes, and seconds", () => {
+    expect(formatCheckDuration(0)).toBe("0s");
+    expect(formatCheckDuration(47_000)).toBe("47s");
+    expect(formatCheckDuration(62_000)).toBe("1m2s");
+    expect(formatCheckDuration(1_207_000)).toBe("20m7s");
+    expect(formatCheckDuration(3_661_000)).toBe("1h1m1s");
+    expect(checkDurationMs({})).toBeUndefined();
+    expect(
+      checkDurationMs({ created_at: "2026-11-08T08:35:07.000Z", updated_at: "2026-11-08T08:15:00.000Z" })
+    ).toBeUndefined();
   });
 });

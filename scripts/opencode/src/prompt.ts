@@ -1,3 +1,4 @@
+import type { CiCheckSummary } from "./ci.ts";
 import type { Pull, PullFile, Repo } from "./ports.ts";
 import {
   formatLinkedIssuesXml,
@@ -73,6 +74,7 @@ const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this 
   <rule>Shell is open for inspection. Pipes, quotes, and git grep regex are allowed.</rule>
   <rule>Keep tool output small: never dump directory-wide or high-context git patches into the session; prefer --stat, single-file --unified=3, and built-in read.</rule>
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
+  <rule><ci_results> lists the checks that ran on this head and their conclusions. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking.</rule>
   <rule>The only file you should write is JUMI_REVIEW.md at the repository root. Stdout is logs, not the sticky.</rule>
   <rule>Do not git add source, git commit, git push, or force-push.</rule>
   <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands.</rule>
@@ -98,6 +100,8 @@ export interface PROpenedPromptOptions {
   pr: Pull;
   prFiles: PullFile[];
   reviewNotes?: string[];
+  /** Deduped non-Jumi checks inspected on the head, rendered as a `<ci_results>` block. */
+  ciResults?: { headSha: string; checks: CiCheckSummary[] };
   thread?: ReviewThread;
   /** Set for a later review: previous findings and the commits since the reviewed SHA. */
   delta?: ReviewDelta;
@@ -105,6 +109,47 @@ export interface PROpenedPromptOptions {
   reviewMd?: { text: string; truncated: boolean };
   /** When true, open `❓` questions block the status for this PR author. */
   blockingQuestions?: boolean;
+}
+
+/** Hard cap for the `<ci_results>` block: at most 50 checks and 4 KiB. */
+export const CI_RESULTS_MAX_CHECKS = 50;
+export const CI_RESULTS_MAX_BYTES = 4 * 1024;
+
+function formatCiCheckLine(check: CiCheckSummary): string {
+  let attrs = `name="${escapeXml(check.name)}" conclusion="${escapeXml(check.conclusion)}"`;
+  if (check.duration !== undefined) attrs += ` duration="${escapeXml(check.duration)}"`;
+  if (check.url !== undefined) attrs += ` url="${escapeXml(check.url)}"`;
+  return `  <check ${attrs}/>`;
+}
+
+/**
+ * Render the `<ci_results>` block for checks inspected on this head. Empty
+ * when there are no checks (the no-CI note covers that case). Past the cap,
+ * non-success entries are kept first and a `<truncated count="N"/>` line
+ * records how many entries were dropped. No logs are included.
+ */
+export function formatCiResults(headSha: string, checks: CiCheckSummary[]): string {
+  if (checks.length === 0) return "";
+  const ordered = [...checks].sort((a, b) => {
+    const aBad = a.conclusion === "success" ? 1 : 0;
+    const bBad = b.conclusion === "success" ? 1 : 0;
+    return aBad - bBad;
+  });
+  const total = ordered.length;
+  const encoder = new TextEncoder();
+  const build = (shown: CiCheckSummary[]): string => {
+    const lines = shown.map(formatCiCheckLine);
+    const dropped = total - shown.length;
+    if (dropped > 0) lines.push(`  <truncated count="${dropped}"/>`);
+    return `<ci_results head="${escapeXml(headSha)}">\n${lines.join("\n")}\n</ci_results>`;
+  };
+  let shown = ordered.slice(0, CI_RESULTS_MAX_CHECKS);
+  let block = build(shown);
+  while (shown.length > 0 && encoder.encode(block).byteLength > CI_RESULTS_MAX_BYTES) {
+    shown = shown.slice(0, -1);
+    block = build(shown);
+  }
+  return block;
 }
 
 function formatBlockingQuestions(blocking: boolean | undefined): string {
@@ -142,6 +187,8 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const formattedNotes = reviewNotes.length
     ? `\n  <review_notes>\n${reviewNotes.map((note) => `    <note>${escapeXml(note)}</note>`).join("\n")}\n  </review_notes>`
     : "";
+  const ciBlock = opts.ciResults ? formatCiResults(opts.ciResults.headSha, opts.ciResults.checks) : "";
+  const formattedCi = ciBlock ? `\n${ciBlock}` : "";
   const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
   const pullReviewsXml = formatPullReviewsXml(thread?.pullReviews ?? []);
   const reviewCommentsXml = formatReviewCommentsXml(thread?.reviewComments ?? []);
@@ -180,7 +227,7 @@ ${formatPRFiles(prFiles)}
     <title>${escapeXml(pr.title)}</title>
     <body>${escapeXml(pr.body ?? "")}</body>
 ${commentsXml ? `${commentsXml}\n` : ""}${pullReviewsXml ? `${pullReviewsXml}\n` : ""}${reviewCommentsXml ? `${reviewCommentsXml}\n` : ""}${changedFilesXml}
-  </pull_request>${deltaXml}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}
+  </pull_request>${deltaXml}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}${formattedCi}
 </gitea_action_context>
 ${reviewMdXml}${blockingXml}
 

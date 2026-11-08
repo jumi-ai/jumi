@@ -33,6 +33,13 @@ export interface FailedCheck {
   flake?: string;
 }
 
+export interface CiCheckSummary {
+  name: string;
+  conclusion: string;
+  duration?: string;
+  url?: string;
+}
+
 export interface CiInspection {
   sha: string;
   pending: boolean;
@@ -41,6 +48,8 @@ export interface CiInspection {
   empty: boolean;
   /** A forge list call threw, so `empty` / `pending` / `failed` may be incomplete. */
   lookupFailed?: boolean;
+  /** Deduped non-Jumi checks seen on the head (`latestStatuses` order, non-success first). */
+  checks: CiCheckSummary[];
 }
 
 export const CI_PENDING_REASON = "CI still pending";
@@ -230,7 +239,7 @@ const UNPACK_NOISE =
   /^(Unpacking |Selecting previously unselected |Preparing to unpack |Setting up |Processing triggers for |Get:\d|Hit:\d|Ign:\d|Fetched \d|Reading package lists|Building dependency tree| {2}inflating:| {2}creating: |Extracting |Unzipping )/i;
 
 function emptyInspection(sha: string): CiInspection {
-  return { sha, pending: false, failed: [], unhandled: [], empty: true };
+  return { sha, pending: false, failed: [], unhandled: [], empty: true, checks: [] };
 }
 
 export function actionJobCheckState(job: ActionJob): CheckState | undefined {
@@ -278,6 +287,52 @@ export function commitStatusState(status: Check): CheckState | undefined {
 
 export function isJumiReviewContext(context: string | undefined): boolean {
   return (context ?? "") === JUMI_REVIEW_CONTEXT;
+}
+
+export function checkDurationMs(check: Check): number | undefined {
+  const start = Date.parse(check.created_at ?? "");
+  const end = Date.parse(check.updated_at ?? "");
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+  const ms = end - start;
+  if (!Number.isFinite(ms) || ms < 0) return undefined;
+  return ms;
+}
+
+export function formatCheckDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h${minutes}m${seconds}s`;
+  if (minutes > 0) return `${minutes}m${seconds}s`;
+  return `${seconds}s`;
+}
+
+/**
+ * Summaries for the `<ci_results>` review-prompt block. Input is the already
+ * deduped non-Jumi check list `inspectCi` merged from statuses, check runs,
+ * and live Action jobs, so no forge call happens here. Non-success
+ * conclusions sort first so a cap keeps them.
+ */
+export function summarizeCiChecks(checks: Check[]): CiCheckSummary[] {
+  const out: CiCheckSummary[] = [];
+  for (const check of checks) {
+    const name = check.context ?? "";
+    if (!name || isJumiReviewContext(name)) continue;
+    const summary: CiCheckSummary = { name, conclusion: commitStatusState(check) ?? "success" };
+    const ms = checkDurationMs(check);
+    if (ms !== undefined) summary.duration = formatCheckDuration(ms);
+    const url = check.target_url ?? check.url;
+    if (url) summary.url = url;
+    out.push(summary);
+  }
+  out.sort((a, b) => {
+    const aBad = a.conclusion === "success" ? 1 : 0;
+    const bBad = b.conclusion === "success" ? 1 : 0;
+    if (aBad !== bBad) return aBad - bBad;
+    return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
+  return out;
 }
 
 export function hashText(text: string): string {
@@ -643,7 +698,15 @@ export async function inspectCi(opts: {
     return state === "failure" || state === "error";
   });
   if (red.length === 0) {
-    return { sha: opts.sha, pending, failed: [], unhandled: [], empty: !sawShaJobs, lookupFailed };
+    return {
+      sha: opts.sha,
+      pending,
+      failed: [],
+      unhandled: [],
+      empty: !sawShaJobs,
+      lookupFailed,
+      checks: summarizeCiChecks(others),
+    };
   }
 
   let jobs: ActionJob[] = [];
@@ -677,7 +740,7 @@ export async function inspectCi(opts: {
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));
-  return { sha: opts.sha, pending, failed, unhandled, empty: false, lookupFailed };
+  return { sha: opts.sha, pending, failed, unhandled, empty: false, lookupFailed, checks: summarizeCiChecks(others) };
 }
 
 export async function needsCiFollowUp(opts: {
