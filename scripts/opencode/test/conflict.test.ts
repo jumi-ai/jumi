@@ -6,9 +6,11 @@ import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim
 import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflictState } from "../src/conflict.ts";
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { handoffKey, MemoryHandoffStore } from "../src/handoff.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { issueJobFromRecord, MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { standingPodRuntime } from "../src/runtime.ts";
+import { JUMI_SENTINEL_FILES, sentinelTrackedReason } from "../src/sentinels.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -1290,6 +1292,119 @@ describe("implementConflict", () => {
       });
       expect(result.status).toBe("up-to-date");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
+    });
+  });
+
+  test("conflict engine strips sentinels before staging but saves the handoff", async () => {
+    await withDirs(async (home, workdir) => {
+      const worktree = join(workdir, "kirmanak/demo/12");
+      const store = new MemoryHandoffStore();
+      const key = handoffKey("gitea", "kirmanak", "demo", 12);
+      await store.put(key, "previous round notes");
+      const api = makeApi();
+      const stagedWithSentinels: string[][] = [];
+      const gitRunner = conflictThenResolvedGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "add" && gitArgs.includes("-A")) {
+          const present: string[] = [];
+          for (const file of JUMI_SENTINEL_FILES) {
+            try {
+              await access(join(worktree, file));
+              present.push(file);
+            } catch {
+              // Absent at staging time: the merge commit cannot contain it.
+            }
+          }
+          stagedWithSentinels.push(present);
+        }
+        return "";
+      });
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        handoffs: store,
+        gitRunner,
+        openCodeRunner: async () => {
+          const injected = await readFile(join(worktree, "JUMI_HANDOFF.md"), "utf8").catch(() => null);
+          expect(injected).toBe("previous round notes");
+          await mkdir(worktree, { recursive: true });
+          await writeFile(join(worktree, "JUMI_HANDOFF.md"), "new round notes");
+          await writeFile(join(worktree, "JUMI_PR.md"), "Should not land.");
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(stagedWithSentinels.length).toBeGreaterThan(0);
+      expect(stagedWithSentinels.every((present) => present.length === 0)).toBe(true);
+      await expect(access(join(worktree, "JUMI_HANDOFF.md"))).rejects.toThrow();
+      await expect(access(join(worktree, "JUMI_PR.md"))).rejects.toThrow();
+      expect(await store.get(key)).toBe("new round notes");
+    });
+  });
+
+  test.each([
+    ["refuses a branch that adds JUMI_HANDOFF.md", "JUMI_HANDOFF.md\0", "", true],
+    ["ignores JUMI_HANDOFF.md already on the default branch", "JUMI_HANDOFF.md\0", "JUMI_HANDOFF.md\0", false],
+  ])("sentinel tip guard: %s", async (_label, headListed, baseListed, refused) => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi();
+      const gitCalls: string[][] = [];
+      let openCode = 0;
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        gitCalls.push(gitArgs);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "merge-base") return "basesha";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
+        if (gitArgs[0] === "diff" && gitArgs.includes("--diff-filter=U")) return "src/demo.ts";
+        if (gitArgs[0] === "grep") return openCode > 0 ? "" : "src/demo.ts";
+        if (gitArgs[0] === "add" && gitArgs.includes("-A")) openCode++;
+        if (gitArgs[0] === "ls-tree" && gitArgs.includes("HEAD")) return headListed;
+        if (gitArgs[0] === "ls-tree") return baseListed;
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      if (refused) {
+        const reason = sentinelTrackedReason("jumi/issue-12-fix-the-thing", ["JUMI_HANDOFF.md"]);
+        expect(result).toEqual({ status: "skipped", reason });
+        expect(gitCalls.some((args) => args[0] === "push")).toBe(false);
+        expect(api.comments.at(-1)).toContain("JUMI_HANDOFF.md");
+      } else {
+        expect(result).toEqual({
+          status: "pushed",
+          prNumber: 127,
+          htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+        });
+        expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
+      }
     });
   });
 });
