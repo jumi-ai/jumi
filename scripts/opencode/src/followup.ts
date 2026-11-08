@@ -52,6 +52,7 @@ import {
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { HANDOFF_FILE, handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
 import { ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
@@ -63,6 +64,7 @@ import {
   jumiPrBodyRegion,
   noteProvenanceRunners,
   PR_DESCRIPTION_FILE,
+  provenanceForgeFor,
   readPullRequestDescription,
   replaceJumiPrBodyRegion,
   seedPullRequestDescription,
@@ -1220,6 +1222,9 @@ export async function implementFollowUp(
       attemptedHeadSha = headSha;
       attemptedBaseSha = baseSha;
       await loop.stampHeadSha(headSha);
+      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+      await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
       if (
         previousConflict.lastHeadSha &&
@@ -1309,6 +1314,7 @@ export async function implementFollowUp(
         });
       };
       if (mergeResult.status === "stuck") {
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
         await persistConflictAttempt(mergeResult);
         await sticky("stuck: cannot resolve conflicts", pr.number);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -1531,11 +1537,13 @@ export async function implementFollowUp(
 
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
+      await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
       await stripSentinels(worktree, [
         PR_DESCRIPTION_FILE,
         "JUMI_TASK.md",
         "JUMI_FEEDBACK.md",
         CI_LOG_FILE,
+        HANDOFF_FILE,
         ATTACHMENTS_MANIFEST,
       ]);
       const porcelain = await worktreePorcelain(loop);

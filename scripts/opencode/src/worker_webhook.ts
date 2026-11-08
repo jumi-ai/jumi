@@ -67,6 +67,8 @@ export interface HandleWorkerWebhookDeps {
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
   sits?: RouterSitStore;
+  /** Previous-round handoff notes; deleted when an issue closes. Best-effort. */
+  handoffs?: Pick<import("./handoff.ts").HandoffStore, "deleteForIssue">;
   /** Full forge for router-side CI gating (pending -> waiting). */
   ciApi?: Pick<
     import("./review.ts").ReviewApi,
@@ -317,6 +319,9 @@ export async function handleWorkerWebhookEvent(
       const payload = parsePullRequestPayload(rawBody);
       if (action === "closed" || action === "merged") {
         assertRepositoryPolicy(payload.repository, policy);
+        // Handoffs are keyed by issue number, not PR number: a PR close must
+        // not delete an unrelated issue's note that shares the number.
+        // Issue close cleans the right key on the issues closed path.
         try {
           const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
           if (jobs.length === 0) {
@@ -616,6 +621,15 @@ export async function handleWorkerWebhookEvent(
     }
 
     const payload = parseIssuesPayload(rawBody);
+    if ((payload.action === "closed" || payload.action === "merged") && deps.handoffs) {
+      try {
+        const owner = payload.repository.full_name.split("/")[0] ?? "";
+        const repo = payload.repository.full_name.split("/")[1] ?? "";
+        if (owner && repo) await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+      } catch {
+        // Best-effort handoff cleanup only.
+      }
+    }
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
     const decision = await requireSenderPush(
       shouldEnqueueIssue(payload, policy),
@@ -683,6 +697,15 @@ export async function handleWorkerWebhookEvent(
             }
           } catch {
             // Repository policy failures already return 400; never sit here.
+          }
+          try {
+            const owner = payload.repository.full_name.split("/")[0] ?? "";
+            const repo = payload.repository.full_name.split("/")[1] ?? "";
+            if (owner && repo && deps.handoffs) {
+              await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+            }
+          } catch {
+            // Best-effort handoff cleanup only.
           }
           return skipped(decision.reason, logger);
         }

@@ -1,4 +1,5 @@
 import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
+import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
 import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
@@ -279,6 +280,8 @@ export interface ReviewJobStore {
   readonly sits: RouterSitStore;
   /** Durable writer provenance for published PR heads. Old heads stay unknown; never guessed from prose. */
   readonly provenance: ProvenanceStore;
+  /** Previous-round worker notes, keyed by forge/owner/repo/issue. Sibling of the issue latch rows. */
+  readonly handoffs: HandoffStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -911,6 +914,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly skipLatches = new MemorySkipLatchStore();
   readonly sits = new MemoryRouterSitStore();
   readonly provenance = new MemoryProvenanceStore();
+  readonly handoffs = new MemoryHandoffStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
@@ -2185,6 +2189,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           row.updatedAt = now;
         }
       }
+      await this.handoffs.deleteForIssue(owner, repo, issueNumber);
       await this.sits.clear(owner, repo, issueNumber);
       return n;
     });
@@ -2240,6 +2245,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       // Worker kill-switch clears only worker latch cells; review stuck lives
       // in review_stuck on the same row and must survive.
       await this.skipLatches.put({ owner, repo, issueNumber }, { followup: {}, conflict: {}, ci: {}, stuck: {} });
+      await this.handoffs.deleteForIssue(owner, repo, issueNumber);
       await this.sits.clear(owner, repo, issueNumber);
       return { ...next };
     });
@@ -2450,6 +2456,7 @@ const REQUIRED_LEDGER_TABLES = [
   "pr_publication_intents",
   "jumi_run_usage",
   "role_gates",
+  "issue_handoffs",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -2500,11 +2507,13 @@ export class PgReviewJobStore implements ReviewJobStore {
   readonly skipLatches: PgSkipLatchStore;
   readonly sits: PgRouterSitStore;
   readonly provenance: PgProvenanceStore;
+  readonly handoffs: PgHandoffStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
     this.sits = new PgRouterSitStore(sql);
     this.provenance = new PgProvenanceStore(sql);
+    this.handoffs = new PgHandoffStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -2518,6 +2527,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(PROVENANCE_SCHEMA_SQL);
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
+        await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);
@@ -3285,6 +3295,7 @@ export class PgReviewJobStore implements ReviewJobStore {
        WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'leased'`,
       [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
     );
+    await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
     return cancelled.length;
   }
@@ -3470,6 +3481,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         [owner, repo, issueNumber]
       )
     );
+    await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
     return rows[0] ? mapIssueSkipLatch(rows[0]) : emptyIssueSkipLatch();
   }
