@@ -90,7 +90,13 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { blockingOpenQuestionCount, parseCheckLine, trailerSuggestionCount } from "./verdict.ts";
+import {
+  blockingOpenQuestionCount,
+  isBlockingQuestionAuthor,
+  isQuestionInline,
+  parseCheckLine,
+  trailerSuggestionCount,
+} from "./verdict.ts";
 import { workerOpenCodeChildEnv } from "./workspace.ts";
 
 export { FOLLOWUP_PROMPT } from "./git.ts";
@@ -313,12 +319,13 @@ export function isJumiPullReviewFinding(
   review: PullReview,
   botUsername: string,
   headSha: string,
-  opts: ReviewFindingMatchOpts = {}
+  opts: ReviewFindingMatchOpts = {},
+  inlines: readonly InlineComment[] = []
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   if (
     !isFindingCheck(lastCheckTrailer(pullReviewBody(review))) &&
-    !isBlockingQuestionFinding(pullReviewBody(review), opts)
+    !isBlockingQuestionFinding(pullReviewBody(review), opts, inlines, botUsername)
   )
     return false;
   const sha = pullReviewFindingSha(review);
@@ -353,18 +360,86 @@ export interface ReviewFindingMatchOpts {
   prAuthor?: string | undefined | null;
 }
 
-function isBlockingQuestionFinding(body: string, opts: ReviewFindingMatchOpts = {}): boolean {
-  return blockingOpenQuestionCount(body, opts.prAuthor, opts.blockingQuestionAuthors) > 0;
+/**
+ * Whether a Jumi inline holds an open blocking question: Jumi-owned
+ * (`<!-- jumi-review:` + bot author), unresolved, and carrying the `❓`
+ * marker in its path or body. The marker check uses the same
+ * `QUESTION_MARKER_RE` rule the engine used to set `N open questions`.
+ */
+export function isBlockingQuestionInline(inline: InlineComment, botUsername?: string): boolean {
+  const body = inline.body ?? "";
+  if (!body.includes(REVIEW_MARKER)) return false;
+  if (typeof botUsername === "string" && botUsername) {
+    if (!loginEquals(inline.user?.login, botUsername)) return false;
+  }
+  if (!isUnresolvedInline(inline)) return false;
+  return isQuestionInline(inline.path, body);
+}
+
+/** Open blocking-question inlines among the given Jumi inlines. */
+export function blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
+  return inlines.filter((inline) => isBlockingQuestionInline(inline, botUsername));
+}
+
+/**
+ * Open blocking questions for one published review: the body's count (same
+ * `blockingOpenQuestionCount` the engine used) plus one per open Jumi
+ * question inline belonging to that review. With the setting off or an
+ * unlisted author this is always zero. The trailer must be a complete
+ * success, otherwise the review is already (or never) a finding via the
+ * failure path and questions do not add to the count.
+ */
+export function blockingOpenQuestionCountWithInlines(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  prAuthorLogin: string | undefined | null,
+  blockingAuthors: readonly string[] | undefined | null,
+  botUsername?: string
+): number {
+  if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
+  const body = reviewBody ?? "";
+  const trailer = lastCheckTrailer(body);
+  if (!trailer || trailer.state !== "success") return 0;
+  const bodyCount = blockingOpenQuestionCount(body, prAuthorLogin, blockingAuthors);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isBlockingQuestionInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
+}
+
+function isBlockingQuestionFinding(
+  body: string,
+  opts: ReviewFindingMatchOpts = {},
+  inlines: readonly InlineComment[] = [],
+  botUsername?: string
+): boolean {
+  return (
+    blockingOpenQuestionCountWithInlines(body, inlines, opts.prAuthor, opts.blockingQuestionAuthors, botUsername) > 0
+  );
+}
+
+/** Inlines belonging to one pull review: an exact `pull_request_review_id`
+ * match, plus orphans without a review id (both forges normally set it, but
+ * an orphan must not silently drop a blocking question). */
+function inlinesForPullReview(reviewId: number, inlines: readonly InlineComment[]): InlineComment[] {
+  return inlines.filter(
+    (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === reviewId
+  );
 }
 
 export function isJumiReviewFinding(
   comment: { body?: string | null; user?: { login?: string } },
   headSha: string,
   opts: ReviewFindingMatchOpts = {},
-  botUsername?: string
+  botUsername?: string,
+  inlines: readonly InlineComment[] = []
 ): boolean {
   if (!isJumiReviewSticky(comment, botUsername)) return false;
-  if (!isFindingCheck(lastCheckTrailer(comment.body ?? "")) && !isBlockingQuestionFinding(comment.body ?? "", opts))
+  if (
+    !isFindingCheck(lastCheckTrailer(comment.body ?? "")) &&
+    !isBlockingQuestionFinding(comment.body ?? "", opts, inlines, botUsername)
+  )
     return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
@@ -412,11 +487,12 @@ export function isInScopeFollowUpComment(
   botUsername: string,
   headSha: string,
   ignoreLogins: readonly string[] = [],
-  findingOpts: ReviewFindingMatchOpts = {}
+  findingOpts: ReviewFindingMatchOpts = {},
+  inlines: readonly InlineComment[] = []
 ): boolean {
   if (!loginEquals(comment.user?.login, botUsername) && loginInList(comment.user?.login, ignoreLogins)) return false;
   return (
-    isJumiReviewFinding(comment, headSha, findingOpts, botUsername) ||
+    isJumiReviewFinding(comment, headSha, findingOpts, botUsername, inlines) ||
     isInScopeHumanComment(comment, botUsername, ignoreLogins)
   );
 }
@@ -494,8 +570,9 @@ export async function collectFollowUpItems(
       return [];
     }),
   ]);
+  const jumiInlinesAll = rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername));
   const candidateComments = rawComments.filter((comment) =>
-    isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts)
+    isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts, jumiInlinesAll)
   );
   const candidateInlines = rawInlines.filter((comment) => isInScopeHumanComment(comment, botUsername, ignoreLogins));
   const candidateReviews = rawReviews.filter(
@@ -522,10 +599,16 @@ export async function collectFollowUpItems(
     inlines: candidateInlines.filter((comment) => isTrusted(comment.user?.login)),
     reviews: candidateReviews.filter((review) => isTrusted(review.user?.login)),
     jumiStickies: rawComments.filter((comment) => isJumiReviewSticky(comment, botUsername)),
-    jumiInlines: rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername)),
+    jumiInlines: jumiInlinesAll,
     jumiReviews: rawReviews.filter((review) => isJumiPullReviewWriteup(review, botUsername)),
     jumiFindingReviews: rawReviews.filter((review) =>
-      isJumiPullReviewFinding(review, botUsername, headSha, findingOpts)
+      isJumiPullReviewFinding(
+        review,
+        botUsername,
+        headSha,
+        findingOpts,
+        inlinesForPullReview(review.id, jumiInlinesAll)
+      )
     ),
   };
 }
@@ -692,13 +775,20 @@ export function buildFeedbackMarkdown(opts: {
 
   const lastReviewSection = opts.lastReview ? `## Last review\n\n${opts.lastReview.body.trimEnd()}\n\n` : "";
 
+  function inlineLocation(inline: InlineComment): string {
+    if (!inline.path) {
+      return inline.new_position != null ? ` on line ${inline.new_position}` : "";
+    }
+    return inline.new_position != null ? ` on ${inline.path}:${inline.new_position}` : ` on ${inline.path}`;
+  }
+
   const currentInlineItems: FeedbackItem[] = [];
   for (const comment of opts.currentInlines ?? []) {
     currentInlineItems.push({
       kind: "inline",
       id: comment.id,
       createdAt: comment.created_at ?? "",
-      text: `### Inline ${comment.id} by ${comment.user?.login ?? "unknown"}${comment.path ? ` on ${comment.path}` : ""}\n\n${comment.body}\n`,
+      text: `### Inline ${comment.id} by ${comment.user?.login ?? "unknown"}${inlineLocation(comment)}\n\n${comment.body}\n`,
     });
   }
   const currentInlineSection = currentInlineItems.length
@@ -730,7 +820,7 @@ export function buildFeedbackMarkdown(opts: {
       kind: "inline",
       id: comment.id,
       createdAt: comment.created_at ?? "",
-      text: `### Inline ${comment.id} by ${comment.user?.login ?? "unknown"}${comment.path ? ` on ${comment.path}` : ""}\n\n${comment.body}\n`,
+      text: `### Inline ${comment.id} by ${comment.user?.login ?? "unknown"}${inlineLocation(comment)}\n\n${comment.body}\n`,
     });
   }
   for (const review of opts.reviews) {
