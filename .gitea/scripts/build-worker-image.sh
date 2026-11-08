@@ -17,6 +17,12 @@ fi
 : "${CODEX_VERSION:?CODEX_VERSION is required}"
 : "${CODEX_SHA256_AMD64:?CODEX_SHA256_AMD64 is required}"
 : "${CODEX_SHA256_ARM64:?CODEX_SHA256_ARM64 is required}"
+: "${YQ_VERSION:?YQ_VERSION is required}"
+: "${YQ_SHA256_AMD64:?YQ_SHA256_AMD64 is required}"
+: "${YQ_SHA256_ARM64:?YQ_SHA256_ARM64 is required}"
+: "${UV_VERSION:?UV_VERSION is required}"
+: "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
+: "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
 : "${TEMURIN_TAG:?TEMURIN_TAG is required}"
 
 primary_tag="$1"
@@ -55,6 +61,12 @@ buildah bud \
       --build-arg "CODEX_VERSION=${CODEX_VERSION}" \
       --build-arg "CODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}" \
       --build-arg "CODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}" \
+      --build-arg "YQ_VERSION=${YQ_VERSION}" \
+      --build-arg "YQ_SHA256_AMD64=${YQ_SHA256_AMD64}" \
+      --build-arg "YQ_SHA256_ARM64=${YQ_SHA256_ARM64}" \
+      --build-arg "UV_VERSION=${UV_VERSION}" \
+      --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
+      --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
       --build-arg "TEMURIN_TAG=${TEMURIN_TAG}" \
       --build-arg "VERSION=${VERSION}" \
       --build-arg "REVISION=${REVISION}" \
@@ -160,6 +172,13 @@ verify_worker_skills() {
     echo "codex missing in worker image" >&2
     exit 1
   fi
+  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'ps --version' 'unzip -v' 'shellcheck --version' 'python --version' "python3 -c 'import yaml'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'; do
+    if ! buildah run "${ctr}" -- sh -c "${tool_cmd}"; then
+      buildah rm "${ctr}" >/dev/null 2>&1 || true
+      echo "worker CLI smoke failed: ${tool_cmd}" >&2
+      exit 1
+    fi
+  done
   # `--version` proves the binary is there, not that it still accepts the argv
   # `codexArgv()` spawns. These no-auth `--help` probes fail the image job
   # when a CODEX_VERSION bump renames or drops a flag the fresh spawn or the
@@ -235,7 +254,7 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, and the xAI child credential"
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13), and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 

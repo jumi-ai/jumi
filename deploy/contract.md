@@ -36,6 +36,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `GITHUB_APP_INSTALLATION_ID`
 - `GITHUB_ALLOWED_REPOS`
 - `JUMI_SECRETS_FILE`
+- `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`
@@ -118,6 +119,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `GITHUB_APP_INSTALLATION_ID`
 - `GITHUB_ALLOWED_REPOS`
 - `JUMI_SECRETS_FILE`
+- `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`
@@ -195,6 +197,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `PORT`
 - `HOME`
 - `JUMI_SECRETS_FILE`
+- `JUMI_SECRETS_DIR`
 - `CODEX_REFRESH_TOKEN_URL_OVERRIDE`
 - `CONTROL_K8S_API_URL`
 - `CONTROL_K8S_TOKEN_FILE`
@@ -262,6 +265,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `GITHUB_APP_INSTALLATION_ID`
 - `GITHUB_ALLOWED_REPOS`
 - `JUMI_SECRETS_FILE`
+- `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`

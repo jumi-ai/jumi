@@ -1,5 +1,5 @@
 import { readFileSync, unlinkSync } from "node:fs";
-import { SECRET_ENV_KEYS, SECRETS_FILE_ENV } from "./config.ts";
+import { SECRET_ENV_KEYS, SECRETS_DIR_ENV, SECRETS_FILE_ENV } from "./config.ts";
 import { defaultK8sCaFile } from "./k8s_ca.ts";
 
 export interface ControlDispatchRoleConfig {
@@ -108,6 +108,9 @@ function parsePositiveIntOrUndefined(raw: string | undefined, name: string): num
 
 export function loadControlConfig(env: Env = process.env): ControlConfig {
   const resolved = overlaySecretsFromFile(env);
+  // Owned by the image entrypoint (secrets tmpfs dir); read here so the
+  // contract gate sees the optional key.
+  void optionalEnv(resolved, SECRETS_DIR_ENV);
   parseControlRole(requireEnv(resolved, "JUMI_ROLE"));
   const secretNamespace = optionalEnv(resolved, "CONTROL_SECRET_NAMESPACE", defaultNamespace()) ?? "default";
   // Every dispatch key is read unconditionally with a literal so the contract
