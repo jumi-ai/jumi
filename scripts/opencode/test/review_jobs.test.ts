@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { encodeCiLookupMarker } from "../src/ci.ts";
+import { encodeCiAbsentWait, encodeCiLookupMarker, encodeCiPendingWait } from "../src/ci.ts";
 import { encodeInfraMarker, INFRA_RETRY_PREFIX } from "../src/infra.ts";
 import { encodeQuotaWaitMarker } from "../src/quota.ts";
 import {
   HEARTBEAT_MS,
+  hasPersistedResult,
   isUniqueViolation,
   MemoryReviewJobStore,
   PgReviewJobStore,
@@ -240,6 +241,61 @@ describe("MemoryReviewJobStore", () => {
     expect(store.rows[0]?.leasedUntil).toBeNull();
     expect(store.rows[0]?.error).toBe(marker);
     expect(await store.lease("engine-1", 60_000, new Date(now))).toBeDefined();
+  });
+
+  test("router wait markers are backoff, not persisted results", () => {
+    const base = {
+      id: 1,
+      jobKey: "kirmanak/demo#7:headsha",
+      kind: "review" as const,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      headSha: "headsha",
+      issueNumber: null,
+      payload: null,
+      delivery: "d1",
+      state: "leased" as const,
+      attempt: 0,
+      leasedBy: "engine-1",
+      leasedUntil: 2_000,
+      resultMarkdown: null,
+      resultRunner: null,
+      resultReason: null,
+      pendingStatusAt: null,
+      publishedAt: null,
+      prUpdatedAt: null,
+      cancelRequested: false,
+      createdAt: 1_000,
+      updatedAt: 1_000,
+    };
+    expect(hasPersistedResult({ ...base, error: encodeCiAbsentWait(1_000) })).toBe(false);
+    expect(hasPersistedResult({ ...base, error: encodeCiPendingWait(1_000) })).toBe(false);
+    expect(hasPersistedResult({ ...base, error: encodeCiLookupMarker(1, 1_000) })).toBe(false);
+    expect(hasPersistedResult({ ...base, error: "boom" })).toBe(true);
+  });
+
+  test("requeueInfra succeeds for a leased row carrying a router wait marker", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000, new Date(1_000));
+    store.rows[0]!.error = encodeCiAbsentWait(500);
+    const marker = encodeCiLookupMarker(1, 500);
+    expect(await store.requeueInfra(leased!.id, "engine-1", 15_000, marker, new Date(1_000))).toBe(true);
+    expect(store.rows[0]?.state).toBe("queued");
+    expect(store.rows[0]?.error).toBe(marker);
+  });
+
+  test("reclaim requeues a leased wait-marker row instead of publishing it", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 1, new Date(1_000));
+    store.rows[0]!.error = encodeCiAbsentWait(1_000);
+    const result = await store.reclaimExpired(5, new Date(5_000));
+    expect(result.publish).toHaveLength(0);
+    expect(result.requeued).toHaveLength(1);
+    expect(result.requeued[0]?.error).toContain("ci-wait-absent:");
+    expect(leased).toBeDefined();
   });
 
   test("model reclaim still increments attempt after an infra marker", async () => {
