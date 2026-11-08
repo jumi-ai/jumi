@@ -956,7 +956,7 @@ describe("prepareGradleSeed", () => {
     }
   });
 
-  test("copy failure removes a leftover destination tree", async () => {
+  test("copy failure preserves a pre-existing destination tree", async () => {
     const seed = await makeTempDir("jumi-gradle-seed-");
     const gradleUserHome = await makeTempDir("jumi-gradle-home-");
     const logged: string[] = [];
@@ -966,7 +966,9 @@ describe("prepareGradleSeed", () => {
       await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
       await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
       // A stale file where the destination directory must be makes `cp(dir, file)`
-      // fail; the failed copy must not leave it behind for later jobs to reuse.
+      // fail; the destination pre-exists (shared GRADLE_USER_HOME may hold a live
+      // tree another concurrent job populated), so the failed copy must leave it
+      // alone rather than delete it.
       const dest = join(gradleUserHome, "wrapper", "dists");
       await mkdir(join(gradleUserHome, "wrapper"), { recursive: true });
       await writeFile(dest, "stale");
@@ -976,7 +978,7 @@ describe("prepareGradleSeed", () => {
       });
       expect(seedEnv).toEqual({});
       expect(logged.length).toBe(1);
-      await expect(lstat(dest)).rejects.toThrow();
+      expect(await readFile(dest, "utf8")).toBe("stale");
     } finally {
       await rm(seed, { recursive: true, force: true });
       await rm(gradleUserHome, { recursive: true, force: true });

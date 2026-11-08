@@ -279,8 +279,12 @@ async function makeCopiedTreeOwnerWritable(root: string): Promise<void> {
  * missing, non-directory, unreadable, or empty seed, a seed without
  * `caches/modules-2`, or a copy error, logs one line and the job continues
  * cold (no extra env). The wrapper copy is kept when only the dependency
- * cache is missing; a failed copy is removed so later jobs do not reuse a
- * truncated tree.
+ * cache is missing; a failed copy removes the destination only when this call
+ * created it, so one job's copy error never deletes the shared
+ * `$GRADLE_USER_HOME/wrapper/dists` another concurrent job populated and may
+ * be running Gradle from (`GRADLE_USER_HOME` is shared by every worker job on
+ * the host). Merging into a pre-existing destination is intentional: stale
+ * dists from a rotated seed accumulate rather than risk deleting a live tree.
  */
 export async function prepareGradleSeed(
   gradleUserHome: string,
@@ -322,6 +326,11 @@ export async function prepareGradleSeed(
   }
   if (srcStat?.isDirectory()) {
     const dest = join(gradleUserHome, "wrapper", "dists");
+    // GRADLE_USER_HOME is shared by every worker job on the host, so dest may
+    // already hold a live tree another concurrent job populated. Only remove
+    // what this call created: on copy failure, clean up just when dest did
+    // not pre-exist.
+    const destExisted = (await lstat(dest).catch(() => undefined)) !== undefined;
     try {
       await mkdir(dirname(dest), { recursive: true });
       await cp(src, dest, { recursive: true });
@@ -329,7 +338,9 @@ export async function prepareGradleSeed(
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
-      await rm(dest, { recursive: true, force: true }).catch(() => {});
+      if (!destExisted) {
+        await rm(dest, { recursive: true, force: true }).catch(() => {});
+      }
       return {};
     }
   }
