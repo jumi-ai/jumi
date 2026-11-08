@@ -24,22 +24,22 @@ describe("offeredTools", () => {
 });
 
 describe("judgeProduction", () => {
-  test("passes with the checkout loaded and no web search", () => {
-    expect(failures(judgeProduction(report([request([shell])])))).toEqual([]);
+  test("passes with the checkout loaded and web search on", () => {
+    expect(failures(judgeProduction(report([request([shell, search])])))).toEqual([]);
   });
 
-  test("fails when the checkout's web search reached the model", () => {
-    expect(failures(judgeProduction(report([request([shell, search])])))).toEqual([
-      "web search stays off against the checkout's config",
+  test("fails when the checkout's disabled web search won", () => {
+    expect(failures(judgeProduction(report([request([shell])])))).toEqual([
+      "web search stays on against the checkout's config",
     ]);
   });
 
   test("fails when no tool list arrived, instead of passing with nothing to judge", () => {
-    expect(failures(judgeProduction(report([])))).toContain("web search stays off against the checkout's config");
+    expect(failures(judgeProduction(report([])))).toContain("web search stays on against the checkout's config");
   });
 
   test("fails when the checkout did not load", () => {
-    const results = judgeProduction({ bodies: [request([shell], "")], hookRan: false, mcpRan: false });
+    const results = judgeProduction({ bodies: [request([shell, search], "")], hookRan: false, mcpRan: false });
     expect(failures(results)).toEqual([
       "the checkout's .codex/config.toml loads",
       "the checkout's hook runs",
@@ -49,9 +49,10 @@ describe("judgeProduction", () => {
 });
 
 describe("judgeControl", () => {
-  test("needs the checkout's web search to reach the model", () => {
-    expect(judgeControl(report([request([shell, search])])).ok).toBe(true);
-    expect(judgeControl(report([request([shell])])).ok).toBe(false);
+  test("needs the checkout's disabled web search to win", () => {
+    expect(judgeControl(report([request([shell])])).ok).toBe(true);
+    expect(judgeControl(report([request([shell, search])])).ok).toBe(false);
+    expect(judgeControl(report([])).ok).toBe(false);
   });
 });
 
@@ -71,7 +72,7 @@ describe("the argv under test", () => {
   test("the control drops only the web search override", () => {
     const control = withoutWebSearchOverride(argv);
     expect(control).toHaveLength(argv.length - 2);
-    expect(control).not.toContain('web_search="disabled"');
+    expect(control).not.toContain('web_search="live"');
   });
 
   test("refuses to run against an argv it no longer recognizes", () => {

@@ -15,6 +15,7 @@ import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import {
+  blockingOpenQuestionCountWithInlines,
   buildFeedbackMarkdown,
   CI_PENDING_RETRY_MS,
   collectFollowUpItems,
@@ -22,6 +23,7 @@ import {
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
   implementFollowUp,
+  isBlockingQuestionInline,
   isJumiPullReviewFinding,
   isJumiReviewFinding,
   needsFollowUp,
@@ -4014,6 +4016,296 @@ describe("collectFollowUpItems", () => {
         blockingQuestionAuthors: ["renovate-bot"],
       })
     ).toBe(false);
+  });
+
+  test("blocking question inline with marker path counts as a finding for a listed author (#6126)", async () => {
+    const emptySuccessBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "_Jumi · opencode · openai/gpt-5.5_",
+      "",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const questionText = "Was the coordinator-drop recovery re-checked against the new zigbee-herdsman?";
+    const review = makeReview({
+      id: 90,
+      body: emptySuccessBody,
+      state: "APPROVED",
+      commit_id: HEAD_SHA,
+      user: makeUser({ login: "jumi" }),
+    });
+    const inline = {
+      ...makeComment({
+        id: 101,
+        body: `${questionText}\n\n<!-- jumi-review:kirmanak/demo#127 -->`,
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "❓ q: k3s/garm/values.yaml",
+      pull_request_review_id: 90,
+    };
+    const listedOpts = { prAuthor: "renovate-bot", blockingQuestionAuthors: ["renovate-bot"] };
+    expect(isBlockingQuestionInline(inline, "jumi")).toBe(true);
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [inline])).toBe(true);
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [])).toBe(false);
+    expect(
+      isJumiPullReviewFinding(
+        review,
+        "jumi",
+        HEAD_SHA,
+        { prAuthor: "alice", blockingQuestionAuthors: ["renovate-bot"] },
+        [inline]
+      )
+    ).toBe(false);
+    const resolvedInline = { ...inline, resolved: true };
+    expect(isBlockingQuestionInline(resolvedInline, "jumi")).toBe(false);
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [resolvedInline])).toBe(false);
+    const githubResolved = { ...inline, resolver: makeUser({ login: "alice" }) };
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [githubResolved])).toBe(false);
+
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [review],
+      listPullReviewComments: async () => [inline],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA, [], listedOpts);
+    expect(items.jumiFindingReviews.map((entry) => entry.id)).toEqual([90]);
+    const listedPr = { ...prWithHead(), user: makeUser({ login: "renovate-bot" }) };
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(true);
+    });
+    const feedback = buildFeedbackMarkdown({
+      pr: listedPr,
+      comments: [],
+      inlines: [],
+      reviews: [],
+      lastReview: {
+        id: review.id,
+        body: review.body ?? "",
+        user: makeUser({ login: "jumi" }),
+        created_at: "2026-11-07T00:00:00Z",
+        updated_at: "2026-11-07T00:00:00Z",
+      },
+      currentInlines: [inline],
+    });
+    expect(feedback.markdown).toContain(questionText);
+    expect(feedback.markdown).toContain("k3s/garm/values.yaml");
+  });
+
+  test("inline blocking questions still skip for an unlisted author or a resolved thread", async () => {
+    const emptySuccessBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const review = makeReview({
+      id: 91,
+      body: emptySuccessBody,
+      state: "APPROVED",
+      commit_id: HEAD_SHA,
+      user: makeUser({ login: "jumi" }),
+    });
+    const inline = {
+      ...makeComment({
+        id: 102,
+        body: "Is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "❓ q: src/foo.ts",
+      pull_request_review_id: 91,
+    };
+    const listedOpts = { prAuthor: "renovate-bot", blockingQuestionAuthors: ["renovate-bot"] };
+    expect(
+      isJumiPullReviewFinding(
+        review,
+        "jumi",
+        HEAD_SHA,
+        { prAuthor: "alice", blockingQuestionAuthors: ["renovate-bot"] },
+        [inline]
+      )
+    ).toBe(false);
+    expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [{ ...inline, resolved: true }])).toBe(false);
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [review],
+      listPullReviewComments: async () => [{ ...inline, resolved: true }],
+    });
+    const items = await collectFollowUpItems(api, "kirmanak", "demo", 127, "jumi", HEAD_SHA, [], listedOpts);
+    expect(items.jumiFindingReviews).toEqual([]);
+    const listedPr = { ...prWithHead(), user: makeUser({ login: "renovate-bot" }) };
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(false);
+    });
+  });
+
+  test("a question in the body still counts without inlines", () => {
+    const body = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: ❓ q: is the timeout intentional?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const review = makeReview({
+      id: 92,
+      body,
+      state: "APPROVED",
+      commit_id: HEAD_SHA,
+      user: makeUser({ login: "jumi" }),
+    });
+    expect(
+      isJumiPullReviewFinding(review, "jumi", HEAD_SHA, {
+        prAuthor: "renovate-bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(true);
+  });
+
+  test("handled inline-question review does not re-trigger, a re-asked question does", async () => {
+    const emptySuccessBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const inline = {
+      ...makeComment({
+        id: 103,
+        body: "Is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "❓ q: src/foo.ts",
+      pull_request_review_id: 93,
+    };
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 93,
+          body: emptySuccessBody,
+          state: "APPROVED",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+      listPullReviewComments: async () => [inline],
+    });
+    const listedPr = { ...prWithHead(), user: makeUser({ login: "renovate-bot" }) };
+    await withDirs(async (home) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: HEAD_SHA,
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [{ id: 93, sha: HEAD_SHA }],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(false);
+      const reaskedApi = makeApi({
+        listIssueComments: async () => [],
+        listPullReviews: async () => [
+          makeReview({
+            id: 94,
+            body: emptySuccessBody,
+            state: "APPROVED",
+            commit_id: HEAD_SHA,
+            user: makeUser({ login: "jumi" }),
+          }),
+        ],
+        listPullReviewComments: async () => [
+          {
+            ...inline,
+            id: 104,
+            pull_request_review_id: 94,
+            body: "Is the timeout still intentional after the retry?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+          },
+        ],
+      });
+      expect(
+        await needsFollowUp({
+          api: reaskedApi,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("worker inline count agrees with the engine open-question count", async () => {
+    const { blockingOpenQuestionCount } = await import("../src/verdict.ts");
+    const original = ["src/foo.ts:12: ❓ q: is the timeout intentional?", "<!-- jumi-check: success -->"].join("\n");
+    expect(blockingOpenQuestionCount(original, "renovate-bot", ["renovate-bot"])).toBe(1);
+    const publishedBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const inline = {
+      ...makeComment({
+        id: 105,
+        body: "❓ q: is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "src/foo.ts",
+      new_position: 12,
+      pull_request_review_id: 95,
+    };
+    expect(
+      blockingOpenQuestionCountWithInlines(publishedBody, [inline], "renovate-bot", ["renovate-bot"], "jumi")
+    ).toBe(1);
+    expect(blockingOpenQuestionCountWithInlines(publishedBody, [], "renovate-bot", ["renovate-bot"], "jumi")).toBe(0);
+    expect(blockingOpenQuestionCountWithInlines(publishedBody, [inline], "alice", ["renovate-bot"], "jumi")).toBe(0);
   });
 
   test("needsFollowUp is true for questions-only success when the author is listed", async () => {

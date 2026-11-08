@@ -38,6 +38,7 @@ import {
 } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { HANDOFF_FILE, handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
 import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
@@ -48,6 +49,7 @@ import {
   type ImplementOptions,
   noteProvenanceRunners,
   type OpenCodeRunner,
+  provenanceForgeFor,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import type { Pull } from "./ports.ts";
@@ -720,6 +722,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       attemptedHeadSha = headSha;
       attemptedBaseSha = baseSha;
       await loop.stampHeadSha(headSha);
+      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+      await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
       if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -816,6 +821,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       }
 
       if (mergeResult.status === "stuck") {
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
         await sticky("stuck: cannot resolve conflicts", pr.number);
         await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -896,7 +902,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               throw new Error(QUOTA_STUCK_TEXT);
             }
             throwIfEngineFailed(continued);
-            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", ATTACHMENTS_MANIFEST]);
+            await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", HANDOFF_FILE, ATTACHMENTS_MANIFEST]);
           },
         });
       } catch (err) {
@@ -920,9 +927,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         return { status: "skipped", reason: gate.reason };
       }
       if (gate.continued) {
-        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", ATTACHMENTS_MANIFEST]);
+        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", HANDOFF_FILE, ATTACHMENTS_MANIFEST]);
         await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
       }
+      await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
 
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);

@@ -76,7 +76,14 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
-          worker: { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits },
+          worker: {
+            queue: deps.queue,
+            api: deps.api,
+            cancel: deps.cancel,
+            logger,
+            sits: deps.sits,
+            handoffs: deps.handoffs,
+          },
           logger,
         })
       );
@@ -119,7 +126,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           trustedSenderLogins: config.trustedSenderLogins,
           ignoreConflictsLabel: config.ignoreConflictsLabel,
         },
-        { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits }
+        { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs }
       );
     }
   };
@@ -192,6 +199,7 @@ async function main() {
       queue,
       api,
       sits: store?.sits,
+      handoffs: store?.handoffs,
       cancel: (owner, repo, issueNumber) =>
         handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids, skipLatches),
     }),
