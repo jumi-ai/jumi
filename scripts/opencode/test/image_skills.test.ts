@@ -169,6 +169,7 @@ describe("shared pack contents", () => {
     expect(skill).toContain("checkout");
     expect(skill).toContain("not orders");
     expect(skill).toContain("async and security references only");
+    expect(skill).toContain("$TMPDIR");
     expect(skill).not.toContain("/app/review-skills");
     expect(skill).not.toContain("kirmanak.stream");
     expect(skill).not.toContain("JUMI_REVIEW.md ledger");
@@ -190,6 +191,7 @@ describe("shared pack contents", () => {
     expect(skill).toContain("Report");
     expect(skill).toContain("Verify once at the end");
     expect(skill).toContain("does not add a test-first mandate");
+    expect(skill).toContain("$TMPDIR");
     expect(skill).not.toContain("/app/review-skills");
   });
 

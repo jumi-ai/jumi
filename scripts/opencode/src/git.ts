@@ -35,7 +35,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { childScratchDir, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { forgeDenyHost, forgeOpenCodeGlobalConfig, forgePermissions } from "./forge_webfetch.ts";
 import { classifyOpenCodeInfra, looksLikeInfraStderr } from "./infra.ts";
 import { armChildCredentialImport } from "./opencode_credentials.ts";
@@ -327,6 +327,8 @@ function buildEnv(
   // stay with this run instead of `$HOME/.local/share`.
   const configPath = resolveOpenCodeConfigPath(opts);
   const xdgDataHome = openCodeXdgDataHome(tempRoot);
+  // Agent scratch under `.jumi-tmp`: `/tmp` may be a small RAM disk.
+  const scratchDir = childScratchDir(opts.workdir);
   // Read fresh on every spawn so a rotated Secret file applies to the next
   // child with no restart. The resolved value lives only in this local and
   // the child env: never written back to process.env, never logged.
@@ -337,7 +339,7 @@ function buildEnv(
       // OpenCode 2 takes its directory from PWD before cwd, and this spread
       // would hand it the parent's.
       PWD: opts.workdir,
-      TMPDIR: tempRoot,
+      TMPDIR: scratchDir,
       OPENCODE_DB: openCodeDbPath,
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
@@ -361,7 +363,7 @@ function buildEnv(
   const env: Record<string, string> = {
     HOME: opts.home ?? process.env.HOME ?? opts.workdir,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    TMPDIR: tempRoot,
+    TMPDIR: scratchDir,
     XDG_CONFIG_HOME: openCodeXdgConfigHome(tempRoot),
     XDG_DATA_HOME: xdgDataHome,
     OPENCODE_MODEL: opts.model,
@@ -530,6 +532,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
+  await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "opencode-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");

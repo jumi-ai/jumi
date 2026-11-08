@@ -1,4 +1,4 @@
-import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile } from "./config.ts";
+import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile, SECRETS_DIR_ENV } from "./config.ts";
 import { type ForgeKind, parseForge } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 import {
@@ -95,6 +95,9 @@ function normalizeUrl(value: string): string {
 
 export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
   const resolved = overlaySecretsFromFile(env);
+  // Owned by the image entrypoint (secrets tmpfs dir); read here so the
+  // contract gate sees the optional key.
+  void optionalEnv(resolved, SECRETS_DIR_ENV);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const fromEnv = {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",

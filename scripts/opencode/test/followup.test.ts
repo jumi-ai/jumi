@@ -929,7 +929,10 @@ describe("implementFollowUp", () => {
       expect(extraEnv?.JAVA_HOME).toBe(process.env.JAVA_HOME || "/opt/java/openjdk");
       expect(extraEnv?.GRADLE_USER_HOME).toBe(join(process.env.WORKDIR || "/work", ".gradle"));
       expect(extraEnv?.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
-      expect(extraEnv?.JAVA_TOOL_OPTIONS).toBe(`-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp")}`);
+      expect(extraEnv?.JAVA_TOOL_OPTIONS).toBe(
+        `-Djava.io.tmpdir=${join(workdir, "kirmanak/demo/12/.jumi-tmp/scratch")}`
+      );
+      expect(extraEnv?.TMPDIR).toBe(join(workdir, "kirmanak/demo/12/.jumi-tmp/scratch"));
     });
   });
 

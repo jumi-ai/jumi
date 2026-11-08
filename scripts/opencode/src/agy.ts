@@ -20,7 +20,7 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { agyConversationPath } from "./fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
@@ -67,8 +67,9 @@ function isEnoent(err: unknown): boolean {
 }
 
 function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
-    const env = { ...process.env, TMPDIR: tempRoot } as Record<string, string>;
+    const env = { ...process.env, TMPDIR: scratchDir } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
     return env;
   }
@@ -76,7 +77,7 @@ function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Re
   const env: Record<string, string> = {
     HOME: opts.home ?? process.env.HOME ?? opts.workdir,
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    TMPDIR: tempRoot,
+    TMPDIR: scratchDir,
   };
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
@@ -263,6 +264,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
+  await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "agy-prompt-"));
   const startedAtMs = Date.now();
