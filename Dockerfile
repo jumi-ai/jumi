@@ -43,7 +43,7 @@ RUN set -eu; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
     esac; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${platform}.tar.gz" -o "${tmp_dir}/opencode.tar.gz"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/opencode-${platform}.tar.gz" -o "${tmp_dir}/opencode.tar.gz"; \
     tar -xzf "${tmp_dir}/opencode.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/opencode" /usr/local/bin/opencode; \
     rm -rf "${tmp_dir}"
@@ -54,7 +54,7 @@ RUN set -eu; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
     esac; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/${platform}/claude" -o "${tmp_dir}/claude"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/${platform}/claude" -o "${tmp_dir}/claude"; \
     install -m 755 "${tmp_dir}/claude" /usr/local/bin/claude; \
     rm -rf "${tmp_dir}"
 RUN set -eu; \
@@ -64,7 +64,7 @@ RUN set -eu; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
     esac; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}/${agy_path}" -o "${tmp_dir}/agy.tar.gz"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://storage.googleapis.com/antigravity-public/antigravity-cli/${AGY_VERSION}/${agy_path}" -o "${tmp_dir}/agy.tar.gz"; \
     echo "${agy_sha512}  ${tmp_dir}/agy.tar.gz" | sha512sum -c -; \
     tar -xzf "${tmp_dir}/agy.tar.gz" -C "${tmp_dir}" antigravity; \
     install -m 755 "${tmp_dir}/antigravity" /usr/local/bin/agy; \
@@ -83,7 +83,7 @@ RUN set -eu; \
     esac; \
     if [ "${#codex_sha256}" -ne 64 ]; then echo "Codex sha256 pin must be 64 hex chars"; exit 1; fi; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz" -o "${tmp_dir}/codex.tar.gz"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz" -o "${tmp_dir}/codex.tar.gz"; \
     echo "${codex_sha256}  ${tmp_dir}/codex.tar.gz" | sha256sum -c -; \
     mkdir -p /usr/local/lib/codex; \
     tar -xzf "${tmp_dir}/codex.tar.gz" -C /usr/local/lib/codex; \
@@ -96,7 +96,7 @@ RUN set -eu; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
     esac; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${helm_arch}.tar.gz" -o "${tmp_dir}/helm.tar.gz"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://get.helm.sh/helm-v${HELM_VERSION}-linux-${helm_arch}.tar.gz" -o "${tmp_dir}/helm.tar.gz"; \
     tar -xzf "${tmp_dir}/helm.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/linux-${helm_arch}/helm" /usr/local/bin/helm; \
     rm -rf "${tmp_dir}"
@@ -107,7 +107,7 @@ RUN set -eu; \
       *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
     esac; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-${bun_platform}.zip" -o "${tmp_dir}/bun.zip"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-${bun_platform}.zip" -o "${tmp_dir}/bun.zip"; \
     unzip -q "${tmp_dir}/bun.zip" -d "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/bun-${bun_platform}/bun" /usr/local/bin/bun; \
     rm -rf "${tmp_dir}"
@@ -155,7 +155,7 @@ RUN set -eu; \
     esac; \
     if [ "${#yq_sha256}" -ne 64 ]; then echo "yq sha256 pin must be 64 hex chars"; exit 1; fi; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/${yq_bin}" -o "${tmp_dir}/yq"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/${yq_bin}" -o "${tmp_dir}/yq"; \
     echo "${yq_sha256}  ${tmp_dir}/yq" | sha256sum -c -; \
     install -m 755 "${tmp_dir}/yq" /usr/local/bin/yq; \
     rm -rf "${tmp_dir}"
@@ -173,7 +173,7 @@ RUN set -eu; \
     esac; \
     if [ "${#uv_sha256}" -ne 64 ]; then echo "uv sha256 pin must be 64 hex chars"; exit 1; fi; \
     tmp_dir="$(mktemp -d)"; \
-    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_target}.tar.gz" -o "${tmp_dir}/uv.tar.gz"; \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_target}.tar.gz" -o "${tmp_dir}/uv.tar.gz"; \
     echo "${uv_sha256}  ${tmp_dir}/uv.tar.gz" | sha256sum -c -; \
     tar -xzf "${tmp_dir}/uv.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uv" /usr/local/bin/uv; \
