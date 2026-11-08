@@ -113,6 +113,12 @@ jobs:
             CODEX_VERSION=${{ env.CODEX_VERSION }}
             CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}
             CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}
+            YQ_VERSION=${{ env.YQ_VERSION }}
+            YQ_SHA256_AMD64=${{ env.YQ_SHA256_AMD64 }}
+            YQ_SHA256_ARM64=${{ env.YQ_SHA256_ARM64 }}
+            UV_VERSION=${{ env.UV_VERSION }}
+            UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
+            UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
 
       - name: Verify reviewer image
         run: |
@@ -127,6 +133,15 @@ jobs:
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
           docker run --rm jumi-reviewer:ci codex --version
+          docker run --rm jumi-reviewer:ci curl --version
+          docker run --rm jumi-reviewer:ci yq --version
+          docker run --rm jumi-reviewer:ci uv --version
+          docker run --rm jumi-reviewer:ci ps --version
+          docker run --rm jumi-reviewer:ci unzip -v
+          docker run --rm jumi-reviewer:ci shellcheck --version
+          docker run --rm jumi-reviewer:ci python --version
+          docker run --rm jumi-reviewer:ci python3 -c 'import yaml'
+          docker run --rm jumi-reviewer:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
@@ -265,6 +280,12 @@ jobs:
             CODEX_VERSION=${{ env.CODEX_VERSION }}
             CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}
             CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}
+            YQ_VERSION=${{ env.YQ_VERSION }}
+            YQ_SHA256_AMD64=${{ env.YQ_SHA256_AMD64 }}
+            YQ_SHA256_ARM64=${{ env.YQ_SHA256_ARM64 }}
+            UV_VERSION=${{ env.UV_VERSION }}
+            UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
+            UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
 
       - name: Verify worker image
@@ -278,6 +299,15 @@ jobs:
           docker run --rm jumi-worker:ci claude --version
           docker run --rm jumi-worker:ci agy --version
           docker run --rm jumi-worker:ci codex --version
+          docker run --rm jumi-worker:ci curl --version
+          docker run --rm jumi-worker:ci yq --version
+          docker run --rm jumi-worker:ci uv --version
+          docker run --rm jumi-worker:ci ps --version
+          docker run --rm jumi-worker:ci unzip -v
+          docker run --rm jumi-worker:ci shellcheck --version
+          docker run --rm jumi-worker:ci python --version
+          docker run --rm jumi-worker:ci python3 -c 'import yaml'
+          docker run --rm jumi-worker:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"

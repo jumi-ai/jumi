@@ -86,7 +86,7 @@ describe("renovate tool-versions config", () => {
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(4);
+    expect(managers?.length).toBe(8);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
@@ -95,6 +95,21 @@ describe("renovate tool-versions config", () => {
     expect(temurin?.depNameTemplate).toBe("eclipse-temurin");
     expect(temurin?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
     expect(temurin?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    // yq/uv per-arch checksum managers move with the version like codex.
+    const yqManagers = managers?.filter((m) => m.depNameTemplate === "mikefarah/yq");
+    const uvManagers = managers?.filter((m) => m.depNameTemplate === "astral-sh/uv");
+    expect(yqManagers?.length).toBe(2);
+    expect(uvManagers?.length).toBe(2);
+    for (const m of [...(yqManagers ?? []), ...(uvManagers ?? [])]) {
+      expect(m?.datasourceTemplate).toBe("github-release-attachments");
+      expect(m?.matchStrings?.length).toBe(1);
+      expect(m?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
+      expect(m?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    }
+    expect(yqManagers?.some((m) => m.matchStrings?.[0]?.includes("YQ_AMD64_TAG"))).toBe(true);
+    expect(yqManagers?.some((m) => m.matchStrings?.[0]?.includes("YQ_ARM64_TAG"))).toBe(true);
+    expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_AMD64_TAG"))).toBe(true);
+    expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_ARM64_TAG"))).toBe(true);
     // Every matchStrings regex must compile (RE2-compatible subset: no lookahead).
     for (const m of managers ?? []) {
       for (const s of m.matchStrings ?? []) {
@@ -110,7 +125,13 @@ describe("renovate tool-versions config", () => {
     const pattern = nonDocker?.matchStrings?.[0] ?? "";
     const temurinPattern = temurin?.matchStrings?.[0] ?? "";
     // Current non-docker pins still extract.
-    for (const line of ["BUN_VERSION=1.4.2", "OPENCODE_VERSION=1.18.35", "HELM_VERSION=4.3.0"]) {
+    for (const line of [
+      "BUN_VERSION=1.4.2",
+      "OPENCODE_VERSION=1.18.35",
+      "HELM_VERSION=4.3.0",
+      "YQ_VERSION=4.54.2",
+      "UV_VERSION=0.13.7",
+    ]) {
       const varName = line.split("=")[0];
       const sample = `# renovate: datasource=github-releases depName=example/${varName}\n${line}`;
       const found = extractFirst(pattern, sample);

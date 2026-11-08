@@ -291,6 +291,18 @@ describe("renovate bun pin", () => {
     expect(dockerfile).not.toMatch(/^ARG CLAUDE_VERSION=/m);
     expect(dockerfile).toMatch(/^ARG HELM_VERSION$/m);
     expect(dockerfile).not.toMatch(/^ARG HELM_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG YQ_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG YQ_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG YQ_SHA256_AMD64$/m);
+    expect(dockerfile).not.toMatch(/^ARG YQ_SHA256_AMD64=/m);
+    expect(dockerfile).toMatch(/^ARG YQ_SHA256_ARM64$/m);
+    expect(dockerfile).not.toMatch(/^ARG YQ_SHA256_ARM64=/m);
+    expect(dockerfile).toMatch(/^ARG UV_VERSION$/m);
+    expect(dockerfile).not.toMatch(/^ARG UV_VERSION=/m);
+    expect(dockerfile).toMatch(/^ARG UV_SHA256_AMD64$/m);
+    expect(dockerfile).not.toMatch(/^ARG UV_SHA256_AMD64=/m);
+    expect(dockerfile).toMatch(/^ARG UV_SHA256_ARM64$/m);
+    expect(dockerfile).not.toMatch(/^ARG UV_SHA256_ARM64=/m);
   });
 
   test("lets Renovate bump constraints.bun so the pin above is not hand-maintained", () => {

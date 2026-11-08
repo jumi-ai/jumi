@@ -478,7 +478,7 @@ REVIEW.md                    # This repository's review rules
 .gitea/
   opencode-review.json       # Hardened review-only OpenCode config
   opencode-implement.json    # Implement config (edit allow; skills /app/review-skills and checkout roots; blanket skill allow)
-  tool-versions.env          # Pinned OpenCode/Claude/Bun/Helm/Temurin versions (agy is pinned with SHA-512 in the Dockerfile)
+  tool-versions.env          # Pinned OpenCode/Claude/Bun/Helm/Temurin/Yq/UV versions (agy is pinned with SHA-512 in the Dockerfile; yq/uv carry per-arch SHA-256 like codex)
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/

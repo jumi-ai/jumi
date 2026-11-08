@@ -82,6 +82,12 @@ jobs:
             CODEX_VERSION=${{ env.CODEX_VERSION }}
             CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}
             CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}
+            YQ_VERSION=${{ env.YQ_VERSION }}
+            YQ_SHA256_AMD64=${{ env.YQ_SHA256_AMD64 }}
+            YQ_SHA256_ARM64=${{ env.YQ_SHA256_ARM64 }}
+            UV_VERSION=${{ env.UV_VERSION }}
+            UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
+            UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
@@ -128,6 +134,15 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" claude --version
           docker run --rm "${IMAGE}:${VERSION}" agy --version
           docker run --rm "${IMAGE}:${VERSION}" codex --version
+          docker run --rm "${IMAGE}:${VERSION}" curl --version
+          docker run --rm "${IMAGE}:${VERSION}" yq --version
+          docker run --rm "${IMAGE}:${VERSION}" uv --version
+          docker run --rm "${IMAGE}:${VERSION}" ps --version
+          docker run --rm "${IMAGE}:${VERSION}" unzip -v
+          docker run --rm "${IMAGE}:${VERSION}" shellcheck --version
+          docker run --rm "${IMAGE}:${VERSION}" python --version
+          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import yaml'
+          docker run --rm "${IMAGE}:${VERSION}" sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
