@@ -3,7 +3,14 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { AUTH_DEATH_REASON, providerAuthDeathMessage } from "../src/auth.ts";
-import { CI_ABSENT_REASON, CI_FAILED_REASON, CI_LOOKUP_FAILED_REASON, CI_PENDING_REASON } from "../src/ci.ts";
+import {
+  CI_ABSENT_REASON,
+  CI_FAILED_REASON,
+  CI_LOOKUP_FAILED_REASON,
+  CI_PENDING_REASON,
+  encodeCiAbsentWait,
+  encodeCiLookupMarker,
+} from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import { GithubAPI } from "../src/github_api.ts";
@@ -2391,6 +2398,45 @@ describe("publishReviewResult", () => {
         target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7",
       },
     ]);
+  });
+
+  test("never posts a ci-wait marker as the failure status description", async () => {
+    const marker = encodeCiAbsentWait(Date.now());
+    const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      error: marker,
+      api: makeApi({
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_LOOKUP_FAILED_REASON });
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.state).toBe("failure");
+    expect(statuses[0]?.description).toBe(CI_LOOKUP_FAILED_REASON);
+    expect(statuses[0]?.description).not.toContain("ci-wait-absent:");
+  });
+
+  test("never posts a ci-lookup marker from resultReason as the status description", async () => {
+    const marker = encodeCiLookupMarker(1, Date.now());
+    const statuses: Array<{ state: string; description?: string; context?: string; target_url?: string }> = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultReason: marker,
+      api: makeApi({
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: CI_LOOKUP_FAILED_REASON });
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.description).toBe(`Jumi review skipped: ${CI_LOOKUP_FAILED_REASON}`);
+    expect(statuses[0]?.description).not.toContain("ci-lookup-retry:");
   });
 
   test("an over-long error does not drop a produced review writeup", async () => {

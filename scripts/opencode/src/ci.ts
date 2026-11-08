@@ -172,17 +172,44 @@ export type CiLookupDecision =
 
 export function decideCiLookupRetry(prevError: string | null | undefined, nowMs: number): CiLookupDecision {
   const prev = parseCiLookupMarker(prevError);
-  const count = (prev?.count ?? 0) + 1;
-  const firstFailAt = prev?.firstFailAt ?? nowMs;
-  if (count >= CI_LOOKUP_MAX_ATTEMPTS || nowMs - firstFailAt >= CI_LOOKUP_BUDGET_MS) {
+  if (prev) {
+    const count = prev.count + 1;
+    if (count >= CI_LOOKUP_MAX_ATTEMPTS || nowMs - prev.firstFailAt >= CI_LOOKUP_BUDGET_MS) {
+      return { action: "exhaust", reason: CI_LOOKUP_FAILED_REASON };
+    }
+    return {
+      action: "requeue",
+      count,
+      firstFailAt: prev.firstFailAt,
+      backoffMs: ciLookupBackoffMs(count),
+      marker: encodeCiLookupMarker(count, prev.firstFailAt),
+    };
+  }
+  // A row promoted after a router-side absent/pending wait still carries the
+  // wait marker. Anchor the retry ladder to the router's `firstSeen` instead
+  // of restarting the budget from now.
+  const wait = parseCiWaitMarker(prevError);
+  if (wait) {
+    if (nowMs - wait.firstSeen >= CI_LOOKUP_BUDGET_MS) {
+      return { action: "exhaust", reason: CI_LOOKUP_FAILED_REASON };
+    }
+    return {
+      action: "requeue",
+      count: 1,
+      firstFailAt: wait.firstSeen,
+      backoffMs: ciLookupBackoffMs(1),
+      marker: encodeCiLookupMarker(1, wait.firstSeen),
+    };
+  }
+  if (CI_LOOKUP_MAX_ATTEMPTS <= 1) {
     return { action: "exhaust", reason: CI_LOOKUP_FAILED_REASON };
   }
   return {
     action: "requeue",
-    count,
-    firstFailAt,
-    backoffMs: ciLookupBackoffMs(count),
-    marker: encodeCiLookupMarker(count, firstFailAt),
+    count: 1,
+    firstFailAt: nowMs,
+    backoffMs: ciLookupBackoffMs(1),
+    marker: encodeCiLookupMarker(1, nowMs),
   };
 }
 

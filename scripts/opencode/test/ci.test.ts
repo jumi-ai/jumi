@@ -15,7 +15,9 @@ import {
   classifyInfraFlake,
   decideCiLookupRetry,
   dropUnpackNoise,
+  encodeCiAbsentWait,
   encodeCiLookupMarker,
+  encodeCiPendingWait,
   flakeSkipReason,
   hashText,
   infraFlakeReason,
@@ -929,6 +931,38 @@ describe("decideCiLookupRetry", () => {
       action: "exhaust",
       reason: CI_LOOKUP_FAILED_REASON,
     });
+  });
+
+  test("requeues a fresh router absent-wait marker anchored to firstSeen", () => {
+    const now = 1_000_000;
+    const firstSeen = now - 60_000;
+    expect(decideCiLookupRetry(encodeCiAbsentWait(firstSeen), now)).toEqual({
+      action: "requeue",
+      count: 1,
+      firstFailAt: firstSeen,
+      backoffMs: CI_LOOKUP_BACKOFF_MS[0],
+      marker: encodeCiLookupMarker(1, firstSeen),
+    });
+  });
+
+  test("exhausts a router absent-wait marker past the lookup budget", () => {
+    const now = 1_000_000;
+    const firstSeen = now - (CI_LOOKUP_BUDGET_MS + 60_000);
+    expect(decideCiLookupRetry(encodeCiAbsentWait(firstSeen), now)).toEqual({
+      action: "exhaust",
+      reason: CI_LOOKUP_FAILED_REASON,
+    });
+  });
+
+  test("requeues a fresh router pending-wait marker anchored to firstSeen", () => {
+    const now = 2_000_000;
+    const firstSeen = now - 60_000;
+    const decision = decideCiLookupRetry(encodeCiPendingWait(firstSeen), now);
+    expect(decision.action).toBe("requeue");
+    if (decision.action === "requeue") {
+      expect(decision.firstFailAt).toBe(firstSeen);
+      expect(decision.marker).toBe(encodeCiLookupMarker(1, firstSeen));
+    }
   });
 });
 
