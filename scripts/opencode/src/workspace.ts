@@ -279,12 +279,15 @@ async function makeCopiedTreeOwnerWritable(root: string): Promise<void> {
  * missing, non-directory, unreadable, or empty seed, a seed without
  * `caches/modules-2`, or a copy error, logs one line and the job continues
  * cold (no extra env). The wrapper copy is kept when only the dependency
- * cache is missing; a failed copy removes the destination only when this call
- * created it, so one job's copy error never deletes the shared
+ * cache is missing; a failed copy never touches the live destination, so one
+ * job's copy error never deletes the shared
  * `$GRADLE_USER_HOME/wrapper/dists` another concurrent job populated and may
  * be running Gradle from (`GRADLE_USER_HOME` is shared by every worker job on
- * the host). Merging into a pre-existing destination is intentional: stale
- * dists from a rotated seed accumulate rather than risk deleting a live tree.
+ * the host and the queue runs jobs concurrently). The seed is first copied to
+ * a temp sibling (`wrapper/.dists.seed-*`) and only merged/renamed over
+ * `dists` on success. Merging into a pre-existing destination is intentional:
+ * stale dists from a rotated seed accumulate rather than risk deleting a live
+ * tree.
  */
 export async function prepareGradleSeed(
   gradleUserHome: string,
@@ -327,21 +330,36 @@ export async function prepareGradleSeed(
   if (srcStat?.isDirectory()) {
     const dest = join(gradleUserHome, "wrapper", "dists");
     // GRADLE_USER_HOME is shared by every worker job on the host, so dest may
-    // already hold a live tree another concurrent job populated. Only remove
-    // what this call created: on copy failure, clean up just when dest did
-    // not pre-exist.
-    const destExisted = (await lstat(dest).catch(() => undefined)) !== undefined;
+    // already hold a live tree another concurrent job populated. Stage the copy
+    // in a temp sibling and only touch dest on success: a failed copy removes
+    // just the staging dir, never the live tree (no `destExisted` check, which
+    // races when two cold-start jobs both see a missing dest).
+    let tmpRoot: string | undefined;
+    let staging: string | undefined;
     try {
       await mkdir(dirname(dest), { recursive: true });
-      await cp(src, dest, { recursive: true });
-      await makeCopiedTreeOwnerWritable(dest);
+      tmpRoot = await mkdtemp(join(dirname(dest), ".dists.seed-"));
+      staging = join(tmpRoot, "dists");
+      await cp(src, staging, { recursive: true });
+      await makeCopiedTreeOwnerWritable(staging);
+      const destNow = await lstat(dest).catch(() => undefined);
+      if (!destNow) {
+        try {
+          await rename(staging, dest);
+        } catch {
+          // Dest appeared concurrently between the check and the rename (or
+          // rename cannot replace it): fall back to merging.
+          await cp(staging, dest, { recursive: true });
+        }
+      } else {
+        await cp(staging, dest, { recursive: true });
+      }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
-      if (!destExisted) {
-        await rm(dest, { recursive: true, force: true }).catch(() => {});
-      }
       return {};
+    } finally {
+      if (tmpRoot) await rm(tmpRoot, { recursive: true, force: true }).catch(() => {});
     }
   }
   let modulesStat: Awaited<ReturnType<typeof lstat>> | undefined;

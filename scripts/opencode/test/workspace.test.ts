@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import {
@@ -979,6 +991,37 @@ describe("prepareGradleSeed", () => {
       expect(seedEnv).toEqual({});
       expect(logged.length).toBe(1);
       expect(await readFile(dest, "utf8")).toBe("stale");
+      // Staging must be cleaned: only the live file remains, no temp siblings.
+      expect(await readdir(join(gradleUserHome, "wrapper"))).toEqual(["dists"]);
+    } finally {
+      await rm(seed, { recursive: true, force: true });
+      await rm(gradleUserHome, { recursive: true, force: true });
+    }
+  });
+
+  test("concurrent cold-start copies share one live tree with no staging leftovers", async () => {
+    const seed = await makeTempDir("jumi-gradle-seed-");
+    const gradleUserHome = await makeTempDir("jumi-gradle-home-");
+    const logged: string[] = [];
+    try {
+      await mkdir(join(seed, "caches", "modules-2"), { recursive: true });
+      await writeFile(join(seed, "caches", "modules-2", "metadata.bin"), "deps");
+      await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
+      await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
+      // Two worker jobs starting cold share GRADLE_USER_HOME. Both must succeed
+      // and the failed-copy path must never delete the tree the other populated:
+      // the copy is staged off-tree, so only staging dirs are ever removed.
+      const [first, second] = await Promise.all([
+        prepareGradleSeed(gradleUserHome, { seedHome: seed, logger: (m) => logged.push(m) }),
+        prepareGradleSeed(gradleUserHome, { seedHome: seed, logger: (m) => logged.push(m) }),
+      ]);
+      expect(first).toEqual({ GRADLE_RO_DEP_CACHE: join(seed, "caches") });
+      expect(second).toEqual({ GRADLE_RO_DEP_CACHE: join(seed, "caches") });
+      expect(logged).toEqual([]);
+      expect(await readFile(join(gradleUserHome, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "utf8")).toBe(
+        "zip"
+      );
+      expect(await readdir(join(gradleUserHome, "wrapper"))).toEqual(["dists"]);
     } finally {
       await rm(seed, { recursive: true, force: true });
       await rm(gradleUserHome, { recursive: true, force: true });
