@@ -1,19 +1,17 @@
 import { access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
+import { stageIssueAttachments } from "./attachments.ts";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
   type ClaimedLoop,
   commitIfDirty,
-  ENGINE_TEMP_DIR,
   inspectRemoteContainsDefault,
   isClaimedEarlyResult,
   openClaimedLoop,
   pushClaimedBranch,
   recheckAssignedAndOpen,
-  removeTree,
   runClaimedLoop,
   STAGE_ALL_ARGS,
   skipClaimedWork,
@@ -38,7 +36,14 @@ import {
 } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { HANDOFF_FILE, handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
+import {
+  type HandoffKey,
+  type HandoffStore,
+  handoffKeyForJob,
+  handoffsFor,
+  injectStoredHandoff,
+  saveWorktreeHandoff,
+} from "./handoff.ts";
 import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
@@ -58,6 +63,7 @@ import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
+import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
@@ -143,6 +149,9 @@ export interface MergeDefaultIntoWorktreeOpts {
   ciMarkdown?: string;
   jobId?: string;
   skipCleanMerge?: boolean;
+  /** Stored previous-round note; saved from the worktree before sentinels are stripped. */
+  handoffStore?: HandoffStore;
+  handoffKey?: HandoffKey;
   /** Called with the runner that ran, before any engine failure is thrown. */
   onRunner?: (runner: RunnerStamp, chainIndex?: number) => void;
 }
@@ -540,12 +549,10 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     });
     mergeNarrowed = engineResult.contributors;
     throwIfEngineFailed(engineResult);
-    await rm(join(worktree, "JUMI_TASK.md"), { force: true });
-    await rm(join(worktree, "JUMI_CONFLICT.md"), { force: true });
-    await rm(join(worktree, CI_LOG_FILE), { force: true });
-    await rm(join(worktree, ATTACHMENTS_MANIFEST), { force: true });
-    await removeTree(join(worktree, ENGINE_TEMP_DIR)).catch(() => undefined);
-    await stripSentinels(worktree, [ATTACHMENTS_MANIFEST]);
+    if (opts.handoffStore && opts.handoffKey) {
+      await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
+    }
+    await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
     remaining = await markerPaths(git, worktree, env);
     if (remaining.length > 0) {
@@ -784,6 +791,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           abortSignal: opts.abortSignal,
           ciMarkdown,
           jobId: opts.jobId ?? opts.job.delivery,
+          handoffStore,
+          handoffKey,
           onPid: loop.engineOnPid(opts.onPid),
           onRunner: (r) => {
             runner = r;
@@ -903,7 +912,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             }
             throwIfEngineFailed(continued);
             await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-            await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", HANDOFF_FILE, ATTACHMENTS_MANIFEST]);
+            await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
           },
         });
       } catch (err) {
@@ -927,10 +936,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         return { status: "skipped", reason: gate.reason };
       }
       if (gate.continued) {
-        await stripSentinels(worktree, ["JUMI_PR.md", "JUMI_TASK.md", HANDOFF_FILE, ATTACHMENTS_MANIFEST]);
+        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
         await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
       }
       await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
 
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
@@ -944,6 +954,20 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         await sticky(reason, pr.number);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
+      }
+      {
+        const added = await tipAddedSentinels(loop.runConfiguredGit, {
+          cwd: loop.worktree,
+          env: loop.env,
+          defaultBranch: opts.job.defaultBranch,
+        });
+        if (added.length > 0) {
+          const reason = sentinelTrackedReason(branch, added);
+          await sticky(reason, pr.number);
+          // The refusal is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
       }
 
       try {
