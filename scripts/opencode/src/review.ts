@@ -1,6 +1,13 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CI_ABSENT_NOTE, CI_LOOKUP_FAILED_REASON, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
+import {
+  CI_ABSENT_NOTE,
+  CI_LOOKUP_FAILED_REASON,
+  inspectCi,
+  isCiLookupRetryMarker,
+  isCiWaitMarker,
+  reviewSkipReasonForCi,
+} from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
@@ -987,12 +994,18 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
 
   if (opts.error && !opts.resultMarkdown) {
-    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, "failure", opts.error, pr.html_url);
-    return { status: "skipped", reason: opts.error };
+    // Internal CI wait/retry markers must never become a forge status
+    // description. A leaked `ci-wait-*` / `ci-lookup-retry:*` marker would
+    // otherwise publish the raw `marker:timestamp` as a failed check.
+    const safeError =
+      isCiWaitMarker(opts.error) || isCiLookupRetryMarker(opts.error) ? CI_LOOKUP_FAILED_REASON : opts.error;
+    await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, "failure", safeError, pr.html_url);
+    return { status: "skipped", reason: safeError };
   }
 
   if (!opts.resultMarkdown) {
-    const reason = opts.resultReason ?? "Incomplete review: no output";
+    const rawReason = opts.resultReason ?? "Incomplete review: no output";
+    const reason = isCiWaitMarker(rawReason) || isCiLookupRetryMarker(rawReason) ? CI_LOOKUP_FAILED_REASON : rawReason;
     const result: ReviewResult = { status: "skipped", reason };
     if (reason === "Incomplete review: no output") {
       await upsertStuckText(forgeApi, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
