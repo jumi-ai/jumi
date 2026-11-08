@@ -111,7 +111,7 @@ describe("codexArgv", () => {
     expect(args).toContain("features.multi_agent=false");
     expect(args).toContain("features.apps=false");
     expect(args).toContain(`model_reasoning_effort="${CODEX_DEFAULT_EFFORT}"`);
-    expect(args).toContain('web_search="disabled"');
+    expect(args).toContain('web_search="live"');
     expect(args).not.toContain("--full-auto");
     expect(args).not.toContain("--yolo");
     expect(args).not.toContain("--search");
@@ -176,7 +176,7 @@ describe("codexArgv", () => {
     expect(resumed).toContain("features.multi_agent=false");
     expect(resumed).toContain("features.apps=false");
     expect(resumed).toContain("agents.enabled=false");
-    expect(resumed).toContain('web_search="disabled"');
+    expect(resumed).toContain('web_search="live"');
     expect(resumed).toContain("features.context_management.experimental_mode=false");
     expect(resumed).toContain("otel.log_user_prompt=false");
     expect(resumed).toContain('otel.trace_exporter="none"');

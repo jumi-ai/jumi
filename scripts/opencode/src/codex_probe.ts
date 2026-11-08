@@ -4,11 +4,12 @@
  * checkout trying to undo it.
  *
  * Jumi loads a repository's `.codex` config, hooks, and MCP servers on purpose.
- * What keeps Codex off the forge is that `-c` outranks that config, so
- * `web_search` stays disabled. A release that flips the precedence would keep
- * every unit test green, so this drives the real binary instead.
+ * What keeps web search on against a checkout that disables it is that `-c`
+ * outranks that config, so `web_search` stays live. A release that flips the
+ * precedence would keep every unit test green, so this drives the real binary
+ * instead.
  *
- * How: plant a checkout whose `.codex/config.toml` turns web search back on and
+ * How: plant a checkout whose `.codex/config.toml` turns web search off and
  * point the production argv at a loopback Responses endpoint, then read the tool
  * list out of the request the binary sends. A second run drops Jumi's
  * `web_search` override, so a checkout that stopped loading fails here instead
@@ -24,7 +25,7 @@ import { codexArgv } from "./codex.ts";
 const INSTRUCTIONS_MARKER = "JUMI-CODEX-CONFIG-PROBE-REACHED";
 /** Hang guard: the endpoint refuses every request, so a healthy run is seconds. */
 const RUN_TIMEOUT_MS = 45_000;
-const WEB_SEARCH_OVERRIDE = 'web_search="disabled"';
+const WEB_SEARCH_OVERRIDE = 'web_search="live"';
 
 export interface CaseResult {
   readonly name: string;
@@ -74,8 +75,8 @@ export function judgeProduction(run: RunReport): CaseResult[] {
     { name: "the checkout's hook runs", ok: run.hookRan, observed: run.hookRan ? "ran" : "did not run" },
     { name: "the checkout's MCP server starts", ok: run.mcpRan, observed: run.mcpRan ? "started" : "did not start" },
     {
-      name: "web search stays off against the checkout's config",
-      ok: tools.length > 0 && !offersWebSearch(run.bodies),
+      name: "web search stays on against the checkout's config",
+      ok: tools.length > 0 && offersWebSearch(run.bodies),
       observed: `tools: ${tools.join(", ") || "<none>"}`,
     },
   ];
@@ -84,20 +85,20 @@ export function judgeProduction(run: RunReport): CaseResult[] {
 /** Without Jumi's override the checkout's setting wins, so the case above is not vacuous. */
 export function judgeControl(run: RunReport): CaseResult {
   return {
-    name: "control: without the override the checkout's web_search reaches the model",
-    ok: offersWebSearch(run.bodies),
+    name: "control: without the override the checkout's disabled web_search wins",
+    ok: run.bodies.length > 0 && !offersWebSearch(run.bodies),
     observed: `tools: ${offeredTools(run.bodies).join(", ") || "<none>"}`,
   };
 }
 
-/** A checkout using each thing Jumi lets a repository bring, and turning web search back on. */
+/** A checkout using each thing Jumi lets a repository bring, and turning web search off. */
 async function seedCheckout(workdir: string, dir: string): Promise<void> {
   await mkdir(join(workdir, ".codex"), { recursive: true });
   await writeFile(
     join(workdir, ".codex", "config.toml"),
     [
       `developer_instructions = "${INSTRUCTIONS_MARKER}"`,
-      'web_search = "live"',
+      'web_search = "disabled"',
       "[mcp_servers.jumiprobe]",
       'command = "/bin/sh"',
       `args = ["-c", "touch ${dir}/mcp-ran; sleep 1"]`,
