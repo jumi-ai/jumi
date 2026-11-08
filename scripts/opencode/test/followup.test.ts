@@ -1851,7 +1851,7 @@ describe("implementFollowUp", () => {
       const kinds: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -1908,7 +1908,7 @@ describe("implementFollowUp", () => {
         runtime,
         gitRunner: async (args) => {
           const gitArgs = stripGitConfigArgs(args);
-          if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+          if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
             throw new Error("git merge-base --is-ancestor failed with exit code 1");
           }
           if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -1971,7 +1971,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -2090,7 +2090,7 @@ describe("implementFollowUp", () => {
       let conflictDone = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -2132,7 +2132,7 @@ describe("implementFollowUp", () => {
       let conflictDone = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -2177,7 +2177,7 @@ describe("implementFollowUp", () => {
       let conflictDone = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
-        if (gitArgs[0] === "merge-base" && gitArgs.includes("HEAD")) {
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
           throw new Error("git merge-base --is-ancestor failed with exit code 1");
         }
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");

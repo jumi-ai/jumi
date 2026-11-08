@@ -1,6 +1,6 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
+import { stageIssueAttachments } from "./attachments.ts";
 import {
   buildCiMarkdown,
   CI_LOG_FILE,
@@ -52,7 +52,7 @@ import {
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { HANDOFF_FILE, handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
+import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
 import { ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
@@ -77,6 +77,7 @@ import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
+import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
@@ -1272,6 +1273,8 @@ export async function implementFollowUp(
             abortSignal: opts.abortSignal,
             jobId: opts.jobId ?? opts.job.delivery,
             ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+            handoffStore,
+            handoffKey,
             onPid: loop.engineOnPid(opts.onPid),
             onRunner: (r) => {
               runner = r;
@@ -1538,14 +1541,7 @@ export async function implementFollowUp(
       throwIfAborted(opts.abortSignal);
       const prFileContents = await readPullRequestDescription(worktree);
       await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-      await stripSentinels(worktree, [
-        PR_DESCRIPTION_FILE,
-        "JUMI_TASK.md",
-        "JUMI_FEEDBACK.md",
-        CI_LOG_FILE,
-        HANDOFF_FILE,
-        ATTACHMENTS_MANIFEST,
-      ]);
+      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
@@ -1568,6 +1564,20 @@ export async function implementFollowUp(
         await sticky(reason, pr.number);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
+      }
+      {
+        const added = await tipAddedSentinels(loop.runConfiguredGit, {
+          cwd: loop.worktree,
+          env: loop.env,
+          defaultBranch: opts.job.defaultBranch,
+        });
+        if (added.length > 0) {
+          const reason = sentinelTrackedReason(branch, added);
+          await sticky(reason, pr.number);
+          // The refusal is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
       }
       try {
         await pushClaimedBranch(loop, branch);

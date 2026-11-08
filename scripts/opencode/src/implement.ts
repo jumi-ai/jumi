@@ -1,7 +1,7 @@
 import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
-import { ATTACHMENTS_MANIFEST, stageIssueAttachments } from "./attachments.ts";
+import { stageIssueAttachments } from "./attachments.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -43,7 +43,6 @@ import type { FollowUpResult } from "./followup.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
 import {
-  HANDOFF_FILE,
   type HandoffStore,
   handoffKeyForJob,
   handoffsFor,
@@ -59,6 +58,7 @@ import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
+import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import {
@@ -578,15 +578,7 @@ async function implementExternalIssue(
       if (handoffStore && handoffKey) {
         await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
       }
-      await stripSentinels(worktree, [
-        PR_DESCRIPTION_FILE,
-        SKIP_FILE,
-        "JUMI_TASK.md",
-        QUEUE_FILE,
-        BLOCKED_BY_FILE,
-        HANDOFF_FILE,
-        ATTACHMENTS_MANIFEST,
-      ]);
+      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
         if (validatedSkip) {
@@ -612,6 +604,18 @@ async function implementExternalIssue(
         const reason = attachmentsTrackedReason(branch);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
         return { status: "skipped", reason };
+      }
+      {
+        const added = await tipAddedSentinels(loop.runConfiguredGit, {
+          cwd: loop.worktree,
+          env: loop.env,
+          defaultBranch: effectiveJob.defaultBranch,
+        });
+        if (added.length > 0) {
+          const reason = sentinelTrackedReason(branch, added);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
       }
       try {
         await pushClaimedBranch(loop, branch);
@@ -1072,15 +1076,7 @@ export async function implementIssue(
         prFileContents = await readPullRequestDescription(worktree);
         const validatedSkip = await readValidatedSkip(worktree);
         await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-        await stripSentinels(worktree, [
-          PR_DESCRIPTION_FILE,
-          SKIP_FILE,
-          "JUMI_TASK.md",
-          QUEUE_FILE,
-          BLOCKED_BY_FILE,
-          HANDOFF_FILE,
-          ATTACHMENTS_MANIFEST,
-        ]);
+        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
         porcelain = await worktreePorcelain(loop);
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
           if (validatedSkip) {
@@ -1124,6 +1120,21 @@ export async function implementIssue(
         await loop.stampTerminalClaim(opts.api);
         await loop.detachWorktree();
         return { status: "skipped", reason };
+      }
+      {
+        const added = await tipAddedSentinels(loop.runConfiguredGit, {
+          cwd: loop.worktree,
+          env: loop.env,
+          defaultBranch: opts.job.defaultBranch,
+        });
+        if (added.length > 0) {
+          const reason = sentinelTrackedReason(branch, added);
+          await diary(reason);
+          await loop.stopHeartbeat();
+          await loop.stampTerminalClaim(opts.api);
+          await loop.detachWorktree();
+          return { status: "skipped", reason };
+        }
       }
       try {
         await pushClaimedBranch(loop, branch);
