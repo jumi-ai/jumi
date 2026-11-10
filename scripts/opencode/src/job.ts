@@ -348,7 +348,7 @@ export function loadJobConfigs(env: JobEnv = process.env): {
   const resolved = overlaySecretsFromFile(env);
   delete process.env[SECRETS_FILE_ENV];
   const engineConfig = loadConfig({ ...resolved, JUMI_ROLE: "engine" });
-  const workerConfig = loadWorkerConfig(resolved);
+  const workerConfig = loadWorkerConfig(resolved, { requireWebhookSecret: false });
   return { engineConfig, workerConfig };
 }
 

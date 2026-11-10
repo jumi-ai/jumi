@@ -1,5 +1,5 @@
 import { GITHUB_ENV, loadForgeBind, overlaySecretsFromFile, SECRETS_DIR_ENV } from "./config.ts";
-import { type ForgeKind, parseForge } from "./forge.ts";
+import type { ForgeKind } from "./forge.ts";
 import { parseOpenCodeWellKnownUrl } from "./opencode_auth.ts";
 import {
   type IndependentReviewConfig,
@@ -61,12 +61,6 @@ export interface WorkerConfig {
 
 type Env = Record<string, string | undefined>;
 
-function requireEnv(env: Env, name: string): string {
-  const value = env[name];
-  if (!value) throw new Error(`Missing required environment variable: ${name}`);
-  return value;
-}
-
 function optionalEnv(env: Env, name: string, fallback?: string): string | undefined {
   return env[name] || fallback;
 }
@@ -90,11 +84,7 @@ function csvEnv(env: Env, name: string, fallback: string[] = []): string[] {
     .filter(Boolean);
 }
 
-function normalizeUrl(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
+export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookSecret?: boolean } = {}): WorkerConfig {
   const resolved = overlaySecretsFromFile(env);
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
@@ -106,21 +96,9 @@ export function loadWorkerConfig(env: Env = process.env): WorkerConfig {
     fallbackModel: optionalEnv(resolved, "OPENCODE_FALLBACK_MODEL"),
     fallbackVariant: optionalEnv(resolved, "OPENCODE_FALLBACK_VARIANT"),
   };
-  const forge = parseForge(resolved.FORGE);
+  const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: opts.requireWebhookSecret ?? true });
   const runnersFile = optionalEnv(resolved, "JUMI_RUNNERS_FILE");
-  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv, forge);
-  const forgeBind =
-    forge === "github"
-      ? loadForgeBind(resolved, { requireWebhookSecret: true })
-      : {
-          forge,
-          giteaUrl: normalizeUrl(requireEnv(resolved, "GITEA_URL")),
-          giteaToken: requireEnv(resolved, "GITEA_BOT_TOKEN"),
-          webhookSecret: requireEnv(resolved, "GITEA_WEBHOOK_SECRET"),
-          webhookAuthToken: optionalEnv(resolved, "GITEA_WEBHOOK_AUTH_TOKEN"),
-          allowedOrgs: csvEnv(resolved, "GITEA_ALLOWED_ORGS", ["kirmanak"]),
-          allowedRepos: csvEnv(resolved, "GITEA_ALLOWED_REPOS"),
-        };
+  const runnersCatalog = loadRunnersCatalog(runnersFile, fromEnv, forgeBind.forge);
   return {
     host: optionalEnv(resolved, "HOST", "0.0.0.0") ?? "0.0.0.0",
     port: intEnv(resolved, "PORT", 3000),
