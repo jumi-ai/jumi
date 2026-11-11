@@ -954,7 +954,9 @@ export function workerMailboxApi(
   api: ReviewApi & Partial<Pick<Forge, "deleteGitRef">>
 ): HandleWorkerWebhookDeps["api"] {
   const extra = api as ReviewApi &
-    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits" | "deleteGitRef">> & {
+    Partial<
+      Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits" | "deleteGitRef">
+    > & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
   return {
@@ -971,9 +973,7 @@ export function workerMailboxApi(
     listPullCommits: extra.listPullCommits
       ? (owner, repo, index) => extra.listPullCommits!(owner, repo, index)
       : undefined,
-    deleteGitRef: extra.deleteGitRef
-      ? (owner, repo, ref) => extra.deleteGitRef!(owner, repo, ref)
-      : undefined,
+    deleteGitRef: extra.deleteGitRef ? (owner, repo, ref) => extra.deleteGitRef!(owner, repo, ref) : undefined,
     rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
 }

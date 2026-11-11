@@ -18,7 +18,7 @@ import {
 import { GithubAPI } from "../src/github_api.ts";
 import { shouldEnqueuePushConflicts } from "../src/push_webhook.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
-import { makeIssueJob, makePushPayload, makeRepo } from "./fixtures.ts";
+import { makePushPayload, makeRepo } from "./fixtures.ts";
 
 function makeLoop(overrides: Partial<CheckpointLoop> & { git: CheckpointLoop["runConfiguredGit"] }): CheckpointLoop {
   return {
@@ -91,7 +91,7 @@ describe("pushCheckpointRef", () => {
     const pushes: string[][] = [];
     const loop = makeLoop({
       refExists: async () => true,
-      git: async (args, opts) => {
+      git: async (args, _opts) => {
         if (args[0] === "rev-parse") return "abc123";
         if (args[0] === "ls-tree") return "";
         if (args[0] === "merge-base") return "";

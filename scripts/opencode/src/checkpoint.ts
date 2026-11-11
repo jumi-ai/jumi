@@ -499,10 +499,7 @@ export interface SweepStaleCheckpointsOpts {
  * refs are not an error). Best-effort: fetch/listing failures yield an empty
  * sweep and individual delete failures are logged once; never throws.
  */
-export async function sweepStaleCheckpoints(
-  loop: CheckpointLoop,
-  opts: SweepStaleCheckpointsOpts
-): Promise<string[]> {
+export async function sweepStaleCheckpoints(loop: CheckpointLoop, opts: SweepStaleCheckpointsOpts): Promise<string[]> {
   if (!(opts.maxAgeMs > 0)) return [];
   try {
     await loop.runConfiguredGit(["fetch", "origin", `+${CHECKPOINT_REF_PREFIX}*:${CHECKPOINT_REF_PREFIX}*`], {
@@ -514,10 +511,13 @@ export async function sweepStaleCheckpoints(
   }
   let listing = "";
   try {
-    listing = await loop.runConfiguredGit(["for-each-ref", "--format=%(refname) %(committerdate:unix)", CHECKPOINT_REF_PREFIX], {
-      cwd: loop.barePath,
-      env: loop.env,
-    });
+    listing = await loop.runConfiguredGit(
+      ["for-each-ref", "--format=%(refname) %(committerdate:unix)", CHECKPOINT_REF_PREFIX],
+      {
+        cwd: loop.barePath,
+        env: loop.env,
+      }
+    );
   } catch {
     return [];
   }
