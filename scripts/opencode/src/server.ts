@@ -71,6 +71,7 @@ import {
   validateWebhookPayload,
   verifyGiteaSignature,
 } from "./webhook.ts";
+import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
 import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
 import { createReviewWorkspace, gitAuthResolverFor, removeReviewWorkspace } from "./workspace.ts";
@@ -111,6 +112,8 @@ export interface FetchHandlerDeps {
   ciApi?: Pick<ReviewApi, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
   /** HOME for CI latch reads (defaults to config.home). */
   ciHome?: string;
+  /** Replay guard for delivery IDs. Defaults to a handler-local LRU. */
+  deliveryDedupe?: DeliveryDedupe;
 }
 
 export interface RunReviewJobExtras {
@@ -289,6 +292,7 @@ function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
 export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps) {
   const logger = deps.logger ?? log;
   const webhookEnabled = deps.webhookEnabled ?? true;
+  const deliveryDedupe = deps.deliveryDedupe ?? createDeliveryDedupe();
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
@@ -304,6 +308,11 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     }
     if (url.pathname === "/webhooks/github") {
       if (!webhookEnabled) return json(404, { error: "not found" });
+      const githubDelivery = request.headers.get("x-github-delivery");
+      if (githubDelivery && deliveryDedupe.seen(githubDelivery)) {
+        logger(`deduped replay delivery=${githubDelivery}`);
+        return json(202, { queued: false, deduped: true });
+      }
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
@@ -345,6 +354,10 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
       if (event === "ping" || eventType === "ping") return json(200, { ok: true });
 
       const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+      if (request.headers.get("x-gitea-delivery") && deliveryDedupe.seen(delivery)) {
+        logger(`deduped replay delivery=${delivery}`);
+        return json(202, { queued: false, deduped: true });
+      }
       const reviewAction = event === "pull_request" ? peekWebhookAction(rawBody) : undefined;
       if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
         try {

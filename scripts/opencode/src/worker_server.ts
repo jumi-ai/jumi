@@ -17,6 +17,7 @@ import { createPgReviewJobStore, isJobMode, QUEUE_POLL_MS, type ReviewJobStore }
 import { installProcessShutdown } from "./shutdown.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
+import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
 import {
   abortIssueQueue,
   createIssueQueue,
@@ -57,10 +58,13 @@ function authMatches(actual: string | null, expected?: string): boolean {
 
 export interface WorkerFetchHandlerDeps extends HandleWorkerWebhookDeps {
   queue: WorkerQueueLike;
+  /** Replay guard for delivery IDs. Defaults to a handler-local LRU. */
+  deliveryDedupe?: DeliveryDedupe;
 }
 
 export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetchHandlerDeps) {
   const logger = deps.logger ?? log;
+  const deliveryDedupe = deps.deliveryDedupe ?? createDeliveryDedupe();
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
@@ -73,6 +77,11 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       });
     }
     if (url.pathname === "/webhooks/github") {
+      const githubDelivery = request.headers.get("x-github-delivery");
+      if (githubDelivery && deliveryDedupe.seen(githubDelivery)) {
+        logger(`deduped replay delivery=${githubDelivery}`);
+        return json(202, { queued: false, deduped: true });
+      }
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
@@ -112,11 +121,17 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       );
       if (!signatureOk) return json(401, { error: "invalid signature" });
 
+      const deliveryHeader = request.headers.get("x-gitea-delivery");
+      if (deliveryHeader && deliveryDedupe.seen(deliveryHeader)) {
+        logger(`deduped replay delivery=${deliveryHeader}`);
+        return json(202, { queued: false, deduped: true });
+      }
+
       return handleWorkerWebhookEvent(
         rawBody,
         request.headers.get("x-gitea-event"),
         request.headers.get("x-gitea-event-type"),
-        request.headers.get("x-gitea-delivery") ?? crypto.randomUUID(),
+        deliveryHeader ?? crypto.randomUUID(),
         {
           giteaUrl: config.giteaUrl,
           allowedOrgs: config.allowedOrgs,

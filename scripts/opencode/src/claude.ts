@@ -155,7 +155,7 @@ export function scrubbedKey(key: string): boolean {
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
