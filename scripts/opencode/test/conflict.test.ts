@@ -3,7 +3,14 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
-import { CONFLICT_TIMEOUT_MS, implementConflict, readConflictState, writeConflictState } from "../src/conflict.ts";
+import {
+  CONFLICT_TIMEOUT_MS,
+  implementConflict,
+  readConflictState,
+  shouldIncrementRound,
+  shouldResetConflictRound,
+  writeConflictState,
+} from "../src/conflict.ts";
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { handoffKey, MemoryHandoffStore } from "../src/handoff.ts";
@@ -126,6 +133,18 @@ function conflictThenResolvedGit(extra: GitRunner = async () => ""): GitRunner {
     return extra(args, opts);
   });
 }
+
+describe("conflict rounds", () => {
+  test("only failed resolutions increment; successful merges reset", () => {
+    const base = { headSha: "headsha", baseSha: "basesha", openCodeRan: false, conflicted: false } as const;
+    expect(shouldIncrementRound({ ...base, status: "stuck" })).toBe(true);
+    expect(shouldIncrementRound({ ...base, status: "merged", openCodeRan: true, conflicted: true })).toBe(false);
+    expect(shouldIncrementRound({ ...base, status: "up-to-date" })).toBe(false);
+    expect(shouldResetConflictRound({ ...base, status: "merged", openCodeRan: true, conflicted: true })).toBe(true);
+    expect(shouldResetConflictRound({ ...base, status: "stuck" })).toBe(false);
+    expect(shouldResetConflictRound({ ...base, status: "up-to-date" })).toBe(false);
+  });
+});
 
 describe("implementConflict", () => {
   test("skips when no open jumi closing PR", async () => {
@@ -835,7 +854,7 @@ describe("implementConflict", () => {
       const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
       expect(state.lastHeadSha).toBe("headsha");
       expect(state.lastBaseSha).toBe("basesha");
-      expect(state.round).toBe(1);
+      expect(state.round).toBe(0);
     });
   });
 

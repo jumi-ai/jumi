@@ -2058,7 +2058,8 @@ describe("implementFollowUp", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const pr = { ...jumiPr(), mergeable: false as const };
+      const api = makeApi({ listOpenPulls: async () => [pr] });
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -2079,9 +2080,150 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({ status: "skipped", reason: "stuck: cannot resolve conflicts" });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "stuck: cannot resolve conflicts (3/3 conflict rounds)",
+      });
       expect(openCode).toBe(0);
-      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts");
+      expect(api.comments.at(-1)).toContain("stuck: cannot resolve conflicts (3/3 conflict rounds)");
+      expect(api.comments.at(-1)).toContain("stuck kick");
+    });
+  });
+
+  test("mergeable pull with exhausted conflict counter still runs follow-up for unhandled comment", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi();
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return " M src/demo.ts";
+          if (gitArgs[0] === "rev-list") return "1";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(1);
+      expect(result.status).toBe("pushed");
+      const followup = await readFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12));
+      expect(followup.round).toBe(1);
+    });
+  });
+
+  test("mergeable pull with exhausted conflict counter still runs for red CI", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]boom\n",
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(1);
+      expect(result.status).not.toEqual({
+        status: "skipped",
+        reason: "stuck: cannot resolve conflicts (3/3 conflict rounds)",
+      });
+    });
+  });
+
+  test("conflicted pull at conflict cap with feedback reports the conflict cap, not the follow-up budget", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "abc",
+        lastBaseSha: "def",
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 3,
+        lastHeadSha: "",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+      });
+      const pr = { ...jumiPr(), mergeable: false as const };
+      const api = makeApi({ listOpenPulls: async () => [pr] });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(0);
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "stuck: cannot resolve conflicts (3/3 conflict rounds)",
+      });
+      expect(api.comments.at(-1)).toContain("stuck kick");
     });
   });
 
@@ -2121,7 +2263,7 @@ describe("implementFollowUp", () => {
       });
       expect(result.status).toBe("pushed");
       const conflict = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
-      expect(conflict.round).toBe(1);
+      expect(conflict.round).toBe(0);
       expect(conflict.lastHeadSha).toBe("abc123");
       expect(conflict.lastBaseSha).toBe("abc123");
     });

@@ -139,7 +139,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per skip-latch generation |
-| `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
+| `MAX_CONFLICT_ROUNDS` | `3` | Max consecutive failed conflict-resolution rounds per issue. Only rounds that fail to resolve count; a round that resolves and pushes resets the counter to 0. The cap gates conflict-resolution work only: a follow-up on a mergeable pull runs normally bounded by `MAX_FOLLOWUP_ROUNDS` whatever the counter says |
 | `AGENT_INSTANCE` | `jumi` | Prometheus `agent_instance` label on `/metrics`. Phoenix project name for **both** OpenCode and Claude traces. Worker image sets `jumi-worker` |
 | `PHOENIX_OTLP_ENDPOINT` | unset | In-cluster Phoenix OTLP HTTP base URL (app port, `/v1/traces`). Unset skips export. Use an in-cluster URL, not a public hostname. Also enables Claude tracing, which posts to `<base>/v1/projects/<AGENT_INSTANCE>/spans` — the parent strips the `/v1/traces` path rather than reusing it |
 | `LEASE_MS` | `OPENCODE_TIMEOUT_MS + 10m` | Engine lease length before reclaim |
