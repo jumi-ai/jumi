@@ -1,3 +1,4 @@
+import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   ciStatePath,
   claimFilePath,
@@ -104,6 +105,9 @@ export function createIssueQueue(
           handoffs: handoffs ?? handoffsFor({ home: config.home }),
           workdir: config.workdir,
           maxOutputBytes: config.maxOutputBytes,
+          checkpointEnabled: config.checkpointEnabled,
+          checkpointIntervalMs: config.checkpointIntervalMs,
+          checkpointMaxAgeMs: config.checkpointMaxAgeMs,
           sanitizeOpenCodeEnv: true,
           abortSignal: abort.signal,
           logger: (message: string) => logger(message),
@@ -210,6 +214,9 @@ export async function handleIssueCancel(
   if (!store || handoffStore !== store.handoffs) {
     await handoffStore.deleteForIssue(owner, repo, issueNumber);
   }
+  await deleteCheckpointForIssueViaForge(api, owner, repo, issueNumber, {
+    log: (message) => log(message),
+  });
   const cancelledQueued = store ? await store.cancelQueuedForIssue(owner, repo, issueNumber) : 0;
   // The ledger mark lands before the in-process abort below: a tick woken by
   // the abort always observes the mark in its settle check instead of racing
@@ -577,6 +584,9 @@ export async function processWorkerTick(
       handoffs: store.handoffs,
       workdir: config.workdir,
       maxOutputBytes: config.maxOutputBytes,
+      checkpointEnabled: config.checkpointEnabled,
+      checkpointIntervalMs: config.checkpointIntervalMs,
+      checkpointMaxAgeMs: config.checkpointMaxAgeMs,
       sanitizeOpenCodeEnv: true,
       useClaim: false,
       abortSignal: abort.signal,

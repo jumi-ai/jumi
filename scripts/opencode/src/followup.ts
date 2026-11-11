@@ -2,6 +2,14 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
 import {
+  beginCheckpointing,
+  checkpointRefForJob,
+  DEFAULT_CHECKPOINT_INTERVAL_MS,
+  deleteCheckpointForIssueViaForge,
+  deleteCheckpointRefViaForge,
+  restoreCheckpoint,
+} from "./checkpoint.ts";
+import {
   buildCiMarkdown,
   CI_LOG_FILE,
   type CiInspection,
@@ -1144,6 +1152,21 @@ export async function implementFollowUp(
   if (opts.job.trigger?.reviewId !== undefined) handledReviewIds.push(opts.job.trigger.reviewId);
 
   let followUpEngineRan = false;
+  let followUpCheckpointRef: string | undefined;
+  try {
+    followUpCheckpointRef = checkpointRefForJob(opts.job);
+  } catch {
+    followUpCheckpointRef = undefined;
+  }
+  const followUpCheckpointEnabled = opts.checkpointEnabled ?? true;
+  const followUpCheckpointIntervalMs = opts.checkpointIntervalMs ?? DEFAULT_CHECKPOINT_INTERVAL_MS;
+  const followUpCheckpoint =
+    followUpCheckpointRef &&
+    followUpCheckpointEnabled &&
+    followUpCheckpointIntervalMs > 0 &&
+    branch !== opts.job.defaultBranch
+      ? { ref: followUpCheckpointRef, intervalMs: followUpCheckpointIntervalMs }
+      : undefined;
   const persistCi = async () => {
     if (!followUpEngineRan || ci.failed.length === 0) return;
     await recordCiHandled({
@@ -1201,7 +1224,7 @@ export async function implementFollowUp(
   let attemptedBaseSha = "";
   let prefixMergeThrew = false;
 
-  return runClaimedLoop(
+  const followUpResult: FollowUpResult = await runClaimedLoop(
     loop,
     opts.abortSignal,
     async () => {
@@ -1223,6 +1246,26 @@ export async function implementFollowUp(
       attemptedHeadSha = headSha;
       attemptedBaseSha = baseSha;
       await loop.stampHeadSha(headSha);
+      if (followUpCheckpoint) {
+        const restored = await restoreCheckpoint(loop, followUpCheckpoint.ref, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        }).catch(() => undefined);
+        if (restored?.restored && restored.sha) {
+          await loop
+            .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
+            .catch(() => undefined);
+        }
+        beginCheckpointing(loop, {
+          ref: followUpCheckpoint.ref,
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          intervalMs: followUpCheckpoint.intervalMs,
+          enabled: true,
+          log,
+        });
+      }
       const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
       const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
       await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
@@ -1590,6 +1633,9 @@ export async function implementFollowUp(
         await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      if (followUpCheckpoint) {
+        await deleteCheckpointRefViaForge(opts.api, owner, repo, followUpCheckpoint.ref, { log });
+      }
       throwIfAborted(opts.abortSignal);
       await persistConflictAttempt(mergeResult);
 
@@ -1658,4 +1704,16 @@ export async function implementFollowUp(
       await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
     }
   );
+  if (
+    followUpCheckpoint &&
+    typeof followUpResult === "object" &&
+    followUpResult !== null &&
+    "status" in followUpResult &&
+    (followUpResult.status === "skipped" ||
+      followUpResult.status === "no-changes" ||
+      followUpResult.status === "cancelled")
+  ) {
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+  }
+  return followUpResult;
 }

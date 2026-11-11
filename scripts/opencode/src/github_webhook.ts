@@ -1,4 +1,5 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
+import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   parseWorkflowJobPayload,
   shouldEnqueueSiblingCheckReview,
@@ -734,13 +735,18 @@ export async function handleGithubWebhookEvent(
     if (event !== "issues") return skipped(`unsupported event ${event ?? "unknown"}`, logger);
 
     const payload = parseIssuesPayload(rawBody);
-    if ((payload.action === "closed" || payload.action === "merged") && deps.worker.handoffs) {
+    if (payload.action === "closed" || payload.action === "merged") {
       try {
         const owner = payload.repository.full_name.split("/")[0] ?? "";
         const repo = payload.repository.full_name.split("/")[1] ?? "";
-        if (owner && repo) await deps.worker.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+        if (owner && repo) {
+          if (deps.worker.handoffs) await deps.worker.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+          await deleteCheckpointForIssueViaForge(deps.worker.api ?? {}, owner, repo, payload.issue.number, {
+            log: logger,
+          });
+        }
       } catch {
-        // Best-effort handoff cleanup only.
+        // Best-effort handoff/checkpoint cleanup only.
       }
     }
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
@@ -755,6 +761,15 @@ export async function handleGithubWebhookEvent(
       const result = deps.worker.cancel
         ? await deps.worker.cancel(decision.owner, decision.repo, decision.issueNumber)
         : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
+      await deleteCheckpointForIssueViaForge(
+        deps.worker.api ?? {},
+        decision.owner,
+        decision.repo,
+        decision.issueNumber,
+        {
+          log: logger,
+        }
+      );
       logger(`cancelled ${result.key}`);
       const cleared = await clearGithubSit(
         deps.worker.sits,
@@ -803,9 +818,14 @@ export async function handleGithubWebhookEvent(
           try {
             const owner = payload.repository.full_name.split("/")[0] ?? "";
             const repo = payload.repository.full_name.split("/")[1] ?? "";
-            if (owner && repo) await deps.worker.handoffs?.deleteForIssue(owner, repo, payload.issue.number);
+            if (owner && repo) {
+              if (deps.worker.handoffs) await deps.worker.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+              await deleteCheckpointForIssueViaForge(deps.worker.api ?? {}, owner, repo, payload.issue.number, {
+                log: logger,
+              });
+            }
           } catch {
-            // Best-effort handoff cleanup only.
+            // Best-effort handoff/checkpoint cleanup only.
           }
           const cleared = await clearGithubSit(
             deps.worker.sits,

@@ -1,3 +1,4 @@
+import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   parseWorkflowJobPayload,
   shouldEnqueueSiblingCheckReview,
@@ -12,7 +13,7 @@ import {
   shouldEnqueuePullAssign,
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
-import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
+import { extractClosingIssueNumbers, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   blockedIssueJobsToEnqueue,
   isDependencyWakeAction,
@@ -51,6 +52,7 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "getCollaboratorPermission"
       | "getAppPermissions"
       | "listPullCommits"
+      | "deleteGitRef"
     >
   > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
@@ -196,6 +198,35 @@ async function clearSitForEnqueue(
   return undefined;
 }
 
+/** Best-effort checkpoint cleanup when a PR closes: the PR's own ref plus any
+ * issue it closes (jumi closer bodies say `Fixes #N`). Deleting a missing ref
+ * is not an error; failures are logged once and never fail the webhook. */
+async function deleteCheckpointsForPrCloseBestEffort(
+  api: WorkerWebhookApi | undefined,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  body: string | null | undefined,
+  logger: (message: string) => void
+): Promise<void> {
+  if (!api?.deleteGitRef) return;
+  const targets = new Set<number>([prNumber, ...extractClosingIssueNumbers({ number: prNumber, body } as never)]);
+  for (const issueNumber of targets) {
+    await deleteCheckpointForIssueViaForge(api, owner, repo, issueNumber, { log: logger });
+  }
+}
+
+async function deleteCheckpointForCancelBestEffort(
+  api: WorkerWebhookApi | undefined,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  logger: (message: string) => void
+): Promise<void> {
+  if (!api?.deleteGitRef) return;
+  await deleteCheckpointForIssueViaForge(api, owner, repo, issueNumber, { log: logger });
+}
+
 /** Best-effort closed/merged marker for the board requeue filter. Never fails the webhook. */
 async function markPullClosedBestEffort(
   sits: RouterSitStore | undefined,
@@ -319,6 +350,19 @@ export async function handleWorkerWebhookEvent(
       const payload = parsePullRequestPayload(rawBody);
       if (action === "closed" || action === "merged") {
         assertRepositoryPolicy(payload.repository, policy);
+        {
+          const [owner, repo] = payload.repository.full_name.split("/");
+          if (owner && repo) {
+            await deleteCheckpointsForPrCloseBestEffort(
+              deps.api,
+              owner,
+              repo,
+              payload.pull_request.number,
+              payload.pull_request.body,
+              logger
+            );
+          }
+        }
         // Handoffs are keyed by issue number, not PR number: a PR close must
         // not delete an unrelated issue's note that shares the number.
         // Issue close cleans the right key on the issues closed path.
@@ -376,6 +420,13 @@ export async function handleWorkerWebhookEvent(
         const result = deps.cancel
           ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
           : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
+        await deleteCheckpointForCancelBestEffort(
+          deps.api,
+          decision.owner,
+          decision.repo,
+          decision.issueNumber,
+          logger
+        );
         logger(`cancelled ${result.key}`);
         if (deps.sits) {
           const cleared = await clearSitForEnqueue(
@@ -621,13 +672,16 @@ export async function handleWorkerWebhookEvent(
     }
 
     const payload = parseIssuesPayload(rawBody);
-    if ((payload.action === "closed" || payload.action === "merged") && deps.handoffs) {
+    if (payload.action === "closed" || payload.action === "merged") {
       try {
         const owner = payload.repository.full_name.split("/")[0] ?? "";
         const repo = payload.repository.full_name.split("/")[1] ?? "";
-        if (owner && repo) await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+        if (owner && repo) {
+          if (deps.handoffs) await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+          await deleteCheckpointForIssueViaForge(deps.api ?? {}, owner, repo, payload.issue.number, { log: logger });
+        }
       } catch {
-        // Best-effort handoff cleanup only.
+        // Best-effort handoff/checkpoint cleanup only.
       }
     }
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
@@ -642,6 +696,7 @@ export async function handleWorkerWebhookEvent(
       const result = deps.cancel
         ? await deps.cancel(decision.owner, decision.repo, decision.issueNumber)
         : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
+      await deleteCheckpointForCancelBestEffort(deps.api, decision.owner, decision.repo, decision.issueNumber, logger);
       logger(`cancelled ${result.key}`);
       if (deps.sits) {
         const cleared = await clearSitForEnqueue(
@@ -701,11 +756,14 @@ export async function handleWorkerWebhookEvent(
           try {
             const owner = payload.repository.full_name.split("/")[0] ?? "";
             const repo = payload.repository.full_name.split("/")[1] ?? "";
-            if (owner && repo && deps.handoffs) {
-              await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+            if (owner && repo) {
+              if (deps.handoffs) await deps.handoffs.deleteForIssue(owner, repo, payload.issue.number);
+              await deleteCheckpointForIssueViaForge(deps.api ?? {}, owner, repo, payload.issue.number, {
+                log: logger,
+              });
             }
           } catch {
-            // Best-effort handoff cleanup only.
+            // Best-effort handoff/checkpoint cleanup only.
           }
           return skipped(decision.reason, logger);
         }
