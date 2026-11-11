@@ -1240,6 +1240,7 @@ export async function implementFollowUp(
       await sweepStaleCheckpoints(loop, {
         maxAgeMs: opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS,
         log,
+        exclude: followUpCheckpoint ? [followUpCheckpoint.ref] : undefined,
       }).catch(() => undefined);
       const attached = await runtime.attachPrWorktree(loop, {
         branch,

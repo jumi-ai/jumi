@@ -325,6 +325,38 @@ describe("POST /webhooks/github", () => {
     expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(0);
   });
 
+  test("unlabel jumi on a PR deletes the checkpoint ref", async () => {
+    const store = new MemoryReviewJobStore();
+    const deletedRefs: string[] = [];
+    const api = {
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" }, created_at: "", updated_at: "" }),
+      updateIssueComment: async () => ({ id: 1, body: "", user: { login: "jumi" }, created_at: "", updated_at: "" }),
+      listOpenPulls: async () => [],
+      getIssue: async () => githubIssue({ number: 55, assignee: null, assignees: [], labels: [{ name: "jumi" }] }),
+      getRepo: async () => githubRepo,
+      getCollaboratorPermission: async () => ({ permission: "write" }),
+      deleteGitRef: async (_owner: string, _repo: string, ref: string) => {
+        deletedRefs.push(ref);
+      },
+    };
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: { enqueue: (job) => store.enqueueIssue(job) },
+        api,
+        cancel: (owner, repo, issueNumber) =>
+          cancelLedgerWorkerJobs({ store, api, owner, repo, issueNumber, botUsername: "jumi" }),
+      },
+    });
+    const unlabeled = labeledForeignPrPayload({ labels: [] });
+    unlabeled.action = "unlabeled";
+    const response = await handler(await signedGithubRequest(unlabeled, { event: "pull_request" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#55", cancelled: true });
+    expect(deletedRefs).toEqual(["refs/jumi/wip/55"]);
+  });
+
   test("GitHub pull_request assigned does not start follow-up", async () => {
     const { handler, store } = mailbox();
     const response = await handler(

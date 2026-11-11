@@ -347,6 +347,35 @@ describe("stale sweep", () => {
     });
     await expect(sweepStaleCheckpoints(loop, { maxAgeMs: 1000 })).resolves.toEqual([]);
   });
+
+  test("sweepStaleCheckpoints keeps the active run ref even when stale", async () => {
+    const nowMs = 1_700_000_000_000;
+    const nowSec = Math.floor(nowMs / 1000);
+    const deletedPushes: string[] = [];
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "for-each-ref") {
+          return [`refs/jumi/wip/12 ${nowSec - 8 * 24 * 3600}`, `refs/jumi/wip/13 ${nowSec - 9 * 24 * 3600}`].join(
+            "\n"
+          );
+        }
+        if (args[0] === "push" && typeof args[2] === "string" && args[2].startsWith(":")) {
+          deletedPushes.push(args[2].slice(1));
+          return "";
+        }
+        if (args[0] === "update-ref") return "";
+        return "";
+      },
+    });
+    const deleted = await sweepStaleCheckpoints(loop, {
+      maxAgeMs: 7 * 24 * 3600 * 1000,
+      nowMs,
+      exclude: ["refs/jumi/wip/12"],
+    });
+    expect(deleted).toEqual(["refs/jumi/wip/13"]);
+    expect(deletedPushes).toEqual(["refs/jumi/wip/13"]);
+  });
 });
 
 describe("checkpoint ticker", () => {

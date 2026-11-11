@@ -517,6 +517,15 @@ export async function handleGithubWebhookEvent(
           const result = deps.worker.cancel
             ? await deps.worker.cancel(decision.owner, decision.repo, decision.issueNumber)
             : { key: cancelKey(decision.owner, decision.repo, decision.issueNumber), cancelled: true as const };
+          await deleteCheckpointForIssueViaForge(
+            deps.worker.api ?? {},
+            decision.owner,
+            decision.repo,
+            decision.issueNumber,
+            {
+              log: logger,
+            }
+          );
           logger(`cancelled ${result.key}`);
           const cleared = await clearGithubSit(
             deps.worker.sits,

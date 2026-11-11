@@ -408,10 +408,11 @@ function checkpointTickerForRun(
 async function sweepStaleCheckpointsBestEffort(
   loop: Parameters<typeof sweepStaleCheckpoints>[0],
   opts: Pick<ImplementOptions, "checkpointMaxAgeMs">,
-  log: (message: string) => void
+  log: (message: string) => void,
+  exclude?: readonly string[]
 ): Promise<void> {
   const maxAgeMs = opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS;
-  await sweepStaleCheckpoints(loop, { maxAgeMs, log }).catch(() => undefined);
+  await sweepStaleCheckpoints(loop, { maxAgeMs, log, exclude }).catch(() => undefined);
 }
 
 export function buildTaskMarkdown(job: IssueJob): string {
@@ -568,7 +569,7 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpointsBestEffort(loop, opts, log);
+      await sweepStaleCheckpointsBestEffort(loop, opts, log, externalCheckpoint ? [externalCheckpoint.ref] : undefined);
       if (externalCheckpoint) {
         await restoreCheckpoint(loop, externalCheckpoint.ref, {
           branch,
@@ -869,7 +870,7 @@ export async function implementIssue(
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpointsBestEffort(loop, opts, log);
+      await sweepStaleCheckpointsBestEffort(loop, opts, log, checkpoint ? [checkpoint.ref] : undefined);
       if (checkpoint) {
         await restoreCheckpoint(loop, checkpoint.ref, {
           branch,

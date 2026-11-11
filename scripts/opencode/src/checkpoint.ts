@@ -490,6 +490,8 @@ export interface SweepStaleCheckpointsOpts {
   maxAgeMs: number;
   nowMs?: number;
   log?: (message: string) => void;
+  /** Refs to keep even when stale — the active run's own checkpoint. */
+  exclude?: readonly string[];
 }
 
 /**
@@ -533,8 +535,10 @@ export async function sweepStaleCheckpoints(loop: CheckpointLoop, opts: SweepSta
     entries.push({ ref, commitUnixTime: Number.isFinite(commitUnixTime) ? commitUnixTime : undefined });
   }
   const stale = staleCheckpointRefs(entries, { maxAgeMs: opts.maxAgeMs, nowMs: opts.nowMs });
+  const keep = new Set(opts.exclude ?? []);
   const deleted: string[] = [];
   for (const ref of stale) {
+    if (keep.has(ref)) continue;
     try {
       const result = await deleteCheckpointRef(loop, ref, { log: opts.log });
       if (result.deleted) deleted.push(ref);
