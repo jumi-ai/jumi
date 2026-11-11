@@ -486,6 +486,68 @@ export function staleCheckpointRefs(
     .map((entry) => entry.ref);
 }
 
+export interface SweepStaleCheckpointsOpts {
+  maxAgeMs: number;
+  nowMs?: number;
+  log?: (message: string) => void;
+}
+
+/**
+ * Production stale-ref sweep: fetch all `refs/jumi/wip/*` from the forge into
+ * the bare cache, list them with committer timestamps, and delete entries
+ * older than `maxAgeMs` via `deleteCheckpointRef` (remote + local, missing
+ * refs are not an error). Best-effort: fetch/listing failures yield an empty
+ * sweep and individual delete failures are logged once; never throws.
+ */
+export async function sweepStaleCheckpoints(
+  loop: CheckpointLoop,
+  opts: SweepStaleCheckpointsOpts
+): Promise<string[]> {
+  if (!(opts.maxAgeMs > 0)) return [];
+  try {
+    await loop.runConfiguredGit(["fetch", "origin", `+${CHECKPOINT_REF_PREFIX}*:${CHECKPOINT_REF_PREFIX}*`], {
+      cwd: loop.barePath,
+      env: loop.env,
+    });
+  } catch {
+    // Fall through to whatever refs already exist locally.
+  }
+  let listing = "";
+  try {
+    listing = await loop.runConfiguredGit(["for-each-ref", "--format=%(refname) %(committerdate:unix)", CHECKPOINT_REF_PREFIX], {
+      cwd: loop.barePath,
+      env: loop.env,
+    });
+  } catch {
+    return [];
+  }
+  const entries: StaleCheckpoint[] = [];
+  for (const line of listing.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split(/\s+/);
+    const ref = parts[0];
+    const stamp = parts[1];
+    if (!ref || stamp === undefined) continue;
+    const commitUnixTime = Number.parseInt(stamp, 10);
+    entries.push({ ref, commitUnixTime: Number.isFinite(commitUnixTime) ? commitUnixTime : undefined });
+  }
+  const stale = staleCheckpointRefs(entries, { maxAgeMs: opts.maxAgeMs, nowMs: opts.nowMs });
+  const deleted: string[] = [];
+  for (const ref of stale) {
+    try {
+      const result = await deleteCheckpointRef(loop, ref, { log: opts.log });
+      if (result.deleted) deleted.push(ref);
+    } catch {
+      // Best-effort per ref; continue with the rest.
+    }
+  }
+  if (deleted.length > 0) {
+    opts.log?.(`checkpoint sweep deleted ${deleted.length} stale ref(s): ${deleted.join(", ")}`);
+  }
+  return deleted;
+}
+
 /**
  * Best-effort forge-side delete of a checkpoint ref (post-push and
  * close/merge/cancel paths that have no worktree). Missing refs and missing

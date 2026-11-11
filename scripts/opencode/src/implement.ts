@@ -6,9 +6,11 @@ import {
   beginCheckpointing,
   checkpointRefForJob,
   DEFAULT_CHECKPOINT_INTERVAL_MS,
+  DEFAULT_CHECKPOINT_MAX_AGE_MS,
   deleteCheckpointForIssueViaForge,
   deleteCheckpointRefViaForge,
   restoreCheckpoint,
+  sweepStaleCheckpoints,
 } from "./checkpoint.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
@@ -402,6 +404,16 @@ function checkpointTickerForRun(
   return { ref, intervalMs };
 }
 
+/** Opportunistic per-repo orphan sweep: same bare cache, best-effort, never throws. */
+async function sweepStaleCheckpointsBestEffort(
+  loop: Parameters<typeof sweepStaleCheckpoints>[0],
+  opts: Pick<ImplementOptions, "checkpointMaxAgeMs">,
+  log: (message: string) => void
+): Promise<void> {
+  const maxAgeMs = opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS;
+  await sweepStaleCheckpoints(loop, { maxAgeMs, log }).catch(() => undefined);
+}
+
 export function buildTaskMarkdown(job: IssueJob): string {
   return `# ${job.title}\n\n${job.body}\n\n${job.htmlUrl}\n`;
 }
@@ -556,6 +568,7 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpointsBestEffort(loop, opts, log);
       if (externalCheckpoint) {
         await restoreCheckpoint(loop, externalCheckpoint.ref, {
           branch,
@@ -733,7 +746,9 @@ async function implementExternalIssue(
       externalResult.status === "no-changes" ||
       externalResult.status === "cancelled")
   ) {
-    await deleteCheckpointForIssueViaForge(provenanceOpts.api ?? opts.api, owner, repo, job.issueNumber, { log });
+    // External briefs have issueNumber 0, so the issue-number helper is a
+    // no-op here; delete the per-brief ext ref the success path deletes.
+    await deleteCheckpointRefViaForge(provenanceOpts.api ?? opts.api, owner, repo, externalCheckpoint.ref, { log });
   }
   return externalResult;
 }
@@ -854,6 +869,7 @@ export async function implementIssue(
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpointsBestEffort(loop, opts, log);
       if (checkpoint) {
         await restoreCheckpoint(loop, checkpoint.ref, {
           branch,

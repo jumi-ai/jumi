@@ -13,6 +13,7 @@ import {
   resolveCheckpointConfig,
   restoreCheckpoint,
   staleCheckpointRefs,
+  sweepStaleCheckpoints,
 } from "../src/checkpoint.ts";
 import { GithubAPI } from "../src/github_api.ts";
 import { shouldEnqueuePushConflicts } from "../src/push_webhook.ts";
@@ -302,6 +303,49 @@ describe("stale sweep", () => {
         { maxAgeMs: 7 * 24 * 3600 * 1000, nowMs }
       )
     ).toEqual(["refs/jumi/wip/12"]);
+  });
+
+  test("sweepStaleCheckpoints lists refs and deletes only stale ones", async () => {
+    const nowMs = 1_700_000_000_000;
+    const nowSec = Math.floor(nowMs / 1000);
+    const deletedPushes: string[] = [];
+    const logs: string[] = [];
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "for-each-ref") {
+          return [
+            `refs/jumi/wip/12 ${nowSec - 8 * 24 * 3600}`,
+            `refs/jumi/wip/13 ${nowSec - 3600}`,
+            `refs/jumi/wip/ext-linear-abc ${nowSec - 9 * 24 * 3600}`,
+          ].join("\n");
+        }
+        if (args[0] === "push" && typeof args[2] === "string" && args[2].startsWith(":")) {
+          deletedPushes.push(args[2].slice(1));
+          return "";
+        }
+        if (args[0] === "update-ref") return "";
+        return "";
+      },
+    });
+    const deleted = await sweepStaleCheckpoints(loop, {
+      maxAgeMs: 7 * 24 * 3600 * 1000,
+      nowMs,
+      log: (message) => logs.push(message),
+    });
+    expect(deleted.sort()).toEqual(["refs/jumi/wip/12", "refs/jumi/wip/ext-linear-abc"].sort());
+    expect(deletedPushes.sort()).toEqual(deleted.sort());
+    expect(logs.join("\n")).toContain("checkpoint sweep deleted 2 stale ref(s)");
+  });
+
+  test("sweepStaleCheckpoints never throws on listing failure", async () => {
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") throw new Error("network down");
+        throw new Error("no refs");
+      },
+    });
+    await expect(sweepStaleCheckpoints(loop, { maxAgeMs: 1000 })).resolves.toEqual([]);
   });
 });
 

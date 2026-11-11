@@ -5,9 +5,11 @@ import {
   beginCheckpointing,
   checkpointRefForJob,
   DEFAULT_CHECKPOINT_INTERVAL_MS,
+  DEFAULT_CHECKPOINT_MAX_AGE_MS,
   deleteCheckpointForIssueViaForge,
   deleteCheckpointRefViaForge,
   restoreCheckpoint,
+  sweepStaleCheckpoints,
 } from "./checkpoint.ts";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
@@ -742,6 +744,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpoints(
+        loop,
+        { maxAgeMs: opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS, log }
+      ).catch(() => undefined);
       const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,

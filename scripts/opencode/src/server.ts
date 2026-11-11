@@ -950,9 +950,11 @@ function engineId(): string {
   return `engine-${hostname()}-${process.pid}-${crypto.randomUUID()}`;
 }
 
-export function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"] {
+export function workerMailboxApi(
+  api: ReviewApi & Partial<Pick<Forge, "deleteGitRef">>
+): HandleWorkerWebhookDeps["api"] {
   const extra = api as ReviewApi &
-    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits">> & {
+    Partial<Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits" | "deleteGitRef">> & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
   return {
@@ -968,6 +970,9 @@ export function workerMailboxApi(api: ReviewApi): HandleWorkerWebhookDeps["api"]
     listRepoIssues: extra.listRepoIssues ? (owner, repo, opts) => extra.listRepoIssues!(owner, repo, opts) : undefined,
     listPullCommits: extra.listPullCommits
       ? (owner, repo, index) => extra.listPullCommits!(owner, repo, index)
+      : undefined,
+    deleteGitRef: extra.deleteGitRef
+      ? (owner, repo, ref) => extra.deleteGitRef!(owner, repo, ref)
       : undefined,
     rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
