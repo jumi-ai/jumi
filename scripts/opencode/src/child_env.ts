@@ -70,6 +70,10 @@ export function auditChildEnv(env: Record<string, string>): ChildEnvAudit {
   const provider = Object.keys(env).filter(isProviderKey);
   const unlistedCredentials = Object.keys(env).filter((key) => {
     if (isForbiddenKey(key) || isProviderKey(key)) return false;
+    // GIT_* plumbing the parent sets for git itself (host, username, author,
+    // config rewrites, terminal/pager flags) carries no secret once the token
+    // is stripped; the token itself is forbidden above.
+    if (key.startsWith("GIT_")) return false;
     if (!CREDENTIAL_HINT.test(key)) return false;
     return true;
   });

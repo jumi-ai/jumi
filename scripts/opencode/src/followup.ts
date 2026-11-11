@@ -739,7 +739,7 @@ interface FeedbackItem {
   text: string;
 }
 
-function escapeFeedbackXml(str: string): string {
+function escapeFeedbackXmlAttr(str: string): string {
   return str
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -748,9 +748,14 @@ function escapeFeedbackXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/** Element text needs only `&<>`: quotes are harmless outside attributes. */
+function escapeFeedbackXmlText(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function framedFeedbackBody(author: string | undefined, body: string): string {
   const who = author?.trim() || "unknown";
-  return `<untrusted_data author="${escapeFeedbackXml(who)}">${escapeFeedbackXml(body)}</untrusted_data>`;
+  return `<untrusted_data author="${escapeFeedbackXmlAttr(who)}">${escapeFeedbackXmlText(body)}</untrusted_data>`;
 }
 
 export function buildFeedbackMarkdown(opts: {
@@ -788,7 +793,7 @@ export function buildFeedbackMarkdown(opts: {
     const triggerBody = (opts.triggerBody ?? opts.trigger.body ?? "").trim();
     triggerLines.push(
       triggerBody
-        ? `<untrusted_data author="${escapeFeedbackXml(opts.trigger.sender)}">${escapeFeedbackXml(triggerBody)}</untrusted_data>`
+        ? `<untrusted_data author="${escapeFeedbackXmlAttr(opts.trigger.sender)}">${escapeFeedbackXmlText(triggerBody)}</untrusted_data>`
         : "(no trigger body)"
     );
   } else {
