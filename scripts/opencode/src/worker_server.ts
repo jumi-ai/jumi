@@ -77,11 +77,8 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       });
     }
     if (url.pathname === "/webhooks/github") {
-      const githubDelivery = request.headers.get("x-github-delivery");
-      if (githubDelivery && deliveryDedupe.seen(githubDelivery)) {
-        logger(`deduped replay delivery=${githubDelivery}`);
-        return json(202, { queued: false, deduped: true });
-      }
+      // No delivery check here: handleGithubWebhook verifies the HMAC first
+      // and owns the replay guard, so unauthenticated probes get 401.
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
@@ -94,6 +91,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
             handoffs: deps.handoffs,
           },
           logger,
+          deliveryDedupe,
         })
       );
     }
@@ -122,16 +120,19 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       if (!signatureOk) return json(401, { error: "invalid signature" });
 
       const deliveryHeader = request.headers.get("x-gitea-delivery");
-      if (deliveryHeader && deliveryDedupe.seen(deliveryHeader)) {
-        logger(`deduped replay delivery=${deliveryHeader}`);
+      const delivery = deliveryHeader ?? crypto.randomUUID();
+      if (deliveryHeader && deliveryDedupe.has(delivery)) {
+        logger(`deduped replay delivery=${delivery}`);
         return json(202, { queued: false, deduped: true });
       }
 
-      return handleWorkerWebhookEvent(
+      // Mark only durable outcomes: a 4xx/5xx from the worker handler leaves
+      // the delivery unmarked so the forge retry is processed, not deduped.
+      const response = await handleWorkerWebhookEvent(
         rawBody,
         request.headers.get("x-gitea-event"),
         request.headers.get("x-gitea-event-type"),
-        deliveryHeader ?? crypto.randomUUID(),
+        delivery,
         {
           giteaUrl: config.giteaUrl,
           allowedOrgs: config.allowedOrgs,
@@ -143,6 +144,10 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
         },
         { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs }
       );
+      if (deliveryHeader && (response.status === 200 || response.status === 202)) {
+        deliveryDedupe.mark(delivery);
+      }
+      return response;
     }
   };
 }

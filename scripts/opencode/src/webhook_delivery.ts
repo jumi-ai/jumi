@@ -16,21 +16,37 @@
  * is documented as accepted risk in the README threat model.
  */
 export function createDeliveryDedupe(limit = 2000): {
+  /** Read-only probe: true when this delivery was already recorded. Never mutates. */
+  has(delivery: string): boolean;
+  /** Record a delivery as handled. No-op for empty ids and already-known ids. */
+  mark(delivery: string): void;
+  /** Legacy check-then-record. Prefer has/mark so unauthenticated or failed
+   * deliveries never occupy a slot (see server.ts, worker_server.ts, github_webhook.ts). */
   seen(delivery: string): boolean;
   size(): number;
 } {
   const order: string[] = [];
   const known = new Set<string>();
+  const has = (delivery: string): boolean => {
+    if (!delivery) return false;
+    return known.has(delivery);
+  };
+  const mark = (delivery: string): void => {
+    if (!delivery || known.has(delivery)) return;
+    known.add(delivery);
+    order.push(delivery);
+    while (order.length > limit) {
+      const oldest = order.shift();
+      if (oldest !== undefined) known.delete(oldest);
+    }
+  };
   return {
+    has,
+    mark,
     seen(delivery: string): boolean {
+      if (has(delivery)) return true;
       if (!delivery) return false;
-      if (known.has(delivery)) return true;
-      known.add(delivery);
-      order.push(delivery);
-      while (order.length > limit) {
-        const oldest = order.shift();
-        if (oldest !== undefined) known.delete(oldest);
-      }
+      mark(delivery);
       return false;
     },
     size(): number {

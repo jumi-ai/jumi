@@ -51,6 +51,7 @@ import {
   writeHandoffToWorktree,
 } from "./handoff.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
+import { withIssueAuthorPermission } from "./permissions.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
@@ -1073,7 +1074,7 @@ export async function implementIssue(
             botUsername: opts.botUsername,
             snapshot,
             continueOpenCode: async (issue) => {
-              await writeTaskFiles(jobWithIssue(opts.job, issue));
+              await writeTaskFiles(await withIssueAuthorPermission(jobWithIssue(opts.job, issue), opts.api));
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
                 "follow-up",
@@ -1103,7 +1104,7 @@ export async function implementIssue(
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped" as const, reason: gate.reason };
         }
-        liveJob = jobWithIssue(opts.job, gate.issue);
+        liveJob = await withIssueAuthorPermission(jobWithIssue(opts.job, gate.issue), opts.api);
         snapshot = gate.snapshot;
 
         throwIfAborted(opts.abortSignal);
