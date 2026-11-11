@@ -18,6 +18,39 @@ export interface ReviewFinding {
   body: string;
 }
 
+/**
+ * Markers around the short findings list the publisher adds to the top-level
+ * pull-review body. The list points at the posted inlines so a review whose
+ * every finding moved into an inline still reads at the top level. Finding
+ * parsers skip the section (see `withoutFindingsListSection`) so a listed
+ * finding is never counted twice: once from the body line and once from its
+ * inline.
+ */
+export const FINDINGS_LIST_START = "<!-- jumi-findings-list:start -->";
+export const FINDINGS_LIST_END = "<!-- jumi-findings-list:end -->";
+
+const FINDINGS_LIST_START_RE = /<!--\s*jumi-findings-list:start\s*-->/;
+const FINDINGS_LIST_END_RE = /<!--\s*jumi-findings-list:end\s*-->/;
+
+/** Drop the published findings-list section so its lines never parse as findings. */
+function withoutFindingsListSection(lines: string[]): string[] {
+  const out: string[] = [];
+  let inList = false;
+  for (const line of lines) {
+    if (FINDINGS_LIST_START_RE.test(line)) {
+      inList = true;
+      continue;
+    }
+    if (FINDINGS_LIST_END_RE.test(line)) {
+      inList = false;
+      continue;
+    }
+    if (inList) continue;
+    out.push(line);
+  }
+  return out;
+}
+
 const MAX_FINDING_LINE = 1_000_000;
 const FILE_LINE_RE = /^(.+?):(\d+):\s+(\S.*)$/;
 const L_LINE_RE = /^L(\d+):\s+(\S.*)$/;
@@ -176,7 +209,7 @@ function collectFindingBlocks(
   text: string,
   opts?: { singleFilePath?: string; keep?: readonly string[]; includeBareL?: boolean }
 ): { blocks: FindingBlock[]; lines: string[] } {
-  const lines = text.split(/\r?\n/);
+  const lines = withoutFindingsListSection(text.split(/\r?\n/));
   const keepNotes = (opts?.keep ?? []).map((line) => line.trim()).filter(Boolean);
   const blocks: FindingBlock[] = [];
   let i = 0;
@@ -266,6 +299,81 @@ export function parseReviewFindings(text: string, opts?: { singleFilePath?: stri
     if (finding) findings.push({ path: finding.path, line: finding.line, body: fullFindingBody(finding, block.lines) });
   }
   return findings;
+}
+
+const SEVERITY_EMOJI_RE = /^(🔴|🟡|💡|❓)\s*/u;
+const SEVERITY_WORD_RE = /^(bug|risk|simpler|suggestions?|questions?|q)\s*:\s*/i;
+
+function severityEmojiForWord(word: string): string {
+  switch (word.toLowerCase()) {
+    case "bug":
+      return "🔴";
+    case "risk":
+      return "🟡";
+    case "simpler":
+    case "suggestion":
+    case "suggestions":
+      return "💡";
+    default:
+      return "❓";
+  }
+}
+
+/** First sentence of a flattened finding body, capped so one line stays short. */
+function firstSentence(text: string): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const match = /^(.+?[.!?])(?:\s|$)/.exec(flat);
+  if (match) return match[1].trim();
+  return flat.length > 200 ? `${flat.slice(0, 200).trimEnd()}…` : flat;
+}
+
+/**
+ * One findings-list line: the severity marker, `path:line` (linked to the
+ * posted inline when the forge returned a URL for it), and the first sentence
+ * of the finding. The line lives inside the `FINDINGS_LIST_START/END`
+ * section, so finding parsers never see it as a second copy of the finding.
+ */
+export function findingListLine(finding: ReviewFinding, url?: string): string {
+  let rest = finding.body.replace(/\s+/g, " ").trim();
+  let marker = "";
+  const emoji = SEVERITY_EMOJI_RE.exec(rest);
+  if (emoji) {
+    marker = emoji[1];
+    rest = rest.slice(emoji[0].length).trim();
+    const word = SEVERITY_WORD_RE.exec(rest);
+    if (word) rest = rest.slice(word[0].length).trim();
+  } else {
+    const word = SEVERITY_WORD_RE.exec(rest);
+    if (word) {
+      marker = severityEmojiForWord(word[1]);
+      rest = rest.slice(word[0].length).trim();
+    }
+  }
+  const summary = firstSentence(rest) || firstSentence(finding.body);
+  const location = `${finding.path}:${finding.line}`;
+  const rendered = url ? `[\`${location}\`](${url})` : `\`${location}\``;
+  return `- ${marker ? `${marker} ` : ""}${rendered}: ${summary}`;
+}
+
+/**
+ * The top-level findings list for a published review: one line per finding
+ * that was actually published, linked when `urls` (keyed by
+ * `findingFingerprint`) has the inline URL. Empty when there are no findings,
+ * so a review with no findings keeps today's body. Unlinked lines mean the
+ * inline could not be posted or the forge gave no URL; the full finding text
+ * stays in the body for those (see `stripFindingLines` with `posted`).
+ */
+export function buildFindingsList(findings: ReviewFinding[], urls?: ReadonlyMap<string, string>): string {
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const finding of findings) {
+    const key = findingFingerprint(finding.path, finding.body);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(findingListLine(finding, urls?.get(key)));
+  }
+  if (lines.length === 0) return "";
+  return [FINDINGS_LIST_START, ...lines, FINDINGS_LIST_END].join("\n");
 }
 
 /**
