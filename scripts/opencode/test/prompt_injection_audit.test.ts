@@ -4,21 +4,20 @@ import { auditChildEnv, CHILD_PROVIDER_ALLOWLIST } from "../src/child_env.ts";
 import { buildClaudeEnv } from "../src/claude.ts";
 import { buildCodexEnv } from "../src/codex.ts";
 import { loadForgeBind } from "../src/config.ts";
-import { createDeliveryDedupe } from "../src/webhook_delivery.ts";
-import { verifyGiteaSignature } from "../src/webhook.ts";
+import type { EngineRunOptions } from "../src/engine.ts";
+import { buildFeedbackMarkdown } from "../src/followup.ts";
 import { buildEnv } from "../src/git.ts";
 import { buildTaskMarkdown } from "../src/implement.ts";
-import { buildFeedbackMarkdown } from "../src/followup.ts";
 import { pullAuthorCanPush } from "../src/permissions.ts";
-import type { EngineRunOptions } from "../src/engine.ts";
 import { createFetchHandler } from "../src/server.ts";
+import { verifyGiteaSignature } from "../src/webhook.ts";
+import { createDeliveryDedupe } from "../src/webhook_delivery.ts";
 import {
   encodeJson,
   makeBranch,
   makeComment,
   makeConfig,
   makeIssueJob,
-  makeJob,
   makePayload,
   makePR,
   makeRepo,
@@ -155,6 +154,7 @@ describe("audit gap 2: child env per runner", () => {
     ["codex", (opts: EngineRunOptions) => buildCodexEnv(opts, "/work/demo/.jumi-tmp")],
     ["agy", (opts: EngineRunOptions) => agyEnv(opts, "/work/demo/.jumi-tmp")],
   ])("%s child holds no forge token and only allowlisted provider keys", (name, build) => {
+    expect(["opencode", "claude", "codex", "agy"]).toContain(name);
     withPoisonedProcessEnv(() => {
       const extraEnv: Record<string, string> = {
         GIT_AUTH_HOST: "gitea.example",

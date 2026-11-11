@@ -89,7 +89,7 @@ function makeIssueQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
 
 async function signedGithubRequest(
   body: unknown,
-  overrides: RequestInit & { event?: string; secret?: string; url?: string } = {}
+  overrides: RequestInit & { event?: string; secret?: string; url?: string; delivery?: string } = {}
 ): Promise<Request> {
   const raw = encodeJson(body);
   const secret = overrides.secret ?? "webhook-secret";
@@ -98,7 +98,9 @@ async function signedGithubRequest(
   headers.set("content-type", "application/json");
   headers.set("x-hub-signature-256", `sha256=${signature}`);
   headers.set("x-github-event", overrides.event ?? "issues");
-  headers.set("x-github-delivery", "delivery-1");
+  // Production forges assign a fresh UUID per delivery; tests must not share
+  // one across requests to the same handler, or the replay guard dedupes them.
+  headers.set("x-github-delivery", overrides.delivery ?? crypto.randomUUID());
   return new Request(overrides.url ?? "https://reviewer.test/webhooks/github", {
     method: overrides.method ?? "POST",
     body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
