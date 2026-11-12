@@ -293,6 +293,22 @@ describe("credential-aware identity", () => {
     expect(isClaudeApiKeyRunner({ auth: RUNNER_AUTH_API_KEY })).toBe(true);
     expect(isClaudeApiKeyRunner({})).toBe(false);
   });
+
+  test("stamp resolution prefers credential in reversed chain order", () => {
+    const sub = { type: "claude", model: "m", effort: "high" };
+    const api = { type: "claude", model: "m", effort: "high", auth: "api-key" };
+    const reversed = [
+      { name: "claude-api", ...api },
+      { name: "claude", ...sub },
+    ] as const;
+    expect(runnerNameForStamp(reversed as never, { type: "claude", model: "m", effort: "high" })).toBe("claude");
+    expect(runnerNameForStamp(reversed as never, { type: "claude", model: "m", effort: "high", auth: "api-key" })).toBe(
+      "claude-api"
+    );
+    expect(
+      runnerNameForStamp(reversed as never, { type: "claude", model: "m", effort: "high", auth: "subscription" })
+    ).toBe("claude");
+  });
 });
 
 describe("redaction", () => {

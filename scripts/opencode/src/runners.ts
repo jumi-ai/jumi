@@ -496,7 +496,7 @@ export function runnerNameForStamp(
   if (wantAuth !== null) {
     return candidates.find((runner) => runnerAuth(runner) === wantAuth)?.name;
   }
-  return candidates[0]?.name;
+  return (candidates.find((runner) => runnerAuth(runner) == null) ?? candidates[0])?.name;
 }
 
 /**
