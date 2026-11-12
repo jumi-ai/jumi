@@ -55,7 +55,7 @@ import {
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
-import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
+import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import {
   appendRunnerStamp,
   describeAttemptOrder,
@@ -189,7 +189,7 @@ export interface ReviewOptions {
   maxFiles?: number;
   maxPatchBytes?: number;
   maxThreadBytes?: number;
-  /** Byte budget for the head's REVIEW.md sections pasted into the prompt. */
+  /** Byte budget for the base branch's REVIEW.md sections pasted into the prompt. */
   maxReviewMdBytes?: number;
   maxOutputBytes?: number;
   engine?: Engine;
@@ -1534,13 +1534,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       delta_files: delta?.files.length ?? null,
     });
 
-    // The workspace is the PR head checkout, so this is the head's REVIEW.md; no base-branch fallback.
+    // Repo rules come from the base commit the review diffs against, not the
+    // checked-out head, so a PR cannot rewrite the rules that judge it. Read
+    // via read-only git: the worktree and the porcelain checks stay untouched.
     // Match against every changed file, not only the ones that fit the patch budget.
-    const reviewMd = await loadReviewMdSections(
-      opts.workspace,
-      prFiles,
-      opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES
-    );
+    const reviewMd = await loadReviewMdSectionsFromBase({
+      git,
+      cwd: opts.workspace,
+      env: gitCmdEnv,
+      baseRef: pr.base.sha,
+      files: prFiles,
+      maxBytes: opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES,
+    });
     logDiagnostic(log, "review_md", {
       review: reviewLabel,
       injected: Boolean(reviewMd),

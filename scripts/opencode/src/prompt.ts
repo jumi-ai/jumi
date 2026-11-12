@@ -105,7 +105,7 @@ export interface PROpenedPromptOptions {
   thread?: ReviewThread;
   /** Set for a later review: previous findings and the commits since the reviewed SHA. */
   delta?: ReviewDelta;
-  /** Sections of the head's root REVIEW.md that apply to this change, already selected by the parent. */
+  /** Sections of the base branch's root REVIEW.md that apply to this change, already selected by the parent. */
   reviewMd?: { text: string; truncated: boolean };
   /** When true, open `❓` questions block the status for this PR author. */
   blockingQuestions?: boolean;
@@ -177,11 +177,11 @@ function formatBlockingQuestions(blocking: boolean | undefined): string {
 function formatReviewMd(reviewMd: PROpenedPromptOptions["reviewMd"]): string {
   if (!reviewMd?.text) return "";
   const truncated = reviewMd.truncated
-    ? " It was truncated to fit this prompt; the rest is in ./REVIEW.md at the repository root."
+    ? " It was truncated to fit this prompt; check the change against the pasted rules, not the worktree's copy."
     : "";
   return `
 
-The repository's REVIEW.md sections that apply to this pull request are below: repo-wide sections, plus path sections whose globs match a changed file. They are this repository's review rules. Check the change against every rule, and report each violation as a finding with the rule it breaks.${truncated}
+The repository's REVIEW.md sections that apply to this pull request are below: repo-wide sections, plus path sections whose globs match a changed file. They come from the base branch the pull request targets, at the base commit the review diffs against. They are this repository's review rules. Check the change against every rule, and report each violation as a finding with the rule it breaks.${truncated}
 
 <review_md path="REVIEW.md" truncated="${reviewMd.truncated}"><![CDATA[
 ${escapeCdata(reviewMd.text)}
