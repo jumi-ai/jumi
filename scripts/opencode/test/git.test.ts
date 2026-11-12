@@ -1594,6 +1594,21 @@ describe("worker prompts", () => {
     expect(FOLLOWUP_PROMPT).toContain("so Renovate can still rebase");
   });
 
+  test("follow-up checks a code-adding suggestion before implementing it", () => {
+    expect(FOLLOWUP_PROMPT).toContain("Check before adding");
+    expect(FOLLOWUP_PROMPT).toContain("does anything call or need it");
+    expect(FOLLOWUP_PROMPT).toContain("does it reach a real path");
+    expect(FOLLOWUP_PROMPT).toContain("smaller fix at the cause");
+    expect(FOLLOWUP_PROMPT).toContain("would add a mechanism the task did not ask for");
+    expect(FOLLOWUP_PROMPT).toContain("reviewer-comments");
+    expect(FOLLOWUP_PROMPT).toContain("callers searched");
+    expect(FOLLOWUP_PROMPT).toContain("two or more rounds");
+    expect(FOLLOWUP_PROMPT).toContain("simpler design would remove the whole class");
+    expect(FOLLOWUP_PROMPT).toContain("still fixed");
+    expect(IMPLEMENT_PROMPT).not.toContain("Check before adding");
+    expect(CONFLICT_PROMPT).not.toContain("Check before adding");
+  });
+
   test("first-run may yield a queue id then stop", () => {
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");
