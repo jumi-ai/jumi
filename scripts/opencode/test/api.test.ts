@@ -892,7 +892,7 @@ describe("GiteaAPI repository settings file", () => {
 });
 
 describe("GiteaAPI cancelAutoMerge", () => {
-  test("resolves on 204 and on 404, and throws on 403", async () => {
+  test("resolves true on 204, false on 404, and throws on 403", async () => {
     const requests: Array<{ url: string; method: string }> = [];
     let mode: 204 | 404 | 403 = 204;
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -901,14 +901,14 @@ describe("GiteaAPI cancelAutoMerge", () => {
     }) as unknown as typeof fetch;
 
     const api = new GiteaAPI("https://gitea.example.test", "token-1");
-    await api.cancelAutoMerge("owner", "repo", 7);
+    await expect(api.cancelAutoMerge("owner", "repo", 7)).resolves.toBe(true);
     expect(requests[0]).toEqual({
       url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/merge",
       method: "DELETE",
     });
 
     mode = 404;
-    await api.cancelAutoMerge("owner", "repo", 7);
+    await expect(api.cancelAutoMerge("owner", "repo", 7)).resolves.toBe(false);
 
     mode = 403;
     await expect(api.cancelAutoMerge("owner", "repo", 7)).rejects.toThrow("403");

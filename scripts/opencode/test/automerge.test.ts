@@ -31,7 +31,7 @@ type TestApi = IssueApi & {
     path: string,
     ref: string
   ) => Promise<{ found: boolean; content?: string }>;
-  cancelAutoMerge: (owner: string, repo: string, index: number) => Promise<void>;
+  cancelAutoMerge: (owner: string, repo: string, index: number) => Promise<boolean>;
 };
 
 function makeApi(overrides: Partial<TestApi> = {}): TestApi & {
@@ -69,6 +69,7 @@ function makeApi(overrides: Partial<TestApi> = {}): TestApi & {
     },
     cancelAutoMerge: async () => {
       calls.push("cancelAutoMerge");
+      return true;
     },
     getBranch: async () => {
       calls.push("getBranch");
@@ -333,7 +334,7 @@ describe("automerge after push", () => {
     expect(api.calls).toEqual([]);
   });
 
-  test("person-cancelled schedule is left cancelled", async () => {
+  test("person-cancelled schedule is left cancelled without extra calls", async () => {
     const api = makeApi();
     await ensureAutomergeAfterPush({
       api,
@@ -346,7 +347,30 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles"]);
+    expect(api.calls).toEqual([]);
+    expect(api.notes).toEqual([]);
+  });
+
+  test("a touching pull without a prior schedule stays silent", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: ".jumi.yml", status: "added", additions: 1, deletions: 0, changes: 1 }];
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "github",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(api.calls).toEqual([]);
+    expect(api.calls).not.toContain("cancelAutoMerge");
+    expect(api.notes).toEqual([]);
   });
 
   test("gitea without a settings touch makes no extra calls", async () => {
@@ -541,6 +565,20 @@ describe("automerge repository settings file", () => {
     const result = await scheduleAutomergeForPr(scheduleInput(api));
     expect(result).toEqual({ scheduled: true });
   });
+
+  test("unreadable pull files fail closed with a note and no schedule call", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      throw new Error("Gitea API → 500");
+    };
+    const result = await scheduleAutomergeForPr(scheduleInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.calls).not.toContain("getRepoFile");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("could not be read");
+  });
 });
 
 describe("automerge settings after push", () => {
@@ -618,6 +656,50 @@ describe("automerge settings after push", () => {
     };
     await ensureAutomergeAfterPush(restoreInput(api));
     expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toEqual([]);
+  });
+
+  test("unreadable pull files after a push neither cancel nor restore", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      throw new Error("GitHub API → 500");
+    };
+    await ensureAutomergeAfterPush(restoreInput(api));
+    expect(api.calls).toEqual(["getPRFiles"]);
+    expect(api.calls).not.toContain("cancelAutoMerge");
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toEqual([]);
+  });
+
+  test("gitea touching pull with a removed schedule posts the cancelled note", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: ".jumi.yml", status: "added", additions: 1, deletions: 0, changes: 1 }];
+    };
+    api.cancelAutoMerge = async () => {
+      api.calls.push("cancelAutoMerge");
+      return true;
+    };
+    await ensureAutomergeAfterPush(restoreInput(api, { forgeKind: "gitea" as const, wasScheduled: false }));
+    expect(api.calls).toContain("cancelAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("cancelled");
+  });
+
+  test("gitea touching pull with nothing to remove stays silent", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: ".jumi.yml", status: "added", additions: 1, deletions: 0, changes: 1 }];
+    };
+    api.cancelAutoMerge = async () => {
+      api.calls.push("cancelAutoMerge");
+      return false;
+    };
+    await ensureAutomergeAfterPush(restoreInput(api, { forgeKind: "gitea" as const, wasScheduled: false }));
+    expect(api.calls).toContain("cancelAutoMerge");
     expect(api.notes).toEqual([]);
   });
 });

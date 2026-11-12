@@ -947,12 +947,13 @@ export class GithubAPI {
   }
 
   /**
-   * Cancel a scheduled auto-merge via `disablePullRequestAutoMerge`. A pull
-   * with no schedule reports back without one; disabling it is a no-op that
-   * resolves the same way. Throws when the pull cannot be read or the
-   * mutation is refused; the caller treats cancel as best-effort.
+   * Cancel a scheduled auto-merge via `disablePullRequestAutoMerge`. Resolves
+   * `true` when the mutation disabled a schedule and `false` when the pull
+   * had no schedule (the steady state after a push dropped it). Throws when
+   * the pull cannot be read or the mutation is refused; the caller treats
+   * cancel as best-effort.
    */
-  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<void> {
+  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<boolean> {
     const pr = await this.getPR(owner, repo, index);
     const nodeId = (pr as Pull).nodeId;
     if (!nodeId) throw new Error("GitHub pull request is missing node id");
@@ -966,14 +967,15 @@ export class GithubAPI {
         { pullRequestId: nodeId },
         { owner, repo }
       );
+      return true;
     } catch (err) {
       // Disabling a schedule that is already gone is the steady state after
-      // a push dropped it: resolve instead of failing the job.
+      // a push dropped it: resolve `false` instead of failing the job.
       if (
         err instanceof Error &&
         /(not enabled|no .*auto-?merge|already (disabled|cancelled)|could not find.*auto-?merge)/i.test(err.message)
       )
-        return;
+        return false;
       throw err;
     }
   }

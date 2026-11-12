@@ -122,7 +122,10 @@ function unrestoredInvalidSettingsNote(error: string): string {
   );
 }
 
-/** Best-effort cancel of a schedule Jumi set earlier. Never throws. */
+/** Best-effort cancel of a schedule Jumi set earlier. Never throws. Resolves
+ * `true` when a schedule was removed; `false` (missing cancel entrypoint,
+ * nothing to remove, or a failed cancel) keeps Gitea silent, where the
+ * schedule state is unreadable. */
 async function cancelAutomergeSchedule(
   api: AutomergeApi,
   forgeKind: ForgeKind,
@@ -130,29 +133,38 @@ async function cancelAutomergeSchedule(
   repo: string,
   prNumber: number,
   log: (message: string) => void
-): Promise<void> {
+): Promise<boolean> {
   void forgeKind;
   try {
     const cancel = api.cancelAutoMerge;
-    if (typeof cancel !== "function") return;
-    await cancel.call(api, owner, repo, prNumber);
+    if (typeof cancel !== "function") return false;
+    const removed = await cancel.call(api, owner, repo, prNumber);
     log(`automerge cancelled for ${owner}/${repo}#${prNumber} (settings file in pull)`);
+    // Older fakes resolve `void`: only an explicit `false` means "nothing
+    // to remove"; anything else keeps the previous claim-a-cancel behaviour.
+    return removed !== false;
   } catch (err) {
     // A missing schedule is the steady state; any other failure stays in the
     // server log and never fails the job.
     log(
       `automerge cancel failed for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
+    return false;
   }
 }
 
+/**
+ * Whether the pull changes the repository settings file. Resolves
+ * `undefined` when the pull file list is unreadable, so callers fail
+ * closed; a missing list entrypoint resolves `false` (no check possible).
+ */
 async function prIncludesSettingsFile(
   api: AutomergeApi,
   owner: string,
   repo: string,
   prNumber: number,
   log: (message: string) => void
-): Promise<boolean> {
+): Promise<boolean | undefined> {
   try {
     const listFiles = api.getPRFiles;
     if (typeof listFiles !== "function") return false;
@@ -162,7 +174,7 @@ async function prIncludesSettingsFile(
     log(
       `automerge pull files unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
-    return false;
+    return undefined;
   }
 }
 
@@ -181,7 +193,20 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   const forge = input.forgeKind;
   if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return { scheduled: false };
 
-  if (await prIncludesSettingsFile(input.api, input.owner, input.repo, input.prNumber, log)) {
+  const touchesSettings = await prIncludesSettingsFile(input.api, input.owner, input.repo, input.prNumber, log);
+  if (touchesSettings === undefined) {
+    log(`automerge pull files unreadable for ${input.owner}/${input.repo}#${input.prNumber}: failing closed`);
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      `Jumi did not schedule auto-merge on this pull request: the pull request files could not be read. A person needs to merge once reviews and CI are green.`
+    );
+    return { scheduled: false };
+  }
+  if (touchesSettings) {
     log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: pull changes ${REPO_SETTINGS_PATH}`);
     await postAutomergeNote(
       input.api,
@@ -368,16 +393,47 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   const log = input.log ?? (() => undefined);
   const noteApi = input.api as AutomergeApi;
   if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return;
-  if (await prIncludesSettingsFile(noteApi, input.owner, input.repo, input.prNumber, log)) {
-    await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
-    await postAutomergeNote(
+  // GitHub exposes a readable schedule state: a pull that never had a
+  // schedule (person-cancelled or never scheduled) stays silent without any
+  // further forge calls.
+  if (input.forgeKind === "github" && !input.wasScheduled) return;
+  const touchesSettings = await prIncludesSettingsFile(noteApi, input.owner, input.repo, input.prNumber, log);
+  // Unreadable pull files fail closed: neither cancel nor restore.
+  if (touchesSettings === undefined) return;
+  if (touchesSettings) {
+    if (input.forgeKind === "github") {
+      await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        cancelledSettingsNote()
+      );
+      return;
+    }
+    // Gitea has no readable schedule state (`wasScheduled` is always
+    // false), so the cancel result drives the note: only claim a
+    // cancellation when a schedule was actually removed.
+    const cancelled = await cancelAutomergeSchedule(
       noteApi,
+      input.forgeKind,
       input.owner,
       input.repo,
       input.prNumber,
-      input.botUsername,
-      cancelledSettingsNote()
+      log
     );
+    if (cancelled) {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        cancelledSettingsNote()
+      );
+    }
     return;
   }
   if (!input.wasScheduled) return;

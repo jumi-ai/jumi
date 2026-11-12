@@ -510,15 +510,20 @@ export class GiteaAPI {
   }
 
   /**
-   * Cancel a scheduled auto-merge. A missing schedule is not an error: 404
-   * (no pull, no schedule) resolves the same as 204.
+   * Cancel a scheduled auto-merge. Resolves `true` when a schedule was
+   * removed (2xx) and `false` when there was nothing to remove (404: no
+   * pull, no schedule).
    */
-  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<void> {
+  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<boolean> {
     const url = `${this.base}/repos/${this.repoPath(owner, repo)}/pulls/${index}/merge`;
     const res = await fetch(url, { method: "DELETE", headers: this.headers() });
-    if (res.ok || res.status === 404) {
+    if (res.status === 404) {
       await res.text().catch(() => "");
-      return;
+      return false;
+    }
+    if (res.ok) {
+      await res.text().catch(() => "");
+      return true;
     }
     const text = await res.text().catch(() => "");
     throw forgeRequestError({

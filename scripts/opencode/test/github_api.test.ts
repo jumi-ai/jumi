@@ -1536,19 +1536,19 @@ describe("GithubAPI cancelAutoMerge", () => {
       return Response.json({ data: { disablePullRequestAutoMerge: { pullRequest: { id: "PR_node_7" } } } });
     }) as unknown as typeof fetch;
 
-    await api().cancelAutoMerge("owner", "repo", 7);
+    await expect(api().cancelAutoMerge("owner", "repo", 7)).resolves.toBe(true);
     const graphql = requests.find((request) => request.url.endsWith("/graphql"));
     expect(graphql?.method).toBe("POST");
     expect(graphql?.body).toContain("disablePullRequestAutoMerge");
     expect(graphql?.body).toContain("PR_node_7");
   });
 
-  test("treats an already-disabled schedule as success", async () => {
+  test("treats an already-disabled schedule as false", async () => {
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       if (String(url).includes("/pulls/7")) return Response.json(prJson);
       return Response.json({ errors: [{ message: "Auto-merge is not enabled for this pull request" }] });
     }) as unknown as typeof fetch;
 
-    await api().cancelAutoMerge("owner", "repo", 7);
+    await expect(api().cancelAutoMerge("owner", "repo", 7)).resolves.toBe(false);
   });
 });

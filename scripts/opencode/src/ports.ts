@@ -253,9 +253,10 @@ export interface Forge extends AttachmentSupport {
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
   /**
    * Best-effort cancel of a forge-native auto-merge schedule. A missing
-   * schedule is not an error.
+   * schedule is not an error. Resolves `true` when a schedule was removed
+   * and `false` when there was nothing to remove.
    */
-  cancelAutoMerge?(owner: string, repo: string, index: number): Promise<void>;
+  cancelAutoMerge?(owner: string, repo: string, index: number): Promise<boolean>;
   /**
    * Forge-native "merge when the required checks succeed" scheduling.
    * Never merges directly, never forces, never bypasses branch protection.
