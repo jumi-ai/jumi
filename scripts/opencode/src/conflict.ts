@@ -1,6 +1,7 @@
 import { access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
+import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -20,7 +21,6 @@ import {
   inspectRemoteContainsDefault,
   isClaimedEarlyResult,
   openClaimedLoop,
-  pushClaimedBranch,
   recheckAssignedAndOpen,
   runClaimedLoop,
   STAGE_ALL_ARGS,
@@ -1038,7 +1038,15 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       }
 
       try {
-        await pushClaimedBranch(loop, branch);
+        await pushClaimedBranchWithAutomergeRestore(loop, branch, {
+          api: opts.api,
+          forgeKind: opts.forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: pr.number,
+          automergeRepos: opts.automergeRepos,
+          log,
+        });
       } catch (err) {
         if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });

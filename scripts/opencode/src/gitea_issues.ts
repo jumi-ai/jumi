@@ -1,5 +1,6 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { Forge, Pull, Tracker } from "./ports.ts";
+import { upsertStickyComment } from "./sticky_comment.ts";
 
 export type { IssueApi, LinkedIssue, Tracker } from "./ports.ts";
 
@@ -210,12 +211,6 @@ export async function upsertWorkerComment(
   opts?: { index?: number }
 ): Promise<void> {
   const marker = workerMarker(owner, repo, issueNumber);
-  const text = `${marker}\n${body}`;
   const index = opts?.index ?? issueNumber;
-  const existing = await api.findStickyIssueComment(owner, repo, index, botUsername, marker);
-  if (existing) {
-    await api.updateIssueComment(owner, repo, existing.id, text);
-    return;
-  }
-  await api.createIssueComment(owner, repo, index, text);
+  await upsertStickyComment(api, owner, repo, index, botUsername, marker, body);
 }

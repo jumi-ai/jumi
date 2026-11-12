@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { upsertStickyComment } from "./sticky_comment.ts";
 import { parseReviewOutput } from "./verdict.ts";
 
 export const SAME_ACTION_LIMIT = 4;
@@ -537,13 +538,7 @@ export async function upsertStuckText(
   body: string
 ): Promise<void> {
   const marker = stuckMarker(owner, repo, index);
-  const text = `${marker}\n${body}`;
-  const existing = await api.findStickyIssueComment(owner, repo, index, botUsername, marker);
-  if (existing) {
-    await api.updateIssueComment(owner, repo, existing.id, text);
-    return;
-  }
-  await api.createIssueComment(owner, repo, index, text);
+  await upsertStickyComment(api, owner, repo, index, botUsername, marker, body);
 }
 
 export async function upsertStuckComment(

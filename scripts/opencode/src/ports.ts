@@ -11,6 +11,13 @@ export interface Repo {
   clone_url: string;
   default_branch: string;
   owner: Actor;
+  /** Gitea: repository default merge style (`merge`, `rebase`, `rebase-merge`, `squash`, `fast-forward-only`). */
+  defaultMergeStyle?: string;
+  /** GitHub: repository allows auto-merge. */
+  allowAutoMerge?: boolean;
+  allowMergeCommit?: boolean;
+  allowSquashMerge?: boolean;
+  allowRebaseMerge?: boolean;
 }
 
 export interface Task {
@@ -70,6 +77,18 @@ export interface Pull {
   labels?: Array<string | { name?: string }> | null;
   created_at: string;
   updated_at: string;
+  /** GitHub node id (GraphQL `pullRequestId` for auto-merge). Absent on Gitea. */
+  nodeId?: string;
+  /** True when the forge reports a pending auto-merge request. Absent when the forge exposes none. */
+  autoMergeEnabled?: boolean;
+}
+
+/** Branch protection as a write-level caller can read it (no admin branch-protection endpoints). */
+export interface BranchProtection {
+  protected?: boolean;
+  enableStatusCheck?: boolean;
+  requiredContexts?: string[];
+  userCanMerge?: boolean;
 }
 
 export interface PullFile {
@@ -224,6 +243,14 @@ export interface Forge extends AttachmentSupport {
   getRepo(owner: string, repo: string): Promise<Repo>;
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;
+  /** Branch protection readable with a write-level token (gate for auto-merge). Throws when unreadable. */
+  getBranch?(owner: string, repo: string, branch: string): Promise<BranchProtection>;
+  /**
+   * Forge-native "merge when the required checks succeed" scheduling.
+   * Never merges directly, never forces, never bypasses branch protection.
+   * Resolves when scheduled (or already scheduled); throws when refused or failed.
+   */
+  scheduleAutoMerge?(owner: string, repo: string, index: number, opts?: { mergeMethod?: string }): Promise<void>;
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
   /** GitHub only: permissions an App's installations hold, e.g. `{ contents: "write" }`. */
   getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
@@ -302,6 +329,8 @@ export type IssueApi = Tracker &
     | "getRepo"
     | "getPR"
     | "listOpenPulls"
+    | "getBranch"
+    | "scheduleAutoMerge"
     | "createPullRequest"
     | "closePullRequest"
     | "updatePullRequestBody"

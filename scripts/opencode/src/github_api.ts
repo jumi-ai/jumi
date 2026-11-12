@@ -2,6 +2,7 @@ import { forgeRequestError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
+  BranchProtection,
   Check,
   CheckPayload,
   CheckState,
@@ -53,6 +54,10 @@ type GithubRepo = {
   clone_url: string;
   default_branch: string;
   owner?: GithubUser;
+  allow_auto_merge?: boolean;
+  allow_merge_commit?: boolean;
+  allow_squash_merge?: boolean;
+  allow_rebase_merge?: boolean;
 };
 
 type GithubIssue = {
@@ -84,6 +89,8 @@ type GithubPR = {
   state: "open" | "closed";
   html_url: string;
   user?: GithubUser;
+  node_id?: string;
+  auto_merge?: { merge_method?: string; enabled_by?: { login?: string } } | null;
   head: {
     ref: string;
     sha: string;
@@ -268,6 +275,10 @@ export function toRepo(repo: GithubRepo): Repo {
     clone_url: repo.clone_url,
     default_branch: repo.default_branch,
     owner: actor(repo.owner),
+    ...(repo.allow_auto_merge !== undefined ? { allowAutoMerge: repo.allow_auto_merge } : {}),
+    ...(repo.allow_merge_commit !== undefined ? { allowMergeCommit: repo.allow_merge_commit } : {}),
+    ...(repo.allow_squash_merge !== undefined ? { allowSquashMerge: repo.allow_squash_merge } : {}),
+    ...(repo.allow_rebase_merge !== undefined ? { allowRebaseMerge: repo.allow_rebase_merge } : {}),
   };
 }
 
@@ -331,6 +342,8 @@ export function toPull(pr: GithubPR): Pull {
     labels: pr.labels,
     created_at: pr.created_at,
     updated_at: pr.updated_at,
+    ...(typeof pr.node_id === "string" && pr.node_id ? { nodeId: pr.node_id } : {}),
+    ...(pr.auto_merge != null ? { autoMergeEnabled: true } : {}),
   };
 }
 
@@ -800,6 +813,103 @@ export class GithubAPI {
       `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
     );
     return { permission: info.permission, role_name: info.role_name };
+  }
+
+  /**
+   * Required status checks the App can read for the fail-closed auto-merge
+   * gate. Reads classic protection first; classic 404s on ruleset-managed
+   * branches, so fall back to the active branch rules
+   * (`GET /repos/{owner}/{repo}/rules/branches/{branch}`) and collect the
+   * `required_status_checks` contexts there. Readable rules without a
+   * required-checks rule report `enableStatusCheck: false`. Throws when
+   * neither source is readable, which the caller treats as "gate not
+   * established".
+   */
+  async getBranch(owner: string, repo: string, branch: string): Promise<BranchProtection> {
+    try {
+      const policy = await this.get<{ contexts?: string[]; checks?: Array<{ context?: string }> }>(
+        `/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`
+      );
+      const requiredContexts = [
+        ...(Array.isArray(policy.contexts) ? policy.contexts : []),
+        ...(Array.isArray(policy.checks) ? policy.checks : [])
+          .map((check) => check.context)
+          .filter((context): context is string => typeof context === "string" && context.length > 0),
+      ];
+      return { protected: true, enableStatusCheck: true, requiredContexts };
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err;
+      return this.getBranchFromRules(owner, repo, branch, err);
+    }
+  }
+
+  private async getBranchFromRules(
+    owner: string,
+    repo: string,
+    branch: string,
+    classicError: unknown
+  ): Promise<BranchProtection> {
+    let rules: unknown;
+    try {
+      rules = await this.get(`/repos/${this.repoPath(owner, repo)}/rules/branches/${encodeURIComponent(branch)}`);
+    } catch {
+      throw classicError;
+    }
+    if (!Array.isArray(rules)) throw classicError;
+    const requiredContexts: string[] = [];
+    for (const rule of rules) {
+      if (!rule || typeof rule !== "object") continue;
+      const typed = rule as {
+        type?: unknown;
+        parameters?: { required_status_checks?: Array<{ context?: unknown }> };
+      };
+      if (typed.type !== "required_status_checks") continue;
+      const checks = typed.parameters?.required_status_checks;
+      if (!Array.isArray(checks)) continue;
+      for (const check of checks) {
+        if (check && typeof check.context === "string" && check.context.length > 0) {
+          requiredContexts.push(check.context);
+        }
+      }
+    }
+    // Readable rules without a required-checks rule mean the branch genuinely
+    // requires nothing: fail closed with `enableStatusCheck: false` (the "does
+    // not require" note) rather than the "could not be read" note.
+    return { protected: true, enableStatusCheck: requiredContexts.length > 0, requiredContexts };
+  }
+
+  /**
+   * Forge-native auto-merge via GraphQL `enablePullRequestAutoMerge`.
+   * Resolves when enabled (or already enabled); throws when the repository
+   * disallows auto-merge, no rule holds the merge back, or the call fails.
+   */
+  async scheduleAutoMerge(owner: string, repo: string, index: number, opts?: { mergeMethod?: string }): Promise<void> {
+    const pr = await this.getPR(owner, repo, index);
+    const nodeId = (pr as Pull).nodeId;
+    if (!nodeId) throw new Error("GitHub pull request is missing node id");
+    const method = (opts?.mergeMethod ?? "MERGE").toUpperCase();
+    if (method !== "MERGE" && method !== "SQUASH" && method !== "REBASE") {
+      throw new Error(`Unsupported GitHub merge method: ${opts?.mergeMethod}`);
+    }
+    try {
+      await this.graphql<{ enablePullRequestAutoMerge?: { pullRequest?: { id?: string } } }>(
+        `mutation ($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod) {
+          enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) {
+            pullRequest { id }
+          }
+        }`,
+        { pullRequestId: nodeId, mergeMethod: method },
+        { owner, repo }
+      );
+    } catch (err) {
+      // Public workflow convention checks `message.includes("already enabled")`:
+      // GitHub reports an existing schedule with the schedule first
+      // ("Auto-merge already enabled") as well as already-first wordings, so
+      // match both orders instead of only `already … auto-merge`.
+      if (err instanceof Error && /(already.*auto-?merge|auto-?merge.*already|already enabled)/i.test(err.message))
+        return;
+      throw err;
+    }
   }
 
   async getAppPermissions(slug: string): Promise<Record<string, string> | undefined> {

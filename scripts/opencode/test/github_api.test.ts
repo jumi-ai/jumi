@@ -1397,3 +1397,87 @@ describe("checkRunState", () => {
     });
   });
 });
+
+describe("GithubAPI automerge gate", () => {
+  const prJson = {
+    number: 7,
+    title: "Jumi",
+    body: "",
+    state: "open",
+    html_url: "https://github.com/owner/repo/pull/7",
+    user: { login: "jumi" },
+    node_id: "PR_node_7",
+    head: { ref: "jumi/issue-1-x", sha: "abc123" },
+    base: { ref: "main", sha: "def456" },
+    created_at: "2026-05-23T00:00:00Z",
+    updated_at: "2026-05-23T00:00:00Z",
+  };
+
+  test("treats an already-enabled schedule as success (enabled-first wording)", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/pulls/7")) return Response.json(prJson);
+      return Response.json({ errors: [{ message: "Auto-merge already enabled" }] });
+    }) as unknown as typeof fetch;
+
+    await api().scheduleAutoMerge("owner", "repo", 7, { mergeMethod: "MERGE" });
+  });
+
+  test("still throws other enable failures", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/pulls/7")) return Response.json(prJson);
+      return Response.json({ errors: [{ message: "Auto merge is not allowed for this repository" }] });
+    }) as unknown as typeof fetch;
+
+    await expect(api().scheduleAutoMerge("owner", "repo", 7, { mergeMethod: "MERGE" })).rejects.toThrow(
+      "not allowed for this repository"
+    );
+  });
+
+  test("reads required checks from branch rules when classic protection 404s", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes("/protection/required_status_checks")) {
+        return new Response("Branch not protected", { status: 404 });
+      }
+      if (target.includes("/rules/branches/")) {
+        return Response.json([
+          {
+            type: "required_status_checks",
+            parameters: {
+              required_status_checks: [{ context: "jumi/opencode-review" }],
+              strict_required_status_checks_policy: true,
+            },
+          },
+        ]);
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const branch = await api().getBranch("owner", "repo", "main");
+    expect(branch.enableStatusCheck).toBe(true);
+    expect(branch.requiredContexts).toContain("jumi/opencode-review");
+  });
+
+  test("reports no required checks when readable rules list none", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes("/protection/required_status_checks")) {
+        return new Response("Branch not protected", { status: 404 });
+      }
+      if (target.includes("/rules/branches/")) {
+        return Response.json([{ type: "pull_request", parameters: {} }]);
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const branch = await api().getBranch("owner", "repo", "main");
+    expect(branch.enableStatusCheck).toBe(false);
+    expect(branch.requiredContexts).toEqual([]);
+  });
+
+  test("throws when neither classic nor rules are readable", async () => {
+    globalThis.fetch = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
+
+    await expect(api().getBranch("owner", "repo", "main")).rejects.toThrow("→ 404");
+  });
+});

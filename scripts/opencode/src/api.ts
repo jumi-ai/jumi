@@ -1,6 +1,7 @@
 import { forgeRequestError } from "./forge_errors.ts";
 import type {
   ActionJob,
+  BranchProtection,
   Check,
   CheckPayload,
   CollaboratorPermission,
@@ -46,6 +47,7 @@ export function toRepo(repo: GiteaRepo): Repo {
     clone_url: repo.clone_url,
     default_branch: repo.default_branch,
     owner: actor(repo.owner),
+    ...(repo.default_merge_style ? { defaultMergeStyle: repo.default_merge_style } : {}),
   };
 }
 
@@ -244,6 +246,24 @@ export function toActionJob(job: GiteaActionJob): ActionJob {
   };
 }
 
+export interface GiteaBranch {
+  name?: string;
+  protected?: boolean;
+  enable_status_check?: boolean;
+  status_check_contexts?: string[];
+  user_can_push?: boolean;
+  user_can_merge?: boolean;
+}
+
+export function toBranchProtection(branch: GiteaBranch): BranchProtection {
+  return {
+    ...(branch.protected !== undefined ? { protected: branch.protected } : {}),
+    ...(branch.enable_status_check !== undefined ? { enableStatusCheck: branch.enable_status_check } : {}),
+    ...(Array.isArray(branch.status_check_contexts) ? { requiredContexts: [...branch.status_check_contexts] } : {}),
+    ...(branch.user_can_merge !== undefined ? { userCanMerge: branch.user_can_merge } : {}),
+  };
+}
+
 export interface GiteaAttachment {
   id: number;
   uuid: string;
@@ -413,6 +433,46 @@ export class GiteaAPI {
       `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
     );
     return { permission: info.permission, role_name: info.role_name };
+  }
+
+  /**
+   * Branch protection as a write-level token can read it. Used as the
+   * fail-closed auto-merge gate: only schedule when the base branch requires
+   * status checks and lists the review status among the required contexts.
+   */
+  async getBranch(owner: string, repo: string, branch: string): Promise<BranchProtection> {
+    return toBranchProtection(
+      await this.get<GiteaBranch>(`/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}`)
+    );
+  }
+
+  /**
+   * Forge-native "merge when checks succeed". Resolves when the merge is
+   * scheduled (201, empty body) or already scheduled (409 already scheduled).
+   * A 200 means the forge merged at once; the caller gated on required
+   * checks, so that path only happens when everything already passes.
+   */
+  async scheduleAutoMerge(owner: string, repo: string, index: number, opts?: { mergeMethod?: string }): Promise<void> {
+    const url = `${this.base}/repos/${this.repoPath(owner, repo)}/pulls/${index}/merge`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ Do: opts?.mergeMethod || "merge", merge_when_checks_succeed: true }),
+    });
+    if (res.ok) {
+      await res.text().catch(() => "");
+      return;
+    }
+    const text = await res.text().catch(() => "");
+    if (res.status === 409 && /already scheduled to auto[ -]?merge/i.test(text)) return;
+    throw forgeRequestError({
+      service: "Gitea API",
+      method: "POST",
+      url,
+      status: res.status,
+      body: text,
+      secrets: [this.token],
+    });
   }
 
   // ── Pull Requests ─────────────────────────────────────────────────────────────
