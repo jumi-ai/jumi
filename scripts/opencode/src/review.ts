@@ -88,6 +88,7 @@ import {
 } from "./stuck.ts";
 import type { ReviewJob } from "./types.ts";
 import {
+  buildFindingsList,
   countQuestionFindings,
   findingFingerprint,
   hasColonEndingFinding,
@@ -480,6 +481,20 @@ async function reconcileReviewInlines(opts: {
   return open;
 }
 
+/** Inline URLs by finding fingerprint, so the top-level body can link each listed finding. */
+function inlineUrlsByFingerprint(comments: InlineComment[], marker: string): Map<string, string> {
+  const urls = new Map<string, string>();
+  for (const comment of comments) {
+    const url = comment.html_url?.trim();
+    if (!url || !comment.path) continue;
+    if (!(comment.body ?? "").includes(marker)) continue;
+    const fingerprint = commentFingerprint(comment, marker);
+    if (!fingerprint) continue;
+    urls.set(fingerprint, url);
+  }
+  return urls;
+}
+
 async function postPullReview(opts: {
   api: ReviewApi;
   owner: string;
@@ -491,7 +506,6 @@ async function postPullReview(opts: {
   botUsername: string;
   prAuthor: string | undefined;
   event: PullReviewEvent;
-  body: string;
   checkLine?: string;
   runner?: string | null;
   singleFilePath?: string;
@@ -540,7 +554,7 @@ async function postPullReview(opts: {
     });
   }
 
-  const create = (event: PullReviewEvent, reviewComments: CreatePullReviewComment[], reviewBody = opts.body) =>
+  const create = (event: PullReviewEvent, reviewComments: CreatePullReviewComment[], reviewBody?: string) =>
     opts.api.createPullReview(opts.owner, opts.repo, opts.prNumber, {
       commit_id: opts.headSha,
       event,
@@ -568,45 +582,59 @@ async function postPullReview(opts: {
     }
   };
 
-  try {
-    await createWithFallback(opts.event, comments);
-    return true;
-  } catch (err) {
-    if (comments.length === 0) {
-      opts.log(`review event skipped: ${errorMessage(err)}`);
-      return false;
-    }
-    opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
-    await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
-    for (const comment of comments) {
-      const fingerprint = commentFingerprint(comment, opts.marker);
-      if (fingerprint && posted.has(fingerprint)) continue;
-      try {
-        await create("COMMENT", [comment], "");
+  // Publish new inlines ahead of the top-level body so the body can link each
+  // listed finding to the inline the forge created for it.
+  if (comments.length > 0) {
+    try {
+      await create("COMMENT", comments, "");
+      for (const comment of comments) {
+        const fingerprint = commentFingerprint(comment, opts.marker);
         if (fingerprint) posted.add(fingerprint);
-      } catch (inner) {
-        await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+      }
+    } catch (err) {
+      opts.log(`batch inlines rejected, retrying individually: ${errorMessage(err)}`);
+      await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+      for (const comment of comments) {
+        const fingerprint = commentFingerprint(comment, opts.marker);
         if (fingerprint && posted.has(fingerprint)) continue;
-        opts.log(`inline skipped ${comment.path}:${comment.new_position}: ${errorMessage(inner)}`);
+        try {
+          await create("COMMENT", [comment], "");
+          if (fingerprint) posted.add(fingerprint);
+        } catch (inner) {
+          await submitPendingAndRefreshPosted(opts, posted, comments, existingIds);
+          if (fingerprint && posted.has(fingerprint)) continue;
+          opts.log(`inline skipped ${comment.path}:${comment.new_position}: ${errorMessage(inner)}`);
+        }
       }
     }
+  }
+
+  let urls = inlineUrlsByFingerprint(existing, opts.marker);
+  if (comments.length > 0) {
     try {
-      await createWithFallback(
-        opts.event,
-        [],
-        buildCommentBody(
-          opts.marker,
-          opts.headSha,
-          stripFindingLines(opts.comment, { singleFilePath: opts.singleFilePath, posted }),
-          opts.checkLine,
-          opts.runner
-        )
-      );
-      return true;
-    } catch (eventErr) {
-      opts.log(`review event skipped: ${errorMessage(eventErr)}`);
-      return false;
+      const published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
+      urls = inlineUrlsByFingerprint(published, opts.marker);
+    } catch (err) {
+      opts.log(`inline urls unavailable: ${errorMessage(err)}`);
     }
+  }
+
+  // The top-level body lists every finding (linked when the forge gave a URL
+  // for its inline) and keeps the full text of any finding whose inline could
+  // not be posted, as before. A review with no findings keeps today's body.
+  const failed = stripFindingLines(opts.comment, { singleFilePath: opts.singleFilePath, posted });
+  const list = buildFindingsList(findings, urls);
+  const content = [list, failed].filter((part) => part.trim()).join("\n\n");
+  try {
+    await createWithFallback(
+      opts.event,
+      [],
+      buildCommentBody(opts.marker, opts.headSha, content, opts.checkLine, opts.runner)
+    );
+    return true;
+  } catch (err) {
+    opts.log(`review event skipped: ${errorMessage(err)}`);
+    return false;
   }
 }
 
@@ -1087,13 +1115,6 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       kept_bytes: comment.length,
     });
   }
-  const writeup = buildCommentBody(
-    marker,
-    opts.expectedHeadSha,
-    stripFindingLines(comment, { singleFilePath }),
-    parsed.checkLine,
-    opts.resultRunner
-  );
   const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, parsed.checkLine, opts.resultRunner);
 
   let result: ReviewResult | undefined;
@@ -1110,7 +1131,6 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
         event: reviewEventForVerdict(effectiveVerdict.state, pr.user?.login, opts.botUsername),
-        body: writeup,
         checkLine: parsed.checkLine,
         runner: opts.resultRunner,
         singleFilePath,

@@ -271,6 +271,37 @@ describe("findPreviousReview", () => {
     expect(previous).toEqual({ sha: "bbbbbbb", findings: ["a.ts:3: 🟡 risk: open one"] });
   });
 
+  test("counts a listed and inlined finding once", () => {
+    const body = [
+      MARKER,
+      "### Jumi review",
+      "",
+      "Reviewed commit: `bbbbbbb`",
+      "",
+      "<!-- jumi-findings-list:start -->",
+      "- 🟡 [`a.ts:3`](https://example.com/discussion/70): open one.",
+      "<!-- jumi-findings-list:end -->",
+      "",
+      "<!-- jumi-check: failure -->",
+    ].join("\n");
+    const previous = findPreviousReview({
+      comments: [],
+      reviews: [
+        {
+          id: 9,
+          user: makeUser({ login: "jumi" }),
+          body,
+          commit_id: "bbbbbbb",
+          submitted_at: "2026-05-02T00:00:00Z",
+        },
+      ],
+      inlines: [{ ...makeComment({ id: 70, body: `🟡 risk: open one\n\n${MARKER}` }), path: "a.ts", new_position: 3 }],
+      botUsername: "jumi",
+      marker: MARKER,
+    });
+    expect(previous).toEqual({ sha: "bbbbbbb", findings: ["a.ts:3: 🟡 risk: open one"] });
+  });
+
   test("carries an inline that someone other than Jumi resolved", () => {
     const inline = (id: number, text: string, extra: object) => ({
       ...makeComment({ id, user: makeUser({ login: "jumi[bot]" }), body: `${text}\n\n${MARKER}` }),
