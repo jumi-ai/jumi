@@ -24,6 +24,7 @@ import {
   issueJobFrom,
   parseIssuesPayload,
 } from "./issue_webhook.ts";
+import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
@@ -37,6 +38,7 @@ import {
   verifyGiteaSignature,
   type WebhookPolicy,
 } from "./webhook.ts";
+import type { DeliveryDedupe } from "./webhook_delivery.ts";
 import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
 
 export const JUMI_LABEL = "jumi";
@@ -72,6 +74,12 @@ export type GithubWebhookDeps = {
   rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   ciApi?: import("./worker_webhook.ts").HandleWorkerWebhookDeps["ciApi"];
   ciHome?: string;
+  /**
+   * Replay guard. Checked only after the HMAC passes, and marked only when
+   * the event resolves to a durable 200/202 outcome — a 401, 400, or 503
+   * never occupies a slot, so a failed delivery stays retryable.
+   */
+  deliveryDedupe?: DeliveryDedupe;
 };
 
 export type GithubWebhookPolicy = WorkerWebhookPolicy & {
@@ -801,7 +809,7 @@ export async function handleGithubWebhookEvent(
       jobs.push({ ...partial, delivery, receivedAt });
     };
 
-    if (decision.type === "enqueue") addJob(decision.job);
+    if (decision.type === "enqueue") addJob(await withIssueAuthorPermission(decision.job, deps.worker.api));
 
     if (isDependencyWakeAction(payload.action) && deps.worker.api?.listIssueBlocks) {
       try {
@@ -810,7 +818,7 @@ export async function handleGithubWebhookEvent(
           getIssue: deps.worker.api.getIssue,
           getRepo: deps.worker.api.getRepo,
         });
-        for (const partial of woken) addJob(partial);
+        for (const partial of woken) addJob(await withIssueAuthorPermission(partial, deps.worker.api));
       } catch (err) {
         if (isQueueUnavailable(err)) {
           logger(`queue unavailable: ${err.message}`);
@@ -893,11 +901,27 @@ export async function handleGithubWebhook(
   const signatureOk = await verifyGithubSignature(rawBody, secret, request.headers.get("x-hub-signature-256"));
   if (!signatureOk) return json(401, { error: "invalid signature" });
 
-  return handleGithubWebhookEvent(
+  // The replay check runs after verification on purpose: an unauthenticated
+  // request must get 401, never a 202 probe answer, and must not occupy an
+  // LRU slot that could evict real deliveries.
+  const deliveryHeader = request.headers.get("x-github-delivery");
+  const delivery = deliveryHeader ?? crypto.randomUUID();
+  if (deliveryHeader && deps.deliveryDedupe?.has(delivery)) {
+    deps.logger?.(`deduped replay delivery=${delivery}`);
+    return json(202, { queued: false, deduped: true });
+  }
+
+  const response = await handleGithubWebhookEvent(
     rawBody,
     request.headers.get("x-github-event"),
-    request.headers.get("x-github-delivery") ?? crypto.randomUUID(),
+    delivery,
     githubWebhookPolicy(config),
     deps
   );
+  // Durable outcomes only: a 400/500/503 leaves the delivery unmarked so the
+  // forge retry is processed, not answered as a replay.
+  if (deliveryHeader && (response.status === 200 || response.status === 202)) {
+    deps.deliveryDedupe?.mark(delivery);
+  }
+  return response;
 }

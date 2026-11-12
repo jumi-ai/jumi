@@ -55,7 +55,10 @@ export async function verifyGiteaSignature(
   secret: string,
   signatureHeader: string | null
 ): Promise<boolean> {
-  if (!signatureHeader) return false;
+  // Fail closed and explicitly: an empty or missing secret must never verify,
+  // on any runtime. (Bun's subtle crypto throws DataError on a zero-length
+  // HMAC key; that accidental failure is not the control.)
+  if (!secret || !signatureHeader) return false;
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [
     "sign",
   ]);

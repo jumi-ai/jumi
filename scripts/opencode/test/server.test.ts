@@ -44,7 +44,7 @@ function makeQueue(): ReviewQueueLike & { jobs: ReviewJob[] } {
 
 async function signedRequest(
   body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string } = {}
+  overrides: RequestInit & { event?: string; eventType?: string; secret?: string; delivery?: string } = {}
 ): Promise<Request> {
   const raw = encodeJson(body);
   const secret = overrides.secret ?? "webhook-secret";
@@ -54,7 +54,7 @@ async function signedRequest(
   headers.set("x-gitea-signature", signature);
   if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
   headers.set("x-gitea-event", overrides.event ?? "pull_request");
-  headers.set("x-gitea-delivery", "delivery-1");
+  headers.set("x-gitea-delivery", overrides.delivery ?? "delivery-1");
   return new Request("https://reviewer.test/webhooks/gitea", {
     method: overrides.method ?? "POST",
     body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
@@ -576,7 +576,7 @@ describe("createFetchHandler router mailbox", () => {
           repository: repo,
           sender: makeUser({ login: "ci" }),
         },
-        { event: "status" }
+        { event: "status", delivery: "delivery-status-pending" }
       )
     );
     expect(await responseJson(pending)).toEqual({ skipped: "status pending" });
@@ -591,7 +591,7 @@ describe("createFetchHandler router mailbox", () => {
           repository: repo,
           sender: makeUser({ login: "jumi" }),
         },
-        { event: "status" }
+        { event: "status", delivery: "delivery-status-own" }
       )
     );
     expect(await responseJson(own)).toEqual({ skipped: "jumi review status" });
@@ -606,7 +606,7 @@ describe("createFetchHandler router mailbox", () => {
           repository: repo,
           sender: makeUser({ login: "ci" }),
         },
-        { event: "status" }
+        { event: "status", delivery: "delivery-status-external" }
       )
     );
     expect(response.status).toBe(202);

@@ -14,6 +14,7 @@ import {
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding } from "../src/followup.ts";
 import { GithubAPI } from "../src/github_api.ts";
+import type { InlineComment } from "../src/ports.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
 import {
   applyContractEnvGate,
@@ -122,6 +123,38 @@ function reviewWriteup(
   const body = `${marker}\n### Jumi review\n\nReviewed commit: \`${sha}\`\n\n${prose}`;
   if (!checkLine) return body;
   return `${body.trimEnd()}\n\n${checkLine}`;
+}
+
+/** Expected top-level body when findings were published: the findings list plus the trailer. */
+function reviewFindingsBody(
+  entries: string[],
+  checkLine: string,
+  sha = "headsha",
+  marker = "<!-- jumi-review:kirmanak/demo#7 -->"
+): string {
+  const list = ["<!-- jumi-findings-list:start -->", ...entries, "<!-- jumi-findings-list:end -->"].join("\n");
+  return reviewWriteup(list, checkLine, sha, marker);
+}
+
+/** Expected top-level body when some inlines failed: the list plus the full text of the failures. */
+function reviewListAndFailedBody(
+  entries: string[],
+  failed: string,
+  checkLine: string,
+  sha = "headsha",
+  marker = "<!-- jumi-review:kirmanak/demo#7 -->"
+): string {
+  const list = ["<!-- jumi-findings-list:start -->", ...entries, "<!-- jumi-findings-list:end -->"].join("\n");
+  return reviewWriteup(`${list}\n\n${failed}`, checkLine, sha, marker);
+}
+
+/** Expected first-phase review: inlines posted ahead of the top-level body so it can link them. */
+function inlineBatch(inlines: Array<{ path: string; new_position: number; body: string }>, sha = "headsha") {
+  return {
+    commit_id: sha,
+    event: "COMMENT",
+    comments: inlines,
+  };
 }
 
 const DEFAULT_RUNNER_STAMP = "_Jumi · opencode · openai/gpt-5.5_";
@@ -996,10 +1029,13 @@ describe("reviewPullRequest", () => {
 
       expect(result.status).toBe("posted");
       expect(sticky).toBe("");
-      expect(reviews[0]?.body).not.toContain("L12:");
-      expect(reviews[0]?.body).not.toContain("I'll inspect");
-      expect(lastNonEmptyLine(reviews[0]?.body ?? "")).toBe("<!-- jumi-check: failure; 2 blocking -->");
-      expect(isJumiReviewFinding({ body: reviews[0]?.body }, REVIEW_SHA)).toBe(true);
+      const final = reviews.at(-1)?.body ?? "";
+      expect(final).not.toContain("L12:");
+      expect(final).not.toContain("I'll inspect");
+      expect(final).toContain("`src/demo.ts:12`");
+      expect(final).toContain("`src/demo.ts:40`");
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; 2 blocking -->");
+      expect(isJumiReviewFinding({ body: final }, REVIEW_SHA)).toBe(true);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("2 blocking");
     });
@@ -1007,15 +1043,109 @@ describe("reviewPullRequest", () => {
 
   test("fails closed when JUMI_REVIEW.md omits the check trailer", async () => {
     await withWorkspace(async (workspace) => {
-      let createdBody = "";
+      const comments: string[] = [];
+      const persisted: PersistReviewResult[] = [];
       const statuses: Array<{ state: string; description?: string }> = [];
+      const reviews: Array<{ body?: string }> = [];
+      let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
         api: makeApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
-            createdBody = body;
-            return makeComment({ id: 44, body });
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            reviews.push(review);
+            return { id: reviews.length };
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
+        openCodeRunner: async () => {
+          ran++;
+          await writeReview(workspace, "No correctness bugs found.");
+          return { status: "ok" };
+        },
+      });
+
+      expect(ran).toBe(1 + MAX_INCOMPLETE_RETRIES);
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no check verdict" });
+      expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no check verdict" }]);
+      expect(reviews).toHaveLength(0);
+      expect(comments.some((body) => body.includes("jumi-review:kirmanak/demo#7"))).toBe(false);
+      expect(comments.some((body) => body.includes("No correctness bugs found."))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe("Incomplete review: no check verdict");
+    });
+  });
+
+  test("retries a trailer-less artifact and posts the retry review once", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      const reviews: Array<{ body?: string }> = [];
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const tasks: string[] = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            reviews.push(review);
+            return { id: reviews.length };
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          ran++;
+          const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          tasks.push(task);
+          if (ran === 1) {
+            await writeReview(workspace, "No correctness bugs found.");
+            return { status: "ok" };
+          }
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted" });
+      expect(reviews).toHaveLength(1);
+      expect(comments.some((body) => body.includes(INCOMPLETE_REVIEW_STUCK))).toBe(false);
+      expect(tasks[1]).toContain("check trailer");
+      expect(tasks[1]).toContain("last non-empty line");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+    });
+  });
+
+  test("does not take the check verdict from stdout", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        maxIncompleteRetries: 0,
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
           },
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
@@ -1024,15 +1154,12 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "No correctness bugs found.");
-          return { status: "ok" };
+          return { status: "ok", stdout: "<!-- jumi-check: success -->" };
         },
       });
 
-      expect(result).toEqual({ status: "posted", commentId: 44 });
-      expect(createdBody).not.toContain("No correctness bugs found.");
-      expect(createdBody).not.toContain("I'll inspect");
-      expect(createdBody).not.toContain("jumi-check");
-      expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no check verdict" });
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no check verdict");
     });
@@ -1104,17 +1231,20 @@ describe("reviewPullRequest", () => {
       expect(sticky).toBe("");
       expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
       expect(reviews).toEqual([
+        inlineBatch([
+          {
+            path: "src/demo.ts",
+            new_position: 8,
+            body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+          },
+        ]),
         {
           commit_id: "headsha",
           event: "APPROVED",
-          body: stampedWriteup("", "<!-- jumi-check: success -->"),
-          comments: [
-            {
-              path: "src/demo.ts",
-              new_position: 8,
-              body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-            },
-          ],
+          body: stampedWriteup(
+            "<!-- jumi-findings-list:start -->\n- 💡 `src/demo.ts:8`: drop the helper.\n<!-- jumi-findings-list:end -->",
+            "<!-- jumi-check: success -->"
+          ),
         },
       ]);
     });
@@ -1527,7 +1657,7 @@ describe("reviewPullRequest", () => {
         globalThis.fetch = originalFetch;
       }
 
-      expect(reviews).toHaveLength(1);
+      expect(reviews).toHaveLength(2);
       const posted = bodies.map((body) => JSON.parse(body) as { state?: string; description?: string });
       expect(posted.some((status) => status.state === "pending")).toBe(true);
       const failure = posted.find((status) => status.state === "failure");
@@ -2156,10 +2286,13 @@ optionalEnv(resolved, "DATABASE_URL");
       expect(ranOpenCode).toBe(true);
       expect(result).toEqual({ status: "posted" });
       expect(sticky).toBe("");
-      expect(reviews[0]?.body).not.toContain("Looks good");
-      expect(reviews[0]?.body).not.toContain("deploy/contract.md:1:");
-      expect(lastNonEmptyLine(reviews[0]?.body ?? "")).toBe("<!-- jumi-check: failure; contract env drift -->");
-      expect(reviews[0]?.comments?.some((comment) => comment.body.includes("MAX_FOLLOWUP_ROUNDS"))).toBe(true);
+      const final = reviews.at(-1)?.body ?? "";
+      expect(final).not.toContain("Looks good");
+      expect(final).not.toContain("deploy/contract.md:1:");
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; contract env drift -->");
+      expect(
+        reviews.some((review) => review.comments?.some((comment) => comment.body.includes("MAX_FOLLOWUP_ROUNDS")))
+      ).toBe(true);
       expect(persisted).toEqual([
         {
           kind: "markdown",
@@ -2228,9 +2361,12 @@ optionalEnv(resolved, "DATABASE_URL");
         },
       });
       expect(ranOpenCode).toBe(true);
-      expect(reviews[0]?.body).not.toContain("Looks good");
-      expect(reviews[0]?.comments?.some((comment) => comment.body.includes("🟡 risk:"))).toBe(true);
-      expect(lastNonEmptyLine(reviews[0]?.body ?? "")).toBe("<!-- jumi-check: failure; contract env drift -->");
+      const final = reviews.at(-1)?.body ?? "";
+      expect(final).not.toContain("Looks good");
+      expect(reviews.some((review) => review.comments?.some((comment) => comment.body.includes("🟡 risk:")))).toBe(
+        true
+      );
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; contract env drift -->");
       expect(statuses.at(-1)?.state).toBe("failure");
     });
   });
@@ -2631,22 +2767,25 @@ describe("publishReviewResult", () => {
     expect(result).toEqual({ status: "posted" });
     expect(sticky).toBe("");
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 12,
+          body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+        {
+          path: "src/foo.ts",
+          new_position: 40,
+          body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure; 1 blocking -->"),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 12,
-            body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-          {
-            path: "src/foo.ts",
-            new_position: 40,
-            body: "💡 simpler: drop the helper.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(
+          ["- 🔴 `src/foo.ts:12`: null deref.", "- 💡 `src/foo.ts:40`: drop the helper."],
+          "<!-- jumi-check: failure; 1 blocking -->"
+        ),
       },
     ]);
   });
@@ -2665,17 +2804,20 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/demo.ts",
+          new_position: 12,
+          body: "❓ q: is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "APPROVED",
-        body: reviewWriteup("", "<!-- jumi-check: success -->"),
-        comments: [
-          {
-            path: "src/demo.ts",
-            new_position: 12,
-            body: "❓ q: is the timeout intentional?\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(
+          ["- ❓ `src/demo.ts:12`: is the timeout intentional?"],
+          "<!-- jumi-check: success -->"
+        ),
       },
     ]);
   });
@@ -2737,7 +2879,11 @@ describe("publishReviewResult", () => {
     expect(reviews[3]).toMatchObject({
       commit_id: "headsha",
       event: "REQUEST_CHANGES",
-      body: reviewWriteup("src/foo.ts:40: 🟡 risk: second.", "<!-- jumi-check: failure -->"),
+      body: reviewListAndFailedBody(
+        ["- 🔴 `src/foo.ts:12`: first.", "- 🟡 `src/foo.ts:40`: second."],
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->"
+      ),
     });
     expect(logs.some((line) => line.includes("inline skipped src/foo.ts:40"))).toBe(true);
   });
@@ -2799,7 +2945,11 @@ describe("publishReviewResult", () => {
     expect(reviews[2]).toMatchObject({
       commit_id: "headsha",
       event: "REQUEST_CHANGES",
-      body: reviewWriteup("src/foo.ts:40: 🟡 risk: second.", "<!-- jumi-check: failure -->"),
+      body: reviewListAndFailedBody(
+        ["- 🔴 `src/foo.ts:12`: first.", "- 🟡 `src/foo.ts:40`: second."],
+        "src/foo.ts:40: 🟡 risk: second.",
+        "<!-- jumi-check: failure -->"
+      ),
     });
   });
 
@@ -2908,7 +3058,10 @@ describe("publishReviewResult", () => {
     expect(reviews[1]).toMatchObject({
       commit_id: "headsha",
       event: "REQUEST_CHANGES",
-      body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+      body: reviewFindingsBody(
+        ["- 🔴 `src/foo.ts:12`: first.", "- 🟡 `src/foo.ts:40`: second."],
+        "<!-- jumi-check: failure -->"
+      ),
     });
   });
 
@@ -3013,7 +3166,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3067,17 +3220,17 @@ describe("publishReviewResult", () => {
     expect(submitted).toEqual([99]);
     expect(logs.some((line) => line.includes("pending review 99 not submitted"))).toBe(true);
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 12,
+          body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 12,
-            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3128,17 +3281,20 @@ describe("publishReviewResult", () => {
     });
     expect(result).toEqual({ status: "posted" });
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 40,
+          body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 40,
-            body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(
+          ["- 🔴 `src/foo.ts:12`: first.", "- 🟡 `src/foo.ts:40`: second."],
+          "<!-- jumi-check: failure -->"
+        ),
       },
     ]);
   });
@@ -3174,7 +3330,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:18`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3209,7 +3365,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3244,17 +3400,20 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 40,
+          body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 40,
-            body: "🟡 risk: second.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(
+          ["- 🔴 `src/foo.ts:12`: first.", "- 🟡 `src/foo.ts:40`: second."],
+          "<!-- jumi-check: failure -->"
+        ),
       },
     ]);
   });
@@ -3326,7 +3485,7 @@ describe("publishReviewResult", () => {
     expect(reviews[2]).toMatchObject({
       commit_id: "headsha",
       event: "REQUEST_CHANGES",
-      body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+      body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: first."], "<!-- jumi-check: failure -->"),
     });
   });
 
@@ -3492,7 +3651,7 @@ describe("publishReviewResult", () => {
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3525,17 +3684,17 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 18,
+          body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", "<!-- jumi-check: failure -->"),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 18,
-            body: "🔴 bug: first.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:18`: first."], "<!-- jumi-check: failure -->"),
       },
     ]);
   });
@@ -3614,17 +3773,17 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(reviews).toEqual([
+      inlineBatch([
+        {
+          path: "src/foo.ts",
+          new_position: 12,
+          body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+        },
+      ]),
       {
         commit_id: "headsha",
         event: "REQUEST_CHANGES",
-        body: reviewWriteup("", trailer),
-        comments: [
-          {
-            path: "src/foo.ts",
-            new_position: 12,
-            body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
-          },
-        ],
+        body: reviewFindingsBody(["- 🔴 `src/foo.ts:12`: null deref."], trailer),
       },
     ]);
 
@@ -3708,7 +3867,7 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(result.status).toBe("posted");
-    expect(reviews[0]?.event).toBe("REQUEST_CHANGES");
+    expect(reviews.at(-1)?.event).toBe("REQUEST_CHANGES");
     expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "2 open questions" });
   });
 
@@ -3732,7 +3891,7 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(result.status).toBe("posted");
-    expect(reviews[0]?.event).toBe("APPROVED");
+    expect(reviews.at(-1)?.event).toBe("APPROVED");
     expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
   });
 
@@ -3789,5 +3948,138 @@ describe("publishReviewResult", () => {
       }),
     });
     expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+
+  test("a failure review with one located risk lists it with a link to the inline", async () => {
+    const reviews: unknown[] = [];
+    let inlines: InlineComment[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "renovate.json:37: 🟡 risk: the tag could drop the `rust-v` prefix.",
+        "<!-- jumi-check: failure; 1 risk -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviewComments: async () => inlines,
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if (review.comments?.length) {
+            inlines = review.comments.map((comment: { path: string; new_position?: number; body: string }) => ({
+              ...makeComment({ id: 100, body: comment.body, user: makeUser({ login: "jumi" }) }),
+              path: comment.path,
+              new_position: comment.new_position,
+              pull_request_review_id: 9,
+              html_url: "https://github.com/kirmanak/demo/pull/7#discussion_r100",
+            }));
+          }
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(reviews).toHaveLength(2);
+    expect(reviews[0]).toMatchObject({
+      event: "COMMENT",
+      comments: [{ path: "renovate.json", new_position: 37 }],
+    });
+    const body = (reviews[1] as { body: string }).body;
+    expect(body).toContain(
+      "- 🟡 [`renovate.json:37`](https://github.com/kirmanak/demo/pull/7#discussion_r100): the tag could drop the `rust-v` prefix."
+    );
+    expect(lastNonEmptyLine(body)).toBe("<!-- jumi-check: failure; 1 risk -->");
+  });
+
+  test("a review with an unlinkable inline lists the location without a link", async () => {
+    const reviews: unknown[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "src/foo.ts:12: 🔴 bug: null deref. Guard it.\n<!-- jumi-check: failure -->",
+      api: makeApi({
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: null deref. Guard it.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/foo.ts",
+            new_position: 12,
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    // The existing inline is already posted, so only the top-level body goes out.
+    expect(reviews).toHaveLength(1);
+    const body = (reviews[0] as { body: string }).body;
+    expect(body).toContain("- 🔴 `src/foo.ts:12`: null deref.");
+    expect(body).not.toContain("](");
+  });
+
+  test("a review with a failed inline lists every finding and keeps the full failed text", async () => {
+    const reviews: unknown[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/a.ts:1: 🔴 bug: first breaks.",
+        "src/b.ts:2: 🟡 risk: second slips.",
+        "<!-- jumi-check: failure -->",
+      ].join("\n"),
+      api: makeApi({
+        listPullReviewComments: async () => [
+          {
+            ...makeComment({
+              id: 11,
+              body: "🔴 bug: first breaks.\n\n<!-- jumi-review:kirmanak/demo#7 -->",
+              user: makeUser({ login: "jumi" }),
+            }),
+            path: "src/a.ts",
+            new_position: 1,
+            html_url: "https://github.com/kirmanak/demo/pull/7#discussion_r11",
+          },
+        ],
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          if (review.comments?.length) throw new Error("line not in diff");
+          return { id: reviews.length };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(reviews).toHaveLength(3);
+    const body = (reviews[2] as { body: string }).body;
+    expect(body).toContain(
+      "- 🔴 [`src/a.ts:1`](https://github.com/kirmanak/demo/pull/7#discussion_r11): first breaks."
+    );
+    expect(body).toContain("- 🟡 `src/b.ts:2`: second slips.");
+    expect(body).toContain("src/b.ts:2: 🟡 risk: second slips.");
+    expect(lastNonEmptyLine(body)).toBe("<!-- jumi-check: failure -->");
+  });
+
+  test("a success review with no findings keeps the body it always had", async () => {
+    const reviews: unknown[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          reviews.push(review);
+          return { id: 1 };
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(reviews).toEqual([
+      {
+        commit_id: "headsha",
+        event: "APPROVED",
+        body: reviewWriteup("", "<!-- jumi-check: success -->"),
+      },
+    ]);
+    expect((reviews[0] as { body: string }).body).not.toContain("jumi-findings-list");
   });
 });

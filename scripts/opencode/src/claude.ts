@@ -36,7 +36,7 @@ export const CLAUDE_OUTPUT_FORMAT = "stream-json";
 
 const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
-const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET"]);
+const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET", "BOARD_PEER_TOKEN"]);
 const CLAUDE_USAGE_LIMIT_RE =
   /You've hit your (?:session |usage |weekly |opus |sonnet |5[- ]hour )?limit|Claude AI usage limit reached/i;
 
@@ -155,7 +155,7 @@ export function scrubbedKey(key: string): boolean {
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {

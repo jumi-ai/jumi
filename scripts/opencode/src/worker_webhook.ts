@@ -22,6 +22,7 @@ import {
   pullWaitClearJobsToEnqueue,
   shouldEnqueueIssue,
 } from "./issue_webhook.ts";
+import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
@@ -297,7 +298,11 @@ async function wakeJobsFromPull(
   if (!deps.api) return [];
   const partials = await pullWaitClearJobsToEnqueue(payload, policy, deps.api, logger);
   const receivedAt = new Date().toISOString();
-  return partials.map((partial) => ({ ...partial, delivery, receivedAt }));
+  const jobs: IssueJob[] = [];
+  for (const partial of partials) {
+    jobs.push({ ...(await withIssueAuthorPermission(partial, deps.api)), delivery, receivedAt });
+  }
+  return jobs;
 }
 
 export async function cancelLedgerWorkerJobs(opts: {
@@ -721,7 +726,7 @@ export async function handleWorkerWebhookEvent(
       jobs.push({ ...partial, delivery, receivedAt });
     };
 
-    if (decision.type === "enqueue") addJob(decision.job);
+    if (decision.type === "enqueue") addJob(await withIssueAuthorPermission(decision.job, deps.api));
 
     if (isDependencyWakeAction(payload.action) && deps.api?.listIssueBlocks) {
       try {
@@ -730,7 +735,7 @@ export async function handleWorkerWebhookEvent(
           getIssue: deps.api.getIssue,
           getRepo: deps.api.getRepo,
         });
-        for (const partial of woken) addJob(partial);
+        for (const partial of woken) addJob(await withIssueAuthorPermission(partial, deps.api));
       } catch (err) {
         return wakeFailedResponse(err, logger);
       }

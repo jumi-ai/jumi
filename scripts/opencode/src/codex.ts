@@ -166,7 +166,7 @@ function redactApiKeys(text: string): string {
   return out;
 }
 
-function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+export function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   const base = opts.sanitizeEnv
     ? {
