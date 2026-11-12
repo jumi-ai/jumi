@@ -588,7 +588,19 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
 }
 
 export function shouldIncrementRound(result: MergeDefaultResult): boolean {
-  return result.openCodeRan || result.conflicted || result.status === "stuck";
+  return result.status === "stuck";
+}
+
+export function shouldResetConflictRound(result: MergeDefaultResult): boolean {
+  return result.status === "merged";
+}
+
+export function conflictCapReason(round: number, max: number): string {
+  return `stuck: cannot resolve conflicts (${round}/${max} conflict rounds)`;
+}
+
+export function conflictCapSticky(round: number, max: number): string {
+  return `${conflictCapReason(round, max)} — run a stuck kick to retry`;
 }
 
 export async function implementConflict(opts: ImplementOptions): Promise<ConflictResult> {
@@ -648,7 +660,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   const state = await readConflictLatch(latches, latchKey);
   if (state.round >= maxConflictRounds) {
-    await sticky("stuck: cannot resolve conflicts", pr.number);
+    await sticky(conflictCapSticky(state.round, maxConflictRounds), pr.number);
     await forgetClaim();
     return { status: "stuck" };
   }
@@ -995,7 +1007,13 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         log
       );
       await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
-      await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
+      await writeConflictLatch(latches, latchKey, {
+        prNumber: pr.number,
+        round: 0,
+        lastHeadSha: mergeResult.headSha,
+        lastBaseSha: mergeResult.baseSha,
+        updatedAt: now().toISOString(),
+      });
       // Push already landed; a failed destroy must not discard it.
       await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
