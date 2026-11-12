@@ -236,6 +236,15 @@ describe("loadWorkerConfig", () => {
     ).toEqual(["renovate-bot", "Renovate[bot]"]);
   });
 
+  test("parses JUMI_AUTOMERGE_REPOS CSV and treats empty as off", () => {
+    expect(loadWorkerConfig(required).automergeRepos).toEqual([]);
+    expect(loadWorkerConfig({ ...required, JUMI_AUTOMERGE_REPOS: "" }).automergeRepos).toEqual([]);
+    expect(loadWorkerConfig({ ...required, JUMI_AUTOMERGE_REPOS: " , " }).automergeRepos).toEqual([]);
+    expect(loadWorkerConfig({ ...required, JUMI_AUTOMERGE_REPOS: "kirmanak/demo, acme/api, " }).automergeRepos).toEqual(
+      ["kirmanak/demo", "acme/api"]
+    );
+  });
+
   const githubPem = "-----BEGIN PRIVATE KEY-----\nMII\n-----END PRIVATE KEY-----";
   const githubRequired = {
     FORGE: "github",
