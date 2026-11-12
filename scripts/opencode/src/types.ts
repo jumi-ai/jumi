@@ -20,6 +20,7 @@ export interface GiteaRepo {
   html_url: string;
   clone_url: string;
   default_branch: string;
+  default_merge_style?: string;
 }
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────
