@@ -1,7 +1,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
-import { ensureAutomergeAfterPush, readAutomergeScheduled } from "./automerge.ts";
+import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -29,7 +29,6 @@ import {
   inspectMovedPrHead,
   isClaimedEarlyResult,
   openClaimedLoop,
-  pushClaimedBranch,
   recheckAssignedAndOpen,
   runClaimedLoop,
   skipClaimedWork,
@@ -1678,22 +1677,12 @@ export async function implementFollowUp(
         }
       }
       try {
-        const wasScheduled = await readAutomergeScheduled(
-          opts.api,
-          opts.forgeKind ?? "gitea",
-          owner,
-          repo,
-          pr.number,
-          opts.automergeRepos
-        );
-        await pushClaimedBranch(loop, branch);
-        await ensureAutomergeAfterPush({
+        await pushClaimedBranchWithAutomergeRestore(loop, branch, {
           api: opts.api,
           forgeKind: opts.forgeKind ?? "gitea",
           owner,
           repo,
           prNumber: pr.number,
-          wasScheduled,
           automergeRepos: opts.automergeRepos,
           log,
         });

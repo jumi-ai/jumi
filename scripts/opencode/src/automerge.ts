@@ -1,6 +1,9 @@
 import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import type { ClaimedLoop } from "./claimed_worktree.ts";
+import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
 import type { IssueApi } from "./ports.ts";
+import { upsertStickyComment } from "./sticky_comment.ts";
 
 export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
 export const AUTOMERGE_NOTE_MARKER = "<!-- jumi-automerge -->";
@@ -40,17 +43,6 @@ export function githubMergeMethodForRepo(repo: {
   return "MERGE";
 }
 
-function firstLine(text: string, maxChars = 300): string {
-  const line = text.split(/\r?\n/)[0]?.trim() ?? "";
-  return line.length > maxChars ? `${line.slice(0, maxChars)}…` : line;
-}
-
-function failureDetail(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  const line = firstLine(raw.replace(/→ \d+\b.*?:\s*/, ""));
-  return line || "unknown error";
-}
-
 async function postAutomergeNote(
   api: AutomergeApi,
   owner: string,
@@ -59,14 +51,8 @@ async function postAutomergeNote(
   botUsername: string,
   body: string
 ): Promise<void> {
-  const text = `${AUTOMERGE_NOTE_MARKER}\n${body}`;
   try {
-    const existing = await api.findStickyIssueComment(owner, repo, prNumber, botUsername, AUTOMERGE_NOTE_MARKER);
-    if (existing) {
-      await api.updateIssueComment(owner, repo, existing.id, text);
-      return;
-    }
-    await api.createIssueComment(owner, repo, prNumber, text);
+    await upsertStickyComment(api, owner, repo, prNumber, botUsername, AUTOMERGE_NOTE_MARKER, body);
   } catch {
     // A failed schedule must not fail the job, and neither may its note.
   }
@@ -201,7 +187,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
       input.repo,
       input.prNumber,
       input.botUsername,
-      `Jumi tried to schedule auto-merge on this pull request but the forge refused (${failureDetail(err)}). A person needs to merge once reviews and CI are green.`
+      `Jumi tried to schedule auto-merge on this pull request but the forge refused. A person needs to merge once reviews and CI are green.`
     );
     return { scheduled: false };
   }
@@ -280,4 +266,45 @@ export async function readAutomergeScheduled(
   } catch {
     return false;
   }
+}
+
+export interface PushWithAutomergeRestoreInput {
+  api: Pick<AutomergeApi, "getRepo" | "getPR" | "scheduleAutoMerge">;
+  forgeKind: ForgeKind;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  automergeRepos: readonly string[] | undefined;
+  log?: (message: string) => void;
+}
+
+/**
+ * Read the schedule state, push the claimed branch, then restore the
+ * schedule when the forge dropped it. Person-cancelled stays cancelled.
+ * Shared by the follow-up and conflict flows so the restore logic has one home.
+ */
+export async function pushClaimedBranchWithAutomergeRestore(
+  loop: ClaimedLoop,
+  branch: string,
+  input: PushWithAutomergeRestoreInput
+): Promise<void> {
+  const wasScheduled = await readAutomergeScheduled(
+    input.api,
+    input.forgeKind,
+    input.owner,
+    input.repo,
+    input.prNumber,
+    input.automergeRepos
+  );
+  await pushClaimedBranch(loop, branch);
+  await ensureAutomergeAfterPush({
+    api: input.api,
+    forgeKind: input.forgeKind,
+    owner: input.owner,
+    repo: input.repo,
+    prNumber: input.prNumber,
+    wasScheduled,
+    automergeRepos: input.automergeRepos,
+    log: input.log,
+  });
 }

@@ -817,20 +817,65 @@ export class GithubAPI {
 
   /**
    * Required status checks the App can read for the fail-closed auto-merge
-   * gate. Throws (404) when the branch has no protection or no required
-   * checks, which the caller treats as "gate not established".
+   * gate. Reads classic protection first; classic 404s on ruleset-managed
+   * branches, so fall back to the active branch rules
+   * (`GET /repos/{owner}/{repo}/rules/branches/{branch}`) and collect the
+   * `required_status_checks` contexts there. Readable rules without a
+   * required-checks rule report `enableStatusCheck: false`. Throws when
+   * neither source is readable, which the caller treats as "gate not
+   * established".
    */
   async getBranch(owner: string, repo: string, branch: string): Promise<BranchProtection> {
-    const policy = await this.get<{ contexts?: string[]; checks?: Array<{ context?: string }> }>(
-      `/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`
-    );
-    const requiredContexts = [
-      ...(Array.isArray(policy.contexts) ? policy.contexts : []),
-      ...(Array.isArray(policy.checks) ? policy.checks : [])
-        .map((check) => check.context)
-        .filter((context): context is string => typeof context === "string" && context.length > 0),
-    ];
-    return { protected: true, enableStatusCheck: true, requiredContexts };
+    try {
+      const policy = await this.get<{ contexts?: string[]; checks?: Array<{ context?: string }> }>(
+        `/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`
+      );
+      const requiredContexts = [
+        ...(Array.isArray(policy.contexts) ? policy.contexts : []),
+        ...(Array.isArray(policy.checks) ? policy.checks : [])
+          .map((check) => check.context)
+          .filter((context): context is string => typeof context === "string" && context.length > 0),
+      ];
+      return { protected: true, enableStatusCheck: true, requiredContexts };
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err;
+      return this.getBranchFromRules(owner, repo, branch, err);
+    }
+  }
+
+  private async getBranchFromRules(
+    owner: string,
+    repo: string,
+    branch: string,
+    classicError: unknown
+  ): Promise<BranchProtection> {
+    let rules: unknown;
+    try {
+      rules = await this.get(`/repos/${this.repoPath(owner, repo)}/rules/branches/${encodeURIComponent(branch)}`);
+    } catch {
+      throw classicError;
+    }
+    if (!Array.isArray(rules)) throw classicError;
+    const requiredContexts: string[] = [];
+    for (const rule of rules) {
+      if (!rule || typeof rule !== "object") continue;
+      const typed = rule as {
+        type?: unknown;
+        parameters?: { required_status_checks?: Array<{ context?: unknown }> };
+      };
+      if (typed.type !== "required_status_checks") continue;
+      const checks = typed.parameters?.required_status_checks;
+      if (!Array.isArray(checks)) continue;
+      for (const check of checks) {
+        if (check && typeof check.context === "string" && check.context.length > 0) {
+          requiredContexts.push(check.context);
+        }
+      }
+    }
+    // Readable rules without a required-checks rule mean the branch genuinely
+    // requires nothing: fail closed with `enableStatusCheck: false` (the "does
+    // not require" note) rather than the "could not be read" note.
+    return { protected: true, enableStatusCheck: requiredContexts.length > 0, requiredContexts };
   }
 
   /**
@@ -857,7 +902,12 @@ export class GithubAPI {
         { owner, repo }
       );
     } catch (err) {
-      if (err instanceof Error && /already.*auto-?merge/i.test(err.message)) return;
+      // Public workflow convention checks `message.includes("already enabled")`:
+      // GitHub reports an existing schedule with the schedule first
+      // ("Auto-merge already enabled") as well as already-first wordings, so
+      // match both orders instead of only `already … auto-merge`.
+      if (err instanceof Error && /(already.*auto-?merge|auto-?merge.*already|already enabled)/i.test(err.message))
+        return;
       throw err;
     }
   }

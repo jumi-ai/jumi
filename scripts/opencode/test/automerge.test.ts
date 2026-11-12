@@ -216,6 +216,9 @@ describe("automerge gate", () => {
     expect(result).toEqual({ scheduled: false });
     expect(api.notes).toHaveLength(1);
     expect(api.notes[0]).toContain("forge refused");
+    // The forge request line stays in the server log, never in the public note.
+    expect(api.notes[0]).not.toContain("Gitea API");
+    expect(api.notes[0]).not.toContain("User not allowed");
   });
 
   test("github refuses when auto-merge is disabled on the repository", async () => {
