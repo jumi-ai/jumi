@@ -6,6 +6,7 @@ import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type P
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import type { ReviewSuggestionCounts, ReviewSuggestionTotalsRow } from "./review_suggestions.ts";
 import {
   CLOSED_PULLS_SCHEMA_SQL,
   MemoryRouterSitStore,
@@ -201,6 +202,16 @@ export interface ReviewJobStore {
   getRunExitCounts(): Promise<ExitCountRow[]>;
   /** Ledger run durations by (kind, exit class), for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
+  /**
+   * Durable per-review 💡 counts: one row per published review (runner, forge,
+   * posted after the cap, dropped by the cap, earlier 💡 not repeated).
+   * Fail-open: callers swallow errors and never fail the review when this
+   * write fails. Labels stay bounded (runner type, forge); no PR number or
+   * repo is stored here.
+   */
+  recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void>;
+  /** Ledger 💡 sums by (runner, forge). */
+  getReviewSuggestionTotals(): Promise<ReviewSuggestionTotalsRow[]>;
   reclaimExpired(maxAttempts: number, now?: Date, leaseMs?: number, kinds?: readonly JobKind[]): Promise<ReclaimResult>;
   /**
    * Router cancel for one issue. Queued worker rows become `cancelled`
@@ -633,6 +644,21 @@ CREATE TABLE IF NOT EXISTS role_gates (
 );
 `;
 
+export const REVIEW_SUGGESTIONS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS jumi_review_suggestions (
+  id BIGSERIAL PRIMARY KEY,
+  runner TEXT NOT NULL,
+  forge TEXT NOT NULL,
+  posted INTEGER NOT NULL DEFAULT 0,
+  dropped INTEGER NOT NULL DEFAULT 0,
+  addressed INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS jumi_review_suggestions_runner_forge
+  ON jumi_review_suggestions (runner, forge);
+`;
+
 export type RoleGateRole = "engine" | "worker";
 
 export interface RoleGateStatus {
@@ -936,6 +962,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   private nextKickId = 1;
   private nextRunUsageId = 1;
   readonly runUsage: Array<NewRunUsageRow & { id: number }> = [];
+  private nextSuggestionId = 1;
+  readonly reviewSuggestions: Array<ReviewSuggestionCounts & { id: number }> = [];
 
   private locked<T>(fn: () => T | Promise<T>): Promise<T> {
     const run = this.chain.then(fn, fn);
@@ -1451,6 +1479,46 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(() =>
       this.runUsage.map((row) => ({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds }))
     );
+  }
+
+  recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void> {
+    return this.locked(() => {
+      this.reviewSuggestions.push({
+        ...counts,
+        runner: counts.runner,
+        forge: counts.forge,
+        posted: Math.max(0, Math.floor(counts.posted)),
+        dropped: Math.max(0, Math.floor(counts.dropped)),
+        addressed: Math.max(0, Math.floor(counts.addressed)),
+        id: this.nextSuggestionId++,
+      });
+    });
+  }
+
+  getReviewSuggestionTotals(): Promise<ReviewSuggestionTotalsRow[]> {
+    return this.locked(() => {
+      const sums = new Map<string, ReviewSuggestionTotalsRow>();
+      for (const row of this.reviewSuggestions) {
+        const key = `${row.runner}\0${row.forge}`;
+        const existing = sums.get(key);
+        if (existing) {
+          existing.posted += row.posted;
+          existing.dropped += row.dropped;
+          existing.addressed += row.addressed;
+          existing.reviews += 1;
+        } else {
+          sums.set(key, {
+            runner: row.runner,
+            forge: row.forge,
+            posted: row.posted,
+            dropped: row.dropped,
+            addressed: row.addressed,
+            reviews: 1,
+          });
+        }
+      }
+      return [...sums.values()];
+    });
   }
 
   countByState(): Promise<Record<ReviewJobState, number>> {
@@ -2467,6 +2535,7 @@ const REQUIRED_LEDGER_TABLES = [
   "jumi_run_usage",
   "role_gates",
   "issue_handoffs",
+  "jumi_review_suggestions",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -2536,6 +2605,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(REVIEW_KICKS_SCHEMA_SQL);
         await tx.unsafe(PROVENANCE_SCHEMA_SQL);
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
+        await tx.unsafe(REVIEW_SUGGESTIONS_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
       });
@@ -3465,6 +3535,52 @@ export class PgReviewJobStore implements ReviewJobStore {
       kind: str(row.kind),
       exitClass: str(row.exit_class),
       durationSeconds: Number(row.duration_seconds) || 0,
+    }));
+  }
+
+  async recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void> {
+    try {
+      await this.sql.unsafe(
+        `INSERT INTO jumi_review_suggestions (runner, forge, posted, dropped, addressed)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          counts.runner,
+          counts.forge,
+          Math.max(0, Math.floor(counts.posted)),
+          Math.max(0, Math.floor(counts.dropped)),
+          Math.max(0, Math.floor(counts.addressed)),
+        ]
+      );
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async getReviewSuggestionTotals(): Promise<ReviewSuggestionTotalsRow[]> {
+    const rows = asRows<{
+      runner: unknown;
+      forge: unknown;
+      posted: unknown;
+      dropped: unknown;
+      addressed: unknown;
+      reviews: unknown;
+    }>(
+      await this.sql.unsafe(
+        `SELECT runner, forge,
+           COALESCE(SUM(posted), 0)::bigint AS posted,
+           COALESCE(SUM(dropped), 0)::bigint AS dropped,
+           COALESCE(SUM(addressed), 0)::bigint AS addressed,
+           COUNT(*)::bigint AS reviews
+         FROM jumi_review_suggestions GROUP BY runner, forge`
+      )
+    );
+    return rows.map((row) => ({
+      runner: str(row.runner),
+      forge: str(row.forge),
+      posted: num(row.posted),
+      dropped: num(row.dropped),
+      addressed: num(row.addressed),
+      reviews: num(row.reviews),
     }));
   }
 
