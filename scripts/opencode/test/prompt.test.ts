@@ -294,6 +294,54 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("later explicit writer correction supersedes");
     expect(prompt).toContain("dismissed or stale review is not a retraction");
   });
+
+  test("names the read-only upstream shallow clone exception without lifting the network ban", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain("arbitrary network shell commands");
+    expect(prompt).toContain("read-only shallow clone");
+    expect(prompt).toContain("git clone --depth 1 --branch <tag>");
+    expect(prompt).toContain("outside the checkout");
+    expect(prompt).toContain("outside the worktree");
+    expect(prompt).toContain("never carry a forge token");
+    expect(prompt).toContain("forge host stays denied");
+    expect(prompt).toContain("package installs");
+  });
+
+  test("blocking questions gather upstream evidence first and never ask for the changelog", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      blockingQuestions: true,
+    });
+
+    expect(prompt).toContain("<blocking_questions>");
+    expect(prompt).toContain("Gather upstream");
+    expect(prompt).toContain("shallow");
+    expect(prompt).toContain("non-blocking note");
+    expect(prompt).toContain("intent");
+    expect(prompt).toContain("deployment");
+    expect(prompt).toContain("acceptable risk");
+    expect(prompt).toContain("tests, config");
+    expect(prompt).toContain("repeat or sharpen");
+    expect(prompt).not.toContain("upstream changelog");
+    expect(prompt).not.toContain("compare across the version range");
+  });
+
+  test("blocking questions stay hidden unless the author is listed", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).not.toContain("<blocking_questions>");
+  });
 });
 
 describe("formatCiResults", () => {

@@ -1588,6 +1588,12 @@ describe("worker prompts", () => {
     expect(FOLLOWUP_PROMPT).toContain("A clean tree is a valid outcome");
   });
 
+  test("follow-up leaves the tree untouched for an upstream-only question with nothing to change", () => {
+    expect(FOLLOWUP_PROMPT).toContain("only asks for an upstream diff");
+    expect(FOLLOWUP_PROMPT).toContain("leave the tree untouched");
+    expect(FOLLOWUP_PROMPT).toContain("so Renovate can still rebase");
+  });
+
   test("first-run may yield a queue id then stop", () => {
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
     expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");
