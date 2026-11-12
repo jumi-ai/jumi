@@ -57,6 +57,13 @@ import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./re
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import {
+  countAddressedSuggestions,
+  forgeLabelForKind,
+  parseSuggestionFindings,
+  type ReviewSuggestionCounts,
+  runnerLabelForStamp,
+} from "./review_suggestions.ts";
+import {
   appendRunnerStamp,
   describeAttemptOrder,
   formatRunnerStamp,
@@ -89,6 +96,7 @@ import {
 import type { ReviewJob } from "./types.ts";
 import {
   buildFindingsList,
+  capSuggestionFindings,
   countQuestionFindings,
   findingFingerprint,
   hasColonEndingFinding,
@@ -198,6 +206,12 @@ export interface ReviewOptions {
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
   persistResult?: (result: PersistReviewResult) => Promise<void>;
+  /**
+   * Fail-open recorder for the per-review 💡 counts. The engine tick wires
+   * this to the ledger; tests and local runs may omit it. Forwarded to
+   * `publishReviewResult` with the capped counts.
+   */
+  recordSuggestions?: (counts: ReviewSuggestionCounts) => Promise<void>;
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
@@ -248,6 +262,15 @@ export interface PublishReviewOptions {
   resultRunner?: string | null;
   error?: string | null;
   logger?: (message: string) => void;
+  /** Forge kind for the `forge` suggestion-metric label. Defaults to `gitea`. */
+  forgeKind?: string;
+  /** Previous review finding lines for the addressed-💡 count. Unset counts 0 addressed. */
+  previousFindings?: readonly string[];
+  /**
+   * Fail-open recorder for the per-review 💡 counts. The engine tick wires
+   * this to the ledger; tests and local runs may omit it.
+   */
+  recordSuggestions?: (counts: ReviewSuggestionCounts) => Promise<void>;
 }
 
 const encoder = new TextEncoder();
@@ -1086,7 +1109,44 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
   // Publish finding blocks and the trailer only; the child's tour is not published.
   // A finding keeps its indented/list continuation; unrelated prose is dropped.
-  const comment = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  // Parent-enforced 💡 cap: at most MAX_SUGGESTION_FINDINGS publish. 🔴/🟡/❓
+  // are never dropped. The dropped count rides in one body line so the next
+  // follow-up still sees the trailer but not a wall of suggestions.
+  const capped = capSuggestionFindings(kept, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  const comment = capped.comment;
+  let suggestionAddressed = 0;
+  if (opts.previousFindings && opts.previousFindings.length > 0) {
+    try {
+      const prevSuggestions = parseSuggestionFindings(opts.previousFindings.join("\n\n"), { singleFilePath });
+      const currSuggestions = parseSuggestionFindings(comment, { singleFilePath });
+      suggestionAddressed = countAddressedSuggestions(prevSuggestions, currSuggestions);
+    } catch {
+      suggestionAddressed = 0;
+    }
+  }
+  if (opts.recordSuggestions) {
+    const counts: ReviewSuggestionCounts = {
+      runner: runnerLabelForStamp(opts.resultRunner),
+      forge: forgeLabelForKind(opts.forgeKind),
+      posted: capped.posted,
+      dropped: capped.dropped,
+      addressed: suggestionAddressed,
+    };
+    try {
+      await opts.recordSuggestions(counts);
+    } catch (err) {
+      log(`suggestion metrics unavailable: ${errorMessage(err)}`);
+    }
+    logDiagnostic(log, "review_suggestions", {
+      review: reviewLabel,
+      runner: counts.runner,
+      forge: counts.forge,
+      posted: counts.posted,
+      dropped: counts.dropped,
+      addressed: counts.addressed,
+    });
+  }
   // Opt-in blocking questions: when the deployment lists this PR author, a
   // questions-only success still fails the required check so automerge waits,
   // and the worker follow-up below answers the questions. With the setting
@@ -1783,6 +1843,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               resultMarkdown: markdown,
               resultRunner: runner,
               logger: log,
+              forgeKind: opts.forgeKind,
+              previousFindings: previousReview?.findings,
+              recordSuggestions: opts.recordSuggestions,
             });
           }
 

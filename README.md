@@ -172,6 +172,25 @@ Repo-specific review rules live in the reviewed repository, in `REVIEW.md` at th
 
 The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure or leftover simplifications (`success; N suggestions`). Questions-only success does not enqueue, unless `REVIEW_BLOCKING_QUESTION_AUTHORS` lists the PR author: then the status fails with `N open questions` and follow-up runs to answer each ❓ (evidence with links/commands, or a change that makes the question moot, or a reply that it needs a human — the status stays failing in that case). On re-review a question closes only when the reply or change actually answers it; otherwise it is re-asked or sharpened, and the status turns `success` only when no questions are open. The worker child holds no forge credentials; its answers reach the forge through the parent's stickies like any other worker output.
 
+### Replay (opt-in one-shot)
+
+`bun run src/replay.ts --cases <case-file.json> --out <output-dir> [--runners <name1,name2>]` replays past reviews on chosen runners without publishing. It runs in the existing reviewer image, so a Kubernetes Job can run it. No new service. Case files are input only: never commit them, they may name private repositories.
+
+Case file JSON is either `{"cases": [...]}` or a bare array. Each case names `owner`/`repo` plus either `prNumber` or a pinned `baseSha` plus `headSha` (never both), with optional `id`, `forge`, and `note`:
+
+```json
+{
+  "cases": [
+    { "id": "fix-123", "owner": "acme", "repo": "api", "prNumber": 123 },
+    { "id": "sha-case", "owner": "acme", "repo": "api", "baseSha": "<base>", "headSha": "<head>", "note": "optional" }
+  ]
+}
+```
+
+For each case and runner the mode runs the normal review on the pinned base and head, with the same prompt, skills, `REVIEW.md` selection, and runner settings the live reviewer would use. Runners default to the configured review chain; `--runners` picks a subset by name. Output is `<out>/results.jsonl` (one record per case and runner) plus one `<case>.<runner>.md` raw review file per record. Each record carries the published-equivalent findings, the trailer verdict (`success` / `failure` / `skip`), the runner stamp, duration, and the skip or quota reason when there is one. Scoring stays outside Jumi: an operator compares the records to the expected defects.
+
+No forge writes: the replay API type exposes only reads and the runtime guard throws on any write call, so a read-only token is enough and nothing posts a review, status, comment, or label. Quota follows normal review handling but records a skip and moves on, never sleeping for hours; pending or red CI also records a skip without starting the model. A case that fails to load (deleted repo/PR, missing SHA, transient list failure) records a `skip` and the batch continues; `results.jsonl` is flushed after each record so completed records are never lost.
+
 ### Independent review (opt-in)
 
 Unset/disabled preserves today's behavior: the reviewer runs the configured chain in order, with synthesized `OPENCODE_MODEL` / `OPENCODE_FALLBACK_*` chains working as before. No factory chain is changed by this ticket; activation is a later explicit `JUMI_RUNNERS_FILE` decision.
@@ -291,6 +310,8 @@ GET /metrics
 Durable usage lives in the ledger table `jumi_run_usage`, one row per runner spawn (runner, model, token counts, exit class, start time, end time). One job row can own many run rows because a job can hop runners. Each spawn writes its row before the job completes; a failed metric write never fails the job. A pod that dies outright writes no usage for the run it was in — those tokens are lost and the job is reclaimed. A lease-lost (aborted) run whose pod stays alive still writes its token/session cells with exit class `incomplete` and the measured wall-clock duration, because every harness records usage before its abort check; only a run with no token/session delta writes nothing. `jumi_jobs_completed_total` is derived from terminal `review_jobs` rows, so with no engine or worker running the router's `/metrics` still reports finished-job totals, and they survive a router restart.
 
 Label notes: `agent_instance` is recorded at run time, so `jumi` and `jumi-worker` rows coexist; `profile` is always `default`; the `jumi_job_duration_seconds` `result` label carries the exit class (historical naming kept for dashboard compatibility).
+
+Suggestion cap and counts: the parent publishes at most 5 💡 findings per review and drops the rest, appending one body line `Jumi dropped N 💡 suggestions (cap 5).` 🔴, 🟡, and ❓ are never dropped, and the trailer and failure gate are unchanged. Durable counts live in the ledger table `jumi_review_suggestions` (one row per published review: runner, forge, posted, dropped, addressed) and render as `jumi_review_suggestions_posted_total{runner,forge}`, `jumi_review_suggestions_dropped_total{runner,forge}`, and `jumi_review_suggestions_addressed_total{runner,forge}`. `addressed` is counted on the next review of the same PR as the earlier 💡 findings not repeated there, matched by same file and similar text (normalized equality, containment, or word Jaccard >= 0.5). Labels stay bounded (`runner` is `opencode`/`claude`/`agy`/`codex`/`unknown`, `forge` is `gitea`/`github`); no PR number or repo is ever a label.
 
 After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums to the in-process counters and the ledger row, then deletes the workspace. In-process counters still reset on process restart; the ledger series do not. This is not a durable OpenCode DB on `HOME`.
 
@@ -415,7 +436,7 @@ The service rejects requests that fail any of these checks:
 | Scope | Repository owner must be in `GITEA_ALLOWED_ORGS`, or that list must include `*` |
 | Repo allowlist | `GITEA_ALLOWED_REPOS` is enforced when set |
 
-OpenCode permissions live in `.gitea/opencode-review.json`. Edit is allowed so the reviewer can write `JUMI_REVIEW.md`. External directory access is last-match: star deny, then allow the baked `/app/review-skills` tree and the fleet skill dirs (`~/.claude/skills`, `~/.agents/skills`, `~/.config/opencode/skill(s)`) so Read can load a skill's references. Every other external path stays denied. Subagents, todos, and questions stay denied. `websearch` names `exa` as its provider, because OpenCode 2 otherwise asks a person to pick one, and a run nobody can answer exits 1 after finishing, which discards the review. Skills are a blanket allow; the baked pack (Helm/K8s/`k3s/` first-apply pitfalls plus the shared `review-proof`/`worker-proof` checks) still loads from `/app/review-skills` via `skills` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search, except the configured forge host and GitHub search URLs.
+OpenCode permissions live in `.gitea/opencode-review.json`. Edit is allowed so the reviewer can write `JUMI_REVIEW.md`. External directory access is last-match: star deny, then allow the baked `/app/review-skills` tree and the fleet skill dirs (`~/.claude/skills`, `~/.agents/skills`, `~/.config/opencode/skill(s)`) so Read can load a skill's references. Every other external path stays denied. Subagents, todos, and questions stay denied. `websearch` names `exa` as its provider, because OpenCode 2 otherwise asks a person to pick one, and a run nobody can answer exits 1 after finishing, which discards the review. Skills are a blanket allow; the baked pack (the shared `review-proof`/`worker-proof` checks) still loads from `/app/review-skills` via `skills` in that JSON — not `OPENCODE_CONFIG_DIR`, which would npm-install into a config directory. Documentation lookup is allowed through OpenCode web fetch/search, except the configured forge host and GitHub search URLs.
 
 ### Reviewer skills
 
@@ -502,7 +523,6 @@ REVIEW.md                    # This repository's review rules
 deploy/
   contract.md                # GitOps runtime contract (semver source of truth)
 review-skills/
-  gitops-apply-review/       # Baked reviewer skill (copied to /app/review-skills)
   gitea-pull-review/         # Baked worker skill: Gitea 1.27 pull-review API
   review-proof/              # Shared reviewer skill: prove or drop a finding (copied to /app/review-skills)
   worker-proof/              # Shared worker skill: observable checks and regression (copied to /app/review-skills)

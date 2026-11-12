@@ -118,6 +118,8 @@ export interface FetchHandlerDeps {
 
 export interface RunReviewJobExtras {
   persistResult?: (result: PersistReviewResult) => Promise<void>;
+  /** Fail-open recorder for per-review 💡 counts. ProcessEngineTick wires it to the ledger. */
+  recordSuggestions?: (counts: import("./review_suggestions.ts").ReviewSuggestionCounts) => Promise<void>;
   engine?: Engine;
   openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
@@ -239,6 +241,7 @@ export async function runReviewJob(
       maxIncompleteRetries: config.maxIncompleteRetries,
       logger: (message) => logger(message),
       persistResult: extras.persistResult,
+      recordSuggestions: extras.recordSuggestions,
       engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
@@ -792,6 +795,15 @@ export async function processEngineTick(
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },
+      recordSuggestions:
+        extras.recordSuggestions ??
+        (async (counts) => {
+          try {
+            await store.recordReviewSuggestions(counts);
+          } catch {
+            // Fail-open: a metric write must never fail the review.
+          }
+        }),
     };
     let result = await runReviewJob(config, job, api, logger, runExtras);
     const current = await store.get(row.id);

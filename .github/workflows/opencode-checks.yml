@@ -156,7 +156,7 @@ jobs:
           for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
-          docker run --rm jumi-reviewer:ci test -f /app/review-skills/gitops-apply-review/SKILL.md
+          docker run --rm jumi-reviewer:ci test -f /app/review-skills/review-proof/SKILL.md
           # Claude tracing is vendored, never installed at run time, and its
           # hooks are pure shell over jq + python3 — both must be in the image.
           docker run --rm jumi-reviewer:ci test -f /app/claude-plugins/claude-code-tracing/hooks/common.sh
