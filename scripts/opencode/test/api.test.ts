@@ -857,3 +857,60 @@ describe("GiteaAPI", () => {
     expect(urls[0]).toContain("/repos/owner/repo/collaborators/alice/permission");
   });
 });
+
+describe("GiteaAPI repository settings file", () => {
+  test("reads the settings file at a ref and decodes base64", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({
+        type: "file",
+        name: ".jumi.yml",
+        content: Buffer.from("automerge: true\n", "utf8").toString("base64"),
+        encoding: "base64",
+      });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.getRepoFile("owner", "repo", ".jumi.yml", "main")).resolves.toEqual({
+      found: true,
+      content: "automerge: true\n",
+    });
+    expect(urls[0]).toContain("/repos/owner/repo/contents/.jumi.yml?ref=main");
+  });
+
+  test("treats a missing file and a directory as not found", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("ref=missing")) return new Response("not found", { status: 404 });
+      return Response.json([{ type: "dir", name: ".jumi.yml" }]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.getRepoFile("owner", "repo", ".jumi.yml", "missing")).resolves.toEqual({ found: false });
+    await expect(api.getRepoFile("owner", "repo", ".jumi.yml", "main")).resolves.toEqual({ found: false });
+  });
+});
+
+describe("GiteaAPI cancelAutoMerge", () => {
+  test("resolves on 204 and on 404, and throws on 403", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    let mode: 204 | 404 | 403 = 204;
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET" });
+      return new Response("", { status: mode });
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await api.cancelAutoMerge("owner", "repo", 7);
+    expect(requests[0]).toEqual({
+      url: "https://gitea.example.test/api/v1/repos/owner/repo/pulls/7/merge",
+      method: "DELETE",
+    });
+
+    mode = 404;
+    await api.cancelAutoMerge("owner", "repo", 7);
+
+    mode = 403;
+    await expect(api.cancelAutoMerge("owner", "repo", 7)).rejects.toThrow("403");
+  });
+});
