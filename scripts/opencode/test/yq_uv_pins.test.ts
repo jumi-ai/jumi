@@ -7,10 +7,10 @@ const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "u
 const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
 
 // Official stable pins verified against the GitHub API `digest` fields.
-const YQ_VERSION = "4.54.2";
-const YQ_TAG = "v4.54.2";
-const YQ_SHA256_AMD64 = "44c7759059b4910827a0059a2757b22001e59360cdecdb2ef8dedc4b6c7e9f32";
-const YQ_SHA256_ARM64 = "bd44211dcd29a5f0eb701d4b7eb5ccd0cfff3bd3966cb4f7f9bd5b13701d997e";
+const YQ_VERSION = "4.54.3";
+const YQ_TAG = "v4.54.3";
+const YQ_SHA256_AMD64 = "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973";
+const YQ_SHA256_ARM64 = "89f69310b61b68d1245065a1241d1fc843f7a36cd6103ffd77ad987613bd1b67";
 const UV_VERSION = "0.13.7";
 const UV_TAG = "0.13.7";
 const UV_SHA256_AMD64 = "c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83";
