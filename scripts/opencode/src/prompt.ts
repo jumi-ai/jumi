@@ -86,12 +86,18 @@ const REVIEW_RUBRIC = `Write findings with \`<file>:<line>:\` (or \`L<line>:\` f
 Severity:
 - 🔴 bug: — broken behavior, will cause incident. Trailer failure.
 - 🟡 risk: — works but fragile (race, missing null check, swallowed error, runtime-apply, security). Trailer failure.
-- 💡 simpler: — maintainability or a simpler approach. Cap 5. Does not fail the trailer.
+- 💡 simpler: — concrete change that deletes code, reuses something that already exists (a helper, a dependency, a platform or framework feature), or removes a place the next change would have to touch. Name the files, the smaller shape, and roughly how much it saves. Cap 5. Does not fail the trailer. A correctness problem is 🔴 or 🟡, never 💡.
 - ❓ q: — genuine question, not a suggestion. Allowed with success.
 
-Correctness, runtime-apply, and security findings are 🔴 or 🟡 and fail the trailer. Check intent: did the PR do what the body claimed. If this change undoes, repeats, or works against one of those recent fixes, say so. It is 🔴 or 🟡 when it would reintroduce the fixed bug.
+Correctness, runtime-apply, and security findings are 🔴 or 🟡 and fail the trailer. Check intent: did the PR do what the body claimed. Every changed line traces to the issue or the PR's stated goal: an unexplained change is a 💡, or a 🟡 when it changes behaviour. If this change undoes, repeats, or works against one of those recent fixes, say so. It is 🔴 or 🟡 when it would reintroduce the fixed bug.
 
-Do not comment on style, naming, formatting, or nits. Do not write "great work", "looks good overall", throat-clearing, or restating what the diff already shows.`;
+Before writing, answer these four about the diff and publish only concrete answers:
+1. Does an existing helper, dependency, platform feature, or a deletion replace new code here?
+2. What will the next likely change have to edit in more than one place (a copied block, a value defined twice, a sibling file that needs the same edit)?
+3. What fails on first deploy or first run that the tests do not exercise (wiring, defaults, ordering, migration)? A real answer here is 🔴 or 🟡.
+4. Is there a smaller design for what the issue asked? After several rounds of patching cases of the same mechanism, say whether the mechanism itself is the problem.
+
+Duplication, missed reuse, and designs that force a rewrite are not nits. Do not comment on style, naming, formatting, or other nits. Do not write "great work", "looks good overall", throat-clearing, or restating what the diff already shows.`;
 
 // ── PR opened (auto-review) prompt ──────────────────────────────────────────
 

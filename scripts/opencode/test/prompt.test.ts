@@ -83,8 +83,35 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("integrated into a Gitea");
     expect(prompt).not.toContain("external_directory");
     expect(prompt).not.toContain("Gitea commit status");
-    expect(prompt).not.toContain("gitops-apply-review");
     expect(prompt).not.toContain("skill tool");
+  });
+
+  test("defines 💡 as a concrete simplification and scopes the four pre-review questions", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain("deletes code");
+    expect(prompt).toContain("reuses something that already exists");
+    expect(prompt).toContain("removes a place the next change would have to touch");
+    expect(prompt).toContain("Name the files, the smaller shape, and roughly how much it saves");
+    expect(prompt).toContain("A correctness problem is 🔴 or 🟡, never 💡");
+    expect(prompt).toContain("Before writing, answer these four about the diff and publish only concrete answers");
+    expect(prompt).toContain(
+      "Does an existing helper, dependency, platform feature, or a deletion replace new code here?"
+    );
+    expect(prompt).toContain("What will the next likely change have to edit in more than one place");
+    expect(prompt).toContain(
+      "What fails on first deploy or first run that the tests do not exercise (wiring, defaults, ordering, migration)?"
+    );
+    expect(prompt).toContain("A real answer here is 🔴 or 🟡");
+    expect(prompt).toContain("Is there a smaller design for what the issue asked?");
+    expect(prompt).toContain("whether the mechanism itself is the problem");
+    expect(prompt).toContain("Every changed line traces to the issue or the PR's stated goal");
+    expect(prompt).toContain("an unexplained change is a 💡, or a 🟡 when it changes behaviour");
+    expect(prompt).toContain("Duplication, missed reuse, and designs that force a rewrite are not nits");
   });
 
   test("does not paste the baked Helm/GitOps checklist on Helm paths", () => {
@@ -97,7 +124,6 @@ describe("buildPROpenedPrompt", () => {
       prFiles: [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
     });
 
-    expect(prompt).not.toContain("gitops-apply-review");
     expect(prompt).not.toContain("Checksum / rollout");
     expect(prompt).not.toContain("House misses");
     expect(prompt).not.toContain("<review_md");

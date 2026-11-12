@@ -15,6 +15,7 @@ Report a CI gap only when this change weakens a check, or when a check stops exe
 - External evidence: a claim about forge payloads, CLI flags, stream output, or provider errors cites a live capture, upstream source, or upstream docs. A mock or fixture the author wrote proves nothing about them (#85, #109, #202).
 - Fail closed: a lookup error stays distinct from an empty list, a skip stays distinct from success, every wait has a wake, and a kick reports success only when the side effect its confirm names really happens (#73, #136, #258, #288).
 - Enforcement: a boundary or behavior fix lives in code, config, or a binary permission. Prompt text alone does not count (#79, #131, #187, #314).
+- A change that grows a file already over about 1,500 lines says why the code belongs there.
 - Redaction: child-written text and engine output are redacted before they reach the forge or a log, and exception text stays out of HTTP bodies (#25, #74, #138).
 - Docs: `README.md`, `AGENTS.md`, and `deploy/contract.md` stay true in the same PR. A new user-visible contract is documented, and a sentence the diff makes false is a finding (#21, #199).
 
@@ -43,6 +44,7 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 ## implement.ts, followup.ts, conflict.ts, claimed_worktree.ts, workspace.ts
 
 - A fix or new option in `implement`, `followup`, or `conflict` reaches its siblings, or the PR says why they differ (#181, #293, #315).
+- A block that repeats one already in a sibling worker flow (implement, follow-up, conflict) is a 💡 to share it (#244).
 - Quota and provenance decisions use the job's effective chain (`jobChain`), not `opts.chain` (#244).
 - A cleanup failure after a landed push keeps the push and still opens the pull (#129, #181).
 - A refused hop stays visible to the caller through `throwIfEngineFailed` (#142).

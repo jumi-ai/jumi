@@ -548,6 +548,83 @@ export function openQuestionDescription(count: number): string {
   return `${count} open question${count === 1 ? "" : "s"}`;
 }
 
+/** Parent-enforced cap: at most 5 💡 findings publish per review. */
+export const MAX_SUGGESTION_FINDINGS = 5;
+
+const SUGGESTION_MARKER_RE =
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:💡|(?:simpler|suggestion|suggestions)\s*:)/iu;
+
+export function isSuggestionFindingFirstLine(original: string): boolean {
+  return SUGGESTION_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+/**
+ * Count the 💡 suggestion findings in a review body: one per finding block
+ * whose first line carries the suggestion marker. Continuation lines stay
+ * attached and are never double-counted. `🔴`/`🟡`/`❓` blocks are ignored.
+ */
+export function countSuggestionFindings(text: string, opts?: { singleFilePath?: string }): number {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isSuggestionFindingFirstLine(block.first)) count++;
+  }
+  return count;
+}
+
+/** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
+export function formatSuggestionCapNote(dropped: number): string {
+  return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${MAX_SUGGESTION_FINDINGS}).`;
+}
+
+/**
+ * Enforce the 💡 cap on an already-filtered review body (finding blocks plus
+ * parent-authored `keep` notes). Keeps the first `MAX_SUGGESTION_FINDINGS` 💡
+ * blocks in order and drops the rest; `🔴`, `🟡`, and `❓` blocks are never
+ * dropped. When nothing is dropped the input is returned unchanged so callers
+ * that did not hit the cap keep byte-identical bodies. Otherwise the kept
+ * blocks are rejoined (same adjacency rule as `keepReviewFindingLines`) with
+ * one `formatSuggestionCapNote` line appended.
+ */
+export function capSuggestionFindings(
+  text: string,
+  opts?: { singleFilePath?: string; keep?: readonly string[] }
+): { comment: string; posted: number; dropped: number } {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let total = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isSuggestionFindingFirstLine(block.first)) total++;
+  }
+  if (total <= MAX_SUGGESTION_FINDINGS) {
+    return { comment: text, posted: total, dropped: 0 };
+  }
+  let keptSuggestions = 0;
+  let out = "";
+  let previous = -2;
+  const keepBlock = (block: FindingBlock) => {
+    const kept = block.lines.join("\n").trimEnd();
+    if (!kept.trim()) return;
+    if (out) out += block.start === previous + 1 ? "\n" : "\n\n";
+    out += kept;
+    previous = block.end;
+  };
+  for (const block of blocks) {
+    if (!block.keepNote && isSuggestionFindingFirstLine(block.first)) {
+      if (keptSuggestions >= MAX_SUGGESTION_FINDINGS) continue;
+      keptSuggestions++;
+      keepBlock(block);
+      continue;
+    }
+    keepBlock(block);
+  }
+  const dropped = total - keptSuggestions;
+  const note = formatSuggestionCapNote(dropped);
+  out = out ? `${out.trimEnd()}\n\n${note}` : note;
+  return { comment: out.trim(), posted: keptSuggestions, dropped };
+}
+
 function normalizeAuthorLogin(login: string | undefined | null): string {
   return (login ?? "").trim().toLowerCase();
 }
