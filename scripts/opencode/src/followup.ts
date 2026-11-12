@@ -38,11 +38,14 @@ import {
 } from "./claimed_worktree.ts";
 import {
   CONFLICT_TIMEOUT_MS,
+  conflictCapReason,
+  conflictCapSticky,
   MAX_CONFLICT_ROUNDS,
   type MergeDefaultResult,
   mergeDefaultIntoWorktree,
   readConflictLatch,
   shouldIncrementRound,
+  shouldResetConflictRound,
   writeConflictLatch,
 } from "./conflict.ts";
 import {
@@ -1050,6 +1053,27 @@ export async function implementFollowUp(
       return { status: "skipped", reason: "comment already handled" };
     }
   }
+  const previousConflict = await readConflictLatch(latches, latchKey);
+  const leftToAuthor = await isLeftToAuthor(
+    opts.api,
+    owner,
+    repo,
+    pr,
+    { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+    log
+  );
+  const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
+  // The conflict cap gates conflict-resolution work only: a mergeable pull
+  // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
+  // For an unmergeable pull the cap reports first so a conflicted pull with
+  // new feedback or red CI keeps skipping merge-of-default with the conflict
+  // reason instead of the follow-up budget.
+  if (pr.mergeable === false && !conflictedLeftToAuthor && previousConflict.round >= maxConflictRounds) {
+    const reason = conflictCapReason(previousConflict.round, maxConflictRounds);
+    await sticky(conflictCapSticky(previousConflict.round, maxConflictRounds), pr.number);
+    await forgetClaim();
+    return { status: "skipped", reason };
+  }
   if (hasFeedback && state.round >= maxFollowupRounds) {
     if (!ciWake) {
       await sticky("stuck: too many follow-up rounds", pr.number);
@@ -1066,15 +1090,12 @@ export async function implementFollowUp(
     if (!ciWake) {
       // A conflicted pull still needs merge-of-default work below: a
       // follow-up must not silently skip it with `no unhandled feedback`.
-      // Conflict resolution (including the round-cap check) runs first.
+      // Conflict resolution runs first.
       if (pr.mergeable !== false) {
         await forgetClaim();
         return { status: "skipped", reason: "no unhandled feedback" };
       }
     } else if (pr.mergeable !== false && ci.unhandled.every((check) => check.flake)) {
-      // Mergeable case only: an unmergeable pull falls through to the
-      // conflict round-cap check and merge-of-default below so conflict
-      // resolution runs first, even when CI is flake-only.
       await sticky(flakeComment(ci.unhandled), pr.number);
       await recordCiHandled({
         home: opts.home,
@@ -1091,24 +1112,9 @@ export async function implementFollowUp(
       return { status: "skipped", reason: flakeSkipReason(ci.unhandled) };
     }
   }
-  const previousConflict = await readConflictLatch(latches, latchKey);
-  const leftToAuthor = await isLeftToAuthor(
-    opts.api,
-    owner,
-    repo,
-    pr,
-    { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
-    log
-  );
-  const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
   if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
     await forgetClaim();
     return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
-  }
-  if (!conflictedLeftToAuthor && previousConflict.round >= maxConflictRounds) {
-    await sticky("stuck: cannot resolve conflicts", pr.number);
-    await forgetClaim();
-    return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
   }
 
   const feedbackPreview = buildFeedbackMarkdown({
@@ -1384,6 +1390,16 @@ export async function implementFollowUp(
       }
       await noteProvenanceRunners(opts, provenanceCollector, log);
       const persistConflictAttempt = async (result: typeof mergeResult) => {
+        if (shouldResetConflictRound(result)) {
+          await writeConflictLatch(latches, latchKey, {
+            prNumber: pr.number,
+            round: 0,
+            lastHeadSha: result.headSha,
+            lastBaseSha: result.baseSha,
+            updatedAt: now().toISOString(),
+          });
+          return;
+        }
         if (!shouldIncrementRound(result)) return;
         await writeConflictLatch(latches, latchKey, {
           prNumber: pr.number,

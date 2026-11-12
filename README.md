@@ -139,7 +139,7 @@ Optional (unset keeps the compiled default; set your own owners and well-known o
 | `FOLLOWUP_TIMEOUT_MS` | `3600000` | Follow-up OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `CONFLICT_TIMEOUT_MS` | `3600000` | Conflict OpenCode run timeout. Does not inherit `OPENCODE_TIMEOUT_MS` |
 | `MAX_FOLLOWUP_ROUNDS` | `3` | Max follow-up OpenCode rounds per skip-latch generation |
-| `MAX_CONFLICT_ROUNDS` | `3` | Max conflict OpenCode rounds per issue |
+| `MAX_CONFLICT_ROUNDS` | `3` | Max consecutive failed conflict-resolution rounds per issue. Only rounds that fail to resolve count; a round that resolves and pushes resets the counter to 0. The cap gates conflict-resolution work only: a follow-up on a mergeable pull runs normally bounded by `MAX_FOLLOWUP_ROUNDS` whatever the counter says |
 | `JUMI_CHECKPOINT_ENABLED` | `true` | Checkpoint worker commits to a hidden `refs/jumi/wip/<issue>` ref while the engine runs; `false` disables it |
 | `JUMI_CHECKPOINT_INTERVAL_MS` | `300000` | Checkpoint interval while the engine runs; `0` disables checkpointing |
 | `JUMI_CHECKPOINT_MAX_AGE_MS` | `604800000` | Stale checkpoint sweep age (refs older than this are deleted) |
