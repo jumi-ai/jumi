@@ -81,6 +81,7 @@ import {
   readPullRequestDescription,
   replaceJumiPrBodyRegion,
   seedPullRequestDescription,
+  workerPublishSecrets,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
@@ -1244,7 +1245,7 @@ export async function implementFollowUp(
       const live = await opts.api.getPR(owner, repo, pr.number);
       const body = replaceJumiPrBodyRegion(
         live.body,
-        buildPullRequestBody(issueNumber, description, runner, [loop.auth.token])
+        buildPullRequestBody(issueNumber, description, runner, workerPublishSecrets(loop.auth.token, jobChain))
       );
       if (body == null || body === live.body) return;
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
@@ -1727,7 +1728,10 @@ export async function implementFollowUp(
         });
         return;
       }
-      await sticky(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`, pr.number).catch(() => undefined);
+      await sticky(
+        `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
+        pr.number
+      ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

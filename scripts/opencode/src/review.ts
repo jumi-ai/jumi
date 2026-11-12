@@ -11,6 +11,7 @@ import {
   reviewSkipReasonForCi,
 } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
+import { claudeApiKeySecrets } from "./claude_credentials.ts";
 import { byteLength, formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
@@ -1393,7 +1394,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   let persisted = false;
   let persistFailed = false;
-  const failureSecrets: string[] = [opts.giteaToken];
+  // Withheld from the persisted/published failure text: forge tokens plus any
+  // resolved Anthropic API key the review chain names (values only).
+  const failureSecrets: string[] = [opts.giteaToken, ...claudeApiKeySecrets(effectiveChain)];
   const persistOutcome = async (result: PersistReviewResult): Promise<void> => {
     if (!opts.persistResult) return;
     try {
@@ -1791,6 +1794,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         }
         if (artifact.status !== "missing" && artifact.content.trim()) {
           let markdown = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, artifact.content);
+          // The API key lives in the child env (unlike the git token), so a
+          // prompt-injected model could echo it into the artifact. Withhold
+          // the value from everything persisted or published below.
+          markdown = redactGitSecrets(markdown, claudeApiKeySecrets(effectiveChain));
           if (opts.noCiNote && !markdown.includes(opts.noCiNote)) {
             markdown = `${opts.noCiNote}\n\n${markdown}`;
           }
