@@ -55,6 +55,7 @@ import {
 } from "./release.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
+import { collectRecentHistory } from "./review_history.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import {
   countAddressedSuggestions,
@@ -1615,6 +1616,25 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       matched_path_sections: reviewMd?.matchedPathSections ?? 0,
     });
 
+    // Parent-side file history: the latest target-branch commits that touched
+    // the files in the diff. Same block for every runner on both forges, and
+    // cheap enough for Renovate PRs. A checkout without enough history skips
+    // the block with one log line instead of failing the review.
+    const recentHistory = await collectRecentHistory({
+      git,
+      cwd: opts.workspace,
+      env: gitCmdEnv,
+      files: prFiles.map((file) => file.filename),
+      log,
+    });
+    logDiagnostic(log, "review_history", {
+      review: reviewLabel,
+      injected: Boolean(recentHistory),
+      bytes: recentHistory?.bytes ?? 0,
+      truncated: recentHistory?.truncated ?? false,
+      commits: recentHistory?.commits.length ?? 0,
+    });
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
@@ -1624,6 +1644,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       thread: fitted.thread,
       delta,
       reviewMd,
+      recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors),
     });
 
