@@ -257,7 +257,7 @@ describe("buildOpenCodeTraceRequest", () => {
           {
             tool: "skill",
             status: "error",
-            name: "gitops-apply-review",
+            name: "review-proof",
             error: "denied",
           },
           {
@@ -319,7 +319,7 @@ describe("buildOpenCodeTraceRequest", () => {
       expect(bash?.attrs["tool.duration_ms"]).toBe(150);
       expect(String(bash?.attrs["tool.parameters"])).toContain("ls -la /work");
       expect(bash?.attrs["output.value"]).toBe("HUGE_STDOUT_BODY_MUST_APPEAR");
-      const skill = spans.find((s) => s.name === "skill:gitops-apply-review");
+      const skill = spans.find((s) => s.name === "skill:review-proof");
       expect(skill?.attrs["tool.status"]).toBe("error");
       expect(skill?.attrs["output.value"]).toBe("denied");
       const mystery = spans.find((s) => s.name === "mystery");

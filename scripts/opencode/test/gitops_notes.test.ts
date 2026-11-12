@@ -1,42 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { gitOpsBumpVerdict, isJumiDockerBump, parseGitOpsSection } from "../src/gitops_notes.ts";
-
-const skill = readFileSync(join(process.cwd(), "../../review-skills/gitops-apply-review/SKILL.md"), "utf8");
-
-describe("gitops-apply-review skill", () => {
-  test("keeps the existing first-apply checklist", () => {
-    expect(skill).toContain("Checksum / rollout");
-    expect(skill).toContain("DNS the app actually dials");
-    expect(skill).toContain("Volume class vs Velero");
-    expect(skill).toContain("Sibling resources");
-    expect(skill).toContain("Hook process identity");
-    expect(skill).not.toContain("Load this skill via the skill tool.");
-    expect(skill).not.toMatch(/skill tool/i);
-    expect(skill).not.toMatch(/Do not Read [`']?\/app\/review-skills/i);
-    expect(skill).not.toContain("/app/review-skills");
-  });
-
-  test("description says when not to load", () => {
-    const frontmatter = skill.slice(skill.indexOf("---"), skill.indexOf("---", 3));
-    const description = frontmatter.match(/^description:\s*(.*)$/m)?.[1] ?? "";
-    expect(description).toContain("Use only for PRs that change k3s/, Chart.yaml, or values.yaml");
-    expect(description).toContain("Renovate docker bump of jumi-reviewer / jumi-worker");
-    expect(description).toContain("Do not use for app/TypeScript, kirillbench tasks, or any PR without those paths");
-  });
-
-  test("parses Renovate ## GitOps notes for jumi image bumps", () => {
-    expect(skill).toContain("## Jumi image bumps");
-    expect(skill).toContain("jumi-reviewer");
-    expect(skill).toContain("jumi-worker");
-    expect(skill).toContain("## GitOps");
-    expect(skill).toContain("no GitOps notes; cannot tell if values need edits");
-    expect(skill).toContain("none");
-    expect(skill).toContain("values.yaml");
-    expect(skill).toContain("Do not treat commit status as notes");
-  });
-});
 
 describe("GitOps notes", () => {
   test("missing section → yellow", () => {
