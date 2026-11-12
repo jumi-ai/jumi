@@ -554,7 +554,7 @@ export const MAX_SUGGESTION_FINDINGS = 5;
 const SUGGESTION_MARKER_RE =
   /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:💡|(?:simpler|suggestion|suggestions)\s*:)/iu;
 
-function isSuggestionFindingFirstLine(original: string): boolean {
+export function isSuggestionFindingFirstLine(original: string): boolean {
   return SUGGESTION_MARKER_RE.test(stripFindingPrefix(original));
 }
 

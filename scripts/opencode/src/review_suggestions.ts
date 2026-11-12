@@ -1,4 +1,4 @@
-import { parseReviewFindings, type ReviewFinding } from "./verdict.ts";
+import { isSuggestionFindingFirstLine, parseReviewFindings, type ReviewFinding } from "./verdict.ts";
 
 /**
  * Approximate matching for 💡 suggestions across two reviews of the same PR.
@@ -57,7 +57,11 @@ export function isSameSuggestion(
 
 /** True when a parsed finding body carries the 💡 suggestion marker. */
 export function isSuggestionBody(body: string): boolean {
-  const text = body.trim();
+  if (isSuggestionFindingFirstLine(body)) return true;
+  // `finding.body` keeps a leading emphasis/backtick run verbatim (e.g.
+  // `**💡 simpler:`), which the cap regex already anticipates. Strip it here
+  // too so both detectors agree.
+  const text = body.trim().replace(/^[`*_]+/, "");
   if (/^💡/u.test(text)) return true;
   return /^(?:simpler|suggestions?)\s*:/i.test(text);
 }

@@ -6,6 +6,7 @@ import {
   filterSuggestionFindings,
   forgeLabelForKind,
   isSameSuggestion,
+  parseSuggestionFindings,
   runnerLabelForStamp,
 } from "../src/review_suggestions.ts";
 import { renderLedgerMetrics } from "../src/run_usage.ts";
@@ -109,6 +110,15 @@ describe("suggestion matching", () => {
     const curr = parseReviewFindings(["src/a.ts:1: 💡 simpler: drop the helper function."].join("\n"));
     expect(filterSuggestionFindings(prev)).toHaveLength(2);
     expect(countAddressedSuggestions(filterSuggestionFindings(prev), filterSuggestionFindings(curr))).toBe(1);
+  });
+
+  test("bold-prefixed markers count for addressed just like the cap", () => {
+    const text = [
+      "src/a.ts:1: **💡 simpler:** bold suggestion one.",
+      "src/a.ts:2: 💡 simpler: plain suggestion two.",
+    ].join("\n");
+    expect(countSuggestionFindings(text)).toBe(2);
+    expect(parseSuggestionFindings(text)).toHaveLength(2);
   });
 
   test("runner and forge labels stay bounded", () => {
