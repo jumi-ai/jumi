@@ -130,6 +130,9 @@ export async function conflictJobIfUnmergeable(
     logger?.(`mergeable lookup failed: ${err instanceof Error ? err.message : String(err)}`);
     return undefined;
   }
+  // A merged or closed pull needs no conflict work: follow-up already ends
+  // quietly on "no open jumi closing PR".
+  if (pr.merged || pr.state !== "open") return undefined;
   if (pr.mergeable !== false) return undefined;
   if (opts?.botUsername && hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel)) {
     const committed = await hasJumiCommitOnPull(

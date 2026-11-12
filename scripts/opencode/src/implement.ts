@@ -2,6 +2,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
 import { stageIssueAttachments } from "./attachments.ts";
+import { scheduleAutomergeForPr } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -50,6 +51,7 @@ import {
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
+import type { ForgeKind } from "./forge.ts";
 import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
 import {
@@ -167,6 +169,13 @@ export interface ImplementOptions extends PickupPolicy {
   trustedSenderLogins?: readonly string[];
   /** Opt-in logins whose open `❓` questions count as follow-up feedback. */
   blockingQuestionAuthors?: readonly string[];
+  /**
+   * Opt-in `owner/repo` list for forge-native auto-merge on pull requests
+   * Jumi opens. Unset or empty disables scheduling with no extra forge calls.
+   */
+  automergeRepos?: readonly string[];
+  /** Forge kind for auto-merge (Gitea merge style vs GitHub auto-merge). Unset defaults to `gitea`. */
+  forgeKind?: ForgeKind;
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -752,6 +761,17 @@ async function implementExternalIssue(
         await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      await scheduleAutomergeForPr({
+        api: forge,
+        forgeKind: opts.forgeKind ?? "gitea",
+        owner,
+        repo,
+        prNumber: pr.number,
+        baseBranch: effectiveJob.defaultBranch,
+        automergeRepos: opts.automergeRepos,
+        botUsername: opts.botUsername,
+        log,
+      });
       const publishedHead = (
         await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
       ).trim();
@@ -1318,6 +1338,17 @@ export async function implementIssue(
         await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      await scheduleAutomergeForPr({
+        api: opts.api,
+        forgeKind: opts.forgeKind ?? "gitea",
+        owner,
+        repo,
+        prNumber: pr.number,
+        baseBranch: opts.job.defaultBranch,
+        automergeRepos: opts.automergeRepos,
+        botUsername: opts.botUsername,
+        log,
+      });
       const publishedHead = (
         await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
       ).trim();
