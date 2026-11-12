@@ -172,6 +172,25 @@ Repo-specific review rules live in the reviewed repository, in `REVIEW.md` at th
 
 The trailer is kept as the last non-empty line of the sticky comment so the worker can follow up on failure or leftover simplifications (`success; N suggestions`). Questions-only success does not enqueue, unless `REVIEW_BLOCKING_QUESTION_AUTHORS` lists the PR author: then the status fails with `N open questions` and follow-up runs to answer each ❓ (evidence with links/commands, or a change that makes the question moot, or a reply that it needs a human — the status stays failing in that case). On re-review a question closes only when the reply or change actually answers it; otherwise it is re-asked or sharpened, and the status turns `success` only when no questions are open. The worker child holds no forge credentials; its answers reach the forge through the parent's stickies like any other worker output.
 
+### Replay (opt-in one-shot)
+
+`bun run src/replay.ts --cases <case-file.json> --out <output-dir> [--runners <name1,name2>]` replays past reviews on chosen runners without publishing. It runs in the existing reviewer image, so a Kubernetes Job can run it. No new service. Case files are input only: never commit them, they may name private repositories.
+
+Case file JSON is either `{"cases": [...]}` or a bare array. Each case names `owner`/`repo` plus either `prNumber` or a pinned `baseSha` plus `headSha` (never both), with optional `id`, `forge`, and `note`:
+
+```json
+{
+  "cases": [
+    { "id": "fix-123", "owner": "acme", "repo": "api", "prNumber": 123 },
+    { "id": "sha-case", "owner": "acme", "repo": "api", "baseSha": "<base>", "headSha": "<head>", "note": "optional" }
+  ]
+}
+```
+
+For each case and runner the mode runs the normal review on the pinned base and head, with the same prompt, skills, `REVIEW.md` selection, and runner settings the live reviewer would use. Runners default to the configured review chain; `--runners` picks a subset by name. Output is `<out>/results.jsonl` (one record per case and runner) plus one `<case>.<runner>.md` raw review file per record. Each record carries the published-equivalent findings, the trailer verdict (`success` / `failure` / `skip`), the runner stamp, duration, and the skip or quota reason when there is one. Scoring stays outside Jumi: an operator compares the records to the expected defects.
+
+No forge writes: the replay API type exposes only reads and the runtime guard throws on any write call, so a read-only token is enough and nothing posts a review, status, comment, or label. Quota follows normal review handling but records a skip and moves on, never sleeping for hours; pending or red CI also records a skip without starting the model. A case that fails to load (deleted repo/PR, missing SHA, transient list failure) records a `skip` and the batch continues; `results.jsonl` is flushed after each record so completed records are never lost.
+
 ### Independent review (opt-in)
 
 Unset/disabled preserves today's behavior: the reviewer runs the configured chain in order, with synthesized `OPENCODE_MODEL` / `OPENCODE_FALLBACK_*` chains working as before. No factory chain is changed by this ticket; activation is a later explicit `JUMI_RUNNERS_FILE` decision.
