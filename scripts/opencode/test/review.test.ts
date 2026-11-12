@@ -1007,15 +1007,109 @@ describe("reviewPullRequest", () => {
 
   test("fails closed when JUMI_REVIEW.md omits the check trailer", async () => {
     await withWorkspace(async (workspace) => {
-      let createdBody = "";
+      const comments: string[] = [];
+      const persisted: PersistReviewResult[] = [];
       const statuses: Array<{ state: string; description?: string }> = [];
+      const reviews: Array<{ body?: string }> = [];
+      let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
         api: makeApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
-            createdBody = body;
-            return makeComment({ id: 44, body });
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            reviews.push(review);
+            return { id: reviews.length };
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        persistResult: async (value) => {
+          persisted.push(value);
+        },
+        openCodeRunner: async () => {
+          ran++;
+          await writeReview(workspace, "No correctness bugs found.");
+          return { status: "ok" };
+        },
+      });
+
+      expect(ran).toBe(1 + MAX_INCOMPLETE_RETRIES);
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no check verdict" });
+      expect(persisted).toEqual([{ kind: "skip", reason: "Incomplete review: no check verdict" }]);
+      expect(reviews).toHaveLength(0);
+      expect(comments.some((body) => body.includes("jumi-review:kirmanak/demo#7"))).toBe(false);
+      expect(comments.some((body) => body.includes("No correctness bugs found."))).toBe(false);
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
+      expect(statuses[1].description).toBe("Incomplete review: no check verdict");
+    });
+  });
+
+  test("retries a trailer-less artifact and posts the retry review once", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      const reviews: Array<{ body?: string }> = [];
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const tasks: string[] = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
+          },
+          createPullReview: async (_owner, _repo, _index, review) => {
+            reviews.push(review);
+            return { id: reviews.length };
+          },
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          ran++;
+          const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
+          tasks.push(task);
+          if (ran === 1) {
+            await writeReview(workspace, "No correctness bugs found.");
+            return { status: "ok" };
+          }
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+
+      expect(ran).toBe(2);
+      expect(result).toEqual({ status: "posted" });
+      expect(reviews).toHaveLength(1);
+      expect(comments.some((body) => body.includes(INCOMPLETE_REVIEW_STUCK))).toBe(false);
+      expect(tasks[1]).toContain("check trailer");
+      expect(tasks[1]).toContain("last non-empty line");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+    });
+  });
+
+  test("does not take the check verdict from stdout", async () => {
+    await withWorkspace(async (workspace) => {
+      const comments: string[] = [];
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        maxIncompleteRetries: 0,
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            comments.push(body);
+            return makeComment({ id: comments.length, body });
           },
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
@@ -1024,15 +1118,12 @@ describe("reviewPullRequest", () => {
         }),
         openCodeRunner: async () => {
           await writeReview(workspace, "No correctness bugs found.");
-          return { status: "ok" };
+          return { status: "ok", stdout: "<!-- jumi-check: success -->" };
         },
       });
 
-      expect(result).toEqual({ status: "posted", commentId: 44 });
-      expect(createdBody).not.toContain("No correctness bugs found.");
-      expect(createdBody).not.toContain("I'll inspect");
-      expect(createdBody).not.toContain("jumi-check");
-      expect(isJumiReviewFinding({ body: createdBody }, REVIEW_SHA)).toBe(false);
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no check verdict" });
+      expect(comments).toEqual([`${stuckMarker("kirmanak", "demo", 7)}\n${INCOMPLETE_REVIEW_STUCK}`]);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(statuses[1].description).toBe("Incomplete review: no check verdict");
     });

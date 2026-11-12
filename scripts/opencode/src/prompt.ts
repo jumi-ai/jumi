@@ -277,3 +277,10 @@ export function buildNoFindingsWritePrompt(lastAssistant?: string): string {
 
 Your previous JUMI_REVIEW.md claimed failure but published no findings: after the publisher keeps only finding lines, the body was empty with no inline comments. A trailer reason such as "1 risk" is not a finding. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
 }
+
+export function buildNoTrailerWritePrompt(lastAssistant?: string): string {
+  const base = buildIncompleteWritePrompt(lastAssistant);
+  return `${base}
+
+Your previous JUMI_REVIEW.md had no check trailer: the last non-empty line was not <!-- jumi-check: success --> or <!-- jumi-check: failure -->. Rewrite JUMI_REVIEW.md from the review already in this session with its findings and exactly one check trailer as the last non-empty line: <!-- jumi-check: success --> when there are no 🔴/🟡 findings, otherwise <!-- jumi-check: failure --> with a short reason. Do not take the verdict from stdout or other prose; the trailer must come from JUMI_REVIEW.md.`;
+}

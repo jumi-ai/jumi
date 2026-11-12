@@ -36,7 +36,12 @@ import type {
   ReviewApi,
   Task,
 } from "./ports.ts";
-import { buildIncompleteWritePrompt, buildNoFindingsWritePrompt, buildPROpenedPrompt } from "./prompt.ts";
+import {
+  buildIncompleteWritePrompt,
+  buildNoFindingsWritePrompt,
+  buildNoTrailerWritePrompt,
+  buildPROpenedPrompt,
+} from "./prompt.ts";
 import type { ProvenanceLookup, ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
@@ -1684,8 +1689,28 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             markdown = `${opts.noCiNote}\n\n${markdown}`;
           }
           const parsedArtifact = parseReviewOutput(markdown);
+          if (parsedArtifact.verdict.incomplete) {
+            if (extrasUsed >= extraCap) {
+              return await persistSkipAndStatus(
+                "Incomplete review: no check verdict",
+                currentPR.html_url,
+                INCOMPLETE_REVIEW_STUCK
+              );
+            }
+            extrasUsed++;
+            log(`Incomplete review: no check verdict; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
+            await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
+            const continueSessionNoTrailer = await hasResumableSession(opts.workspace);
+            const writePromptNoTrailer = buildNoTrailerWritePrompt(
+              continueSessionNoTrailer ? undefined : artifact.content
+            );
+            lastStdout = (
+              await runOpenCode({ prompt: writePromptNoTrailer, continueSession: continueSessionNoTrailer })
+            ).stdout;
+            continue;
+          }
           let blankFailure = false;
-          if (!parsedArtifact.verdict.incomplete && parsedArtifact.verdict.state === "failure") {
+          if (parsedArtifact.verdict.state === "failure") {
             const singleFilePath = needsSingleFilePath(parsedArtifact.comment)
               ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, opts.prNumber, log)
               : undefined;
