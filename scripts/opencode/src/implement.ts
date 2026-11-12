@@ -2,6 +2,16 @@ import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
 import { stageIssueAttachments } from "./attachments.ts";
+import {
+  beginCheckpointing,
+  checkpointRefForJob,
+  DEFAULT_CHECKPOINT_INTERVAL_MS,
+  DEFAULT_CHECKPOINT_MAX_AGE_MS,
+  deleteCheckpointForIssueViaForge,
+  deleteCheckpointRefViaForge,
+  restoreCheckpoint,
+  sweepStaleCheckpoints,
+} from "./checkpoint.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -206,6 +216,10 @@ export interface ImplementOptions extends PickupPolicy {
   /** Previous-round handoff notes. Unset keeps the per-HOME memory fallback (tests, local/dev). */
   handoffs?: HandoffStore;
   previousError?: string | null;
+  /** Periodic hidden-ref checkpoint while the engine runs. Unset keeps the compiled default (5m, enabled). */
+  checkpointEnabled?: boolean;
+  checkpointIntervalMs?: number;
+  checkpointMaxAgeMs?: number;
   /** Durable writer provenance. Unset keeps the legacy in-memory path (tests, local/dev). */
   provenance?: ProvenanceStore;
   /** Ledger identity for the provenance intent; required when `provenance` is set. */
@@ -364,6 +378,42 @@ export function issueJobKey(job: {
     return `implement:${tracker}:${trackerId}`;
   }
   return `${job.owner}/${job.repo}#${job.issueNumber}`;
+}
+
+/** Hidden-ref checkpoint for a job; undefined when the job has no stable id. */
+export function checkpointRefForRun(job: IssueJob): string | undefined {
+  try {
+    return checkpointRefForJob(job);
+  } catch {
+    return undefined;
+  }
+}
+
+function checkpointTickerForRun(
+  opts: Pick<ImplementOptions, "checkpointEnabled" | "checkpointIntervalMs" | "job">,
+  branch: string,
+  defaultBranch: string,
+  log: (message: string) => void
+): { ref: string; intervalMs: number } | undefined {
+  const ref = checkpointRefForRun(opts.job);
+  if (!ref) return undefined;
+  const enabled = opts.checkpointEnabled ?? true;
+  const intervalMs = opts.checkpointIntervalMs ?? DEFAULT_CHECKPOINT_INTERVAL_MS;
+  if (!enabled || !(intervalMs > 0)) return undefined;
+  if (!branch || branch === defaultBranch) return undefined;
+  void log;
+  return { ref, intervalMs };
+}
+
+/** Opportunistic per-repo orphan sweep: same bare cache, best-effort, never throws. */
+async function sweepStaleCheckpointsBestEffort(
+  loop: Parameters<typeof sweepStaleCheckpoints>[0],
+  opts: Pick<ImplementOptions, "checkpointMaxAgeMs">,
+  log: (message: string) => void,
+  exclude?: readonly string[]
+): Promise<void> {
+  const maxAgeMs = opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS;
+  await sweepStaleCheckpoints(loop, { maxAgeMs, log, exclude }).catch(() => undefined);
 }
 
 function escapeTaskXmlAttr(str: string): string {
@@ -537,7 +587,13 @@ async function implementExternalIssue(
   const provenanceCollector = new ProvenanceCollector(claimed.effectiveChain ?? opts.chain);
   const provenanceOpts = { ...opts, job: effectiveJob };
 
-  return runClaimedLoop(
+  const externalCheckpoint = checkpointTickerForRun(
+    { ...opts, job: effectiveJob },
+    branch,
+    effectiveJob.defaultBranch,
+    log
+  );
+  const externalResult: ImplementResult | FollowUpResult | ConflictResult = await runClaimedLoop(
     loop,
     opts.abortSignal,
     async () => {
@@ -548,6 +604,14 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpointsBestEffort(loop, opts, log, externalCheckpoint ? [externalCheckpoint.ref] : undefined);
+      if (externalCheckpoint) {
+        await restoreCheckpoint(loop, externalCheckpoint.ref, {
+          branch,
+          defaultBranch: effectiveJob.defaultBranch,
+          log,
+        }).catch(() => undefined);
+      }
       const headSha = await runtime.attachIssueWorktree(loop, {
         branch,
         defaultBranch: effectiveJob.defaultBranch,
@@ -555,6 +619,16 @@ async function implementExternalIssue(
         log,
       });
       await loop.stampHeadSha(headSha);
+      if (externalCheckpoint) {
+        beginCheckpointing(loop, {
+          ref: externalCheckpoint.ref,
+          branch,
+          defaultBranch: effectiveJob.defaultBranch,
+          intervalMs: externalCheckpoint.intervalMs,
+          enabled: true,
+          log,
+        });
+      }
       await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
       throwIfAborted(opts.abortSignal);
       await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
@@ -658,6 +732,9 @@ async function implementExternalIssue(
         await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      if (externalCheckpoint) {
+        await deleteCheckpointRefViaForge(forge, owner, repo, externalCheckpoint.ref, { log });
+      }
       throwIfAborted(opts.abortSignal);
 
       const stamp = runner ? formatRunnerStamp(runner) : undefined;
@@ -696,6 +773,20 @@ async function implementExternalIssue(
         .catch(() => undefined);
     }
   );
+  if (
+    externalCheckpoint &&
+    typeof externalResult === "object" &&
+    externalResult !== null &&
+    "status" in externalResult &&
+    (externalResult.status === "skipped" ||
+      externalResult.status === "no-changes" ||
+      externalResult.status === "cancelled")
+  ) {
+    // External briefs have issueNumber 0, so the issue-number helper is a
+    // no-op here; delete the per-brief ext ref the success path deletes.
+    await deleteCheckpointRefViaForge(provenanceOpts.api ?? opts.api, owner, repo, externalCheckpoint.ref, { log });
+  }
+  return externalResult;
 }
 
 export async function implementIssue(
@@ -718,27 +809,36 @@ export async function implementIssue(
   const jumiCloser = pulls.find((pr) => isJumiCloserForIssue(pr, owner, repo, issueNumber, opts.botUsername));
   if (jumiCloser) {
     await forgetClaim();
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
     return runCloserWork(opts, jumiCloser);
   }
   if (pulls.some((pr) => pullRequestClosesIssue(pr, issueNumber))) {
     await forgetClaim();
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
     return { status: "skipped", reason: `open PR already closes #${issueNumber}` };
   }
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
-  if (assigned) return assigned;
+  if (assigned) {
+    if (assigned.status === "cancelled") {
+      await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+    }
+    return assigned;
+  }
 
   try {
     const blockers = await checkIssueBlockers(opts.api, owner, repo, issueNumber);
     if (blockers.status === "stuck") {
       await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, blockers.reason);
       await forgetClaim();
+      await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
       return { status: "skipped", reason: blockers.reason };
     }
     if (blockers.status === "blocked") {
       const reason = blockedOnComment(blockers.blockers, owner, repo);
       await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason);
       await forgetClaim();
+      await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
       return { status: "skipped", reason };
     }
   } catch (err) {
@@ -755,12 +855,14 @@ export async function implementIssue(
   if (isQuotaStuck(stuckState)) {
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
     await forgetClaim();
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
     return { status: "skipped", reason: QUOTA_STUCK_TEXT };
   }
   const stuckReason = evaluateStuck(stuckState.fingerprints);
   if (stuckReason) {
     await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, stuckComment(stuckReason));
     await forgetClaim();
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
     return { status: "skipped", reason: stuckComment(stuckReason) };
   }
 
@@ -791,7 +893,8 @@ export async function implementIssue(
   const diary = (body: string) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
-  return runClaimedLoop(
+  const checkpoint = checkpointTickerForRun(opts, branch, opts.job.defaultBranch, log);
+  const implementResult: ImplementResult | FollowUpResult | ConflictResult = await runClaimedLoop(
     loop,
     opts.abortSignal,
     async () => {
@@ -802,6 +905,14 @@ export async function implementIssue(
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpointsBestEffort(loop, opts, log, checkpoint ? [checkpoint.ref] : undefined);
+      if (checkpoint) {
+        await restoreCheckpoint(loop, checkpoint.ref, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        }).catch(() => undefined);
+      }
       const headSha = await runtime.attachIssueWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
@@ -809,6 +920,16 @@ export async function implementIssue(
         log,
       });
       await loop.stampHeadSha(headSha);
+      if (checkpoint) {
+        beginCheckpointing(loop, {
+          ref: checkpoint.ref,
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          intervalMs: checkpoint.intervalMs,
+          enabled: true,
+          log,
+        });
+      }
       await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
       throwIfAborted(opts.abortSignal);
@@ -953,6 +1074,9 @@ export async function implementIssue(
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           if (!/remote ref does not exist/i.test(msg)) throw err;
+        }
+        if (checkpoint) {
+          await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
         }
         await deleteRefIfPresent(`refs/remotes/origin/${branch}`);
         await loop.runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
@@ -1177,6 +1301,9 @@ export async function implementIssue(
         await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      if (checkpoint) {
+        await deleteCheckpointRefViaForge(opts.api, owner, repo, checkpoint.ref, { log });
+      }
       throwIfAborted(opts.abortSignal);
 
       let pr: Pull;
@@ -1236,6 +1363,18 @@ export async function implementIssue(
       await loop.detachWorktree();
     }
   );
+  if (
+    checkpoint &&
+    typeof implementResult === "object" &&
+    implementResult !== null &&
+    "status" in implementResult &&
+    (implementResult.status === "skipped" ||
+      implementResult.status === "no-changes" ||
+      implementResult.status === "cancelled")
+  ) {
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+  }
+  return implementResult;
 }
 
 export async function cancelIssueWork(opts: {
@@ -1261,4 +1400,5 @@ export async function cancelIssueWork(opts: {
   }
   await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
   await deleteClaim(claimPath);
+  await deleteCheckpointForIssueViaForge(opts.api, opts.owner, opts.repo, opts.issueNumber);
 }

@@ -149,6 +149,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `PHOENIX_OTLP_ENDPOINT`
+- `JUMI_CHECKPOINT_ENABLED`
+- `JUMI_CHECKPOINT_INTERVAL_MS`
+- `JUMI_CHECKPOINT_MAX_AGE_MS`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
@@ -294,6 +297,9 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `PHOENIX_OTLP_ENDPOINT`
+- `JUMI_CHECKPOINT_ENABLED`
+- `JUMI_CHECKPOINT_INTERVAL_MS`
+- `JUMI_CHECKPOINT_MAX_AGE_MS`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`
