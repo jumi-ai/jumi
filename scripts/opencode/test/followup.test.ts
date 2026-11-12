@@ -318,10 +318,12 @@ describe("implementFollowUp", () => {
       expect((await runFollowUp({ body: posted, writePr: () => "  \n" })).patches).toEqual([]);
     });
 
-    test("does not refresh when the follow-up has no changes", async () => {
+    test("refreshes the posted body when the follow-up has no changes", async () => {
       const run = await runFollowUp({ body: posted, porcelain: "", writePr: () => "New writeup." });
       expect(run.result?.status).toBe("no-changes");
-      expect(run.patches).toEqual([]);
+      expect(run.patches).toEqual([
+        `Human note above.\n\n${fenced("New writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_")}\n\nHuman note below.`,
+      ]);
     });
 
     test("a failed body PATCH does not fail the pushed fix", async () => {

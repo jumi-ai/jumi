@@ -305,8 +305,10 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("arbitrary network shell commands");
     expect(prompt).toContain("read-only shallow clone");
     expect(prompt).toContain("git clone --depth 1 --branch <tag>");
-    expect(prompt).toContain("outside the checkout");
-    expect(prompt).toContain("outside the worktree");
+    expect(prompt).toContain('"$TMPDIR/upstream-<tag>"');
+    expect(prompt).toContain('rm -rf "$TMPDIR/upstream-<tag>"');
+    expect(prompt).toContain('stay under "$TMPDIR"');
+    expect(prompt).not.toContain("/tmp/...");
     expect(prompt).toContain("never carry a forge token");
     expect(prompt).toContain("forge host stays denied");
     expect(prompt).toContain("package installs");
@@ -323,6 +325,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("<blocking_questions>");
     expect(prompt).toContain("Gather upstream");
     expect(prompt).toContain("shallow");
+    expect(prompt).toContain('"$TMPDIR"');
+    expect(prompt).toContain("removing the");
     expect(prompt).toContain("non-blocking note");
     expect(prompt).toContain("intent");
     expect(prompt).toContain("deployment");

@@ -1641,6 +1641,7 @@ export async function implementFollowUp(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+        await refreshPullRequestBody(prFileContents);
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });

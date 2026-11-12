@@ -77,7 +77,7 @@ const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this 
   <rule><ci_results> lists the checks that ran on this head and their conclusions. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking.</rule>
   <rule>The only file you should write is JUMI_REVIEW.md at the repository root. Stdout is logs, not the sticky.</rule>
   <rule>Do not git add source, git commit, git push, or force-push.</rule>
-  <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands. The only network-shell exception is a read-only shallow clone of a public upstream repository at the tags/refs named in the diff into a temp directory outside the checkout (for example \`git clone --depth 1 --branch <tag> <public-url> /tmp/...\`) and diffing those two refs there; the clone must stay outside the worktree so the porcelain/HEAD freeze still holds, must never carry a forge token, and the forge host stays denied.</rule>
+  <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands. The only network-shell exception is a read-only shallow clone of a public upstream repository at the tags/refs named in the diff into "$TMPDIR" scratch outside the porcelain (for example \`git clone --depth 1 --branch <tag> <public-url> "$TMPDIR/upstream-<tag>"\`) and diffing those two refs there, then removing the clone (for example \`rm -rf "$TMPDIR/upstream-<tag>"\`); the clone must stay under "$TMPDIR" so the porcelain/HEAD freeze still holds, must never carry a forge token, and the forge host stays denied.</rule>
   <rule>Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
 </rules>`;
 
@@ -160,7 +160,8 @@ function formatBlockingQuestions(blocking: boolean | undefined): string {
   check while any ❓ is open, so required-check automerge waits. Gather upstream
   evidence yourself before asking: use web search/fetch, or a read-only shallow
   clone of the public upstream repository at the tags/refs named in the diff into
-  a temp directory outside the checkout and diff those refs there. Ask a ❓ only
+  "$TMPDIR" scratch outside the porcelain and diff those refs there, removing the
+  clone when done. Ask a ❓ only
   for decisions or facts only the author or operator has (intent, deployment
   context, acceptable risk) or that a worker change can resolve (tests, config),
   such as a rendered chart or a command run in the checkout. When upstream
