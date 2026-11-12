@@ -321,6 +321,9 @@ export interface RunUsageLedger {
   getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
   getRunExitCounts(): Promise<ExitCountRow[]>;
   getRunDurations(): Promise<DurationRow[]>;
+  getReviewSuggestionTotals(): Promise<
+    Array<{ runner: string; forge: string; posted: number; dropped: number; addressed: number; reviews: number }>
+  >;
 }
 
 function tokenSeriesLabels(agent: string, source: string, model: string, tokenType?: TokenType): string {
@@ -342,12 +345,13 @@ function tokenSeriesLabels(agent: string, source: string, model: string, tokenTy
  * class, matching the historical in-process histogram naming).
  */
 export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string> {
-  const [counts, tokenTotals, sessionTotals, exitCounts, durations] = await Promise.all([
+  const [counts, tokenTotals, sessionTotals, exitCounts, durations, suggestionTotals] = await Promise.all([
     store.countByKindState(),
     store.getRunUsageTokenTotals(),
     store.getRunUsageSessionTotals(),
     store.getRunExitCounts(),
     store.getRunDurations(),
+    store.getReviewSuggestionTotals(),
   ]);
   const lines: string[] = [
     "# HELP ai_tokens_total Cumulative AI tokens recorded in the ledger",
@@ -422,6 +426,33 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
       const value = exitByKey.get(`${kind}\0${exitClass}`) ?? 0;
       lines.push(`jumi_opencode_exits_total{kind="${kind}",class="${exitClass}"} ${value}`);
     }
+  }
+
+  const sortedSuggestions = [...suggestionTotals].sort((a, b) =>
+    `${a.runner}\0${a.forge}`.localeCompare(`${b.runner}\0${b.forge}`)
+  );
+  lines.push("# HELP jumi_review_suggestions_posted_total Suggestion findings published per review (after the cap)");
+  lines.push("# TYPE jumi_review_suggestions_posted_total counter");
+  for (const row of sortedSuggestions) {
+    lines.push(
+      `jumi_review_suggestions_posted_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}"} ${row.posted}`
+    );
+  }
+
+  lines.push("# HELP jumi_review_suggestions_dropped_total Suggestion findings dropped by the parent cap");
+  lines.push("# TYPE jumi_review_suggestions_dropped_total counter");
+  for (const row of sortedSuggestions) {
+    lines.push(
+      `jumi_review_suggestions_dropped_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}"} ${row.dropped}`
+    );
+  }
+
+  lines.push("# HELP jumi_review_suggestions_addressed_total Earlier suggestions not repeated on the next review");
+  lines.push("# TYPE jumi_review_suggestions_addressed_total counter");
+  for (const row of sortedSuggestions) {
+    lines.push(
+      `jumi_review_suggestions_addressed_total{runner="${escapeLabel(row.runner)}",forge="${escapeLabel(row.forge)}"} ${row.addressed}`
+    );
   }
   return `${lines.join("\n")}\n`;
 }
