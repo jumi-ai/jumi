@@ -18,7 +18,7 @@ import {
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
-import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSections } from "./review_md.ts";
+import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
 import { hasPublishedFindings, keepReviewFindingLines, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 import {
@@ -781,7 +781,22 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
       }
     }
 
-    const reviewMd = await loadReviewMdSections(workdir, prFiles, maxReviewMdBytes);
+    // Repo rules come from the base commit the replay diffs against, not the
+    // checked-out head, mirroring the live reviewer. Read via read-only git.
+    const reviewMd = await loadReviewMdSectionsFromBase({
+      git: opts.gitRunner ?? runGit,
+      cwd: workdir,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        LANG: process.env.LANG,
+        LC_ALL: process.env.LC_ALL,
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      baseRef: baseSha,
+      files: prFiles,
+      maxBytes: maxReviewMdBytes,
+    });
     const prompt = buildPROpenedPrompt({
       repo,
       pr: effectivePr,
