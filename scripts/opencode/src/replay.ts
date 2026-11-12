@@ -174,6 +174,9 @@ function parseCase(value: unknown, index: number): ReplayCase {
   if (prNumber == null && (baseSha == null || headSha == null)) {
     fail(`cases[${index}] needs either prNumber or baseSha plus headSha`);
   }
+  if (prNumber != null && (baseSha != null || headSha != null)) {
+    fail(`cases[${index}] needs either prNumber or baseSha plus headSha, not both`);
+  }
   const idRaw = raw.id ?? raw.caseId ?? raw.name;
   const id =
     typeof idRaw === "string" && idRaw.trim() ? idRaw.trim() : prNumber != null ? `pr-${prNumber}` : `case-${index}`;
@@ -1134,25 +1137,57 @@ export interface RunReplayOptions extends Omit<RunReplayCaseOptions, "api" | "re
 
 export async function runReplay(opts: RunReplayOptions): Promise<ReplayRecord[]> {
   await mkdir(opts.outDir, { recursive: true });
+  const log = opts.logger ?? logDefault;
   const records: ReplayRecord[] = [];
   const lines: string[] = [];
+  const flush = async () => {
+    await writeFile(join(opts.outDir, "results.jsonl"), `${lines.join("\n")}\n`);
+  };
   for (const reviewCase of opts.cases) {
     for (const runner of opts.runners) {
-      const record = await runReplayCase({
-        ...opts,
-        api: opts.api,
-        reviewCase,
-        runner,
-        workdirRoot: opts.workdirRoot,
-        ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
-      });
+      const started = Date.now();
+      let record: ReplayRecord;
+      try {
+        record = await runReplayCase({
+          ...opts,
+          api: opts.api,
+          reviewCase,
+          runner,
+          workdirRoot: opts.workdirRoot,
+          ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
+        });
+      } catch (err) {
+        const message = errorMessage(err);
+        const reason = quotaSkip(message);
+        log(`replay ${reviewCase.id}/${runner.name} failed: ${message}`);
+        record = {
+          caseId: reviewCase.id,
+          forge: reviewCase.forge ?? opts.forgeKind ?? "gitea",
+          owner: reviewCase.owner,
+          repo: reviewCase.repo,
+          prNumber: reviewCase.prNumber ?? null,
+          baseSha: reviewCase.baseSha ?? "unknown",
+          headSha: reviewCase.headSha ?? "unknown",
+          ...(reviewCase.note ? { note: reviewCase.note } : {}),
+          runner: runner.name,
+          runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+          verdict: "skip",
+          findings: "",
+          findingsCount: 0,
+          rawMarkdown: "",
+          durationMs: Date.now() - started,
+          skipReason: reason,
+          ...(isQuotaText(message) ? { quota: true as const } : {}),
+        };
+      }
       records.push(record);
       lines.push(JSON.stringify(record));
       const rawName = `${sanitizeFileSegment(record.caseId)}.${sanitizeFileSegment(record.runner)}.md`;
       await writeFile(join(opts.outDir, rawName), record.rawMarkdown);
+      // Flush incrementally so a later failure cannot discard completed records.
+      await flush();
     }
   }
-  await writeFile(join(opts.outDir, "results.jsonl"), `${lines.join("\n")}\n`);
   return records;
 }
 
@@ -1240,7 +1275,7 @@ Case file (never commit it; it may name private repositories):
   [{ "id": "sha-case", "owner": "acme", "repo": "api",
      "baseSha": "<base>", "headSha": "<head>", "note": "optional" }]
 
-Each case names owner/repo plus either prNumber or baseSha plus headSha.
+Each case names owner/repo plus either prNumber or baseSha plus headSha, never both.
 Runners default to the configured review chain; --runners picks a subset.
 Output is <out>/results.jsonl plus one <case>.<runner>.md raw review per record.
 No forge writes: a read-only token is enough. Quota records a skip, never waits.`);

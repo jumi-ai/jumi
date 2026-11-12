@@ -176,7 +176,7 @@ The trailer is kept as the last non-empty line of the sticky comment so the work
 
 `bun run src/replay.ts --cases <case-file.json> --out <output-dir> [--runners <name1,name2>]` replays past reviews on chosen runners without publishing. It runs in the existing reviewer image, so a Kubernetes Job can run it. No new service. Case files are input only: never commit them, they may name private repositories.
 
-Case file JSON is either `{"cases": [...]}` or a bare array. Each case names `owner`/`repo` plus either `prNumber` or a pinned `baseSha` plus `headSha`, with optional `id`, `forge`, and `note`:
+Case file JSON is either `{"cases": [...]}` or a bare array. Each case names `owner`/`repo` plus either `prNumber` or a pinned `baseSha` plus `headSha` (never both), with optional `id`, `forge`, and `note`:
 
 ```json
 {
@@ -189,7 +189,7 @@ Case file JSON is either `{"cases": [...]}` or a bare array. Each case names `ow
 
 For each case and runner the mode runs the normal review on the pinned base and head, with the same prompt, skills, `REVIEW.md` selection, and runner settings the live reviewer would use. Runners default to the configured review chain; `--runners` picks a subset by name. Output is `<out>/results.jsonl` (one record per case and runner) plus one `<case>.<runner>.md` raw review file per record. Each record carries the published-equivalent findings, the trailer verdict (`success` / `failure` / `skip`), the runner stamp, duration, and the skip or quota reason when there is one. Scoring stays outside Jumi: an operator compares the records to the expected defects.
 
-No forge writes: the replay API type exposes only reads and the runtime guard throws on any write call, so a read-only token is enough and nothing posts a review, status, comment, or label. Quota follows normal review handling but records a skip and moves on, never sleeping for hours; pending or red CI also records a skip without starting the model.
+No forge writes: the replay API type exposes only reads and the runtime guard throws on any write call, so a read-only token is enough and nothing posts a review, status, comment, or label. Quota follows normal review handling but records a skip and moves on, never sleeping for hours; pending or red CI also records a skip without starting the model. A case that fails to load (deleted repo/PR, missing SHA, transient list failure) records a `skip` and the batch continues; `results.jsonl` is flushed after each record so completed records are never lost.
 
 ### Independent review (opt-in)
 

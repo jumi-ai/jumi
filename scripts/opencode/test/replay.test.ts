@@ -241,4 +241,66 @@ describe("replay", () => {
     expect(() => parseReplayCases([{ owner: "o", repo: "r", baseSha: "abc", headSha: "zzz" }])).toThrow();
     expect(makeUser).toBeDefined();
   });
+
+  test("case with both prNumber and pinned shas is rejected", async () => {
+    expect(() =>
+      parseReplayCases([
+        { id: "both", owner: "o", repo: "r", prNumber: 12, baseSha: REPLAY_BASE_SHA, headSha: REPLAY_HEAD_SHA },
+      ])
+    ).toThrow(/not both/);
+  });
+
+  test("one bad case records a skip and the batch continues", async () => {
+    const { api } = makeCountingApi({
+      getRepo: async (owner, repo) => {
+        if (repo === "gone") throw new Error("repo not found");
+        return makeRepo({ full_name: `${owner}/${repo}` });
+      },
+    });
+    const readOnly = makeReplayReadOnly(api);
+    const workdirRoot = await mkdtemp(join(tmpdir(), "jumi-replay-batch-"));
+    const outDir = await mkdtemp(join(tmpdir(), "jumi-replay-batch-out-"));
+    try {
+      const records = await runReplay({
+        api: readOnly,
+        cases: parseReplayCases([
+          { id: "good", owner: "kirmanak", repo: "demo", prNumber: 7 },
+          { id: "bad", owner: "kirmanak", repo: "gone", prNumber: 8 },
+          { id: "good2", owner: "kirmanak", repo: "demo", prNumber: 9 },
+        ]),
+        runners: [{ name: "fake-a", type: "opencode", model: "fake/model-a" }],
+        outDir,
+        workdirRoot,
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "read-only",
+        botUsername: "jumi",
+        gitRunner: async (args) => {
+          if (args[0] === "rev-parse") return REPLAY_HEAD_SHA;
+          return "";
+        },
+        workspacePreparer: async () => undefined,
+        createWorkspace: async (root) => mkdtemp(join(root, "ws-")),
+        engineForRunner: () => async (opts) => {
+          await writeFile(
+            join(opts.workdir, "JUMI_REVIEW.md"),
+            `src/demo.ts:1: 🔴 bug: boom.\n<!-- jumi-check: failure -->`
+          );
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(records).toHaveLength(3);
+      expect(records[0].verdict).toBe("failure");
+      expect(records[1].verdict).toBe("skip");
+      expect(records[1].skipReason).toContain("repo not found");
+      expect(records[2].verdict).toBe("failure");
+      const jsonl = await readFile(join(outDir, "results.jsonl"), "utf8");
+      expect(jsonl.trim().split("\n")).toHaveLength(3);
+      const raw = await readFile(join(outDir, "bad.fake-a.md"), "utf8");
+      expect(raw).toBe("");
+    } finally {
+      await rm(workdirRoot, { recursive: true, force: true }).catch(() => undefined);
+      await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
 });
