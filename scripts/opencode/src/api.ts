@@ -447,6 +447,40 @@ export class GiteaAPI {
   }
 
   /**
+   * Raw file read for the repository settings file (`.jumi.yml`), which the
+   * parent reads from the default branch (scheduling) or a head SHA
+   * (review). Missing paths resolve `{found:false}`; directories and
+   * non-file entries count as missing. Other failures throw.
+   */
+  async getRepoFile(
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string
+  ): Promise<{ found: boolean; content?: string }> {
+    const encodedPath = path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    try {
+      const body = (await this.get<unknown>(
+        `/repos/${this.repoPath(owner, repo)}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`
+      )) as { type?: unknown; content?: unknown; encoding?: unknown } | unknown[];
+      if (Array.isArray(body) || !body || typeof body !== "object") return { found: false };
+      const entry = body as { type?: unknown; content?: unknown; encoding?: unknown };
+      if (entry.type !== undefined && entry.type !== "file") return { found: false };
+      if (typeof entry.content !== "string") return { found: false };
+      const encoding = typeof entry.encoding === "string" ? entry.encoding.toLowerCase() : "base64";
+      const text =
+        encoding === "base64" ? Buffer.from(entry.content, "base64").toString("utf8") : String(entry.content);
+      return { found: true, content: text };
+    } catch (err) {
+      if (isNotFoundError(err)) return { found: false };
+      throw err;
+    }
+  }
+
+  /**
    * Forge-native "merge when checks succeed". Resolves when the merge is
    * scheduled (201, empty body) or already scheduled (409 already scheduled).
    * A 200 means the forge merged at once; the caller gated on required
@@ -468,6 +502,28 @@ export class GiteaAPI {
     throw forgeRequestError({
       service: "Gitea API",
       method: "POST",
+      url,
+      status: res.status,
+      body: text,
+      secrets: [this.token],
+    });
+  }
+
+  /**
+   * Cancel a scheduled auto-merge. A missing schedule is not an error: 404
+   * (no pull, no schedule) resolves the same as 204.
+   */
+  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<void> {
+    const url = `${this.base}/repos/${this.repoPath(owner, repo)}/pulls/${index}/merge`;
+    const res = await fetch(url, { method: "DELETE", headers: this.headers() });
+    if (res.ok || res.status === 404) {
+      await res.text().catch(() => "");
+      return;
+    }
+    const text = await res.text().catch(() => "");
+    throw forgeRequestError({
+      service: "Gitea API",
+      method: "DELETE",
       url,
       status: res.status,
       body: text,

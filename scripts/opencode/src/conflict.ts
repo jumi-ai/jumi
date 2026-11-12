@@ -1045,6 +1045,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           repo,
           prNumber: pr.number,
           automergeRepos: opts.automergeRepos,
+          botUsername: opts.botUsername,
           log,
         });
       } catch (err) {

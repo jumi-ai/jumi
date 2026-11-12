@@ -246,6 +246,17 @@ export interface Forge extends AttachmentSupport {
   /** Branch protection readable with a write-level token (gate for auto-merge). Throws when unreadable. */
   getBranch?(owner: string, repo: string, branch: string): Promise<BranchProtection>;
   /**
+   * Raw file read at a ref (branch name, tag, or SHA); the repository
+   * settings file is the only parent-read consumer. Missing paths resolve
+   * `{found:false}` and never throw; other failures throw.
+   */
+  getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
+  /**
+   * Best-effort cancel of a forge-native auto-merge schedule. A missing
+   * schedule is not an error.
+   */
+  cancelAutoMerge?(owner: string, repo: string, index: number): Promise<void>;
+  /**
    * Forge-native "merge when the required checks succeed" scheduling.
    * Never merges directly, never forces, never bypasses branch protection.
    * Resolves when scheduled (or already scheduled); throws when refused or failed.
@@ -302,6 +313,7 @@ export type ReviewApi = Pick<
   | "getRepo"
   | "getPR"
   | "getPRFiles"
+  | "getRepoFile"
   | "listIssueComments"
   | "findStickyIssueComment"
   | "createIssueComment"
@@ -331,6 +343,8 @@ export type IssueApi = Tracker &
     | "listOpenPulls"
     | "getBranch"
     | "scheduleAutoMerge"
+    | "cancelAutoMerge"
+    | "getRepoFile"
     | "createPullRequest"
     | "closePullRequest"
     | "updatePullRequestBody"

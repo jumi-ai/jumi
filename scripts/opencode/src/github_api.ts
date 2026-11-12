@@ -808,6 +808,40 @@ export class GithubAPI {
     return toRepo(await this.get<GithubRepo>(`/repos/${this.repoPath(owner, repo)}`));
   }
 
+  /**
+   * Raw file read for the repository settings file (`.jumi.yml`), which the
+   * parent reads from the default branch (scheduling) or a head SHA
+   * (review). Missing paths resolve `{found:false}`; directories and
+   * non-file entries count as missing. Other failures throw.
+   */
+  async getRepoFile(
+    owner: string,
+    repo: string,
+    path: string,
+    ref: string
+  ): Promise<{ found: boolean; content?: string }> {
+    const encodedPath = path
+      .split("/")
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    try {
+      const body = await this.get<unknown>(
+        `/repos/${this.repoPath(owner, repo)}/contents/${encodedPath}?ref=${encodeURIComponent(ref)}`
+      );
+      if (Array.isArray(body) || !body || typeof body !== "object") return { found: false };
+      const entry = body as { type?: unknown; content?: unknown; encoding?: unknown };
+      if (entry.type !== undefined && entry.type !== "file") return { found: false };
+      if (typeof entry.content !== "string") return { found: false };
+      const encoding = typeof entry.encoding === "string" ? entry.encoding.toLowerCase() : "base64";
+      const text =
+        encoding === "base64" ? Buffer.from(entry.content, "base64").toString("utf8") : String(entry.content);
+      return { found: true, content: text };
+    } catch (err) {
+      if (isNotFoundError(err)) return { found: false };
+      throw err;
+    }
+  }
+
   async getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission> {
     const info = await this.get<{ permission: string; role_name?: string }>(
       `/repos/${this.repoPath(owner, repo)}/collaborators/${encodeURIComponent(username)}/permission`
@@ -907,6 +941,38 @@ export class GithubAPI {
       // ("Auto-merge already enabled") as well as already-first wordings, so
       // match both orders instead of only `already … auto-merge`.
       if (err instanceof Error && /(already.*auto-?merge|auto-?merge.*already|already enabled)/i.test(err.message))
+        return;
+      throw err;
+    }
+  }
+
+  /**
+   * Cancel a scheduled auto-merge via `disablePullRequestAutoMerge`. A pull
+   * with no schedule reports back without one; disabling it is a no-op that
+   * resolves the same way. Throws when the pull cannot be read or the
+   * mutation is refused; the caller treats cancel as best-effort.
+   */
+  async cancelAutoMerge(owner: string, repo: string, index: number): Promise<void> {
+    const pr = await this.getPR(owner, repo, index);
+    const nodeId = (pr as Pull).nodeId;
+    if (!nodeId) throw new Error("GitHub pull request is missing node id");
+    try {
+      await this.graphql<{ disablePullRequestAutoMerge?: { pullRequest?: { id?: string } } }>(
+        `mutation ($pullRequestId: ID!) {
+          disablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId}) {
+            pullRequest { id }
+          }
+        }`,
+        { pullRequestId: nodeId },
+        { owner, repo }
+      );
+    } catch (err) {
+      // Disabling a schedule that is already gone is the steady state after
+      // a push dropped it: resolve instead of failing the job.
+      if (
+        err instanceof Error &&
+        /(not enabled|no .*auto-?merge|already (disabled|cancelled)|could not find.*auto-?merge)/i.test(err.message)
+      )
         return;
       throw err;
     }
