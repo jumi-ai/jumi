@@ -14,6 +14,13 @@ Before editing, turn the task and accepted feedback into observable checks. Fix 
 3. **Cause, not symptom.** Fix the cause. Add or update a regression that reaches the symptom through the real entrypoint, with a positive control where a negative test must prove the observer works.
 4. **Report.** Report what actually ran and what remains unverified. Do not claim coverage you did not run.
 
+## Smallest complete change
+
+- **Reuse before adding.** Search callers and sibling code before adding anything. Prefer code already in the repo, then a dependency or platform feature already present, then the minimum new code. Fix a shared root cause once rather than once per copy.
+- **Nothing unrequested.** Add no options, flags, layers, configuration, or abstractions the task did not ask for.
+- **Never trade away safety.** Validation, data safety, security, and required tests stay.
+- **Re-read the diff.** Every changed line traces to the task or to accepted feedback. Remove whatever your change left unused. Leave unrelated code alone.
+
 ## Limits
 
 - Verify once at the end, not after every edit. This skill does not add a test-first mandate or a check after every edit.
