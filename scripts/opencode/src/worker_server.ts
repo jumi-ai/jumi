@@ -17,6 +17,7 @@ import { createPgReviewJobStore, isJobMode, QUEUE_POLL_MS, type ReviewJobStore }
 import { installProcessShutdown } from "./shutdown.ts";
 import type { IssueJob } from "./types.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
+import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
 import {
   abortIssueQueue,
   createIssueQueue,
@@ -57,10 +58,13 @@ function authMatches(actual: string | null, expected?: string): boolean {
 
 export interface WorkerFetchHandlerDeps extends HandleWorkerWebhookDeps {
   queue: WorkerQueueLike;
+  /** Replay guard for delivery IDs. Defaults to a handler-local LRU. */
+  deliveryDedupe?: DeliveryDedupe;
 }
 
 export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetchHandlerDeps) {
   const logger = deps.logger ?? log;
+  const deliveryDedupe = deps.deliveryDedupe ?? createDeliveryDedupe();
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
@@ -73,6 +77,8 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       });
     }
     if (url.pathname === "/webhooks/github") {
+      // No delivery check here: handleGithubWebhook verifies the HMAC first
+      // and owns the replay guard, so unauthenticated probes get 401.
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
@@ -85,6 +91,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
             handoffs: deps.handoffs,
           },
           logger,
+          deliveryDedupe,
         })
       );
     }
@@ -112,11 +119,20 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
       );
       if (!signatureOk) return json(401, { error: "invalid signature" });
 
-      return handleWorkerWebhookEvent(
+      const deliveryHeader = request.headers.get("x-gitea-delivery");
+      const delivery = deliveryHeader ?? crypto.randomUUID();
+      if (deliveryHeader && deliveryDedupe.has(delivery)) {
+        logger(`deduped replay delivery=${delivery}`);
+        return json(202, { queued: false, deduped: true });
+      }
+
+      // Mark only durable outcomes: a 4xx/5xx from the worker handler leaves
+      // the delivery unmarked so the forge retry is processed, not deduped.
+      const response = await handleWorkerWebhookEvent(
         rawBody,
         request.headers.get("x-gitea-event"),
         request.headers.get("x-gitea-event-type"),
-        request.headers.get("x-gitea-delivery") ?? crypto.randomUUID(),
+        delivery,
         {
           giteaUrl: config.giteaUrl,
           allowedOrgs: config.allowedOrgs,
@@ -128,6 +144,10 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
         },
         { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs }
       );
+      if (deliveryHeader && (response.status === 200 || response.status === 202)) {
+        deliveryDedupe.mark(delivery);
+      }
+      return response;
     }
   };
 }

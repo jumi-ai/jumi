@@ -50,7 +50,14 @@ export type IssueWebhookDecision =
 export function issueJobFrom(
   owner: string,
   repo: string,
-  issue: { number: number; title: string; body?: string | null; html_url: string; updated_at: string },
+  issue: {
+    number: number;
+    title: string;
+    body?: string | null;
+    html_url: string;
+    updated_at: string;
+    user?: { login?: string } | null;
+  },
   repository: { default_branch: string; clone_url: string },
   action: string
 ): Omit<IssueJob, "delivery" | "receivedAt"> {
@@ -65,6 +72,9 @@ export function issueJobFrom(
     issueUpdatedAt: issue.updated_at,
     defaultBranch: repository.default_branch,
     cloneUrl: repository.clone_url,
+    ...(typeof issue.user?.login === "string" && issue.user.login.trim()
+      ? { issueAuthor: issue.user.login.trim() }
+      : {}),
   };
 }
 

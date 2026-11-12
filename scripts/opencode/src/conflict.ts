@@ -57,6 +57,7 @@ import {
   provenanceForgeFor,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
+import { withIssueAuthorPermission } from "./permissions.ts";
 import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
@@ -861,7 +862,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           closerPrNumber: pr.number,
           continueOpenCode: async (issue) => {
             throwIfAborted(opts.abortSignal);
-            await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(jobWithIssue(taskJob, issue)));
+            await writeFile(
+              join(worktree, "JUMI_TASK.md"),
+              buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))
+            );
             await stageIssueAttachments({
               api: opts.api,
               owner,

@@ -71,6 +71,7 @@ import {
   validateWebhookPayload,
   verifyGiteaSignature,
 } from "./webhook.ts";
+import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
 import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
 import { createReviewWorkspace, gitAuthResolverFor, removeReviewWorkspace } from "./workspace.ts";
@@ -111,6 +112,8 @@ export interface FetchHandlerDeps {
   ciApi?: Pick<ReviewApi, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
   /** HOME for CI latch reads (defaults to config.home). */
   ciHome?: string;
+  /** Replay guard for delivery IDs. Defaults to a handler-local LRU. */
+  deliveryDedupe?: DeliveryDedupe;
 }
 
 export interface RunReviewJobExtras {
@@ -289,6 +292,7 @@ function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
 export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps) {
   const logger = deps.logger ?? log;
   const webhookEnabled = deps.webhookEnabled ?? true;
+  const deliveryDedupe = deps.deliveryDedupe ?? createDeliveryDedupe();
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
@@ -304,6 +308,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
     }
     if (url.pathname === "/webhooks/github") {
       if (!webhookEnabled) return json(404, { error: "not found" });
+      // No delivery check here: handleGithubWebhook verifies the HMAC first
+      // and owns the replay guard, so unauthenticated probes get 401.
       return meterWebhook(
         request.headers.get("x-github-event"),
         handleGithubWebhook(request, config, {
@@ -313,6 +319,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           logger,
           ciApi: deps.ciApi,
           ciHome: deps.ciHome ?? config.home,
+          deliveryDedupe,
         })
       );
     }
@@ -344,7 +351,20 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
 
       if (event === "ping" || eventType === "ping") return json(200, { ok: true });
 
-      const delivery = request.headers.get("x-gitea-delivery") ?? crypto.randomUUID();
+      const deliveryHeader = request.headers.get("x-gitea-delivery");
+      const delivery = deliveryHeader ?? crypto.randomUUID();
+      if (deliveryHeader && deliveryDedupe.has(delivery)) {
+        logger(`deduped replay delivery=${delivery}`);
+        return json(202, { queued: false, deduped: true });
+      }
+      // Mark only durable outcomes: a 400/503 leaves the delivery unmarked so
+      // the forge retry is processed instead of answered as a replay.
+      const markDurable = (response: Response): Response => {
+        if (deliveryHeader && (response.status === 200 || response.status === 202)) {
+          deliveryDedupe.mark(delivery);
+        }
+        return response;
+      };
       const reviewAction = event === "pull_request" ? peekWebhookAction(rawBody) : undefined;
       if (event === "pull_request" && (!deps.worker || isReviewWebhookAction(reviewAction))) {
         try {
@@ -373,7 +393,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           });
           if ("skip" in validation) {
             logger(`skipped ${validation.skip}`);
-            return json(202, { skipped: validation.skip });
+            return markDurable(json(202, { skipped: validation.skip }));
           }
 
           const job = { ...validation, delivery };
@@ -383,7 +403,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               if (job.headSha !== pr.head.sha) {
                 const key = reviewJobKey(job);
                 logger(`stale head ${key} current=${pr.head.sha}`);
-                return json(202, { key, queued: false });
+                return markDurable(json(202, { key, queued: false }));
               }
             } catch (err) {
               logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -395,7 +415,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             logger,
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
-          return json(202, result);
+          return markDurable(json(202, result));
         } catch (err) {
           if (isQueueUnavailable(err)) {
             logger(`queue unavailable: ${err.message}`);
@@ -407,27 +427,29 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
       }
 
       if (deps.worker) {
-        return handleWorkerWebhookEvent(
-          rawBody,
-          event,
-          eventType,
-          delivery,
-          {
-            giteaUrl: config.giteaUrl,
-            allowedOrgs: config.allowedOrgs,
-            allowedRepos: config.allowedRepos,
-            botUsername: config.botUsername,
-            followupIgnoreLogins: config.followupIgnoreLogins,
-            trustedSenderLogins: config.trustedSenderLogins,
-            ignoreConflictsLabel: config.ignoreConflictsLabel,
-          },
-          { ...deps.worker, logger: deps.worker.logger ?? logger }
+        return markDurable(
+          await handleWorkerWebhookEvent(
+            rawBody,
+            event,
+            eventType,
+            delivery,
+            {
+              giteaUrl: config.giteaUrl,
+              allowedOrgs: config.allowedOrgs,
+              allowedRepos: config.allowedRepos,
+              botUsername: config.botUsername,
+              followupIgnoreLogins: config.followupIgnoreLogins,
+              trustedSenderLogins: config.trustedSenderLogins,
+              ignoreConflictsLabel: config.ignoreConflictsLabel,
+            },
+            { ...deps.worker, logger: deps.worker.logger ?? logger }
+          )
         );
       }
 
       const skipReason = `unsupported event ${event ?? "unknown"}`;
       logger(`skipped ${skipReason}`);
-      return json(202, { skipped: skipReason });
+      return markDurable(json(202, { skipped: skipReason }));
     }
   };
 }

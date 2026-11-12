@@ -66,7 +66,7 @@ function isEnoent(err: unknown): boolean {
   return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
 }
 
-function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+export function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: scratchDir } as Record<string, string>;

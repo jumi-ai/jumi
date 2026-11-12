@@ -1,14 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   blockingOpenQuestionCount,
+  buildFindingsList,
   countQuestionFindings,
   findingFingerprint,
+  findingListLine,
   hasPublishedFindings,
   isBlockingQuestionAuthor,
   isQuestionInline,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
+  reviewFindingLines,
   stripFindingLines,
   trailerSuggestionCount,
 } from "../src/verdict.ts";
@@ -374,5 +377,70 @@ describe("blocking questions", () => {
     expect(isQuestionInline("src/foo.ts", "🔴 bug: null deref.")).toBe(false);
     expect(isQuestionInline("src/foo.ts", "Was the default re-checked?")).toBe(false);
     expect(isQuestionInline(undefined, "❓ q: is the timeout intentional?")).toBe(true);
+  });
+});
+
+describe("findings list", () => {
+  test("lists one line per finding with marker, location, and first sentence", () => {
+    expect(findingListLine({ path: "src/foo.ts", line: 12, body: "🔴 bug: null deref. Guard it." })).toBe(
+      "- 🔴 `src/foo.ts:12`: null deref."
+    );
+    expect(
+      findingListLine(
+        { path: "renovate.json", line: 37, body: "🟡 risk: the tag could drop the prefix." },
+        "https://example.com/discussion/1"
+      )
+    ).toBe("- 🟡 [`renovate.json:37`](https://example.com/discussion/1): the tag could drop the prefix.");
+  });
+
+  test("maps word severities to markers and keeps marker-less findings plain", () => {
+    expect(findingListLine({ path: "a.ts", line: 1, body: "bug: null deref. Guard it." })).toBe(
+      "- 🔴 `a.ts:1`: null deref."
+    );
+    expect(findingListLine({ path: "b.ts", line: 2, body: "question: was it validated? Later." })).toBe(
+      "- ❓ `b.ts:2`: was it validated?"
+    );
+    expect(findingListLine({ path: "c.ts", line: 3, body: "please rename this" })).toBe(
+      "- `c.ts:3`: please rename this"
+    );
+  });
+
+  test("buildFindingsList is empty without findings and links entries by fingerprint", () => {
+    expect(buildFindingsList([])).toBe("");
+    const findings = [
+      { path: "src/foo.ts", line: 12, body: "🔴 bug: first breaks. More." },
+      { path: "src/bar.ts", line: 40, body: "🟡 risk: second slips. More." },
+    ];
+    const urls = new Map([[findingFingerprint("src/foo.ts", "🔴 bug: first breaks. More."), "https://example.com/1"]]);
+    expect(buildFindingsList(findings, urls)).toBe(
+      [
+        "<!-- jumi-findings-list:start -->",
+        "- 🔴 [`src/foo.ts:12`](https://example.com/1): first breaks.",
+        "- 🟡 `src/bar.ts:40`: second slips.",
+        "<!-- jumi-findings-list:end -->",
+      ].join("\n")
+    );
+  });
+
+  test("the published list never parses back as findings", () => {
+    const findings = [
+      { path: "src/foo.ts", line: 12, body: "🔴 bug: null deref. Guard it." },
+      { path: "src/bar.ts", line: 7, body: "❓ q: is the timeout intentional?" },
+    ];
+    const body = [
+      "<!-- jumi-review:o/r#1 -->",
+      "### Jumi review",
+      "",
+      "Reviewed commit: `abc123`",
+      "",
+      buildFindingsList(findings, new Map([[findingFingerprint("src/foo.ts", findings[0].body), "https://x/1"]])),
+      "",
+      "<!-- jumi-check: failure; 1 risk -->",
+    ].join("\n");
+    expect(reviewFindingLines(body)).toEqual([]);
+    expect(stripFindingLines(body)).not.toContain("null deref");
+    expect(stripFindingLines(body)).not.toContain("src/foo.ts:12");
+    expect(countQuestionFindings(body)).toBe(0);
+    expect(hasPublishedFindings(body)).toBe(false);
   });
 });

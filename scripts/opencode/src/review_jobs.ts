@@ -60,6 +60,8 @@ export interface IssueJobPayload {
   tracker?: string;
   trackerId?: string;
   trackerUrl?: string;
+  issueAuthor?: string;
+  issueAuthorPermission?: string;
 }
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
@@ -765,6 +767,8 @@ export function issueJobPayload(job: IssueJob): IssueJobPayload {
     ...(job.tracker ? { tracker: job.tracker } : {}),
     ...(job.trackerId ? { trackerId: job.trackerId } : {}),
     ...(job.trackerUrl ? { trackerUrl: job.trackerUrl } : {}),
+    ...(job.issueAuthor ? { issueAuthor: job.issueAuthor } : {}),
+    ...(job.issueAuthorPermission ? { issueAuthorPermission: job.issueAuthorPermission } : {}),
   };
 }
 
@@ -800,6 +804,8 @@ export function issueJobFromRecord(row: ReviewJobRecord): IssueJob {
     ...(payload.tracker ? { tracker: payload.tracker } : {}),
     ...(payload.trackerId ? { trackerId: payload.trackerId } : {}),
     ...(payload.trackerUrl ? { trackerUrl: payload.trackerUrl } : {}),
+    ...(payload.issueAuthor ? { issueAuthor: payload.issueAuthor } : {}),
+    ...(payload.issueAuthorPermission ? { issueAuthorPermission: payload.issueAuthorPermission } : {}),
   };
 }
 
@@ -830,6 +836,10 @@ function parsePayload(value: unknown): IssueJobPayload | null {
     ...(typeof rec.tracker === "string" && rec.tracker ? { tracker: rec.tracker } : {}),
     ...(typeof rec.trackerId === "string" && rec.trackerId ? { trackerId: rec.trackerId } : {}),
     ...(typeof rec.trackerUrl === "string" && rec.trackerUrl ? { trackerUrl: rec.trackerUrl } : {}),
+    ...(typeof rec.issueAuthor === "string" && rec.issueAuthor ? { issueAuthor: rec.issueAuthor } : {}),
+    ...(typeof rec.issueAuthorPermission === "string" && rec.issueAuthorPermission
+      ? { issueAuthorPermission: rec.issueAuthorPermission }
+      : {}),
   };
 }
 
