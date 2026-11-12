@@ -35,6 +35,34 @@ export function normalizePermission(permission: string | undefined | null): stri
   return permission.trim().toLowerCase();
 }
 
+/**
+ * Best-effort author-permission fill for the framed worker task (#438).
+ *
+ * Looks up the forge collaborator permission for the recorded issue author
+ * and stores it lowercased, so `<untrusted_issue permission="...">` reflects
+ * the author's actual write access instead of always reading `"unknown"`.
+ * Never throws and never overwrites an existing value: when the API is
+ * unavailable or the lookup fails the job is returned unchanged and the
+ * prompt keeps rendering `unknown`.
+ */
+export async function withIssueAuthorPermission<
+  T extends { owner: string; repo: string } & Partial<{
+    issueAuthor: string;
+    issueAuthorPermission: string;
+  }>,
+>(job: T, api: Partial<PermissionApi> | undefined): Promise<T> {
+  if (job.issueAuthorPermission || typeof job.issueAuthor !== "string" || !job.issueAuthor.trim()) return job;
+  if (!api || typeof api.getCollaboratorPermission !== "function") return job;
+  try {
+    const result = await api.getCollaboratorPermission(job.owner, job.repo, job.issueAuthor.trim());
+    const raw = permissionFromResult(result);
+    if (typeof raw !== "string" || !raw.trim()) return job;
+    return { ...job, issueAuthorPermission: raw.trim().toLowerCase() };
+  } catch {
+    return job;
+  }
+}
+
 function loginKey(login: string | undefined | null): string | undefined {
   if (typeof login !== "string") return undefined;
   const trimmed = login.trim();

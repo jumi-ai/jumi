@@ -38,9 +38,11 @@ export function issueTextChanged(
 
 export function jobWithIssue(
   job: IssueJob,
-  issue: { title: string; body: string | null | undefined; html_url: string }
+  issue: { title: string; body: string | null | undefined; html_url: string; user?: { login?: string } | null }
 ): IssueJob {
-  return { ...job, title: issue.title, body: issue.body ?? "", htmlUrl: issue.html_url };
+  const next: IssueJob = { ...job, title: issue.title, body: issue.body ?? "", htmlUrl: issue.html_url };
+  if (typeof issue.user?.login === "string" && issue.user.login.trim()) next.issueAuthor = issue.user.login.trim();
+  return next;
 }
 
 export function skipRecheckComment(reason: string): string {

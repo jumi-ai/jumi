@@ -227,6 +227,10 @@ export interface IssueJob {
   prNumber?: number;
   headSha?: string;
   trigger?: IssueJobTrigger;
+  /** Login that authored the issue text, when the forge payload carried it. */
+  issueAuthor?: string;
+  /** Raw forge permission of the issue author at pickup time, lowercased. */
+  issueAuthorPermission?: string;
   /** Tracker reference: which tracker owns the brief. Unset keeps the historical meaning (git-host issue). */
   tracker?: string;
   /** Stable id owned by `tracker`. Never a forge issue number for external trackers. */
