@@ -367,6 +367,9 @@ export class GiteaAPI {
   private patch<T>(path: string, body: unknown) {
     return this.request<T>("PATCH", path, body);
   }
+  private del<T>(path: string) {
+    return this.request<T>("DELETE", path);
+  }
 
   private repoPath(owner: string, repo: string): string {
     return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -443,6 +446,24 @@ export class GiteaAPI {
 
   async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
     return toPull(await this.patch<GiteaPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
+  }
+
+  /**
+   * Best-effort delete of a git ref (checkpoint hidden refs). A missing ref is
+   * not an error. Gitea and GitHub both accept `DELETE
+   * /repos/{owner}/{repo}/git/refs/{ref}` with the `refs/` prefix stripped;
+   * an endpoint that does not know the ref namespace surfaces as 404 and is
+   * swallowed the same way.
+   */
+  async deleteGitRef(owner: string, repo: string, ref: string): Promise<void> {
+    const short = ref.startsWith("refs/") ? ref.slice("refs/".length) : ref;
+    if (!short) return;
+    try {
+      await this.del<unknown>(`/repos/${this.repoPath(owner, repo)}/git/refs/${short}`);
+    } catch (err) {
+      if (isNotFoundError(err)) return;
+      throw err;
+    }
   }
 
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {

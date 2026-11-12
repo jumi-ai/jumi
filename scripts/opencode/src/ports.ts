@@ -227,6 +227,8 @@ export interface Forge extends AttachmentSupport {
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
   /** GitHub only: permissions an App's installations hold, e.g. `{ contents: "write" }`. */
   getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
+  /** Best-effort delete of a git ref (e.g. a checkpoint hidden ref). Missing refs are not an error. */
+  deleteGitRef?(owner: string, repo: string, ref: string): Promise<void>;
   createPullRequest(
     owner: string,
     repo: string,
@@ -312,6 +314,7 @@ export type IssueApi = Tracker &
     | "getCollaboratorPermission"
     | "getAppPermissions"
     | "listPullCommits"
+    | "deleteGitRef"
   >;
 
 export function trackerRefOf(task: { trackerRef?: string; number: number }): string {

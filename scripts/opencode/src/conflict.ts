@@ -1,6 +1,16 @@
 import { access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
+import {
+  beginCheckpointing,
+  checkpointRefForJob,
+  DEFAULT_CHECKPOINT_INTERVAL_MS,
+  DEFAULT_CHECKPOINT_MAX_AGE_MS,
+  deleteCheckpointForIssueViaForge,
+  deleteCheckpointRefViaForge,
+  restoreCheckpoint,
+  sweepStaleCheckpoints,
+} from "./checkpoint.ts";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
@@ -720,7 +730,23 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   let attemptedBaseSha = "";
   let mergeDefaultThrew = false;
 
-  return runClaimedLoop(
+  let conflictCheckpointRef: string | undefined;
+  try {
+    conflictCheckpointRef = checkpointRefForJob(opts.job);
+  } catch {
+    conflictCheckpointRef = undefined;
+  }
+  const conflictCheckpointEnabled = opts.checkpointEnabled ?? true;
+  const conflictCheckpointIntervalMs = opts.checkpointIntervalMs ?? DEFAULT_CHECKPOINT_INTERVAL_MS;
+  const conflictCheckpoint =
+    conflictCheckpointRef &&
+    conflictCheckpointEnabled &&
+    conflictCheckpointIntervalMs > 0 &&
+    branch !== opts.job.defaultBranch
+      ? { ref: conflictCheckpointRef, intervalMs: conflictCheckpointIntervalMs }
+      : undefined;
+
+  const conflictResult: ConflictResult = await runClaimedLoop(
     loop,
     opts.abortSignal,
     async () => {
@@ -731,6 +757,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         abortSignal: opts.abortSignal,
         log,
       });
+      await sweepStaleCheckpoints(loop, {
+        maxAgeMs: opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS,
+        log,
+        exclude: conflictCheckpoint ? [conflictCheckpoint.ref] : undefined,
+      }).catch(() => undefined);
       const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
@@ -742,6 +773,26 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       attemptedHeadSha = headSha;
       attemptedBaseSha = baseSha;
       await loop.stampHeadSha(headSha);
+      if (conflictCheckpoint) {
+        const restored = await restoreCheckpoint(loop, conflictCheckpoint.ref, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        }).catch(() => undefined);
+        if (restored?.restored && restored.sha) {
+          await loop
+            .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
+            .catch(() => undefined);
+        }
+        beginCheckpointing(loop, {
+          ref: conflictCheckpoint.ref,
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          intervalMs: conflictCheckpoint.intervalMs,
+          enabled: true,
+          log,
+        });
+      }
       const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
       const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
       await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
@@ -996,6 +1047,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
+      if (conflictCheckpoint) {
+        await deleteCheckpointRefViaForge(opts.api, owner, repo, conflictCheckpoint.ref, { log });
+      }
       throwIfAborted(opts.abortSignal);
 
       const publishedHead = (
@@ -1051,4 +1105,17 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
     }
   );
+  if (
+    conflictCheckpoint &&
+    typeof conflictResult === "object" &&
+    conflictResult !== null &&
+    "status" in conflictResult &&
+    (conflictResult.status === "skipped" ||
+      conflictResult.status === "up-to-date" ||
+      conflictResult.status === "stuck" ||
+      conflictResult.status === "cancelled")
+  ) {
+    await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+  }
+  return conflictResult;
 }

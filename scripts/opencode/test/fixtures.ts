@@ -357,6 +357,9 @@ export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerC
     maxConflictRounds: 3,
     leaseMs: 14_400_000 + 10 * 60 * 1000,
     maxJobAttempts: 2,
+    checkpointEnabled: true,
+    checkpointIntervalMs: 300_000,
+    checkpointMaxAgeMs: 7 * 24 * 60 * 60 * 1000,
     ...overrides,
   };
 }

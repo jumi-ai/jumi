@@ -423,6 +423,9 @@ describe("deploy/contract.md", () => {
       "LEASE_MS",
       "MAX_JOB_ATTEMPTS",
       "PHOENIX_OTLP_ENDPOINT",
+      "JUMI_CHECKPOINT_ENABLED",
+      "JUMI_CHECKPOINT_INTERVAL_MS",
+      "JUMI_CHECKPOINT_MAX_AGE_MS",
     ]);
     expect(parsed.reviewer.ports).toEqual(["3000", "3001", "3010"]);
     expect(parsed.worker.ports).toEqual(["3000", "3010"]);

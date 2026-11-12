@@ -57,6 +57,9 @@ export interface WorkerConfig {
   leaseMs: number;
   maxJobAttempts: number;
   phoenixOtlpEndpoint?: string;
+  checkpointEnabled: boolean;
+  checkpointIntervalMs: number;
+  checkpointMaxAgeMs: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -82,6 +85,46 @@ function csvEnv(env: Env, name: string, fallback: string[] = []): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+function checkpointBit(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  throw new Error(`Invalid boolean for JUMI_CHECKPOINT_ENABLED: ${value}`);
+}
+
+function checkpointInterval(resolved: Env): number {
+  const raw = resolved.JUMI_CHECKPOINT_INTERVAL_MS;
+  if (raw === undefined || raw === "") return 300_000;
+  if (raw.trim() === "0") return 0;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid positive integer for JUMI_CHECKPOINT_INTERVAL_MS: ${raw}`);
+  }
+  return parsed;
+}
+
+function checkpointMaxAge(resolved: Env): number {
+  const raw = resolved.JUMI_CHECKPOINT_MAX_AGE_MS;
+  if (raw === undefined || raw === "") return 7 * 24 * 60 * 60 * 1000;
+  const parsed = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid positive integer for JUMI_CHECKPOINT_MAX_AGE_MS: ${raw}`);
+  }
+  return parsed;
+}
+
+function checkpointFromEnv(
+  resolved: Env
+): Pick<WorkerConfig, "checkpointEnabled" | "checkpointIntervalMs" | "checkpointMaxAgeMs"> {
+  const enabled = checkpointBit(resolved.JUMI_CHECKPOINT_ENABLED, true);
+  const intervalMs = checkpointInterval(resolved);
+  const maxAgeMs = checkpointMaxAge(resolved);
+  if (!enabled || intervalMs === 0)
+    return { checkpointEnabled: false, checkpointIntervalMs: intervalMs, checkpointMaxAgeMs: maxAgeMs };
+  return { checkpointEnabled: true, checkpointIntervalMs: intervalMs, checkpointMaxAgeMs: maxAgeMs };
 }
 
 export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookSecret?: boolean } = {}): WorkerConfig {
@@ -135,5 +178,6 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
     maxJobAttempts: intEnv(resolved, "MAX_JOB_ATTEMPTS", 2),
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
+    ...checkpointFromEnv(resolved),
   };
 }

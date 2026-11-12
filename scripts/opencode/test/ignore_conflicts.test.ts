@@ -497,6 +497,37 @@ for (const forge of ["gitea", "github"] as const) {
 }
 
 describe("router mailbox push (workerMailboxApi regression)", () => {
+  test("mailbox forwards deleteGitRef so webhook checkpoint cleanup is live", async () => {
+    let deleted: { owner: string; repo: string; ref: string } | undefined;
+    const fullApi = {
+      getIssue: async () => makeIssue(),
+      getRepo: async () => repo,
+      getPR: async () => labelledForeignPR("gitea"),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      listOpenPulls: async () => [],
+      listPullCommits: async () => [],
+      deleteGitRef: async (owner: string, repo: string, ref: string) => {
+        deleted = { owner, repo, ref };
+      },
+    };
+    const mailboxApi = workerMailboxApi(fullApi as never);
+    expect(mailboxApi?.deleteGitRef).toBeDefined();
+    await mailboxApi?.deleteGitRef?.("o", "r", "refs/jumi/wip/12");
+    expect(deleted).toEqual({ owner: "o", repo: "r", ref: "refs/jumi/wip/12" });
+  });
+
+  test("mailbox without deleteGitRef leaves it undefined", async () => {
+    const fullApi = {
+      getIssue: async () => makeIssue(),
+      getRepo: async () => repo,
+      getPR: async () => labelledForeignPR("gitea"),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      listOpenPulls: async () => [],
+      listPullCommits: async () => [],
+    };
+    const mailboxApi = workerMailboxApi(fullApi as never);
+    expect(mailboxApi?.deleteGitRef).toBeUndefined();
+  });
   test("labelled PR with a Jumi commit enqueues a conflict job", async () => {
     const pr = labelledForeignPR("gitea");
     const fullApi = {

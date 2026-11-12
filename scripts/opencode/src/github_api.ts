@@ -703,6 +703,9 @@ export class GithubAPI {
   private put<T>(path: string, body: unknown, target?: GithubTokenTarget) {
     return this.request<T>("PUT", path, body, target);
   }
+  private del<T>(path: string, target?: GithubTokenTarget) {
+    return this.request<T>("DELETE", path, undefined, target);
+  }
 
   private repoPath(owner: string, repo: string): string {
     return `${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -833,6 +836,24 @@ export class GithubAPI {
 
   async updatePullRequestBody(owner: string, repo: string, index: number, body: string): Promise<Pull> {
     return toPull(await this.patch<GithubPR>(`/repos/${this.repoPath(owner, repo)}/pulls/${index}`, { body }));
+  }
+
+  /**
+   * Best-effort delete of a git ref (checkpoint hidden refs). GitHub takes
+   * the ref without the `refs/` prefix (`DELETE
+   * /repos/{owner}/{repo}/git/refs/{ref}`). A missing ref (404/422) is not an
+   * error so close/merge cleanup stays idempotent.
+   */
+  async deleteGitRef(owner: string, repo: string, ref: string): Promise<void> {
+    const short = ref.startsWith("refs/") ? ref.slice("refs/".length) : ref;
+    if (!short) return;
+    try {
+      await this.del<unknown>(`/repos/${this.repoPath(owner, repo)}/git/refs/${short}`);
+    } catch (err) {
+      if (isNotFoundError(err)) return;
+      if (err instanceof Error && /→ 422\b/.test(err.message)) return;
+      throw err;
+    }
   }
 
   async getIssue(owner: string, repo: string, index: number): Promise<Task> {
