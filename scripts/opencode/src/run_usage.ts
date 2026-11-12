@@ -224,6 +224,11 @@ export function withLedgerRunUsage(engine: Engine): Engine {
     const recording = activeRecording;
     if (!recording) return engine(opts);
     const source = (opts.type ?? "opencode").trim() || "opencode";
+    // Catalog entry name when the spawn came through a named chain, else the
+    // harness type. Two entries may share type and model and differ only in
+    // credential, so the name is what keeps API-billed and
+    // subscription-billed runs countable separately.
+    const runnerLabel = opts.runnerName?.trim() ? opts.runnerName.trim() : source;
     const before = snapshotTokenMetrics();
     const startedAt = new Date();
     const startMs = Date.now();
@@ -254,7 +259,7 @@ export function withLedgerRunUsage(engine: Engine): Engine {
             ? deltas.map((delta) =>
                 toRow(
                   recording.context,
-                  { source: delta.source, model: delta.model, usage: mergeUsage(deltas), sessions: delta.sessions },
+                  { source: runnerLabel, model: delta.model, usage: mergeUsage(deltas), sessions: delta.sessions },
                   exitClass,
                   startedAt,
                   endedAt,
@@ -264,7 +269,7 @@ export function withLedgerRunUsage(engine: Engine): Engine {
             : [
                 toRow(
                   recording.context,
-                  { source, model: fallbackModelFor(source, opts.model), usage: undefined, sessions: 0 },
+                  { source: runnerLabel, model: fallbackModelFor(source, opts.model), usage: undefined, sessions: 0 },
                   exitClass,
                   startedAt,
                   endedAt,
