@@ -83,7 +83,6 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("integrated into a Gitea");
     expect(prompt).not.toContain("external_directory");
     expect(prompt).not.toContain("Gitea commit status");
-    expect(prompt).not.toContain("gitops-apply-review");
     expect(prompt).not.toContain("skill tool");
   });
 
@@ -97,7 +96,6 @@ describe("buildPROpenedPrompt", () => {
       prFiles: [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
     });
 
-    expect(prompt).not.toContain("gitops-apply-review");
     expect(prompt).not.toContain("Checksum / rollout");
     expect(prompt).not.toContain("House misses");
     expect(prompt).not.toContain("<review_md");

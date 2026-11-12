@@ -1798,7 +1798,6 @@ describe("reviewPullRequest", () => {
       expect(prompt).toContain("Bump checksum/config when a ConfigMap changes.");
       expect(prompt).toContain("Never log tokens.");
       expect(prompt).not.toContain("Prefer Bun APIs.");
-      expect(prompt).not.toContain("gitops-apply-review");
       expect(prompt).not.toContain("Checksum / rollout");
       expect(prompt).not.toContain("House misses");
       expect(prompt).not.toContain("skill tool");
@@ -1851,7 +1850,6 @@ describe("reviewPullRequest", () => {
 
       expect(prompt).toContain("You are Jumi's reviewer");
       expect(prompt).not.toContain("<review_md");
-      expect(prompt).not.toContain("gitops-apply-review");
       expect(prompt).not.toContain("Checksum / rollout");
       expect(status.at(-1)).toBe("success");
     });

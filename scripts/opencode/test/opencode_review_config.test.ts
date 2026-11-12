@@ -149,16 +149,16 @@ describe("opencode review config", () => {
 describe("reviewer image permissions", () => {
   const repoRoot = join(process.cwd(), "../..");
   const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
-  const skillPath = join(repoRoot, "review-skills/gitops-apply-review/SKILL.md");
+  const skillPath = join(repoRoot, "review-skills/review-proof/SKILL.md");
 
   test("does not chown /app to the reviewer uid", () => {
     expect(dockerfile).not.toMatch(/chown\s+-R\s+jumi:jumi\s+\/app/);
     expect(dockerfile).toMatch(/chown\s+-R\s+jumi:jumi\s+\/data\s+\/work/);
   });
 
-  test("copies gitops-apply-review into the image layout the config points at", () => {
+  test("copies review-proof into the image layout the config points at", () => {
     expect(existsSync(skillPath)).toBe(true);
-    expect(readFileSync(skillPath, "utf8")).toContain("name: gitops-apply-review");
+    expect(readFileSync(skillPath, "utf8")).toContain("name: review-proof");
     expect(dockerfile).toContain("COPY review-skills /app/review-skills");
   });
 

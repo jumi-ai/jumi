@@ -110,7 +110,7 @@ describe("opencode implement config", () => {
     ]);
 
     expect(lastMatch(rules, "/app/review-skills/gitea-pull-review/*")).toBe("allow");
-    expect(lastMatch(rules, "/app/review-skills/gitops-apply-review/*")).toBe("allow");
+    expect(lastMatch(rules, "/app/review-skills/review-proof/*")).toBe("allow");
     expect(lastMatch(rules, "/app/review-skills/*")).toBe("allow");
     expect(lastMatch(rules, "/app/*")).toBe("deny");
     expect(lastMatch(rules, "/app/.gitea/*")).toBe("deny");

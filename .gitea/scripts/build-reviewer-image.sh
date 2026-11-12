@@ -156,9 +156,9 @@ verify_reviewer_runtime() {
     echo "pre-installed CPython 3.13 not usable offline via uv in reviewer image" >&2
     exit 1
   fi
-  if ! buildah run "${ctr}" -- test -f /app/review-skills/gitops-apply-review/SKILL.md; then
+  if ! buildah run "${ctr}" -- test -f /app/review-skills/review-proof/SKILL.md; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
-    echo "gitops-apply-review skill missing in reviewer image" >&2
+    echo "review-proof skill missing in reviewer image" >&2
     exit 1
   fi
   if ! config_json="$(
@@ -288,7 +288,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, gitops-apply-review skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
