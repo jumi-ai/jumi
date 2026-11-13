@@ -65,11 +65,7 @@ export const KNOWN_KEYS = new Set([
   "max_followup_rounds",
   "max_conflict_rounds",
   "takeover_authors",
-  "takeover-authors",
-  "takeoverAuthors",
   "ignore_conflicts_authors",
-  "ignore-conflicts-authors",
-  "ignoreConflictsAuthors",
   "blocking_question_authors",
   "mode",
 ]);
@@ -83,21 +79,50 @@ export const MIN_TIMEOUT_MINUTES = 1;
 
 export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 
-function parseTimeoutsValue(value: unknown): RepoSettingsParse {
-  if (value === undefined)
-    return {
-      ok: true,
-      settings: {
-        automerge: false,
-        timeouts: {},
-        reviewExclude: [],
-        followupOnSuggestions: true,
-        takeoverAuthors: [],
-        ignoreConflictsAuthors: [],
-        blockingQuestionAuthors: [],
-        mode: "full",
-      },
-    };
+/** Default settings: every site that needs default values uses this. */
+function defaultRepoSettings(): RepoSettings {
+  return {
+    automerge: false,
+    timeouts: {},
+    allowedRunners: undefined,
+    reviewExclude: [],
+    followupOnSuggestions: true,
+    takeoverAuthors: [],
+    ignoreConflictsAuthors: [],
+    blockingQuestionAuthors: [],
+    mode: "full",
+  };
+}
+
+/**
+ * Normalize a key for "did you mean" suggestions: lowercase, `-` → `_`,
+ * camelCase → snake_case. Canonical keys are already in that form, so a
+ * normalized unknown key that matches a known key is almost certainly a
+ * misspelling of it.
+ */
+function normalizeKey(key: string): string {
+  return key
+    .replace(/-/g, "_")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .toLowerCase();
+}
+
+/** `unknown key "k"` plus a suggestion when `k` normalizes to a known key. */
+function unknownKeyError(key: string, known: readonly string[], prefix = ""): string {
+  const normalized = normalizeKey(key);
+  const canonical = known.find((candidate) => candidate === normalized);
+  const shown = prefix ? `${prefix}.${key}` : key;
+  if (canonical && canonical !== key) {
+    const suggestion = prefix ? `${prefix}.${canonical}` : canonical;
+    return `unknown key "${shown}" (did you mean "${suggestion}"?)`;
+  }
+  return `unknown key "${shown}"`;
+}
+
+type TimeoutsParse = { ok: true; timeouts: RepoTimeouts } | { ok: false; error: string };
+
+function parseTimeoutsValue(value: unknown): TimeoutsParse {
+  if (value === undefined) return { ok: true, timeouts: {} };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, error: `"timeouts" must be a mapping` };
   }
@@ -105,7 +130,7 @@ function parseTimeoutsValue(value: unknown): RepoSettingsParse {
   const timeouts: RepoTimeouts = {};
   for (const key of Object.keys(record)) {
     if (!(TIMEOUT_KEYS as readonly string[]).includes(key)) {
-      return { ok: false, error: `unknown key "timeouts.${key}"` };
+      return { ok: false, error: unknownKeyError(key, TIMEOUT_KEYS, "timeouts") };
     }
     const minutes = record[key];
     if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < MIN_TIMEOUT_MINUTES) {
@@ -113,19 +138,7 @@ function parseTimeoutsValue(value: unknown): RepoSettingsParse {
     }
     (timeouts as Record<string, number>)[key] = minutes;
   }
-  return {
-    ok: true,
-    settings: {
-      automerge: false,
-      timeouts,
-      reviewExclude: [],
-      followupOnSuggestions: true,
-      takeoverAuthors: [],
-      ignoreConflictsAuthors: [],
-      blockingQuestionAuthors: [],
-      mode: "full",
-    },
-  };
+  return { ok: true, timeouts };
 }
 
 function parserErrorMessage(err: unknown): string {
@@ -136,16 +149,17 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * absent `allowed_runners` means no runner restriction;
+ * absent `allowed_runners` means no runner restriction (an explicitly empty
+ * list is invalid: no runner could work on the repository, so use
+ * `mode: off` or `mode: review-only` instead);
  * absent `review_exclude` means nothing is left out; absent author lists
  * mean empty; absent `mode` means `full`. No schema-version key exists. The
  * error string is the parser's error and is surfaced verbatim in the
- * auto-merge note and the review status. Author lists match whole logins,
- * case-insensitive. Canonical keys are `takeover_authors` and
- * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted
- * as aliases for the same setting. `blocking_question_authors` must be a
- * list of login strings when present; blank entries are dropped like the
- * deployer CSV.
+ * auto-merge note and the review status. Each key has exactly one spelling
+ * (snake_case); an unknown key that normalizes to a known key names the
+ * known key as a suggestion. Author lists match whole logins,
+ * case-insensitive. Every list key rejects blank or non-string entries:
+ * a blank entry makes the whole file invalid instead of being dropped.
  * `followup_on_suggestions` absent means on: a `success` review with
  * suggestions follows up as today; `false` turns that off while failures,
  * blocking questions, red CI, and conflicts run as today.
@@ -165,26 +179,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   } catch (err) {
     return { ok: false, error: parserErrorMessage(err) };
   }
-  if (parsed === null || parsed === undefined)
-    return {
-      ok: true,
-      settings: {
-        automerge: false,
-        timeouts: {},
-        allowedRunners: undefined,
-        reviewExclude: [],
-        followupOnSuggestions: true,
-        takeoverAuthors: [],
-        ignoreConflictsAuthors: [],
-        blockingQuestionAuthors: [],
-        mode: "full",
-      },
-    };
+  if (parsed === null || parsed === undefined) return { ok: true, settings: defaultRepoSettings() };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
   for (const key of Object.keys(parsed as Record<string, unknown>)) {
-    if (!KNOWN_KEYS.has(key)) return { ok: false, error: `unknown key "${key}"` };
+    if (!KNOWN_KEYS.has(key)) return { ok: false, error: unknownKeyError(key, [...KNOWN_KEYS]) };
   }
   const record = parsed as Record<string, unknown>;
   let automerge = false;
@@ -196,32 +196,30 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if ("timeouts" in record && record.timeouts !== undefined) {
     const timeoutsParsed = parseTimeoutsValue(record.timeouts);
     if (!timeoutsParsed.ok) return timeoutsParsed;
-    timeouts = timeoutsParsed.settings.timeouts;
+    timeouts = timeoutsParsed.timeouts;
   }
   let allowedRunners: string[] | undefined;
   if ("allowed_runners" in record && record.allowed_runners !== undefined) {
-    const value = record.allowed_runners;
-    if (!Array.isArray(value)) return { ok: false, error: `"allowed_runners" must be a list of runner names` };
-    const names: string[] = [];
-    for (const entry of value) {
-      if (typeof entry !== "string") return { ok: false, error: `"allowed_runners" must be a list of runner names` };
-      const trimmed = entry.trim();
-      if (!trimmed) continue;
-      if (!names.includes(trimmed)) names.push(trimmed);
+    const parsed = parseStringList(record.allowed_runners, "allowed_runners", {
+      notListError: `"allowed_runners" must be a list of runner names`,
+    });
+    if (!parsed.ok) return parsed;
+    if (parsed.values.length === 0) {
+      return {
+        ok: false,
+        error: `"allowed_runners" is empty, so no runner could work on the repository; use mode: off or mode: review-only`,
+      };
     }
-    allowedRunners = names;
+    allowedRunners = parsed.values;
   }
   let reviewExclude: string[] = [];
   if ("review_exclude" in record && record.review_exclude !== undefined) {
-    if (!Array.isArray(record.review_exclude)) {
-      return { ok: false, error: `"review_exclude" must be a list of glob strings` };
-    }
-    for (const entry of record.review_exclude) {
-      if (typeof entry !== "string" || entry.trim() === "") {
-        return { ok: false, error: `"review_exclude" must be a list of glob strings` };
-      }
-    }
-    reviewExclude = (record.review_exclude as string[]).map((entry) => entry.trim());
+    const parsed = parseStringList(record.review_exclude, "review_exclude", {
+      notListError: `"review_exclude" must be a list of glob strings`,
+      dedupe: false,
+    });
+    if (!parsed.ok) return parsed;
+    reviewExclude = parsed.values;
   }
   if (
     "followup_on_suggestions" in record &&
@@ -236,26 +234,17 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
         return { ok: false, error: `"${key}" must be a non-negative integer` };
     }
   }
-  const takeover = parseAuthorList(record, ["takeover_authors", "takeover-authors", "takeoverAuthors"]);
+  const takeover = parseAuthorList(record, "takeover_authors");
   if (!takeover.ok) return takeover;
-  const ignoreConflicts = parseAuthorList(record, [
-    "ignore_conflicts_authors",
-    "ignore-conflicts-authors",
-    "ignoreConflictsAuthors",
-  ]);
+  const ignoreConflicts = parseAuthorList(record, "ignore_conflicts_authors");
   if (!ignoreConflicts.ok) return ignoreConflicts;
   let blockingQuestionAuthors: string[] = [];
   if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
-    const value = record.blocking_question_authors;
-    if (!Array.isArray(value)) return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
-    const logins: string[] = [];
-    for (const entry of value) {
-      if (typeof entry !== "string")
-        return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
-      const trimmed = entry.trim();
-      if (trimmed) logins.push(trimmed);
-    }
-    blockingQuestionAuthors = logins;
+    const parsed = parseStringList(record.blocking_question_authors, "blocking_question_authors", {
+      notListError: `"blocking_question_authors" must be a list of logins`,
+    });
+    if (!parsed.ok) return parsed;
+    blockingQuestionAuthors = parsed.values;
   }
   let mode: RepoMode = "full";
   if ("mode" in record && record.mode !== undefined) {
@@ -285,28 +274,38 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   return { ok: true, settings };
 }
 
-function canonicalKey(aliases: readonly string[]): string {
-  return aliases[0] ?? "";
+/**
+ * Parse one list-of-strings setting. A non-list value keeps the caller's
+ * `notListError`; a blank or non-string entry makes the whole file invalid.
+ * Duplicates are dropped (unless `dedupe: false`), never an error.
+ */
+function parseStringList(
+  value: unknown,
+  key: string,
+  opts: { notListError: string; dedupe?: boolean }
+): { ok: true; values: string[] } | { ok: false; error: string } {
+  if (!Array.isArray(value)) return { ok: false, error: opts.notListError };
+  const dedupe = opts.dedupe ?? true;
+  const values: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      return { ok: false, error: `"${key}" must not contain blank entries` };
+    }
+    const trimmed = entry.trim();
+    if (dedupe && values.includes(trimmed)) continue;
+    values.push(trimmed);
+  }
+  return { ok: true, values };
 }
 
 function parseAuthorList(
   record: Record<string, unknown>,
-  aliases: readonly string[]
+  key: string
 ): { ok: true; authors: string[] } | { ok: false; error: string } {
-  const present = aliases.filter((key) => key in record && (record as Record<string, unknown>)[key] !== undefined);
-  if (present.length > 1) return { ok: false, error: `duplicate setting "${canonicalKey(aliases)}"` };
-  const key = present[0];
-  if (!key) return { ok: true, authors: [] };
-  const value = (record as Record<string, unknown>)[key];
-  if (!Array.isArray(value)) return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
-  const authors: string[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "string" || !entry.trim()) {
-      return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
-    }
-    authors.push(entry.trim());
-  }
-  return { ok: true, authors };
+  if (!(key in record) || record[key] === undefined) return { ok: true, authors: [] };
+  const parsed = parseStringList(record[key], key, { notListError: `"${key}" must be a list of logins` });
+  if (!parsed.ok) return parsed;
+  return { ok: true, authors: parsed.values };
 }
 
 export type RepoSettingsLoad =
