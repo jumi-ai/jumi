@@ -15,6 +15,8 @@ export interface RepoSettings {
   automerge: boolean;
   takeoverAuthors: string[];
   ignoreConflictsAuthors: string[];
+  /** PR-author logins whose open ❓ questions block the review status in this repository. */
+  blockingQuestionAuthors: string[];
 }
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
@@ -27,6 +29,7 @@ const KNOWN_KEYS = new Set([
   "ignore_conflicts_authors",
   "ignore-conflicts-authors",
   "ignoreConflictsAuthors",
+  "blocking_question_authors",
 ]);
 
 function parserErrorMessage(err: unknown): string {
@@ -42,7 +45,9 @@ function parserErrorMessage(err: unknown): string {
  * note and the review status. Author lists match whole logins,
  * case-insensitive. Canonical keys are `takeover_authors` and
  * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted
- * as aliases for the same setting.
+ * as aliases for the same setting. `blocking_question_authors` must be a
+ * list of login strings when present; blank entries are dropped like the
+ * deployer CSV.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -52,7 +57,10 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     return { ok: false, error: parserErrorMessage(err) };
   }
   if (parsed === null || parsed === undefined)
-    return { ok: true, settings: { automerge: false, takeoverAuthors: [], ignoreConflictsAuthors: [] } };
+    return {
+      ok: true,
+      settings: { automerge: false, takeoverAuthors: [], ignoreConflictsAuthors: [], blockingQuestionAuthors: [] },
+    };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -70,12 +78,26 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     "ignoreConflictsAuthors",
   ]);
   if (!ignoreConflicts.ok) return ignoreConflicts;
+  let blockingQuestionAuthors: string[] = [];
+  if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
+    const value = record.blocking_question_authors;
+    if (!Array.isArray(value)) return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
+    const logins: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string")
+        return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
+      const trimmed = entry.trim();
+      if (trimmed) logins.push(trimmed);
+    }
+    blockingQuestionAuthors = logins;
+  }
   return {
     ok: true,
     settings: {
       automerge: record.automerge,
       takeoverAuthors: takeover.authors,
       ignoreConflictsAuthors: ignoreConflicts.authors,
+      blockingQuestionAuthors,
     },
   };
 }
@@ -106,7 +128,13 @@ function parseAuthorList(
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean; takeoverAuthors: string[]; ignoreConflictsAuthors: string[] }
+  | {
+      state: "valid";
+      automerge: boolean;
+      takeoverAuthors: string[];
+      ignoreConflictsAuthors: string[];
+      blockingQuestionAuthors: string[];
+    }
   | { state: "invalid"; error: string };
 
 export interface RepoSettingsFileApi {
@@ -145,7 +173,62 @@ export async function loadRepoSettings(
     automerge: parsed.settings.automerge,
     takeoverAuthors: parsed.settings.takeoverAuthors,
     ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
+    blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
   };
+}
+
+/**
+ * Effective blocking-question authors for a repository: the deployer's list
+ * plus the repository file's list. The file cannot remove a login the
+ * deployer listed; matching stays case-insensitive whole-login. Invalid or
+ * missing files contribute nothing (the deployer list still applies).
+ */
+export function effectiveBlockingQuestionAuthors(
+  deployerAuthors: readonly string[] | undefined | null,
+  settings: RepoSettingsLoad
+): string[] {
+  const merged = [...(deployerAuthors ?? [])];
+  const seen = new Set(merged.map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+  if (settings.state === "valid") {
+    for (const entry of settings.blockingQuestionAuthors) {
+      const key = entry.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry.trim());
+    }
+  }
+  return merged;
+}
+
+/**
+ * Load the default-branch settings file and merge its
+ * `blocking_question_authors` with the deployer list. Missing, invalid, or
+ * unreadable files fall back to the deployer list so one repository's file
+ * never changes another repository. Never throws.
+ */
+export async function loadEffectiveBlockingQuestionAuthors(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployerAuthors: readonly string[] | undefined | null,
+  log?: (message: string) => void
+): Promise<string[]> {
+  if (!defaultBranch.trim()) return [...(deployerAuthors ?? [])];
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `blocking settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [...(deployerAuthors ?? [])];
+  }
+  if (settings.state === "invalid") {
+    log?.(`blocking settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    return [...(deployerAuthors ?? [])];
+  }
+  return effectiveBlockingQuestionAuthors(deployerAuthors, settings);
 }
 
 function normalizePath(filename: string): string {
