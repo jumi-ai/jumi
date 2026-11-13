@@ -24,6 +24,13 @@ import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./in
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import {
+  REPO_MODE_DISABLED_NOTE,
+  REPO_MODE_OFF_REASON,
+  REPO_MODE_REVIEW_ONLY_REASON,
+  type RepoMode,
+  resolveRepoMode,
+} from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
@@ -60,6 +67,38 @@ function log(message: string) {
   console.log(`[worker] ${message}`);
 }
 
+/**
+ * Resolve the repository mode and post the one-time worker-disabled note for
+ * `review-only`. Returns the mode; callers keep only their settle shape
+ * (queue early-return vs. ledger-tick settle-and-publish). The `try` covers
+ * the lookup alone so settle failures propagate instead of silently running
+ * the gated job. Fail-open to `full` on lookup failure.
+ */
+async function checkWorkerMode(
+  api: IssueApi,
+  owner: string,
+  repo: string,
+  issueNumber: number | undefined | null,
+  botUsername: string,
+  noteKey: string,
+  logger: (message: string) => void
+): Promise<RepoMode> {
+  let mode: RepoMode = "full";
+  try {
+    mode = await resolveRepoMode(api, owner, repo, logger);
+  } catch {
+    mode = "full";
+  }
+  if (mode === "review-only" && issueNumber != null) {
+    try {
+      await upsertWorkerComment(api, owner, repo, issueNumber, botUsername, REPO_MODE_DISABLED_NOTE);
+    } catch (err) {
+      logger(`mode note failed ${noteKey}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return mode;
+}
+
 export function createIssueQueue(
   config: WorkerConfig,
   api: IssueApi = createForge(config),
@@ -75,6 +114,17 @@ export function createIssueQueue(
       const abort = new AbortController();
       aborts.set(key, abort);
       try {
+        // Repository mode is read when the job starts. Restricted repos cost
+        // no model time. Fail-open to full on lookup failure.
+        const mode = await checkWorkerMode(api, job.owner, job.repo, job.issueNumber, config.botUsername, key, logger);
+        if (mode === "off") {
+          logger(`${key} skipped: ${REPO_MODE_OFF_REASON}`);
+          return;
+        }
+        if (mode === "review-only") {
+          logger(`${key} skipped: ${REPO_MODE_REVIEW_ONLY_REASON}`);
+          return;
+        }
         const shared = {
           api,
           tracker: api,
@@ -402,6 +452,23 @@ export async function processWorkerTick(
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
+  }
+  // Repository mode is read when the job starts so a change on the default
+  // branch applies to the next job without a restart; a running job finishes.
+  // Restricted repos cost no model time. Off settles silently, review-only
+  // leaves one worker-disabled note via the sticky (upsert says it once).
+  // The lookup fail-opens to full; settle failures below propagate to the
+  // tick error handling instead of silently running the gated job.
+  const mode = await checkWorkerMode(api, row.owner, row.repo, row.issueNumber, config.botUsername, row.jobKey, logger);
+  if (mode === "off" || mode === "review-only") {
+    const reason = mode === "off" ? REPO_MODE_OFF_REASON : REPO_MODE_REVIEW_ONLY_REASON;
+    await store.markPublished(row.id, leasedBy, { state: "skipped", reason });
+    recordJobCompleted(row.kind, "skipped");
+    logger(`${row.jobKey} skipped: ${reason}`);
+    await clearSitBestEffort(store.sits, row.owner, row.repo, row.issueNumber ?? 0, logger);
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else await store.recordRoleSuccess("worker");
+    return "processed";
   }
   // Same ambient ledger recorder as the engine tick: runner spawns record
   // per-run usage against this row before the tick ends. A failed metric
