@@ -16,6 +16,22 @@ export interface EngineRunOptions {
   model: string;
   variant?: string;
   effort?: string;
+  /**
+   * Catalog entry name behind this spawn (`chain` entry). Present when the
+   * spawn came through a named chain; absent for direct engine calls.
+   * Usage rows and logs use it so same-model entries stay countable.
+   */
+  runnerName?: string;
+  /**
+   * Credential selector from the catalog entry (`"api-key"` for API-key
+   * runners, else the subscription default). General across runner types;
+   * only `type: claude` honors `"api-key"` today.
+   */
+  auth?: string;
+  /** Parent env var holding the key when `auth` is `"api-key"`. */
+  authEnv?: string;
+  /** Parent key-var names across the whole chain (stripped from every child). */
+  keyEnvNames?: string[];
   workdir: string;
   home?: string;
   sanitizeEnv?: boolean;

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { isValidEnvName, RUNNER_AUTH_API_KEY, RUNNER_AUTH_SUBSCRIPTION } from "./claude_credentials.ts";
 import type { ForgeKind } from "./forge.ts";
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
@@ -21,24 +22,44 @@ export interface OpenCodeRunnerConfig {
   type: typeof OPENCODE_RUNNER_TYPE;
   model: string;
   variant?: string;
+  /**
+   * Credential selector, general across runner types. `undefined` (or
+   * `"subscription"`) keeps today's behavior. `"api-key"` bills the run to
+   * the key in `authEnv`. Only `type: claude` accepts `"api-key"` today.
+   */
+  auth?: string;
+  /** Parent env var holding the key when `auth` is `"api-key"`. Never a value. */
+  authEnv?: string;
 }
 
 export interface ClaudeRunnerConfig {
   type: typeof CLAUDE_RUNNER_TYPE;
   model: string;
   effort?: string;
+  /** Credential selector: absent (or `"subscription"`) is the setup token, `"api-key"` is `authEnv`. */
+  auth?: string;
+  /** Parent env var holding the Anthropic API key when `auth` is `"api-key"`. Never a value. */
+  authEnv?: string;
 }
 
 export interface AgyRunnerConfig {
   type: typeof AGY_RUNNER_TYPE;
   model: string;
   effort?: string;
+  /** Accepted for shape parity; `"api-key"` is refused on this runner type. */
+  auth?: string;
+  /** Refused on this runner type (only meaningful with `"api-key"`). */
+  authEnv?: string;
 }
 
 export interface CodexRunnerConfig {
   type: typeof CODEX_RUNNER_TYPE;
   model: string;
   effort: string;
+  /** Accepted for shape parity; `"api-key"` is refused on this runner type. */
+  auth?: string;
+  /** Refused on this runner type (only meaningful with `"api-key"`). */
+  authEnv?: string;
 }
 
 export type RunnerConfig = OpenCodeRunnerConfig | ClaudeRunnerConfig | AgyRunnerConfig | CodexRunnerConfig;
@@ -107,8 +128,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function opencodeRunner(model: string, variant?: string): RunnerConfig {
-  return variant ? { type: OPENCODE_RUNNER_TYPE, model, variant } : { type: OPENCODE_RUNNER_TYPE, model };
+function opencodeRunner(model: string, variant?: string, auth?: { auth?: string; authEnv?: string }): RunnerConfig {
+  const runner: OpenCodeRunnerConfig = { type: OPENCODE_RUNNER_TYPE, model };
+  if (variant) runner.variant = variant;
+  if (auth?.auth !== undefined) runner.auth = auth.auth;
+  if (auth?.authEnv !== undefined) runner.authEnv = auth.authEnv;
+  return runner;
 }
 
 function fail(message: string): never {
@@ -118,9 +143,49 @@ function fail(message: string): never {
 function effortRunner(
   type: typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE,
   model: string,
-  effort?: string
+  effort?: string,
+  auth?: { auth?: string; authEnv?: string }
 ): ClaudeRunnerConfig | AgyRunnerConfig {
-  return effort ? { type, model, effort } : { type, model };
+  const runner: { type: string; model: string; effort?: string; auth?: string; authEnv?: string } = { type, model };
+  if (effort) runner.effort = effort;
+  if (auth?.auth !== undefined) runner.auth = auth.auth;
+  if (auth?.authEnv !== undefined) runner.authEnv = auth.authEnv;
+  return runner as ClaudeRunnerConfig | AgyRunnerConfig;
+}
+
+/**
+ * Shared `auth` / `authEnv` shape validation. The `auth` value vocabulary is
+ * general across runner types; whether `"api-key"` is usable depends on the
+ * runner type and is checked in `parseRunner`, where the type is known.
+ */
+function parseRunnerAuth(name: string, spec: Record<string, unknown>): { auth?: string; authEnv?: string } {
+  const auth = (spec as { auth?: unknown }).auth;
+  const authEnv = (spec as { authEnv?: unknown }).authEnv;
+  if (auth === undefined || auth === null || auth === "") {
+    if (authEnv !== undefined) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} sets authEnv without auth`);
+    }
+    return {};
+  }
+  if (typeof auth !== "string") {
+    fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid auth`);
+  }
+  if (auth !== RUNNER_AUTH_SUBSCRIPTION && auth !== RUNNER_AUTH_API_KEY) {
+    fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} unknown auth ${JSON.stringify(auth)}`);
+  }
+  if (auth === RUNNER_AUTH_SUBSCRIPTION) {
+    if (authEnv !== undefined) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} sets authEnv without api-key auth`);
+    }
+    return { auth };
+  }
+  if (typeof authEnv !== "string" || !authEnv) {
+    fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} api-key auth requires authEnv`);
+  }
+  if (!isValidEnvName(authEnv)) {
+    fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid authEnv ${JSON.stringify(authEnv)}`);
+  }
+  return { auth, authEnv };
 }
 
 function parseRunner(name: string, spec: unknown): RunnerConfig {
@@ -133,7 +198,11 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
     if (variant != null && typeof variant !== "string") {
       fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} invalid variant`);
     }
-    return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined);
+    const credential = parseRunnerAuth(name, spec);
+    if (credential.auth === RUNNER_AUTH_API_KEY) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} api-key auth is only supported on type ${CLAUDE_RUNNER_TYPE}`);
+    }
+    return opencodeRunner(spec.model, typeof variant === "string" && variant ? variant : undefined, credential);
   }
   if (spec.type === CODEX_RUNNER_TYPE) {
     const effort = spec.effort;
@@ -146,7 +215,14 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
         `Invalid ${RUNNERS_FILE_ENV}: runner ${name} effort ${level} is not one of ${CODEX_EFFORT_LEVELS.join(", ")}`
       );
     }
-    return { type: CODEX_RUNNER_TYPE, model: spec.model, effort: level };
+    const credential = parseRunnerAuth(name, spec);
+    if (credential.auth === RUNNER_AUTH_API_KEY) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} api-key auth is only supported on type ${CLAUDE_RUNNER_TYPE}`);
+    }
+    const runner: CodexRunnerConfig = { type: CODEX_RUNNER_TYPE, model: spec.model, effort: level };
+    if (credential.auth !== undefined) runner.auth = credential.auth;
+    if (credential.authEnv !== undefined) runner.authEnv = credential.authEnv;
+    return runner;
   }
   if (usesEffort(spec.type as string | undefined)) {
     const effort = spec.effort;
@@ -163,10 +239,15 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
         `Invalid ${RUNNERS_FILE_ENV}: runner ${name} effort ${effort} is not one of ${CLAUDE_EFFORT_LEVELS.join(", ")}`
       );
     }
+    const credential = parseRunnerAuth(name, spec);
+    if (credential.auth === RUNNER_AUTH_API_KEY && spec.type !== CLAUDE_RUNNER_TYPE) {
+      fail(`Invalid ${RUNNERS_FILE_ENV}: runner ${name} api-key auth is only supported on type ${CLAUDE_RUNNER_TYPE}`);
+    }
     return effortRunner(
       spec.type as typeof CLAUDE_RUNNER_TYPE | typeof AGY_RUNNER_TYPE,
       spec.model,
-      typeof effort === "string" && effort ? effort : undefined
+      typeof effort === "string" && effort ? effort : undefined,
+      credential
     );
   }
   fail(`Unknown runner type: ${String(spec.type)}`);
@@ -398,18 +479,24 @@ export function indexOfRunnerByName(chain: readonly NamedRunner[], name: string 
   return chain.findIndex((runner) => runner.name === name);
 }
 
-/** Runner name for a spawn stamp, matched by full identity (type+model+variant/effort). */
+/** Runner name for a spawn stamp, matched by full identity (type+model+variant/effort+credential). */
 export function runnerNameForStamp(
   chain: readonly NamedRunner[],
-  stamp: { type: string; model: string; variant?: string; effort?: string } | null | undefined
+  stamp: { type: string; model: string; variant?: string; effort?: string; auth?: string } | null | undefined
 ): string | undefined {
   if (!stamp) return undefined;
   const wantLevel = stamp.effort ?? stamp.variant ?? null;
-  return chain.find((runner) => {
+  const wantAuth = stamp.auth === RUNNER_AUTH_API_KEY ? RUNNER_AUTH_API_KEY : null;
+  const candidates = chain.filter((runner) => {
     if (runner.type !== stamp.type || runner.model !== stamp.model) return false;
     const stamped = runnerStamp(runner);
     return (stamped.effort ?? stamped.variant ?? null) === wantLevel;
-  })?.name;
+  });
+  if (candidates.length === 0) return undefined;
+  if (wantAuth !== null) {
+    return candidates.find((runner) => runnerAuth(runner) === wantAuth)?.name;
+  }
+  return (candidates.find((runner) => runnerAuth(runner) == null) ?? candidates[0])?.name;
 }
 
 /**
@@ -453,15 +540,34 @@ export interface RunnerStamp {
   model: string;
   variant?: string;
   effort?: string;
+  /**
+   * Credential the run was billed to. Present only for API-key runners
+   * (`"api-key"`); absent means the subscription token. The public
+   * attribution line ignores it; provenance and hop matching do not.
+   */
+  auth?: string;
 }
 
-export function runnerStamp(runner: { type?: string; model: string; variant?: string; effort?: string }): RunnerStamp {
+/** Normalized credential marker: `"api-key"` for API-key runners, else absent. */
+export function runnerAuth(runner: { auth?: string | undefined }): string | undefined {
+  return runner.auth === RUNNER_AUTH_API_KEY ? RUNNER_AUTH_API_KEY : undefined;
+}
+
+export function runnerStamp(runner: {
+  type?: string;
+  model: string;
+  variant?: string;
+  effort?: string;
+  auth?: string;
+}): RunnerStamp {
   const type = runner.type ?? OPENCODE_RUNNER_TYPE;
+  const auth = runnerAuth(runner);
   const level = usesEffort(type) ? runner.effort : runner.variant;
-  if (!level) return { type, model: runner.model };
-  return usesEffort(type)
-    ? { type, model: runner.model, effort: level }
-    : { type, model: runner.model, variant: level };
+  if (!level) return auth ? { type, model: runner.model, auth } : { type, model: runner.model };
+  if (usesEffort(type)) {
+    return auth ? { type, model: runner.model, effort: level, auth } : { type, model: runner.model, effort: level };
+  }
+  return auth ? { type, model: runner.model, variant: level, auth } : { type, model: runner.model, variant: level };
 }
 
 /** The one visible attribution line Jumi appends to public artifacts. */

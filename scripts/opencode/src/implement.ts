@@ -29,6 +29,7 @@ import {
   throwIfAborted,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
+import { claudeApiKeySecrets } from "./claude_credentials.ts";
 import type { ConflictResult } from "./conflict.ts";
 import {
   BLOCKED_BY_FILE,
@@ -123,6 +124,19 @@ export function isValidatedSkipText(text: string | null | undefined): boolean {
 
 export function skipDiaryText(text: string, secrets: readonly (string | undefined)[] = []): string {
   return redactGitSecrets(parentOwnedProse(text), secrets);
+}
+
+/**
+ * Secrets withheld from every worker-published prose surface (diary, issue
+ * and PR text): the write-capable git token plus any resolved Anthropic API
+ * key the chain names. Values only, read fresh at publish time; never the
+ * variable names, never logged.
+ */
+export function workerPublishSecrets(
+  gitToken: string | undefined,
+  chain: readonly NamedRunner[] | undefined
+): (string | undefined)[] {
+  return [gitToken, ...claudeApiKeySecrets(chain)];
 }
 
 /** Non-empty regular file text, else null: missing, empty, directory, and symlink are incomplete. */
@@ -752,7 +766,10 @@ async function implementExternalIssue(
         pr = await forge.createPullRequest(owner, repo, {
           title: job.title,
           body: wrapJumiPrBody(
-            redactGitSecrets(buildExternalPullRequestBody(prFileContents, ref.url, stamp), [loop.auth.token])
+            redactGitSecrets(
+              buildExternalPullRequestBody(prFileContents, ref.url, stamp),
+              workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? opts.chain)
+            )
           ),
           head: branch,
           base: effectiveJob.defaultBranch,
@@ -1139,7 +1156,7 @@ export async function implementIssue(
         } catch (err) {
           await deletePushedIssueBranch().catch(() => undefined);
           const raw = err instanceof Error ? err.message : String(err);
-          const secrets = [loop.auth.token];
+          const secrets = workerPublishSecrets(loop.auth.token, jobChain);
           return skipBlocked(
             `failed to set dependency: ${redactGitSecrets(raw, secrets)}`,
             `failed to set dependency: ${stickyFailureDetail(err, secrets)}`
@@ -1260,7 +1277,7 @@ export async function implementIssue(
         if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
           if (validatedSkip) {
             await loop.stopHeartbeat();
-            await diary(skipDiaryText(validatedSkip, [loop.auth.token]));
+            await diary(skipDiaryText(validatedSkip, workerPublishSecrets(loop.auth.token, jobChain)));
             await loop.stampTerminalClaim(opts.api);
             await loop.detachWorktree();
             return { status: "no-changes" };
@@ -1330,7 +1347,9 @@ export async function implementIssue(
       try {
         pr = await opts.api.createPullRequest(owner, repo, {
           title: liveJob.title,
-          body: wrapJumiPrBody(buildPullRequestBody(issueNumber, prFileContents, runner, [loop.auth.token])),
+          body: wrapJumiPrBody(
+            buildPullRequestBody(issueNumber, prFileContents, runner, workerPublishSecrets(loop.auth.token, jobChain))
+          ),
           head: branch,
           base: opts.job.defaultBranch,
         });
@@ -1382,7 +1401,9 @@ export async function implementIssue(
         });
         return;
       }
-      await diary(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`).catch(() => undefined);
+      await diary(`Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`).catch(
+        () => undefined
+      );
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

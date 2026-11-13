@@ -1,5 +1,6 @@
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { claudeApiKeyVarNames } from "./claude_credentials.ts";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
@@ -216,7 +217,8 @@ async function beginHop(
 function engineOptsForRunner(
   opts: EngineRunOptions,
   runner: NamedRunner,
-  extra?: Partial<EngineRunOptions>
+  extra?: Partial<EngineRunOptions>,
+  keyEnvNames?: readonly string[]
 ): EngineRunOptions {
   const fields: Pick<EngineRunOptions, "type" | "model" | "variant" | "effort"> = usesEffort(runner.type)
     ? {
@@ -231,7 +233,13 @@ function engineOptsForRunner(
         variant: "variant" in runner ? runner.variant : undefined,
         effort: undefined,
       };
-  return { ...opts, ...fields, ...extra };
+  const credential: Pick<EngineRunOptions, "runnerName" | "auth" | "authEnv" | "keyEnvNames"> = {
+    runnerName: runner.name,
+  };
+  if (runner.auth !== undefined) credential.auth = runner.auth;
+  if (runner.authEnv !== undefined) credential.authEnv = runner.authEnv;
+  if (keyEnvNames && keyEnvNames.length > 0) credential.keyEnvNames = [...keyEnvNames];
+  return { ...opts, ...fields, ...credential, ...extra };
 }
 
 function lazyChain(opts: EngineRunOptions, hop: EngineChainOptions): NamedRunner[] {
@@ -305,7 +313,7 @@ function narrowedContributors(
     const entry = runners[i];
     if (!entry) continue;
     const stamp = runnerStamp(entry);
-    const key = `${stamp.type}|${stamp.model}|${stamp.effort ?? stamp.variant ?? ""}`;
+    const key = `${stamp.type}|${stamp.model}|${stamp.effort ?? stamp.variant ?? ""}|${stamp.auth ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(stamp);
@@ -425,6 +433,10 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     // selected start. Chain positions below are in effective attempt order.
     const runners = runnersFor(opts);
     const logForHop = hop.logger ?? opts.logger;
+    // Parent key-var names across the effective chain. Every Claude spawn
+    // strips these from its child env so the operator's variable never leaks
+    // into any child under its own name (subscription children included).
+    const keyEnvNames = claudeApiKeyVarNames(runners);
 
     if (opts.hopFromIncomplete === true) {
       // The hop is always from scratch to the *next* runner, so anything that
@@ -448,7 +460,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       let result: EngineResult | undefined;
       try {
         result = stampRunner(
-          await recording(engineOptsForRunner(opts, current, { deferQuotaExit: true })),
+          await recording(engineOptsForRunner(opts, current, { deferQuotaExit: true }, keyEnvNames)),
           current,
           index
         );
@@ -492,10 +504,15 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     while (true) {
       const runner = runners[index]!;
       const hopSpawn = index > 0;
-      const runOpts: EngineRunOptions = engineOptsForRunner(opts, runner, {
-        deferQuotaExit: true,
-        ...(hopSpawn ? { continueSession: false, hop: true } : {}),
-      });
+      const runOpts: EngineRunOptions = engineOptsForRunner(
+        opts,
+        runner,
+        {
+          deferQuotaExit: true,
+          ...(hopSpawn ? { continueSession: false, hop: true } : {}),
+        },
+        keyEnvNames
+      );
 
       let result: EngineResult;
       try {

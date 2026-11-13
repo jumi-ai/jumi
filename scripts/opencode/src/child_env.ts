@@ -32,6 +32,13 @@ export const CHILD_FORBIDDEN_PREFIXES = ["GITEA_", "GITHUB_APP_", "GITHUB_WEBHOO
  * unrestricted in the reference deployment), so these keys are reachable by
  * the model but never by the forge. They are allowlisted explicitly so a new
  * credential cannot slip in unnoticed.
+ *
+ * `ANTHROPIC_API_KEY` is deliberately NOT on this list: it is only expected
+ * on an API-key Claude child, and the runner-aware audit below allowlists it
+ * there while still reporting it as an unexpected credential anywhere else
+ * (a subscription Claude child, an OpenCode child, or any other harness must
+ * never carry it — Claude Code's precedence would silently rebill the run).
+ * `ANTHROPIC_AUTH_TOKEN` is never allowlisted anywhere.
  */
 export const CHILD_PROVIDER_ALLOWLIST = [
   "OPENCODE_API_KEY",
@@ -41,13 +48,11 @@ export const CHILD_PROVIDER_ALLOWLIST = [
   "XAI_API_KEY",
 ] as const;
 
+export const CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY";
+
 function isForbiddenKey(key: string): boolean {
   if ((CHILD_FORBIDDEN_KEYS as readonly string[]).includes(key)) return true;
   return CHILD_FORBIDDEN_PREFIXES.some((prefix) => key.startsWith(prefix));
-}
-
-function isProviderKey(key: string): boolean {
-  return (CHILD_PROVIDER_ALLOWLIST as readonly string[]).includes(key);
 }
 
 export interface ChildEnvAudit {
@@ -55,6 +60,15 @@ export interface ChildEnvAudit {
   /** Provider keys present that are not on the explicit allowlist. */
   unlistedCredentials: string[];
   provider: string[];
+}
+
+export interface ChildEnvAuditOptions {
+  /**
+   * `true` when the child is an API-key Claude spawn: `ANTHROPIC_API_KEY`
+   * is its expected credential. Any other value (including unset) reports
+   * `ANTHROPIC_API_KEY` as an unexpected credential.
+   */
+  allowAnthropicApiKey?: boolean;
 }
 
 const CREDENTIAL_HINT = /(TOKEN|KEY|SECRET|AUTH)/i;
@@ -65,7 +79,11 @@ const CREDENTIAL_HINT = /(TOKEN|KEY|SECRET|AUTH)/i;
  * non-secret (GIT_AUTH_HOST/USERNAME, *_URL, *_DIR, etc.) nor on the
  * provider allowlist.
  */
-export function auditChildEnv(env: Record<string, string>): ChildEnvAudit {
+export function auditChildEnv(env: Record<string, string>, opts?: ChildEnvAuditOptions): ChildEnvAudit {
+  const allowlist: readonly string[] = opts?.allowAnthropicApiKey
+    ? [...CHILD_PROVIDER_ALLOWLIST, CLAUDE_API_KEY_ENV]
+    : CHILD_PROVIDER_ALLOWLIST;
+  const isProviderKey = (key: string): boolean => (allowlist as readonly string[]).includes(key);
   const forbidden = Object.keys(env).filter(isForbiddenKey);
   const provider = Object.keys(env).filter(isProviderKey);
   const unlistedCredentials = Object.keys(env).filter((key) => {

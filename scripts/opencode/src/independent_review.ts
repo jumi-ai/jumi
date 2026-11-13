@@ -10,7 +10,10 @@ export function isIndependentReviewRefusal(reason: string | null | undefined): b
   return reason.startsWith(INDEPENDENT_REVIEW_UNAVAILABLE_PREFIX);
 }
 
-/** Family identity ignores effort/variant: same family across levels stays one family. */
+/** Family identity ignores effort/variant AND credential: a subscription Claude
+ * and an API-key Claude on the same model are the same writer. Same family
+ * across levels or billing stays one family. Nothing is guessed from harness,
+ * provider prefix, or fuzzy model-name matching. */
 export function independenceIdentityKey(type: string, model: string): string {
   return `${type.trim().toLowerCase()}|${model.trim()}`;
 }

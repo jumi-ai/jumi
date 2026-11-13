@@ -65,6 +65,7 @@ import {
   noteProvenanceRunners,
   type OpenCodeRunner,
   provenanceForgeFor,
+  workerPublishSecrets,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { withIssueAuthorPermission } from "./permissions.ts";
@@ -1100,7 +1101,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
         return;
       }
-      await sticky(`Jumi failed: ${stickyFailureDetail(err, [loop.auth.token])}`, pr.number).catch(() => undefined);
+      await sticky(
+        `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
+        pr.number
+      ).catch(() => undefined);
       const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(

@@ -1,3 +1,4 @@
+import { RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
 import type { EngineResult } from "./engine.ts";
 import { thrownChainIndex, thrownRunner } from "./engine.ts";
 import type { ForgeKind } from "./forge.ts";
@@ -150,7 +151,11 @@ CREATE INDEX IF NOT EXISTS pr_publication_intents_branch_idx
 
 export function provenanceRunnerKey(runner: RunnerStamp): string {
   const level = runner.effort ?? runner.variant ?? "";
-  return `${runner.type}|${runner.model}|${level}`;
+  // The credential is part of the identity: two catalog entries may share
+  // type, model and effort and differ only in billing (subscription token vs
+  // API key), and both must be recorded. The public stamp and the
+  // independence family ignore it (see `independenceIdentityKey`).
+  return `${runner.type}|${runner.model}|${level}|${runner.auth ?? ""}`;
 }
 
 export function normalizeRunnerStamp(runner: RunnerStamp): RunnerStamp | undefined {
@@ -159,9 +164,10 @@ export function normalizeRunnerStamp(runner: RunnerStamp): RunnerStamp | undefin
   if (!type || !model) return undefined;
   const effort = typeof runner.effort === "string" && runner.effort ? runner.effort : undefined;
   const variant = typeof runner.variant === "string" && runner.variant ? runner.variant : undefined;
-  if (effort) return { type, model, effort };
-  if (variant) return { type, model, variant };
-  return { type, model };
+  const auth = runner.auth === RUNNER_AUTH_API_KEY ? RUNNER_AUTH_API_KEY : undefined;
+  if (effort) return auth ? { type, model, effort, auth } : { type, model, effort };
+  if (variant) return auth ? { type, model, variant, auth } : { type, model, variant };
+  return auth ? { type, model, auth } : { type, model };
 }
 
 export function mergeContributors(existing: RunnerStamp[], incoming: RunnerStamp[]): RunnerStamp[] {
@@ -280,13 +286,14 @@ export class ProvenanceCollector {
       const stamps: RunnerStamp[] = [];
       for (const entry of narrowed) {
         if (!entry || typeof entry !== "object") continue;
-        const rec = entry as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown };
+        const rec = entry as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown; auth?: unknown };
         if (typeof rec.type !== "string" || typeof rec.model !== "string") continue;
         const normalized = normalizeRunnerStamp({
           type: rec.type,
           model: rec.model,
           ...(typeof rec.variant === "string" ? { variant: rec.variant } : {}),
           ...(typeof rec.effort === "string" ? { effort: rec.effort } : {}),
+          ...(rec.auth === RUNNER_AUTH_API_KEY ? { auth: rec.auth } : {}),
         });
         if (normalized) stamps.push(normalized);
       }
@@ -367,13 +374,14 @@ function parseRunnerArray(value: unknown): RunnerStamp[] {
   const out: RunnerStamp[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object") continue;
-    const rec = entry as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown };
+    const rec = entry as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown; auth?: unknown };
     if (typeof rec.type !== "string" || typeof rec.model !== "string") continue;
     const normalized = normalizeRunnerStamp({
       type: rec.type,
       model: rec.model,
       ...(typeof rec.variant === "string" ? { variant: rec.variant } : {}),
       ...(typeof rec.effort === "string" ? { effort: rec.effort } : {}),
+      ...(rec.auth === RUNNER_AUTH_API_KEY ? { auth: rec.auth } : {}),
     });
     if (normalized) out.push(normalized);
   }
@@ -383,7 +391,7 @@ function parseRunnerArray(value: unknown): RunnerStamp[] {
 function parseRunnerObject(value: unknown): RunnerStamp | null {
   if (value == null) return null;
   if (typeof value !== "object" || Array.isArray(value)) return null;
-  const rec = value as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown };
+  const rec = value as { type?: unknown; model?: unknown; variant?: unknown; effort?: unknown; auth?: unknown };
   if (typeof rec.type !== "string" || typeof rec.model !== "string") return null;
   return (
     normalizeRunnerStamp({
@@ -391,6 +399,7 @@ function parseRunnerObject(value: unknown): RunnerStamp | null {
       model: rec.model,
       ...(typeof rec.variant === "string" ? { variant: rec.variant } : {}),
       ...(typeof rec.effort === "string" ? { effort: rec.effort } : {}),
+      ...(rec.auth === RUNNER_AUTH_API_KEY ? { auth: rec.auth } : {}),
     }) ?? null
   );
 }

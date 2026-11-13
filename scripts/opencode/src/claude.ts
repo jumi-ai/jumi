@@ -1,6 +1,12 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { looksLikeProviderAuthDeath, providerAuthDeathForRun, stripClaudeConfigWarning } from "./auth.ts";
+import {
+  looksLikeProviderAuthDeath,
+  providerAuthDeathForRun,
+  roleForTraceKind,
+  runnerForAuthDeath,
+  stripClaudeConfigWarning,
+} from "./auth.ts";
 import {
   type ChildGitProxy,
   childProxyGitConfigEnv,
@@ -9,6 +15,13 @@ import {
   isChildStrippedKey,
   startChildGitProxy,
 } from "./child_git_proxy.ts";
+import {
+  ANTHROPIC_API_KEY_ENV,
+  ANTHROPIC_AUTH_TOKEN_ENV,
+  CLAUDE_CODE_OAUTH_TOKEN_ENV,
+  RUNNER_AUTH_API_KEY,
+  resolveClaudeApiKey,
+} from "./claude_credentials.ts";
 import { claudeTracingEnv, claudeTracingPluginDir } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
@@ -26,6 +39,7 @@ import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
+import { redactGitSecrets } from "./workspace.ts";
 
 /** `project` is what loads the checkout's `AGENTS.md`, `CLAUDE.md`, skills and settings. */
 export const CLAUDE_SETTING_SOURCES = "user,project";
@@ -155,12 +169,97 @@ export function scrubbedKey(key: string): boolean {
   return SCRUB_ENV_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
+/** `true` when this spawn bills to an Anthropic Console API key. */
+export function isClaudeApiKeyRunner(opts: Pick<EngineRunOptions, "auth">): boolean {
+  return opts.auth === RUNNER_AUTH_API_KEY;
+}
+
+/** Display name for logs: the catalog entry name, else `claude/<model>`. */
+export function claudeRunnerDisplayName(opts: Pick<EngineRunOptions, "model" | "runnerName">): string {
+  const name = opts.runnerName?.trim();
+  if (name) return name;
+  return runnerForAuthDeath({ type: "claude", model: opts.model });
+}
+
+/**
+ * Missing-key failure for an API-key runner whose parent variable is unset
+ * or blank. Names the runner and the variable, never a value. The message
+ * carries the provider-auth-death phrase so the chain hops to the next
+ * runner the way an expired setup token hops today.
+ */
+export function claudeApiKeyConfigError(
+  opts: Pick<EngineRunOptions, "model" | "runnerName" | "trace" | "authEnv">
+): string {
+  const role = roleForTraceKind(opts.trace?.kind);
+  const runner = claudeRunnerDisplayName(opts);
+  const variable = opts.authEnv || "(unset)";
+  return (
+    `claude runner ${runner} has no usable credentials: ${variable} is missing or empty ` +
+    `(${role} ${runnerForAuthDeath({ type: "claude", model: opts.model })}: provider auth death)`
+  );
+}
+
+/**
+ * Secrets the parent redacts from this Claude child's output and published
+ * prose: the resolved API key when this is an API-key spawn, plus any
+ * Anthropic key material the parent environment holds (never the child).
+ * Never throws, never logs.
+ */
+export function claudeRedactSecrets(apiKey: string | undefined): string[] {
+  const out: string[] = [];
+  if (apiKey) out.push(apiKey);
+  for (const name of [ANTHROPIC_API_KEY_ENV, ANTHROPIC_AUTH_TOKEN_ENV]) {
+    const value = process.env[name];
+    if (value && value !== apiKey) out.push(value);
+  }
+  return out;
+}
+
+/**
+ * Enforce the one-credential rule on an inherited (unsanitized) child env,
+ * in place. An API-key child gets exactly `ANTHROPIC_API_KEY`; a
+ * subscription child keeps exactly `CLAUDE_CODE_OAUTH_TOKEN`. The
+ * operator's key variables never survive under their own names.
+ */
+export function applyClaudeCredentialRule(
+  env: Record<string, string>,
+  opts: Pick<EngineRunOptions, "auth" | "authEnv" | "model" | "runnerName" | "trace">,
+  apiKeyMode: boolean,
+  keyVarNames: ReadonlySet<string>
+): void {
+  if (apiKeyMode) {
+    const key = resolveClaudeApiKey(opts.authEnv, process.env);
+    if (!key) throw new EngineFailedError(claudeApiKeyConfigError(opts), false, { auth: true });
+    env[ANTHROPIC_API_KEY_ENV] = key;
+    delete env[CLAUDE_CODE_OAUTH_TOKEN_ENV];
+    delete env[ANTHROPIC_AUTH_TOKEN_ENV];
+    for (const name of keyVarNames) {
+      if (name !== ANTHROPIC_API_KEY_ENV) delete env[name];
+    }
+    return;
+  }
+  delete env[ANTHROPIC_API_KEY_ENV];
+  delete env[ANTHROPIC_AUTH_TOKEN_ENV];
+  for (const name of keyVarNames) {
+    if (name !== CLAUDE_CODE_OAUTH_TOKEN_ENV) delete env[name];
+  }
+}
+
 export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
+  const apiKeyMode = isClaudeApiKeyRunner(opts);
+  // Every parent variable that holds an API key across the chain. No child
+  // — subscription or API-key — receives one under its own name.
+  const keyVarNames = new Set([...(opts.keyEnvNames ?? []), ...(opts.authEnv ? [opts.authEnv] : [])]);
+
   if (!opts.sanitizeEnv) {
+    // Unsanitized spawns inherit the whole parent environment, so enforce
+    // the one-credential rule on the copy instead of running with the wrong
+    // credential (Claude Code's precedence would silently rebill the run).
     const env = { ...process.env, TMPDIR: scratchDir, ...tracing } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
+    applyClaudeCredentialRule(env, opts, apiKeyMode, keyVarNames);
     return env;
   }
 
@@ -170,13 +269,25 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
     TMPDIR: scratchDir,
     DISABLE_AUTOUPDATER: "1",
   };
-  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  if (apiKeyMode) {
+    const key = resolveClaudeApiKey(opts.authEnv, process.env);
+    if (!key) throw new EngineFailedError(claudeApiKeyConfigError(opts), false, { auth: true });
+    env[ANTHROPIC_API_KEY_ENV] = key;
+  } else if (process.env[CLAUDE_CODE_OAUTH_TOKEN_ENV]) {
+    env[CLAUDE_CODE_OAUTH_TOKEN_ENV] = process.env[CLAUDE_CODE_OAUTH_TOKEN_ENV];
+  }
   if (opts.extraEnv) {
     for (const [key, value] of Object.entries(opts.extraEnv)) {
       if (scrubbedKey(key)) continue;
       // Unconditional: a spawn that cannot proxy must still never see the
       // token or the old `$GIT_AUTH_TOKEN` credential helper (refused below).
       if (isChildStrippedKey(key)) continue;
+      // One credential per child: Anthropic billing keys never arrive via
+      // extraEnv (the API-key value comes only from the resolved parent
+      // variable; a subscription child must not see either), and neither
+      // does the operator's key variable under its own name.
+      if (key === ANTHROPIC_API_KEY_ENV || key === ANTHROPIC_AUTH_TOKEN_ENV) continue;
+      if (keyVarNames.has(key)) continue;
       env[key] = value;
     }
   }
@@ -285,13 +396,32 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       }
     }
     const proc = (() => {
+      // Build the child env before spawning so a missing-key configuration
+      // keeps its auth classification instead of being wrapped as infra.
+      let childEnv: Record<string, string>;
+      try {
+        childEnv = buildClaudeEnv(opts, tempRoot, gitProxy?.url);
+      } catch (err) {
+        if (err instanceof EngineFailedError && err.auth) {
+          const message = err.message;
+          log(message);
+          observeEngineRun(opts, {
+            status: "exit",
+            infra: false,
+            auth: true,
+            durationMs: Date.now() - startedAtMs,
+            message: providerAuthDeathForRun({ ...opts, type: "claude" }),
+          });
+        }
+        throw err;
+      }
       try {
         return Bun.spawn(args, {
           cwd: opts.workdir,
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",
-          env: buildClaudeEnv(opts, tempRoot, gitProxy?.url),
+          env: childEnv,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -340,9 +470,15 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     // Parent-held usage at child end, whatever the outcome (ok, non-zero,
     // timeout, 143, cancel). Fail-open: no usage records nothing.
     recordClaudeUsage(parser.usage());
+    // The API key gets the same redaction as the setup token wherever the
+    // parent publishes child text: logs, traces, diary, board, issue and PR
+    // text. The value is resolved from the parent env, never from the child.
+    const apiKey = isClaudeApiKeyRunner(opts) ? resolveClaudeApiKey(opts.authEnv, process.env) : undefined;
+    const secrets = claudeRedactSecrets(apiKey);
+    const redact = (text: string): string => redactGitSecrets(redactEngineText(text, opts), secrets);
     const stdoutResult = limitText(parser.text(), "claude output", opts.maxOutputBytes);
-    const stdout = redactEngineText(stripAnsi(stdoutResult.text).trim(), opts);
-    const stderr = redactEngineText(stripAnsi(stderrResult.text).trim(), opts);
+    const stdout = redact(stripAnsi(stdoutResult.text).trim());
+    const stderr = redact(stripAnsi(stderrResult.text).trim());
     // The `Claude configuration file not found` / backup-restore warning also
     // appears on successful runs: it must not decide auth classification, and
     // failure messages must show the actual cause line, not the warning.
@@ -359,7 +495,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (runError) {
-      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
+      const message = redact(runError instanceof Error ? runError.message : String(runError));
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
         const authMessage = providerAuthDeathForRun({ ...opts, type: "claude" });
@@ -425,7 +561,10 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = isClaudeApiKeyRunner(opts)
+      ? redactGitSecrets(rawMessage, claudeRedactSecrets(resolveClaudeApiKey(opts.authEnv, process.env)))
+      : rawMessage;
     if (looksLikeProviderAuthDeath(message)) {
       throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "claude" }), false, { auth: true });
     }
