@@ -82,7 +82,7 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { loadRepoFollowupPolicy } from "./repo_settings.ts";
+import { applyRepoChain, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -753,12 +753,44 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   const loop = openClaimedLoop(claimed, opts);
 
+  // Repository runner allow-list (default branch only). Invalid or an
+  // allow-list that matches nothing fails closed before any runner starts:
+  // one sticky on the pull request, then a skipped result. Unreadable fails
+  // open with a log. Narrowing runs before the sticky writer-family restart
+  // so that restart stays inside the narrowed set.
+  let repoChain = opts.chain ?? claimed.effectiveChain;
+  const repoBaseChain = opts.chain ?? claimed.effectiveChain;
+  if (repoBaseChain && repoBaseChain.length > 0) {
+    // Only the resolve runs in the fail-open `try` (inside the helper);
+    // the fail-closed sticky runs after it so a sticky failure propagates
+    // instead of continuing on the full chain.
+    const applied = await applyRepoChain({
+      api: opts.api,
+      owner,
+      repo,
+      defaultBranch: opts.job.defaultBranch,
+      chain: repoBaseChain,
+      log,
+      diagBase: { job: `${owner}/${repo}#${issueNumber}`, head: pr.head.sha },
+      unreadableContext: `${owner}/${repo}`,
+      publish: async (reason) => {
+        try {
+          await sticky(reason, pr.number);
+        } finally {
+          await forgetClaim();
+        }
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) repoChain = applied.chain;
+  }
+
   {
     const baseEngine = resolveEngine(opts, registeredEngine);
     const active = await buildActiveWorkerEngine({
       baseEngine,
-      baseChain: opts.chain,
-      effectiveChain: claimed.effectiveChain,
+      baseChain: repoChain,
+      effectiveChain: repoChain,
       runnerSelection: opts.runnerSelection,
       runnerRandom: opts.runnerRandom,
       independentReview: opts.independentReview,

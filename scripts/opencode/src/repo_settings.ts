@@ -9,6 +9,7 @@
  * never treated as "no file". A missing file is normal and silent.
  */
 
+import { logDiagnostic } from "./diagnostics.ts";
 import { globToRegExp } from "./review_md.ts";
 
 export const REPO_SETTINGS_PATH = ".jumi.yml";
@@ -23,6 +24,14 @@ export interface RepoTimeouts {
 export interface RepoSettings {
   automerge: boolean;
   timeouts: RepoTimeouts;
+  /**
+   * Runner allow-list for the repository. `undefined` (key absent) means no
+   * restriction: the repository uses the full active chain. A defined list
+   * (possibly empty) narrows every job for the repository to chain entries
+   * whose name is on the list. Narrowing only: names outside the active
+   * chain grant nothing.
+   */
+  allowedRunners?: string[];
   reviewExclude: string[];
   followupOnSuggestions: boolean;
   maxFollowupRounds?: number;
@@ -49,6 +58,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 
 const KNOWN_KEYS = new Set([
   "automerge",
+  "allowed_runners",
   "timeouts",
   "review_exclude",
   "followup_on_suggestions",
@@ -126,6 +136,7 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
+ * absent `allowed_runners` means no runner restriction;
  * absent `review_exclude` means nothing is left out; absent author lists
  * mean empty; absent `mode` means `full`. No schema-version key exists. The
  * error string is the parser's error and is surfaced verbatim in the
@@ -160,6 +171,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       settings: {
         automerge: false,
         timeouts: {},
+        allowedRunners: undefined,
         reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
@@ -185,6 +197,19 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     const timeoutsParsed = parseTimeoutsValue(record.timeouts);
     if (!timeoutsParsed.ok) return timeoutsParsed;
     timeouts = timeoutsParsed.settings.timeouts;
+  }
+  let allowedRunners: string[] | undefined;
+  if ("allowed_runners" in record && record.allowed_runners !== undefined) {
+    const value = record.allowed_runners;
+    if (!Array.isArray(value)) return { ok: false, error: `"allowed_runners" must be a list of runner names` };
+    const names: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string") return { ok: false, error: `"allowed_runners" must be a list of runner names` };
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      if (!names.includes(trimmed)) names.push(trimmed);
+    }
+    allowedRunners = names;
   }
   let reviewExclude: string[] = [];
   if ("review_exclude" in record && record.review_exclude !== undefined) {
@@ -242,6 +267,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   const settings: RepoSettings = {
     automerge,
     timeouts,
+    allowedRunners,
     reviewExclude,
     followupOnSuggestions:
       "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
@@ -289,6 +315,7 @@ export type RepoSettingsLoad =
       state: "valid";
       automerge: boolean;
       timeouts: RepoTimeouts;
+      allowedRunners?: string[];
       reviewExclude: string[];
       followupOnSuggestions: boolean;
       maxFollowupRounds?: number;
@@ -370,6 +397,7 @@ export async function loadRepoSettings(
     state: "valid",
     automerge: parsed.settings.automerge,
     timeouts: parsed.settings.timeouts,
+    allowedRunners: parsed.settings.allowedRunners,
     reviewExclude: parsed.settings.reviewExclude,
     followupOnSuggestions: parsed.settings.followupOnSuggestions,
     ...(parsed.settings.maxFollowupRounds !== undefined
@@ -617,6 +645,156 @@ export function prTouchesRepoSettings(files: ReadonlyArray<{ filename: string }>
   return files.some((file) => normalizePath(file.filename) === REPO_SETTINGS_PATH);
 }
 
+/** Failure text for an invalid default-branch settings file. Names the parser error. */
+export function invalidRepoSettingsReason(error: string): string {
+  return `${REPO_SETTINGS_PATH} is invalid: ${error}`;
+}
+
+/**
+ * Fail-closed text when the repository's runner allow-list leaves no
+ * eligible runner. Names the repository setting as the cause.
+ */
+export function noAllowedRunnerReason(owner: string, repo: string, allowed: readonly string[]): string {
+  const listed = allowed.length > 0 ? allowed.join(", ") : "(empty list)";
+  return (
+    `repository settings left no eligible runner for ${owner}/${repo}: ` +
+    `` +
+    `allowed_runners [${listed}] matches no runner in the active chain`
+  );
+}
+
+export interface NarrowedChain<T extends { name: string }> {
+  /** Chain entries whose name is on the allow-list, in configured order. */
+  chain: T[];
+  /** Allow-list names that match no chain entry. Never an error. */
+  unknownNames: string[];
+}
+
+/**
+ * Narrowing only: keep the chain entries whose name is on the repository
+ * allow-list, preserving configured order. `undefined` (key absent) keeps
+ * the full chain. Names outside the active chain grant nothing; they are
+ * reported via `log` and otherwise ignored.
+ */
+export function narrowChainForRepo<T extends { name: string }>(
+  chain: readonly T[],
+  allowedRunners: readonly string[] | undefined,
+  log?: (message: string) => void
+): NarrowedChain<T> {
+  if (allowedRunners === undefined) return { chain: [...chain], unknownNames: [] };
+  const allowed = new Set(allowedRunners);
+  const narrowed = chain.filter((entry) => allowed.has(entry.name));
+  const chainNames = new Set(chain.map((entry) => entry.name));
+  const unknownNames = [...allowed].filter((name) => !chainNames.has(name));
+  if (unknownNames.length > 0) {
+    log?.(`repository settings list unknown runner(s): ${unknownNames.join(", ")} (not in the active chain)`);
+  }
+  return { chain: narrowed, unknownNames };
+}
+
+export type RepoChainResolution<T extends { name: string }> =
+  | { state: "unrestricted"; chain: T[] }
+  | { state: "narrowed"; chain: T[]; unknownNames: string[] }
+  | { state: "empty"; reason: string; unknownNames: string[] }
+  | { state: "invalid"; reason: string };
+
+/**
+ * Resolve the effective chain for one repository job from the default-branch
+ * settings. Missing (or no file API, or an empty ref) is unrestricted.
+ * Reads that fail for another reason throw so the caller can log and fail
+ * open; only an invalid file and an allow-list that matches nothing fail
+ * closed here.
+ */
+export async function resolveRepoChain<T extends { name: string }>(opts: {
+  api: RepoSettingsFileApi;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  chain: readonly T[] | undefined;
+  log?: (message: string) => void;
+}): Promise<RepoChainResolution<T>> {
+  const base = opts.chain ? [...opts.chain] : [];
+  if (!opts.defaultBranch.trim()) return { state: "unrestricted", chain: base };
+  const settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.defaultBranch);
+  if (settings.state === "missing") return { state: "unrestricted", chain: base };
+  if (settings.state === "invalid") return { state: "invalid", reason: invalidRepoSettingsReason(settings.error) };
+  if (settings.allowedRunners === undefined) return { state: "unrestricted", chain: base };
+  const narrowed = narrowChainForRepo(base, settings.allowedRunners, opts.log);
+  if (narrowed.chain.length === 0) {
+    return {
+      state: "empty",
+      reason: noAllowedRunnerReason(opts.owner, opts.repo, settings.allowedRunners),
+      unknownNames: narrowed.unknownNames,
+    };
+  }
+  return { state: "narrowed", chain: narrowed.chain, unknownNames: narrowed.unknownNames };
+}
+
+export type RepoChainApply<T> =
+  | { failedClosed: false; chain: T[] | undefined; narrowed: boolean }
+  | { failedClosed: true; reason: string };
+
+/**
+ * Shared resolve→log→publish→return step for every job that runs on a
+ * runner chain. `resolveRepoChain` runs inside the `try` (unreadable fails
+ * open with a log); the `invalid`/`empty` publish runs after the `catch` so
+ * a publish failure propagates instead of continuing on the full chain.
+ * The caller passes its own `publish` (review status, worker comment, PR
+ * sticky) and returns `skipped` when `failedClosed` is true.
+ */
+export async function applyRepoChain<T extends { name: string }>(opts: {
+  api: RepoSettingsFileApi;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  chain: readonly T[] | undefined;
+  log?: (message: string) => void;
+  /** Extra diagnostic fields, e.g. `{ review: "o/r#7", head }` or `{ job: "o/r#7", head }`. */
+  diagBase?: Record<string, string | null | undefined>;
+  /** Log context for the fail-open unreadable line. Defaults to `owner/repo`. */
+  unreadableContext?: string;
+  publish: (reason: string) => Promise<void>;
+}): Promise<RepoChainApply<T>> {
+  const base = opts.chain ? [...opts.chain] : undefined;
+  if (!opts.chain || opts.chain.length === 0) return { failedClosed: false, chain: base, narrowed: false };
+  let resolution: RepoChainResolution<T>;
+  try {
+    resolution = await resolveRepoChain({
+      api: opts.api,
+      owner: opts.owner,
+      repo: opts.repo,
+      defaultBranch: opts.defaultBranch,
+      chain: opts.chain,
+      log: opts.log,
+    });
+  } catch (err) {
+    const context = opts.unreadableContext ?? `${opts.owner}/${opts.repo}`;
+    opts.log?.(`runner settings unreadable for ${context}: ${err instanceof Error ? err.message : String(err)}`);
+    return { failedClosed: false, chain: base, narrowed: false };
+  }
+  if (resolution.state === "invalid" || resolution.state === "empty") {
+    if (opts.log) {
+      logDiagnostic(opts.log, "repo_settings", {
+        ...(opts.diagBase ?? {}),
+        state: resolution.state,
+        reason: resolution.reason,
+      });
+    }
+    await opts.publish(resolution.reason);
+    return { failedClosed: true, reason: resolution.reason };
+  }
+  if (resolution.state === "narrowed") {
+    if (opts.log) {
+      logDiagnostic(opts.log, "repo_settings", {
+        ...(opts.diagBase ?? {}),
+        state: "narrowed",
+        eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
+      });
+    }
+    return { failedClosed: false, chain: resolution.chain, narrowed: true };
+  }
+  return { failedClosed: false, chain: base, narrowed: false };
+}
 /**
  * Compile `review_exclude` patterns to matchers over repository-relative
  * file paths. Uses the same gitignore-style glob dialect as `REVIEW.md`

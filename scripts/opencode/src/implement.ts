@@ -70,6 +70,7 @@ import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { applyRepoChain } from "./repo_settings.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -599,10 +600,47 @@ async function implementExternalIssue(
     return { status: "skipped", reason: "refusing to commit on the default branch" };
   }
 
+  // Repository runner allow-list for the targeted repository. Invalid or
+  // empty fails closed before any runner starts; the note goes where the
+  // brief was started. Unreadable fails open with a log.
+  let activeChain = opts.chain;
+  let activeFallbackModel = opts.fallbackModel;
+  let activeFallbackVariant = opts.fallbackVariant;
+  if (opts.chain && opts.chain.length > 0) {
+    const applied = await applyRepoChain({
+      api: forge,
+      owner,
+      repo,
+      defaultBranch: job.defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { job: `${owner}/${repo}@${ref.tracker}:${ref.id}` },
+      unreadableContext: `${owner}/${repo}`,
+      publish: async (reason) => {
+        if (typeof briefTracker.postBriefComment === "function") {
+          try {
+            await briefTracker.postBriefComment(ref, reason);
+          } catch {
+            // The skipped reason still carries the failure.
+          }
+        }
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      activeChain = applied.chain;
+      activeFallbackModel = undefined;
+      activeFallbackVariant = undefined;
+    }
+  }
+
   const effectiveJob: IssueJob = { ...job, owner, repo };
   const claimed = await beginClaimedWorktree({
     ...opts,
     job: effectiveJob,
+    chain: activeChain,
+    fallbackModel: activeFallbackModel,
+    fallbackVariant: activeFallbackVariant,
     fallbackEngine: registeredEngine,
     branch,
   });
@@ -610,7 +648,7 @@ async function implementExternalIssue(
   const { worktree, sanitizeEnv, engine } = claimed;
   const loop = openClaimedLoop(claimed, opts);
   let runner: RunnerStamp | undefined;
-  const provenanceCollector = new ProvenanceCollector(claimed.effectiveChain ?? opts.chain);
+  const provenanceCollector = new ProvenanceCollector(claimed.effectiveChain ?? activeChain);
   const provenanceOpts = { ...opts, job: effectiveJob };
 
   const externalCheckpoint = checkpointTickerForRun(
@@ -771,7 +809,7 @@ async function implementExternalIssue(
           body: wrapJumiPrBody(
             redactGitSecrets(
               buildExternalPullRequestBody(prFileContents, ref.url, stamp),
-              workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? opts.chain)
+              workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? activeChain)
             )
           ),
           head: branch,
@@ -836,9 +874,39 @@ export async function implementIssue(
     return implementExternalIssue(opts);
   }
   const log = opts.logger ?? logDefault;
-  const branch = issueBranchName(opts.job.issueNumber, opts.job.title);
+  // Repository runner allow-list (default branch only). Invalid or empty
+  // fails closed before any runner starts: one comment where the job was
+  // started, then a skipped result. Unreadable fails open with a log.
+  let activeOpts = opts;
+  if (opts.chain && opts.chain.length > 0) {
+    const applied = await applyRepoChain({
+      api: opts.api,
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      defaultBranch: opts.job.defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { job: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}` },
+      unreadableContext: `${opts.job.owner}/${opts.job.repo}`,
+      publish: async (reason) => {
+        await upsertWorkerComment(
+          opts.api,
+          opts.job.owner,
+          opts.job.repo,
+          opts.job.issueNumber,
+          opts.botUsername,
+          reason
+        ).catch(() => undefined);
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      activeOpts = { ...opts, chain: applied.chain, fallbackModel: undefined, fallbackVariant: undefined };
+    }
+  }
+  const branch = issueBranchName(activeOpts.job.issueNumber, activeOpts.job.title);
   const claimed = await beginClaimedWorktree({
-    ...opts,
+    ...activeOpts,
     fallbackEngine: registeredEngine,
     branch,
   });
@@ -850,7 +918,7 @@ export async function implementIssue(
   if (jumiCloser) {
     await forgetClaim();
     await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
-    return runCloserWork(opts, jumiCloser);
+    return runCloserWork(activeOpts, jumiCloser);
   }
   if (pulls.some((pr) => pullRequestClosesIssue(pr, issueNumber))) {
     await forgetClaim();
@@ -929,7 +997,7 @@ export async function implementIssue(
   const loop = openClaimedLoop(claimed, opts);
   // The runner behind the latest spawn; after a hop this is the one that ran.
   let runner: RunnerStamp | undefined;
-  const jobChain = claimed.effectiveChain ?? opts.chain;
+  const jobChain = claimed.effectiveChain ?? activeOpts.chain;
   const provenanceCollector = new ProvenanceCollector(jobChain);
   const diary = (body: string) =>
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
