@@ -89,6 +89,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -340,11 +341,10 @@ export function isJumiPullReviewFinding(
   inlines: readonly InlineComment[] = []
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
-  if (
-    !isFindingCheck(lastCheckTrailer(pullReviewBody(review))) &&
-    !isBlockingQuestionFinding(pullReviewBody(review), opts, inlines, botUsername)
-  )
+  const body = pullReviewBody(review);
+  if (!isFindingCheck(lastCheckTrailer(body)) && !isBlockingQuestionFinding(body, opts, inlines, botUsername))
     return false;
+  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(body, opts, inlines, botUsername)) return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -375,6 +375,12 @@ export interface ReviewFindingMatchOpts {
   blockingQuestionAuthors?: readonly string[];
   /** Author of the pull under review; required together with `blockingQuestionAuthors` to match. */
   prAuthor?: string | undefined | null;
+  /**
+   * Per-repository suggestion switch from `.jumi.yml`. `false` ignores a
+   * `success` review whose only findings are suggestions; failures and
+   * blocking questions still count. Unset preserves today's behavior.
+   */
+  followupOnSuggestions?: boolean;
 }
 
 /**
@@ -416,7 +422,7 @@ export function blockingOpenQuestionCountWithInlines(
   if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
   const body = reviewBody ?? "";
   const trailer = lastCheckTrailer(body);
-  if (!trailer || trailer.state !== "success") return 0;
+  if (trailer?.state !== "success") return 0;
   const bodyCount = blockingOpenQuestionCount(body, prAuthorLogin, blockingAuthors);
   let inlineCount = 0;
   for (const inline of inlines) {
@@ -434,6 +440,24 @@ function isBlockingQuestionFinding(
   return (
     blockingOpenQuestionCountWithInlines(body, inlines, opts.prAuthor, opts.blockingQuestionAuthors, botUsername) > 0
   );
+}
+
+/**
+ * A `success` trailer that carries suggestions and no open blocking
+ * questions. Failures never count here; with `followup_on_suggestions: false`
+ * these reviews stop counting as findings while everything else runs as
+ * today.
+ */
+function isSuggestionOnlyBody(
+  body: string,
+  opts: ReviewFindingMatchOpts = {},
+  inlines: readonly InlineComment[] = [],
+  botUsername?: string
+): boolean {
+  const trailer = lastCheckTrailer(body);
+  if (trailer?.state !== "success") return false;
+  if (trailerSuggestionCount(trailer.reason) === 0) return false;
+  return !isBlockingQuestionFinding(body, opts, inlines, botUsername);
 }
 
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
@@ -457,6 +481,8 @@ export function isJumiReviewFinding(
     !isFindingCheck(lastCheckTrailer(comment.body ?? "")) &&
     !isBlockingQuestionFinding(comment.body ?? "", opts, inlines, botUsername)
   )
+    return false;
+  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(comment.body ?? "", opts, inlines, botUsername))
     return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
@@ -714,17 +740,42 @@ export async function needsFollowUp(opts: {
   botUsername: string;
   home: string;
   maxFollowupRounds?: number;
+  maxConflictRounds?: number;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   blockingQuestionAuthors?: readonly string[];
   skipLatches?: SkipLatchStore;
+  /**
+   * Default-branch name for the per-repository `.jumi.yml` policy. When
+   * set, the file's round caps (ceiled by the deployment values) and the
+   * suggestion switch apply; when unset, today's behavior is preserved
+   * with no extra forge calls.
+   */
+  defaultBranch?: string;
 }): Promise<boolean> {
   const state = await readFollowUpLatch(skipLatchesFor(opts), {
     owner: opts.owner,
     repo: opts.repo,
     issueNumber: opts.issueNumber,
   });
-  if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
+  let effectiveMax = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
+  let followupOnSuggestions = true;
+  if (opts.defaultBranch) {
+    const policy = await loadRepoFollowupPolicy(
+      opts.api,
+      opts.owner,
+      opts.repo,
+      opts.defaultBranch,
+      {
+        maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+        maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+      },
+      undefined
+    );
+    effectiveMax = policy.maxFollowupRounds;
+    followupOnSuggestions = policy.followupOnSuggestions;
+  }
+  if (state.round >= effectiveMax) return false;
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -736,6 +787,7 @@ export async function needsFollowUp(opts: {
     {
       prAuthor: opts.pr.user?.login,
       ...(opts.blockingQuestionAuthors ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+      ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
     },
     opts.trustedSenderLogins
   );
@@ -945,7 +997,8 @@ function reviewFindingMatchOptsForJob(
   job: IssueJob,
   headSha: string,
   prAuthor?: string | undefined | null,
-  blockingQuestionAuthors?: readonly string[] | undefined | null
+  blockingQuestionAuthors?: readonly string[] | undefined | null,
+  followupOnSuggestions?: boolean
 ): ReviewFindingMatchOpts {
   const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
   return {
@@ -953,6 +1006,7 @@ function reviewFindingMatchOptsForJob(
     anyReviewedCommit: job.trigger?.event === "review-failure",
     ...(prAuthor ? { prAuthor } : {}),
     ...(blockingQuestionAuthors ? { blockingQuestionAuthors } : {}),
+    ...(followupOnSuggestions === false ? { followupOnSuggestions: false as const } : {}),
   };
 }
 
@@ -960,8 +1014,19 @@ export async function implementFollowUp(
   opts: ImplementOptions & { sleep?: (ms: number) => Promise<void> }
 ): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
-  const maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
-  const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  const policy = await loadRepoFollowupPolicy(
+    opts.api,
+    opts.job.owner,
+    opts.job.repo,
+    opts.job.defaultBranch,
+    {
+      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+    },
+    log
+  );
+  const maxFollowupRounds = policy.maxFollowupRounds;
+  const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
@@ -996,7 +1061,13 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha, pr.user?.login, opts.blockingQuestionAuthors);
+  const findingOpts = reviewFindingMatchOptsForJob(
+    opts.job,
+    pr.head.sha,
+    pr.user?.login,
+    opts.blockingQuestionAuthors,
+    policy.followupOnSuggestions
+  );
 
   const branch = pr.head.ref;
   claim.branch = branch;

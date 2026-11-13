@@ -35,6 +35,8 @@ export async function classifyCloserWork(opts: {
   blockingQuestionAuthors?: readonly string[];
   skipLatches?: SkipLatchStore;
   ignoreConflictsLabel?: string;
+  /** Default-branch name for the per-repository `.jumi.yml` policy. */
+  defaultBranch?: string;
 }): Promise<CloserWorkMode | undefined> {
   const followUp = await needsFollowUp({
     api: opts.api,
@@ -45,10 +47,12 @@ export async function classifyCloserWork(opts: {
     botUsername: opts.botUsername,
     home: opts.home,
     maxFollowupRounds: opts.maxFollowupRounds,
+    maxConflictRounds: opts.maxConflictRounds,
     followupIgnoreLogins: opts.followupIgnoreLogins,
     trustedSenderLogins: opts.trustedSenderLogins,
     blockingQuestionAuthors: opts.blockingQuestionAuthors,
     skipLatches: opts.skipLatches,
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
   });
   const ci = await needsCiFollowUp({
     api: opts.api,
@@ -73,9 +77,29 @@ export async function classifyCloserWork(opts: {
     botUsername: opts.botUsername,
     home: opts.home,
     maxConflictRounds: opts.maxConflictRounds,
+    maxFollowupRounds: opts.maxFollowupRounds,
     skipLatches: opts.skipLatches,
     ignoreConflictsLabel: opts.ignoreConflictsLabel,
     ...(hasJumiCommit !== undefined ? { hasJumiCommit } : {}),
+    ...(opts.defaultBranch
+      ? {
+          defaultBranch: opts.defaultBranch,
+          ...(typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function"
+            ? {
+                getRepoFile: (
+                  opts.api as {
+                    getRepoFile: (
+                      owner: string,
+                      repo: string,
+                      path: string,
+                      ref: string
+                    ) => Promise<{ found: boolean; content?: string }>;
+                  }
+                ).getRepoFile.bind(opts.api),
+              }
+            : {}),
+        }
+      : {}),
   });
   if (conflict && !(followUp || ci)) return "conflict";
   if (followUp || ci || conflict) return "follow-up";
@@ -101,6 +125,7 @@ export async function runCloserWork(
     blockingQuestionAuthors: opts.blockingQuestionAuthors,
     skipLatches: opts.skipLatches,
     ignoreConflictsLabel: opts.ignoreConflictsLabel,
+    defaultBranch: opts.job.defaultBranch,
   });
   if (!mode) return { status: "skipped", reason: `open PR already closes #${opts.job.issueNumber}` };
   const job: IssueJob = {

@@ -1,8 +1,10 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
+import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { loadRepoFollowupPolicy } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -101,12 +103,19 @@ export async function enqueueFollowUpFromReview(
     store: ReviewJobStore;
     api: Pick<
       ReviewApi,
-      "getPR" | "getIssue" | "getRepo" | "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"
+      | "getPR"
+      | "getIssue"
+      | "getRepo"
+      | "getRepoFile"
+      | "findStickyIssueComment"
+      | "createIssueComment"
+      | "updateIssueComment"
     >;
     row: ReviewJobRecord;
     published: ReviewResult;
     markdown?: string | null;
     maxFollowupRounds?: number;
+    maxConflictRounds?: number;
     blockingQuestionAuthors?: readonly string[];
     logger?: (message: string) => void;
   } & PickupPolicy
@@ -160,8 +169,35 @@ export async function enqueueFollowUpFromReview(
     return logSkip("unassigned");
   }
 
+  // Per-repository follow-up policy from the default branch. Fail-open:
+  // missing, invalid, or unreadable behaves as today.
+  const policy = await loadRepoFollowupPolicy(
+    opts.api,
+    opts.row.owner,
+    opts.row.repo,
+    repo.default_branch,
+    {
+      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+    },
+    opts.logger
+  );
+
+  // Suggestion follow-up off: a `success` review with suggestions starts no
+  // follow-up in that repository. Failures, blocking questions, red CI, and
+  // conflicts run as today; a person asking still follows via the webhook
+  // path, which never reaches this handover.
+  if (
+    isLeftoverSimplificationTrailer(opts.markdown) &&
+    !isCurrentHeadFailureTrailer(opts.markdown) &&
+    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, opts.blockingQuestionAuthors) &&
+    !policy.followupOnSuggestions
+  ) {
+    return logSkip("suggestions disabled");
+  }
+
   const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
-  if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) {
+  if (followUpSucceeded >= policy.maxFollowupRounds) {
     await upsertStuckText(
       opts.api,
       opts.row.owner,

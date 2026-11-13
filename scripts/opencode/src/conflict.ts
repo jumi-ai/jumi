@@ -73,6 +73,7 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -231,9 +232,18 @@ export async function needsConflict(opts: {
   botUsername: string;
   home: string;
   maxConflictRounds?: number;
+  maxFollowupRounds?: number;
   skipLatches?: SkipLatchStore;
   ignoreConflictsLabel?: string;
   hasJumiCommit?: boolean;
+  /**
+   * Default-branch name for the per-repository `.jumi.yml` policy. When
+   * set, the file's conflict cap (ceiled by the deployment value) applies;
+   * when unset, today's behavior is preserved with no extra forge calls.
+   */
+  defaultBranch?: string;
+  /** Forge file read for the settings file. Absent keeps today's behavior. */
+  getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
 }): Promise<boolean> {
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
@@ -245,7 +255,22 @@ export async function needsConflict(opts: {
     repo: opts.repo,
     issueNumber: opts.issueNumber,
   });
-  if (state.round >= (opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS)) return false;
+  let effectiveMax = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
+    const policy = await loadRepoFollowupPolicy(
+      { getRepoFile: opts.getRepoFile },
+      opts.owner,
+      opts.repo,
+      opts.defaultBranch,
+      {
+        maxFollowupRounds: opts.maxFollowupRounds ?? 3,
+        maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+      },
+      undefined
+    );
+    effectiveMax = policy.maxConflictRounds;
+  }
+  if (state.round >= effectiveMax) return false;
   if (
     state.lastHeadSha &&
     state.lastBaseSha &&
@@ -616,7 +641,19 @@ export function conflictCapSticky(round: number, max: number): string {
 
 export async function implementConflict(opts: ImplementOptions): Promise<ConflictResult> {
   const log = opts.logger ?? logDefault;
-  const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  const policy = await loadRepoFollowupPolicy(
+    opts.api,
+    opts.job.owner,
+    opts.job.repo,
+    opts.job.defaultBranch,
+    {
+      // Follow-up cap unused here; passed through for a single policy load.
+      maxFollowupRounds: opts.maxFollowupRounds ?? 3,
+      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+    },
+    log
+  );
+  const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
     ...opts,
