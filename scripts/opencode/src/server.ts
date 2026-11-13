@@ -33,6 +33,7 @@ import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import { REPO_MODE_OFF_REASON, resolveRepoMode } from "./repo_settings.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
@@ -738,6 +739,24 @@ export async function processEngineTick(
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
+  }
+  // Repository mode is read when the job starts so a change on the default
+  // branch applies to the next job without a restart; a running job finishes.
+  // Off mode starts no job of any kind and posts no status: settle the row as
+  // skipped before any runner, CI look, or status call. Never throws: a
+  // lookup failure runs the review (fail-open to today's behavior).
+  try {
+    if ((await resolveRepoMode(api, row.owner, row.repo, logger)) === "off") {
+      await store.markPublished(row.id, leasedBy, { state: "skipped", reason: REPO_MODE_OFF_REASON });
+      recordJobCompleted(row.kind, "skipped");
+      logger(`${row.jobKey} skipped: ${REPO_MODE_OFF_REASON}`);
+      await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
+      if (extras.breaker) extras.breaker.recordModelReached();
+      else await store.recordRoleSuccess("engine");
+      return "processed";
+    }
+  } catch {
+    // Fail-open: an unexpected mode-gate failure still reviews.
   }
   // Ambient ledger recorder for this tick: engine spawns record per-run usage
   // (tokens, exit class, start/end) against this row before the tick ends, so

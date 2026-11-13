@@ -24,6 +24,12 @@ import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./in
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import {
+  REPO_MODE_DISABLED_NOTE,
+  REPO_MODE_OFF_REASON,
+  REPO_MODE_REVIEW_ONLY_REASON,
+  resolveRepoMode,
+} from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
@@ -75,6 +81,34 @@ export function createIssueQueue(
       const abort = new AbortController();
       aborts.set(key, abort);
       try {
+        // Repository mode is read when the job starts. Restricted repos cost
+        // no model time. Fail-open to full on lookup failure.
+        let mode: "full" | "review-only" | "off" = "full";
+        try {
+          mode = await resolveRepoMode(api, job.owner, job.repo, logger);
+        } catch {
+          mode = "full";
+        }
+        if (mode === "off") {
+          logger(`${key} skipped: ${REPO_MODE_OFF_REASON}`);
+          return;
+        }
+        if (mode === "review-only") {
+          try {
+            await upsertWorkerComment(
+              api,
+              job.owner,
+              job.repo,
+              job.issueNumber,
+              config.botUsername,
+              REPO_MODE_DISABLED_NOTE
+            );
+          } catch (err) {
+            logger(`mode note failed ${key}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          logger(`${key} skipped: ${REPO_MODE_REVIEW_ONLY_REASON}`);
+          return;
+        }
         const shared = {
           api,
           tracker: api,
@@ -402,6 +436,40 @@ export async function processWorkerTick(
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
+  }
+  // Repository mode is read when the job starts so a change on the default
+  // branch applies to the next job without a restart; a running job finishes.
+  // Restricted repos cost no model time. Off settles silently, review-only
+  // leaves one worker-disabled note via the sticky (upsert says it once).
+  // Never throws: a lookup failure runs the job (fail-open to full).
+  try {
+    const mode = await resolveRepoMode(api, row.owner, row.repo, logger);
+    if (mode === "off" || mode === "review-only") {
+      const reason = mode === "off" ? REPO_MODE_OFF_REASON : REPO_MODE_REVIEW_ONLY_REASON;
+      if (mode === "review-only" && row.issueNumber != null) {
+        try {
+          await upsertWorkerComment(
+            api,
+            row.owner,
+            row.repo,
+            row.issueNumber,
+            config.botUsername,
+            REPO_MODE_DISABLED_NOTE
+          );
+        } catch (err) {
+          logger(`mode note failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      await store.markPublished(row.id, leasedBy, { state: "skipped", reason });
+      recordJobCompleted(row.kind, "skipped");
+      logger(`${row.jobKey} skipped: ${reason}`);
+      await clearSitBestEffort(store.sits, row.owner, row.repo, row.issueNumber ?? 0, logger);
+      if (extras.breaker) extras.breaker.recordModelReached();
+      else await store.recordRoleSuccess("worker");
+      return "processed";
+    }
+  } catch {
+    // Fail-open: an unexpected mode-gate failure still runs the job.
   }
   // Same ambient ledger recorder as the engine tick: runner spawns record
   // per-run usage against this row before the tick ends. A failed metric

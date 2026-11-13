@@ -3,7 +3,7 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { loadEffectiveBlockingQuestionAuthors } from "./repo_settings.ts";
+import { loadEffectiveBlockingQuestionAuthors, resolveRepoMode } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -124,6 +124,17 @@ export async function enqueueFollowUpFromReview(
   };
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
+
+  // Restricted repository modes start no worker jobs: review-only and off
+  // never enqueue follow-up from a review. The worker start gate is the
+  // backstop for jobs queued before the mode changed.
+  try {
+    if ((await resolveRepoMode(opts.api, opts.row.owner, opts.row.repo, opts.logger)) !== "full") {
+      return logSkip("repository mode is restricted");
+    }
+  } catch {
+    // Fail-open: an unexpected mode-gate failure still enqueues.
+  }
 
   // Cheap trailer gate first: incomplete skips without a PR fetch, and a
   // failure or leftover-simplification success enqueues. Only a plain success

@@ -15,11 +15,23 @@ export interface RepoSettings {
   automerge: boolean;
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
   blockingQuestionAuthors: string[];
+  /** Repository mode: full work, reviews only, or everything off. Absent means full. */
+  mode: RepoMode;
 }
+
+export type RepoMode = "full" | "review-only" | "off";
+
+export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+export const REPO_MODE_DISABLED_NOTE =
+  "Jumi worker jobs are turned off in this repository's settings (`.jumi.yml` `mode: review-only`). Reviews still run; assigning or labelling will not start work.";
+
+export const REPO_MODE_OFF_REASON = "repository mode is off";
+export const REPO_MODE_REVIEW_ONLY_REASON = "repository mode is review-only";
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set(["automerge", "blocking_question_authors"]);
+const KNOWN_KEYS = new Set(["automerge", "blocking_question_authors", "mode"]);
 
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -29,11 +41,12 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * absent `blocking_question_authors` means no repo-listed authors.
- * `blocking_question_authors` must be a list of login strings when present;
- * blank entries are dropped like the deployer CSV. No schema-version key
- * exists. The error string is the parser's error and is surfaced verbatim
- * in the auto-merge note and the review status.
+ * absent `blocking_question_authors` means no repo-listed authors; absent
+ * `mode` means `full`. `blocking_question_authors` must be a list of login
+ * strings when present; blank entries are dropped like the deployer CSV.
+ * `mode` must be `full`, `review-only`, or `off` when present. No
+ * schema-version key exists. The error string is the parser's error and is
+ * surfaced verbatim in the auto-merge note and the review status.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -43,7 +56,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     return { ok: false, error: parserErrorMessage(err) };
   }
   if (parsed === null || parsed === undefined)
-    return { ok: true, settings: { automerge: false, blockingQuestionAuthors: [] } };
+    return { ok: true, settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" } };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -69,12 +82,19 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     blockingQuestionAuthors = logins;
   }
-  return { ok: true, settings: { automerge, blockingQuestionAuthors } };
+  let mode: RepoMode = "full";
+  if ("mode" in record && record.mode !== undefined) {
+    if (typeof record.mode !== "string" || !(REPO_MODES as readonly string[]).includes(record.mode)) {
+      return { ok: false, error: `"mode" must be one of "full", "review-only", "off"` };
+    }
+    mode = record.mode as RepoMode;
+  }
+  return { ok: true, settings: { automerge, blockingQuestionAuthors, mode } };
 }
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean; blockingQuestionAuthors: string[] }
+  | { state: "valid"; automerge: boolean; blockingQuestionAuthors: string[]; mode: RepoMode }
   | { state: "invalid"; error: string };
 
 export interface RepoSettingsFileApi {
@@ -112,7 +132,74 @@ export async function loadRepoSettings(
     state: "valid",
     automerge: parsed.settings.automerge,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
+    mode: parsed.settings.mode,
   };
+}
+
+/**
+ * Repository mode from a loaded settings file. Missing or invalid files are
+ * today's behavior (`full`): this setting adds no new invalid-file rule, and
+ * an unreadable file also falls back to `full` via the loaders below.
+ */
+export function repoMode(settings: RepoSettingsLoad): RepoMode {
+  if (settings.state !== "valid") return "full";
+  return settings.mode;
+}
+
+/**
+ * Load the mode at a default-branch ref. Missing, invalid, or unreadable
+ * files fall back to `full` so one repository's file never changes another
+ * repository. Never throws.
+ */
+export async function loadRepoMode(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<RepoMode> {
+  if (!defaultBranch.trim()) return "full";
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `mode settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return "full";
+  }
+  if (settings.state === "invalid") {
+    log?.(`mode settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    return "full";
+  }
+  return repoMode(settings);
+}
+
+export interface RepoModeRepoApi extends RepoSettingsFileApi {
+  getRepo?(owner: string, repo: string): Promise<{ default_branch: string }>;
+}
+
+/**
+ * Resolve the mode via the repository's default branch. Missing, invalid,
+ * unreadable, or branchless repositories fall back to `full`. Never throws.
+ */
+export async function resolveRepoMode(
+  api: RepoModeRepoApi,
+  owner: string,
+  repo: string,
+  log?: (message: string) => void
+): Promise<RepoMode> {
+  try {
+    const getRepo = api.getRepo;
+    if (typeof getRepo !== "function") return "full";
+    const info = await getRepo.call(api, owner, repo);
+    const defaultBranch = info.default_branch?.trim() ? info.default_branch : "";
+    if (!defaultBranch) return "full";
+    return await loadRepoMode(api, owner, repo, defaultBranch, log);
+  } catch (err) {
+    log?.(`mode settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return "full";
+  }
 }
 
 /**

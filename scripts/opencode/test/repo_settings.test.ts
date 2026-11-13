@@ -2,9 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
   effectiveBlockingQuestionAuthors,
   loadEffectiveBlockingQuestionAuthors,
+  loadRepoMode,
   loadRepoSettings,
   parseRepoSettingsText,
   prTouchesRepoSettings,
+  repoMode,
+  resolveRepoMode,
 } from "../src/repo_settings.ts";
 import { invalidHeadSettingsFailure } from "../src/review.ts";
 
@@ -12,25 +15,25 @@ describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, blockingQuestionAuthors: [] },
+      settings: { automerge: true, blockingQuestionAuthors: [], mode: "full" },
     });
   });
 
   test("absent automerge means off", () => {
     expect(parseRepoSettingsText("{}\n")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: [] },
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: [] },
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
     });
   });
 
   test("explicit false means off", () => {
     expect(parseRepoSettingsText("automerge: false\n")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: [] },
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
     });
   });
 
@@ -50,11 +53,11 @@ describe("parseRepoSettingsText", () => {
   test("an empty file means off", () => {
     expect(parseRepoSettingsText("")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: [] },
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: [] },
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
     });
   });
 
@@ -75,12 +78,12 @@ describe("parseRepoSettingsText", () => {
   test("blocking_question_authors parses a login list", () => {
     expect(parseRepoSettingsText("blocking_question_authors:\n  - renovate-bot\n")).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: ["renovate-bot"] },
+      settings: { automerge: false, blockingQuestionAuthors: ["renovate-bot"], mode: "full" },
     });
     expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
       {
         ok: true,
-        settings: { automerge: true, blockingQuestionAuthors: ["Alice", "renovate-bot"] },
+        settings: { automerge: true, blockingQuestionAuthors: ["Alice", "renovate-bot"], mode: "full" },
       }
     );
   });
@@ -88,7 +91,7 @@ describe("parseRepoSettingsText", () => {
   test("absent blocking_question_authors means none", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, blockingQuestionAuthors: [] },
+      settings: { automerge: true, blockingQuestionAuthors: [], mode: "full" },
     });
   });
 
@@ -107,8 +110,39 @@ describe("parseRepoSettingsText", () => {
   test("blank blocking entries are dropped", () => {
     expect(parseRepoSettingsText('blocking_question_authors:\n  - "  "\n  - alice\n')).toEqual({
       ok: true,
-      settings: { automerge: false, blockingQuestionAuthors: ["alice"] },
+      settings: { automerge: false, blockingQuestionAuthors: ["alice"], mode: "full" },
     });
+  });
+
+  test("mode parses the three repository modes", () => {
+    expect(parseRepoSettingsText("mode: full\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "full" },
+    });
+    expect(parseRepoSettingsText("mode: review-only\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "review-only" },
+    });
+    expect(parseRepoSettingsText("mode: off\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, blockingQuestionAuthors: [], mode: "off" },
+    });
+  });
+
+  test("absent mode means full", () => {
+    expect(parseRepoSettingsText("automerge: true\n")).toEqual({
+      ok: true,
+      settings: { automerge: true, blockingQuestionAuthors: [], mode: "full" },
+    });
+  });
+
+  test("a wrong-type mode is invalid", () => {
+    for (const text of ["mode: 1\n", "mode: null\n", "mode: []\n", "mode: Full\n", "mode: disabled\n", "mode:\n"]) {
+      expect(parseRepoSettingsText(text)).toEqual({
+        ok: false,
+        error: '"mode" must be one of "full", "review-only", "off"',
+      });
+    }
   });
 });
 
@@ -131,7 +165,13 @@ describe("loadRepoSettings", () => {
         "r",
         "main"
       )
-    ).toEqual({ state: "valid", automerge: true, blockingQuestionAuthors: [] });
+    ).toEqual({ state: "valid", automerge: true, blockingQuestionAuthors: [], mode: "full" });
+  });
+
+  test("valid file loads the mode", async () => {
+    expect(
+      await loadRepoSettings({ getRepoFile: async () => ({ found: true, content: "mode: off\n" }) }, "o", "r", "main")
+    ).toEqual({ state: "valid", automerge: false, blockingQuestionAuthors: [], mode: "off" });
   });
 
   test("invalid file carries the parser error", async () => {
@@ -163,6 +203,7 @@ describe("effectiveBlockingQuestionAuthors", () => {
         state: "valid",
         automerge: false,
         blockingQuestionAuthors: ["repo-bot", "DEPLOYER-bot"],
+        mode: "full",
       })
     ).toEqual(["deployer-bot", "repo-bot"]);
   });
@@ -173,6 +214,78 @@ describe("effectiveBlockingQuestionAuthors", () => {
       "deployer-bot",
     ]);
     expect(effectiveBlockingQuestionAuthors([], { state: "missing" })).toEqual([]);
+  });
+});
+
+describe("repoMode", () => {
+  test("missing or invalid files fall back to full", () => {
+    expect(repoMode({ state: "missing" })).toBe("full");
+    expect(repoMode({ state: "invalid", error: "bad" })).toBe("full");
+  });
+
+  test("valid files return their mode", async () => {
+    expect(repoMode({ state: "valid", automerge: false, blockingQuestionAuthors: [], mode: "full" })).toBe("full");
+    expect(repoMode({ state: "valid", automerge: false, blockingQuestionAuthors: [], mode: "review-only" })).toBe(
+      "review-only"
+    );
+    expect(repoMode({ state: "valid", automerge: true, blockingQuestionAuthors: [], mode: "off" })).toBe("off");
+  });
+});
+
+describe("loadRepoMode", () => {
+  test("review-only and off load from the default branch", async () => {
+    const api = { getRepoFile: async () => ({ found: true, content: "mode: review-only\n" }) };
+    expect(await loadRepoMode(api, "o", "r", "main")).toBe("review-only");
+    const off = { getRepoFile: async () => ({ found: true, content: "mode: off\n" }) };
+    expect(await loadRepoMode(off, "o", "r", "main")).toBe("off");
+  });
+
+  test("missing, invalid, unreadable, or blank branches fall back to full", async () => {
+    expect(await loadRepoMode({ getRepoFile: async () => ({ found: false }) }, "o", "r", "main")).toBe("full");
+    expect(
+      await loadRepoMode({ getRepoFile: async () => ({ found: true, content: "nope: 1\n" }) }, "o", "r", "main")
+    ).toBe("full");
+    expect(
+      await loadRepoMode(
+        {
+          getRepoFile: async () => {
+            throw new Error("GitHub API → 500");
+          },
+        },
+        "o",
+        "r",
+        "main"
+      )
+    ).toBe("full");
+    expect(
+      await loadRepoMode({ getRepoFile: async () => ({ found: true, content: "mode: off\n" }) }, "o", "r", "  ")
+    ).toBe("full");
+  });
+});
+
+describe("resolveRepoMode", () => {
+  test("resolves the default branch before reading", async () => {
+    const api = {
+      getRepo: async () => ({ default_branch: "main" }),
+      getRepoFile: async () => ({ found: true, content: "mode: off\n" }),
+    };
+    expect(await resolveRepoMode(api, "o", "r")).toBe("off");
+  });
+
+  test("falls back to full without a branch or on errors", async () => {
+    expect(await resolveRepoMode({}, "o", "r")).toBe("full");
+    expect(await resolveRepoMode({ getRepo: async () => ({ default_branch: "  " }) }, "o", "r")).toBe("full");
+    expect(
+      await resolveRepoMode(
+        {
+          getRepo: async () => {
+            throw new Error("boom");
+          },
+        },
+        "o",
+        "r"
+      )
+    ).toBe("full");
   });
 });
 
