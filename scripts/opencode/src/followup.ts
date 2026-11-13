@@ -68,6 +68,7 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
 import {
   hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
   ignoreConflictsReason,
   isLeftToAuthor,
   leaveConflictsAuthorReason,
@@ -1099,6 +1100,10 @@ export async function implementFollowUp(
   }
   const previousConflict = await readConflictLatch(latches, latchKey);
   const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  if (ignoreAuthors === undefined) {
+    await forgetClaim();
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  }
   const leftToAuthor = await isLeftToAuthor(
     opts.api,
     owner,

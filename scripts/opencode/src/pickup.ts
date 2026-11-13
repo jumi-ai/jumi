@@ -5,6 +5,7 @@ import { extractWorkingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
 import {
   hasIgnoreConflictsLabel,
   hasJumiCommitOnPull,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
   isIgnoreConflictsAuthor,
   loadIgnoreConflictsAuthors,
 } from "./ignore_conflicts.ts";
@@ -43,6 +44,17 @@ export async function classifyCloserWork(opts: {
   ignoreConflictsAuthors?: readonly string[];
   defaultBranch?: string;
 }): Promise<CloserWorkMode | undefined> {
+  let ignoreAuthors = opts.ignoreConflictsAuthors;
+  if (ignoreAuthors === undefined) {
+    const branch =
+      opts.defaultBranch ??
+      (await opts.api
+        .getRepo(opts.owner, opts.repo)
+        .then((r) => r.default_branch)
+        .catch(() => undefined));
+    ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.owner, opts.repo, branch);
+    if (ignoreAuthors === undefined) return undefined;
+  }
   const followUp = await needsFollowUp({
     api: opts.api,
     owner: opts.owner,
@@ -66,16 +78,6 @@ export async function classifyCloserWork(opts: {
     issueNumber: opts.issueNumber,
     skipLatches: opts.skipLatches,
   });
-  let ignoreAuthors = opts.ignoreConflictsAuthors;
-  if (ignoreAuthors === undefined) {
-    const branch =
-      opts.defaultBranch ??
-      (await opts.api
-        .getRepo(opts.owner, opts.repo)
-        .then((r) => r.default_branch)
-        .catch(() => undefined));
-    ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.owner, opts.repo, branch);
-  }
   const authorListed = isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
   let hasJumiCommit: boolean | undefined;
   if (!followUp && !ci && (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel) || authorListed)) {
@@ -106,11 +108,9 @@ export async function runCloserWork(
   pr: Pull
 ): Promise<FollowUpResult | ConflictResult | { status: "skipped"; reason: string }> {
   const branch = opts.job.defaultBranch;
-  let ignoreAuthors: readonly string[] | undefined;
-  try {
-    ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.job.owner, opts.job.repo, branch);
-  } catch {
-    ignoreAuthors = undefined;
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.job.owner, opts.job.repo, branch);
+  if (ignoreAuthors === undefined) {
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   }
   const mode = await classifyCloserWork({
     api: opts.api,
@@ -168,11 +168,10 @@ export async function conflictJobIfUnmergeable(
   if (pr.mergeable !== false) return undefined;
   let authors = opts?.ignoreConflictsAuthors;
   if (authors === undefined) {
-    const { loadIgnoreConflictsAuthors } = await import("./ignore_conflicts.ts");
     authors = await loadIgnoreConflictsAuthors(api, job.owner, job.repo, job.defaultBranch, logger);
+    if (authors === undefined) return undefined;
   }
   const labeled = opts?.botUsername ? hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel) : false;
-  const { isIgnoreConflictsAuthor } = await import("./ignore_conflicts.ts");
   if (opts?.botUsername && (labeled || isIgnoreConflictsAuthor(pr.user?.login, authors))) {
     const committed = await hasJumiCommitOnPull(
       api,

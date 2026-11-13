@@ -56,7 +56,9 @@ import {
 } from "./handoff.ts";
 import {
   hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
   ignoreConflictsReason,
+  isIgnoreConflictsAuthor,
   isLeftToAuthor,
   leaveConflictsAuthorReason,
   loadIgnoreConflictsAuthors,
@@ -246,7 +248,6 @@ export async function needsConflict(opts: {
   if (opts.pr.mergeable !== false) return false;
   if (opts.hasJumiCommit === false) {
     if (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) return false;
-    const { isIgnoreConflictsAuthor } = await import("./ignore_conflicts.ts");
     if (isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors)) return false;
   }
   const state = await readConflictLatch(skipLatchesFor(opts), {
@@ -665,6 +666,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
 
   const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  if (ignoreAuthors === undefined) {
+    await forgetClaim();
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  }
   const leftLabeled = hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel);
   if (
     await isLeftToAuthor(

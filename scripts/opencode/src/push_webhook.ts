@@ -2,6 +2,7 @@ import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { extractWorkingIssueNumber, type IssueApi, isAssignedForeignPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import {
   hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
   ignoreConflictsReason,
   isIgnoreConflictsAuthor,
   isLeftToAuthor,
@@ -87,6 +88,7 @@ export async function shouldEnqueuePushConflicts(
   const sender = pushSender(payload);
   const ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
   const ignoreAuthors = await loadIgnoreConflictsAuthors(api, owner, repo, payload.repository.default_branch, logger);
+  if (ignoreAuthors === undefined) return { type: "skip", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   let ignoredByLabel = 0;
   let ignoredAuthor: string | undefined;
 

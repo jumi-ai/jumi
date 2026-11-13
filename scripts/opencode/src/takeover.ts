@@ -1,5 +1,5 @@
 import { isWipOrDraft } from "./gitea_issues.ts";
-import { senderCanSteer } from "./permissions.ts";
+import { isListedLogin, senderCanSteer } from "./permissions.ts";
 import { loadRepoSettings } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 
@@ -10,12 +10,7 @@ export function isTakeoverAuthor(
   login: string | undefined | null,
   authors: readonly string[] | undefined | null
 ): boolean {
-  if (typeof login !== "string" || !login.trim()) return false;
-  const needle = login.trim().toLowerCase();
-  for (const entry of authors ?? []) {
-    if (typeof entry === "string" && entry.trim().toLowerCase() === needle) return true;
-  }
-  return false;
+  return isListedLogin(login, authors ?? undefined);
 }
 
 /**

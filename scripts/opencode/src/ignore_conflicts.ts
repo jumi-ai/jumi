@@ -1,8 +1,12 @@
 import { hasLabel } from "./assignee.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { isListedLogin } from "./permissions.ts";
 import type { PullCommit } from "./ports.ts";
 
 export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
+
+/** Skip reason when the settings file cannot be read: fail closed, deny the merge. */
+export const IGNORE_CONFLICTS_SETTINGS_UNREADABLE = "ignore-conflicts settings unreadable";
 
 export function normalizeIgnoreConflictsLabel(value: string | undefined | null): string {
   const trimmed = (value ?? "").trim();
@@ -25,12 +29,7 @@ export function isIgnoreConflictsAuthor(
   login: string | undefined | null,
   authors: readonly string[] | undefined | null
 ): boolean {
-  if (typeof login !== "string" || !login.trim()) return false;
-  const needle = login.trim().toLowerCase();
-  for (const entry of authors ?? []) {
-    if (typeof entry === "string" && entry.trim().toLowerCase() === needle) return true;
-  }
-  return false;
+  return isListedLogin(login, authors ?? undefined);
 }
 
 export function leaveConflictsAuthorReason(authorLogin: string | undefined | null): string {
@@ -150,6 +149,7 @@ export async function isLeftToAuthor(
   let authors = opts.ignoreConflictsAuthors;
   if (authors === undefined && typeof opts.defaultBranch === "string" && opts.defaultBranch.trim()) {
     authors = await loadIgnoreConflictsAuthors(api, owner, repo, opts.defaultBranch, logger);
+    if (authors === undefined) return true;
   }
   const authorLogin = opts.prAuthor ?? pr.user?.login;
   const authorListed = isIgnoreConflictsAuthor(authorLogin, authors);
@@ -179,9 +179,10 @@ export async function isLeftToAuthor(
 
 /**
  * Best-effort load of the `ignore_conflicts_authors` list from the
- * default-branch settings file. Missing, invalid, unreadable, or
- * file-API-less resolves to an empty list (no leave): an invalid file never
- * leaves conflicts to anyone.
+ * default-branch settings file. Missing, invalid, or file-API-less resolves to
+ * an empty list (no leave): an invalid file never leaves conflicts to anyone.
+ * A read that fails for another reason resolves to `undefined` so callers can
+ * fail closed (deny the merge) instead of treating the error as not-listed.
  */
 export async function loadIgnoreConflictsAuthors(
   api:
@@ -198,7 +199,7 @@ export async function loadIgnoreConflictsAuthors(
   repo: string,
   defaultBranch: string | undefined | null,
   logger?: (message: string) => void
-): Promise<string[]> {
+): Promise<string[] | undefined> {
   try {
     if (!api || typeof api.getRepoFile !== "function") return [];
     if (typeof defaultBranch !== "string" || !defaultBranch.trim()) return [];
@@ -210,21 +211,6 @@ export async function loadIgnoreConflictsAuthors(
     logger?.(
       `ignore-conflicts authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
     );
-    return [];
+    return undefined;
   }
-}
-
-/**
- * Skip reason for a pull left to its author. The label form keeps today's
- * text; the author-list form names the author instead. Both share the
- * `conflicted, left to author` prefix so `isIgnoreConflictsSkipReason`
- * still matches.
- */
-export function leaveConflictsReason(opts: {
-  ignoreConflictsLabel?: string | undefined | null;
-  authorLogin?: string | undefined | null;
-  viaAuthor?: boolean;
-}): string {
-  if (opts.viaAuthor) return leaveConflictsAuthorReason(opts.authorLogin);
-  return ignoreConflictsReason(opts.ignoreConflictsLabel);
 }
