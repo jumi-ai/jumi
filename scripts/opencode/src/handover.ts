@@ -10,6 +10,8 @@ import {
   effectiveFollowupRounds,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
+  type RepoSettingsLoad,
+  repoMode,
 } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
@@ -133,7 +135,7 @@ export async function enqueueFollowUpFromReview(
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
 
-  // Cheap trailer gate first: incomplete skips without a PR fetch, and a
+  // Cheap trailer gate first: incomplete skips without any fetch, and a
   // failure or leftover-simplification success enqueues. Only a plain success
   // trailer needs the PR author plus the effective blocking list (deployer
   // plus the repository's default-branch file) to decide whether opt-in
@@ -141,14 +143,13 @@ export async function enqueueFollowUpFromReview(
   const earlySkip = persistInsertSkipReason(opts.markdown);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
 
-  const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
-  if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
-
-  // Fetch the repo once for the settings file and the follow-up job.
-  // The default-branch file is read once; the pure helpers derive both
-  // the follow-up policy and the effective blocking list from that load.
-  // Missing, invalid, or unreadable behaves as today (fail-open).
+  // One default-branch read covers the restricted-mode gate, the follow-up
+  // policy, and the success-trailer blocking list below. Missing, invalid,
+  // or unreadable behaves as today (mode `full`, deployment caps,
+  // suggestions on, deployer blocking list). The worker start gate is the
+  // backstop for jobs queued before the mode changed.
   const repo = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+  let repoSettings: RepoSettingsLoad = { state: "missing" };
   let effectiveBlocking: readonly string[] | undefined = opts.blockingQuestionAuthors;
   let policy = {
     followupOnSuggestions: true,
@@ -159,10 +160,9 @@ export async function enqueueFollowUpFromReview(
     const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
     if (defaultBranch) {
       const load = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
+      repoSettings = load;
       if (load.state === "invalid") {
-        opts.logger?.(
-          `follow-up settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${load.error}`
-        );
+        opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${load.error}`);
       } else {
         policy = {
           followupOnSuggestions: isSuggestionFollowupEnabled(load),
@@ -174,9 +174,17 @@ export async function enqueueFollowUpFromReview(
     }
   } catch (err) {
     opts.logger?.(
-      `follow-up settings unreadable for ${opts.row.owner}/${opts.row.repo}@${repo.default_branch}: ${err instanceof Error ? err.message : String(err)}`
+      `repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${err instanceof Error ? err.message : String(err)}`
     );
+    repoSettings = { state: "missing" };
   }
+  if (repoMode(repoSettings) !== "full") {
+    return logSkip("repository mode is restricted");
+  }
+
+  const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
+  if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
+
   if (earlySkip === "success trailer") {
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
     if (trailerSkip) return logSkip(trailerSkip);

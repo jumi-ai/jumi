@@ -32,7 +32,19 @@ export interface RepoSettings {
   ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
   blockingQuestionAuthors: string[];
+  /** Repository mode: full work, reviews only, or everything off. Absent means full. */
+  mode: RepoMode;
 }
+
+export type RepoMode = "full" | "review-only" | "off";
+
+export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+export const REPO_MODE_DISABLED_NOTE =
+  "Jumi worker jobs are turned off in this repository's settings (`.jumi.yml` `mode: review-only`). Reviews still run; assigning or labelling will not start work.";
+
+export const REPO_MODE_OFF_REASON = "repository mode is off";
+export const REPO_MODE_REVIEW_ONLY_REASON = "repository mode is review-only";
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
@@ -50,6 +62,7 @@ const KNOWN_KEYS = new Set([
   "ignore-conflicts-authors",
   "ignoreConflictsAuthors",
   "blocking_question_authors",
+  "mode",
 ]);
 
 function parserErrorMessage(err: unknown): string {
@@ -61,19 +74,21 @@ function parserErrorMessage(err: unknown): string {
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
  * absent `allowed_runners` means no runner restriction;
- * absent `review_exclude` means nothing is left out; `followup_on_suggestions`
- * absent means on: a `success` review with suggestions follows up as today;
- * `false` turns that off while failures, blocking questions, red CI, and
- * conflicts run as today. `max_followup_rounds` / `max_conflict_rounds`
- * absent mean the deployment value; `0` is valid and means no rounds of that
- * kind. Absent author lists mean empty; absent `blocking_question_authors`
- * means no repo-listed authors; no schema-version key exists. The error
+ * absent `review_exclude` means nothing is left out; absent author lists
+ * mean empty; absent `mode` means `full`. No schema-version key exists.
+ * `followup_on_suggestions` absent means on: a `success` review with
+ * suggestions follows up as today; `false` turns that off while failures,
+ * blocking questions, red CI, and conflicts run as today.
+ * `max_followup_rounds` / `max_conflict_rounds` absent mean the deployment
+ * value; `0` is valid and means no rounds of that kind. Absent
+ * `blocking_question_authors` means no repo-listed authors. The error
  * string is the parser's error and is surfaced verbatim in the auto-merge
  * note and the review status. Author lists match whole logins,
  * case-insensitive. Canonical keys are `takeover_authors` and
- * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted as
- * aliases for the same setting. `blocking_question_authors` must be a list of
- * login strings when present; blank entries are dropped like the deployer CSV.
+ * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted
+ * as aliases for the same setting. `blocking_question_authors` must be a
+ * list of login strings when present; blank entries are dropped like the
+ * deployer CSV. `mode` must be `full`, `review-only`, or `off` when present.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -93,6 +108,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
+        mode: "full",
       },
     };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -166,6 +182,13 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     blockingQuestionAuthors = logins;
   }
+  let mode: RepoMode = "full";
+  if ("mode" in record && record.mode !== undefined) {
+    if (typeof record.mode !== "string" || !(REPO_MODES as readonly string[]).includes(record.mode)) {
+      return { ok: false, error: `"mode" must be one of "full", "review-only", "off"` };
+    }
+    mode = record.mode as RepoMode;
+  }
   const settings: RepoSettings = {
     automerge,
     allowedRunners,
@@ -177,6 +200,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     takeoverAuthors: takeover.authors,
     ignoreConflictsAuthors: ignoreConflicts.authors,
     blockingQuestionAuthors,
+    mode,
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
@@ -222,6 +246,7 @@ export type RepoSettingsLoad =
       takeoverAuthors: string[];
       ignoreConflictsAuthors: string[];
       blockingQuestionAuthors: string[];
+      mode: RepoMode;
     }
   | { state: "invalid"; error: string };
 
@@ -271,7 +296,74 @@ export async function loadRepoSettings(
     takeoverAuthors: parsed.settings.takeoverAuthors,
     ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
+    mode: parsed.settings.mode,
   };
+}
+
+/**
+ * Repository mode from a loaded settings file. Missing or invalid files are
+ * today's behavior (`full`): this setting adds no new invalid-file rule, and
+ * an unreadable file also falls back to `full` via the loaders below.
+ */
+export function repoMode(settings: RepoSettingsLoad): RepoMode {
+  if (settings.state !== "valid") return "full";
+  return settings.mode;
+}
+
+/**
+ * Load the mode at a default-branch ref. Missing, invalid, or unreadable
+ * files fall back to `full` so one repository's file never changes another
+ * repository. Never throws.
+ */
+export async function loadRepoMode(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<RepoMode> {
+  if (!defaultBranch.trim()) return "full";
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `mode settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return "full";
+  }
+  if (settings.state === "invalid") {
+    log?.(`mode settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    return "full";
+  }
+  return repoMode(settings);
+}
+
+export interface RepoModeRepoApi extends RepoSettingsFileApi {
+  getRepo?(owner: string, repo: string): Promise<{ default_branch: string }>;
+}
+
+/**
+ * Resolve the mode via the repository's default branch. Missing, invalid,
+ * unreadable, or branchless repositories fall back to `full`. Never throws.
+ */
+export async function resolveRepoMode(
+  api: RepoModeRepoApi,
+  owner: string,
+  repo: string,
+  log?: (message: string) => void
+): Promise<RepoMode> {
+  try {
+    const getRepo = api.getRepo;
+    if (typeof getRepo !== "function") return "full";
+    const info = await getRepo.call(api, owner, repo);
+    const defaultBranch = info.default_branch?.trim() ? info.default_branch : "";
+    if (!defaultBranch) return "full";
+    return await loadRepoMode(api, owner, repo, defaultBranch, log);
+  } catch (err) {
+    log?.(`mode settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return "full";
+  }
 }
 
 /**

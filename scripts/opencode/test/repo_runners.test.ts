@@ -33,6 +33,7 @@ describe("allowed_runners parsing", () => {
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
+        mode: "full",
       },
     });
   });
@@ -48,6 +49,7 @@ describe("allowed_runners parsing", () => {
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
+        mode: "full",
       },
     });
   });
@@ -63,6 +65,7 @@ describe("allowed_runners parsing", () => {
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
+        mode: "full",
       },
     });
   });
