@@ -24,21 +24,21 @@ describe("allowed_runners parsing", () => {
   test("absent means unrestricted", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, allowedRunners: undefined },
+      settings: { automerge: true, allowedRunners: undefined, blockingQuestionAuthors: [] },
     });
   });
 
   test("list parses, trims, drops blanks and dedupes", () => {
     expect(parseRepoSettingsText("allowed_runners: [grok, opus, grok, '  ']\n")).toEqual({
       ok: true,
-      settings: { automerge: false, allowedRunners: ["grok", "opus"] },
+      settings: { automerge: false, allowedRunners: ["grok", "opus"], blockingQuestionAuthors: [] },
     });
   });
 
   test("empty list is valid and means no runner", () => {
     expect(parseRepoSettingsText("allowed_runners: []\n")).toEqual({
       ok: true,
-      settings: { automerge: false, allowedRunners: [] },
+      settings: { automerge: false, allowedRunners: [], blockingQuestionAuthors: [] },
     });
   });
 

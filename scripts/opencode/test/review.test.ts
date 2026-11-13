@@ -4006,6 +4006,60 @@ describe("publishReviewResult", () => {
     expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
   });
 
+  test("a login listed only in the repository file blocks in that repository", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: [],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "repo-bot" }) }),
+        getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+
+  test("a repository file for another author does not block this author", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: [],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "alice" }) }),
+        getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+  });
+
+  test("a deployer-listed author still blocks when the file lists others", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...publishOpts,
+      blockingQuestionAuthors: ["renovate-bot"],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: makeApi({
+        getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
+        getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+
   test("a failure review with one located risk lists it with a link to the inline", async () => {
     const reviews: unknown[] = [];
     let inlines: InlineComment[] = [];

@@ -55,7 +55,12 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
-import { loadRepoSettings, REPO_SETTINGS_PATH, resolveRepoChain } from "./repo_settings.ts";
+import {
+  loadEffectiveBlockingQuestionAuthors,
+  loadRepoSettings,
+  REPO_SETTINGS_PATH,
+  resolveRepoChain,
+} from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -1102,6 +1107,27 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const forgeApi = opts.forge ?? opts.api;
   const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewLabel = `${opts.owner}/${opts.repo}#${opts.prNumber}`;
+  // Effective blocking authors: the deployer list plus the repository's
+  // default-branch file. Read from the default branch only so a change takes
+  // effect when it reaches the default branch. Fail-open to the deployer
+  // list: a missing, invalid, or unreadable file contributes nothing.
+  let blockingQuestionAuthors = opts.blockingQuestionAuthors;
+  try {
+    const repoInfo = await forgeApi.getRepo(opts.owner, opts.repo);
+    const defaultBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+    if (defaultBranch) {
+      blockingQuestionAuthors = await loadEffectiveBlockingQuestionAuthors(
+        forgeApi,
+        opts.owner,
+        opts.repo,
+        defaultBranch,
+        opts.blockingQuestionAuthors,
+        log
+      );
+    }
+  } catch {
+    // Fail-open: the deployer list still applies.
+  }
   const skipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, opts.expectedHeadSha);
   if (skipReason) {
     const result: ReviewResult = { status: "skipped", reason: skipReason };
@@ -1217,14 +1243,15 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       addressed: counts.addressed,
     });
   }
-  // Opt-in blocking questions: when the deployment lists this PR author, a
+  // Opt-in blocking questions: when the effective list (deployer plus the
+  // repository's default-branch file) names this PR author, a
   // questions-only success still fails the required check so automerge waits,
-  // and the worker follow-up below answers the questions. With the setting
-  // off (or an unlisted author) the count is zero and nothing changes.
+  // and the worker follow-up below answers the questions. With neither list
+  // naming the author the count is zero and nothing changes.
   const blockingQuestions =
     !parsed.verdict.incomplete &&
     parsed.verdict.state === "success" &&
-    isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors)
+    isBlockingQuestionAuthor(pr.user?.login, blockingQuestionAuthors)
       ? countQuestionFindings(comment, { singleFilePath })
       : 0;
   const effectiveVerdict =
@@ -1774,6 +1801,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       commits: recentHistory?.commits.length ?? 0,
     });
 
+    const effectiveBlockingAuthors = await loadEffectiveBlockingQuestionAuthors(
+      forgeApi,
+      opts.owner,
+      opts.repo,
+      repoInfo.default_branch?.trim() ? repoInfo.default_branch : "",
+      opts.blockingQuestionAuthors,
+      log
+    );
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
@@ -1784,7 +1820,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       delta,
       reviewMd,
       recentHistory,
-      blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors),
+      blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
     });
 
     logDiagnostic(log, "review_prompt", {
@@ -2003,7 +2039,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               prNumber: opts.prNumber,
               expectedHeadSha: reviewedHeadSha,
               botUsername: opts.botUsername,
-              blockingQuestionAuthors: opts.blockingQuestionAuthors,
+              blockingQuestionAuthors: effectiveBlockingAuthors,
               automergeRepos: opts.automergeRepos,
               resultMarkdown: markdown,
               resultRunner: runner,
