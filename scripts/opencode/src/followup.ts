@@ -1232,8 +1232,11 @@ export async function implementFollowUp(
       diagBase: { job: `${owner}/${repo}#${issueNumber}`, head: pr.head.sha },
       unreadableContext: `${owner}/${repo}`,
       publish: async (reason) => {
-        await sticky(reason, pr.number);
-        await forgetClaim();
+        try {
+          await sticky(reason, pr.number);
+        } finally {
+          await forgetClaim();
+        }
       },
     });
     if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
