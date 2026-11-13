@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { implementIssue } from "../src/implement.ts";
 import {
+  applyRepoChain,
   invalidRepoSettingsReason,
   narrowChainForRepo,
   noAllowedRunnerReason,
@@ -505,6 +506,85 @@ describe("worker runner allow-list", () => {
       expect(result.reason).toContain("Independent review unavailable");
       expect(result.reason).toContain("no eligible reviewer");
       expect(statuses.at(-1)?.state).toBe("failure");
+    });
+  });
+});
+
+describe("applyRepoChain fail-closed ordering", () => {
+  test("unreadable resolves fail-open without publishing", async () => {
+    let published = 0;
+    const applied = await applyRepoChain({
+      api: {
+        getRepoFile: async () => {
+          throw new Error("GitHub API → 500");
+        },
+      },
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      chain: chain(),
+      log: () => undefined,
+      publish: async () => {
+        published++;
+      },
+    });
+    expect(published).toBe(0);
+    expect(applied.failedClosed).toBe(false);
+    if (!applied.failedClosed) {
+      expect(applied.narrowed).toBe(false);
+      expect(applied.chain?.map((r) => r.name)).toEqual(["grok", "opus"]);
+    }
+  });
+
+  test("publish failure propagates instead of continuing on the full chain", async () => {
+    let published = 0;
+    await expect(
+      applyRepoChain({
+        api: { getRepoFile: async () => ({ found: true, content: "nope: 1\n" }) },
+        owner: "o",
+        repo: "r",
+        defaultBranch: "main",
+        chain: chain(),
+        log: () => undefined,
+        publish: async () => {
+          published++;
+          throw new Error("status store unavailable");
+        },
+      })
+    ).rejects.toThrow("status store unavailable");
+    expect(published).toBe(1);
+  });
+
+  test("review fail-closed status failure runs no runner", async () => {
+    await withWorkspace(async (workspace) => {
+      let ran = 0;
+      const { api } = reviewApi({
+        getRepoFile: async () => ({ found: true, content: "nope: 1\n" }),
+        createCommitStatus: async () => {
+          throw new Error("status store unavailable");
+        },
+      });
+      await expect(
+        reviewPullRequest({
+          api: api as never,
+          owner: "o",
+          repo: "r",
+          prNumber: 7,
+          model: "openai/gpt-5.5",
+          workspace,
+          giteaUrl: "https://gitea.example",
+          giteaToken: "t",
+          botUsername: "jumi",
+          workspacePreparer: async () => undefined,
+          logger: () => undefined,
+          chain: chain() as never,
+          openCodeRunner: async () => {
+            ran++;
+            return { status: "ok" };
+          },
+        } as never)
+      ).rejects.toThrow("status store unavailable");
+      expect(ran).toBe(0);
     });
   });
 });
