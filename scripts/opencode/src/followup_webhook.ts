@@ -449,10 +449,6 @@ function payloadPickupLabel(label: GiteaPRPayload["label"], pickupLabel?: string
   return hasLabel({ labels: [label] }, needle);
 }
 
-function payloadJumiLabel(label: GiteaPRPayload["label"]): boolean {
-  return payloadPickupLabel(label, "jumi");
-}
-
 function prWithEventLabel(pr: GiteaPR, label: GiteaPRPayload["label"]): GiteaPR {
   if (label == null) return pr;
   return { ...pr, labels: [...(pr.labels ?? []), label] };

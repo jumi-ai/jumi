@@ -263,7 +263,6 @@ export async function needsConflict(opts: {
   let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
   if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
     try {
-      const { loadRepoSettings } = await import("./repo_settings.ts");
       const loaded = await loadRepoSettings(
         { getRepoFile: opts.getRepoFile },
         opts.owner,

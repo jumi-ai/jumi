@@ -1,6 +1,6 @@
 import { isWipOrDraft } from "./gitea_issues.ts";
-import { isListedLogin, senderCanSteer } from "./permissions.ts";
-import { loadRepoSettings } from "./repo_settings.ts";
+import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
+import { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 
 export const TAKEOVER_NOTE_MARKER = "<!-- jumi-takeover -->";
@@ -101,6 +101,45 @@ export async function loadTakeoverAuthors(
   } catch (err) {
     logger?.(`takeover authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
     return [];
+  }
+}
+
+/**
+ * Single default-branch read serving the takeover list, the effective trusted
+ * list, and the pickup marker. Missing, invalid, or unreadable falls back to
+ * deployment behaviour (`jumi` marker, deployer trust list, no takeover).
+ * When `preloadedAuthors` is set only the authors read is skipped; the file
+ * is still read once for the trust list and marker.
+ */
+async function loadTakeoverRepoPolicy(
+  api: TakeoverFileApi | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null,
+  trustedSenderLogins: readonly string[] | undefined,
+  log: (message: string) => void,
+  preloadedAuthors?: readonly string[]
+): Promise<{ authors: readonly string[]; effectiveTrusted: readonly string[] | undefined; pickupLabel: string }> {
+  const fallback = {
+    authors: preloadedAuthors ?? ([] as readonly string[]),
+    effectiveTrusted: trustedSenderLogins,
+    pickupLabel: "jumi",
+  };
+  try {
+    const branch = typeof defaultBranch === "string" ? defaultBranch.trim() : "";
+    if (!branch || !api || typeof api.getRepoFile !== "function") return fallback;
+    const loaded = await loadRepoSettings(api as never, owner, repo, branch);
+    if (loaded.state !== "valid") {
+      return preloadedAuthors === undefined ? { ...fallback, authors: [] } : fallback;
+    }
+    return {
+      authors: preloadedAuthors ?? [...(loaded.takeoverAuthors ?? [])],
+      effectiveTrusted: effectiveTrustedSenderLogins(trustedSenderLogins, loaded),
+      pickupLabel: effectivePickupLabel(loaded),
+    };
+  } catch (err) {
+    log(`takeover settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return fallback;
   }
 }
 
@@ -254,60 +293,18 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
   const log = input.log ?? (() => undefined);
   const author = typeof input.prAuthorLogin === "string" ? input.prAuthorLogin.trim() : "";
   if (!author) return { takeover: false, refused: false };
-  let authors = input.takeoverAuthors;
-  // One default-branch read serves the takeover list, the effective trusted
-  // list, and the pickup marker: missing, invalid, or unreadable falls back
-  // to deployment behaviour (`jumi` marker, deployer trust list).
-  let effectiveTrusted = input.trustedSenderLogins;
-  let pickupLabel = "jumi";
-  if (authors === undefined) {
-    authors = await loadTakeoverAuthors(input.api, input.owner, input.repo, input.defaultBranch, log);
-    try {
-      const { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } = await import(
-        "./repo_settings.ts"
-      );
-      const branch = typeof input.defaultBranch === "string" ? input.defaultBranch.trim() : "";
-      if (branch && input.api && typeof (input.api as { getRepoFile?: unknown }).getRepoFile === "function") {
-        try {
-          const loaded = await loadRepoSettings(input.api as never, input.owner, input.repo, branch);
-          if (loaded.state === "valid") {
-            effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, loaded);
-            pickupLabel = effectivePickupLabel(loaded);
-          }
-        } catch (err) {
-          log(
-            `takeover settings unreadable for ${input.owner}/${input.repo}: ${err instanceof Error ? err.message : String(err)}`
-          );
-        }
-      }
-    } catch {
-      // Fall back to deployment behaviour.
-    }
-  } else {
-    // Pre-loaded list: still resolve the effective trust/marker from the file
-    // so callers that bypass the file read get repo-aware behaviour.
-    try {
-      const { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } = await import(
-        "./repo_settings.ts"
-      );
-      const branch = typeof input.defaultBranch === "string" ? input.defaultBranch.trim() : "";
-      if (branch && input.api && typeof (input.api as { getRepoFile?: unknown }).getRepoFile === "function") {
-        try {
-          const loaded = await loadRepoSettings(input.api as never, input.owner, input.repo, branch);
-          if (loaded.state === "valid") {
-            effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, loaded);
-            pickupLabel = effectivePickupLabel(loaded);
-          }
-        } catch (err) {
-          log(
-            `takeover settings unreadable for ${input.owner}/${input.repo}: ${err instanceof Error ? err.message : String(err)}`
-          );
-        }
-      }
-    } catch {
-      // Fall back to deployment behaviour.
-    }
-  }
+  const policy = await loadTakeoverRepoPolicy(
+    input.api,
+    input.owner,
+    input.repo,
+    input.defaultBranch,
+    input.trustedSenderLogins,
+    log,
+    input.takeoverAuthors
+  );
+  const authors = policy.authors;
+  const effectiveTrusted = policy.effectiveTrusted;
+  const pickupLabel = policy.pickupLabel;
   if (!isTakeoverAuthor(author, authors)) return { takeover: false, refused: false };
   let admitted = false;
   try {
@@ -319,7 +316,6 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
     return { takeover: false, refused: false };
   }
   if (!admitted) {
-    const { hasTrustedSenders } = await import("./permissions.ts");
     const trusted = (input.hasTrustedSenders ?? hasTrustedSenders)(effectiveTrusted);
     const detail = trusted
       ? "that author is not on the trusted-sender list."
