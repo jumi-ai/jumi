@@ -37,7 +37,12 @@ import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
-import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import {
+  CREDIT_QUOTA_MESSAGE,
+  isCreditBalanceText,
+  QUOTA_MESSAGE,
+  type QuotaClass,
+} from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
@@ -53,6 +58,17 @@ const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
 const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET", "BOARD_PEER_TOKEN"]);
 const CLAUDE_USAGE_LIMIT_RE =
   /You've hit your (?:session |usage |weekly |opus |sonnet |5[- ]hour )?limit|Claude AI usage limit reached/i;
+
+/**
+ * Narrow credit-exhaustion signal for API-key billing. Only the documented
+ * `Credit balance is too low` phrase matches, so ordinary task output that
+ * mentions credit, billing, or balance never trips it. Covers both the
+ * stdout `result` text and stderr: the caller passes the combined output.
+ */
+export function inspectClaudeCreditExhaustion(text: string | null | undefined): QuotaClass | undefined {
+  if (!text || !isCreditBalanceText(text)) return undefined;
+  return "hard";
+}
 
 export function stripAnsi(str: string): string {
   return str.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`, "g"), "");
@@ -485,8 +501,9 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     const cleanStderr = stripClaudeConfigWarning(stderr);
     const combined = [cleanStderr, stdout].filter(Boolean).join("\n");
     const durationMs = Date.now() - startedAtMs;
-    const quota = !timedOut ? inspectClaudeUsageLimit(combined) : undefined;
-    const auth = !quota && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);
+    const credit = !timedOut ? inspectClaudeCreditExhaustion(combined) : undefined;
+    const quota = !credit && !timedOut ? inspectClaudeUsageLimit(combined) : undefined;
+    const auth = !quota && !credit && !timedOut && exitCode !== 143 && looksLikeProviderAuthDeath(combined);
 
     if (opts.abortSignal?.aborted) {
       const err = new Error("cancelled");
@@ -496,6 +513,24 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
 
     if (runError) {
       const message = redact(runError instanceof Error ? runError.message : String(runError));
+      const runCredit = inspectClaudeCreditExhaustion(message);
+      if (runCredit) {
+        if (stderr) log(`[claude stderr] ${stderr}`);
+        if (!isClaudeApiKeyRunner(opts)) {
+          log(
+            `claude runner ${claudeRunnerDisplayName(opts)} hit credit exhaustion on a subscription runner: billed through an API key`
+          );
+        }
+        return observeEngineRun(opts, {
+          status: "stuck",
+          exitCode,
+          stdout,
+          message: CREDIT_QUOTA_MESSAGE,
+          infra: false,
+          durationMs,
+          quota: runCredit,
+        });
+      }
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[claude stderr] ${stderr}`);
         const authMessage = providerAuthDeathForRun({ ...opts, type: "claude" });
@@ -521,6 +556,24 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     if (exitCode === 0) {
       if (stderr) log(`[claude stderr] ${stderr}`);
       return observeEngineRun(opts, { status: "ok", exitCode: 0, stdout, durationMs });
+    }
+
+    if (credit) {
+      if (stderr) log(`[claude stderr] ${stderr}`);
+      if (!isClaudeApiKeyRunner(opts)) {
+        log(
+          `claude runner ${claudeRunnerDisplayName(opts)} hit credit exhaustion on a subscription runner: billed through an API key`
+        );
+      }
+      return observeEngineRun(opts, {
+        status: "stuck",
+        exitCode,
+        stdout,
+        message: CREDIT_QUOTA_MESSAGE,
+        infra: false,
+        durationMs,
+        quota: credit,
+      });
     }
 
     if (quota) {
@@ -565,6 +618,14 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     const message = isClaudeApiKeyRunner(opts)
       ? redactGitSecrets(rawMessage, claudeRedactSecrets(resolveClaudeApiKey(opts.authEnv, process.env)))
       : rawMessage;
+    if (isCreditBalanceText(message)) {
+      if (!isClaudeApiKeyRunner(opts)) {
+        log(
+          `claude runner ${claudeRunnerDisplayName(opts)} hit credit exhaustion on a subscription runner: billed through an API key`
+        );
+      }
+      throw new EngineFailedError(CREDIT_QUOTA_MESSAGE, false, { quota: "hard" });
+    }
     if (looksLikeProviderAuthDeath(message)) {
       throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "claude" }), false, { auth: true });
     }

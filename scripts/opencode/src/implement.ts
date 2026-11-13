@@ -68,7 +68,7 @@ import { withIssueAuthorPermission } from "./permissions.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -893,10 +893,11 @@ export async function implementIssue(
   const latchKey = { owner, repo, issueNumber };
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
-    await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, QUOTA_STUCK_TEXT);
+    const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
+    await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, quotaReason);
     await forgetClaim();
     await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
-    return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+    return { status: "skipped", reason: quotaReason };
   }
   const stuckReason = evaluateStuck(stuckState.fingerprints);
   if (stuckReason) {
@@ -1080,11 +1081,12 @@ export async function implementIssue(
             chain: jobChain,
             previousError: opts.previousError,
           });
-          await diary(QUOTA_STUCK_TEXT);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          const quotaReason = quotaStuckReasonForText(result.message);
+          await diary(quotaReason);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          return { status: "skipped", reason: quotaReason };
         }
         throwIfEngineFailed(result);
         return undefined;
@@ -1245,7 +1247,7 @@ export async function implementIssue(
                 queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
                 { continueSession: true }
               );
-              if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+              if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
             },
           });
         } catch (err) {
@@ -1257,9 +1259,10 @@ export async function implementIssue(
               chain: jobChain,
               previousError: opts.previousError,
             });
+            const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-            return { status: "skipped" as const, reason: QUOTA_STUCK_TEXT };
+            return { status: "skipped" as const, reason: quotaReason };
           }
           throw err;
         }
@@ -1396,8 +1399,9 @@ export async function implementIssue(
           chain: jobChain,
           previousError: opts.previousError,
         });
-        await diary(QUOTA_STUCK_TEXT).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        await diary(quotaReason).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
           pushLanded: false,
           logger: log,
