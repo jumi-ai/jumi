@@ -56,7 +56,7 @@ export const REPO_MODE_REVIEW_ONLY_REASON = "repository mode is review-only";
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set([
+export const KNOWN_KEYS = new Set([
   "automerge",
   "allowed_runners",
   "timeouts",
