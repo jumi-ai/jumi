@@ -89,7 +89,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { loadRepoFollowupPolicy } from "./repo_settings.ts";
+import { loadEffectiveBlockingQuestionAuthors, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -760,7 +760,7 @@ export async function needsFollowUp(opts: {
   });
   let effectiveMax = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
   let followupOnSuggestions = true;
-  if (opts.defaultBranch) {
+  if (opts.defaultBranch?.trim()) {
     const policy = await loadRepoFollowupPolicy(
       opts.api,
       opts.owner,
@@ -776,6 +776,28 @@ export async function needsFollowUp(opts: {
     followupOnSuggestions = policy.followupOnSuggestions;
   }
   if (state.round >= effectiveMax) return false;
+  // Effective blocking authors: deployer plus the repository's
+  // default-branch file. Fail-open to the deployer list. Prefer the
+  // caller-provided default branch so no extra repo lookup is needed.
+  let effectiveBlocking = opts.blockingQuestionAuthors;
+  try {
+    let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
+    if (!settingsBranch) {
+      const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
+      settingsBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+    }
+    if (settingsBranch) {
+      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
+        opts.api,
+        opts.owner,
+        opts.repo,
+        settingsBranch,
+        opts.blockingQuestionAuthors
+      );
+    }
+  } catch {
+    // Fail-open: the deployer list still decides.
+  }
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -786,7 +808,7 @@ export async function needsFollowUp(opts: {
     opts.followupIgnoreLogins,
     {
       prAuthor: opts.pr.user?.login,
-      ...(opts.blockingQuestionAuthors ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+      ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
       ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
     },
     opts.trustedSenderLogins
@@ -1061,11 +1083,29 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
+  // Effective blocking authors: deployer plus the repository's
+  // default-branch file (the job's default branch). Fail-open to deployer.
+  let effectiveBlocking = opts.blockingQuestionAuthors;
+  try {
+    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
+    if (defaultBranch) {
+      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
+        opts.api,
+        owner,
+        repo,
+        defaultBranch,
+        opts.blockingQuestionAuthors,
+        log
+      );
+    }
+  } catch {
+    // Fail-open: the deployer list still decides.
+  }
   const findingOpts = reviewFindingMatchOptsForJob(
     opts.job,
     pr.head.sha,
     pr.user?.login,
-    opts.blockingQuestionAuthors,
+    effectiveBlocking,
     policy.followupOnSuggestions
   );
 

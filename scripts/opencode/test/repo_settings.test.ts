@@ -1,30 +1,36 @@
 import { describe, expect, test } from "bun:test";
-import { loadRepoSettings, parseRepoSettingsText, prTouchesRepoSettings } from "../src/repo_settings.ts";
+import {
+  effectiveBlockingQuestionAuthors,
+  loadEffectiveBlockingQuestionAuthors,
+  loadRepoSettings,
+  parseRepoSettingsText,
+  prTouchesRepoSettings,
+} from "../src/repo_settings.ts";
 import { invalidHeadSettingsFailure } from "../src/review.ts";
 
 describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, followupOnSuggestions: true },
+      settings: { automerge: true, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
   });
 
   test("absent automerge means off", () => {
     expect(parseRepoSettingsText("{}\n")).toEqual({
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true },
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true },
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
   });
 
   test("explicit false means off", () => {
     expect(parseRepoSettingsText("automerge: false\n")).toEqual({
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true },
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
   });
 
@@ -44,11 +50,11 @@ describe("parseRepoSettingsText", () => {
   test("an empty file means off", () => {
     expect(parseRepoSettingsText("")).toEqual({
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true },
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true },
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
     });
   });
 
@@ -64,6 +70,45 @@ describe("parseRepoSettingsText", () => {
       const parsed = parseRepoSettingsText(text);
       expect(parsed).toEqual({ ok: false, error: '"automerge" must be a boolean' });
     }
+  });
+
+  test("blocking_question_authors parses a login list", () => {
+    expect(parseRepoSettingsText("blocking_question_authors:\n  - renovate-bot\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: ["renovate-bot"] },
+    });
+    expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
+      {
+        ok: true,
+        settings: { automerge: true, followupOnSuggestions: true, blockingQuestionAuthors: ["Alice", "renovate-bot"] },
+      }
+    );
+  });
+
+  test("absent blocking_question_authors means none", () => {
+    expect(parseRepoSettingsText("automerge: true\n")).toEqual({
+      ok: true,
+      settings: { automerge: true, followupOnSuggestions: true, blockingQuestionAuthors: [] },
+    });
+  });
+
+  test("a wrong-type blocking list is invalid", () => {
+    for (const text of [
+      "blocking_question_authors: renovate-bot\n",
+      "blocking_question_authors: 1\n",
+      "blocking_question_authors: null\n",
+      "blocking_question_authors:\n  - renovate-bot\n  - 1\n",
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({ ok: false, error: '"blocking_question_authors" must be a list of logins' });
+    }
+  });
+
+  test("blank blocking entries are dropped", () => {
+    expect(parseRepoSettingsText('blocking_question_authors:\n  - "  "\n  - alice\n')).toEqual({
+      ok: true,
+      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: ["alice"] },
+    });
   });
 });
 
@@ -86,7 +131,12 @@ describe("loadRepoSettings", () => {
         "r",
         "main"
       )
-    ).toEqual({ state: "valid", automerge: true, followupOnSuggestions: true });
+    ).toEqual({
+      state: "valid",
+      automerge: true,
+      followupOnSuggestions: true,
+      blockingQuestionAuthors: [],
+    });
   });
 
   test("invalid file carries the parser error", async () => {
@@ -108,6 +158,47 @@ describe("loadRepoSettings", () => {
         "main"
       )
     ).rejects.toThrow("500");
+  });
+});
+
+describe("effectiveBlockingQuestionAuthors", () => {
+  test("merges deployer and repo lists without removing deployer logins", () => {
+    expect(
+      effectiveBlockingQuestionAuthors(["deployer-bot"], {
+        state: "valid",
+        automerge: false,
+        followupOnSuggestions: true,
+        blockingQuestionAuthors: ["repo-bot", "DEPLOYER-bot"],
+      })
+    ).toEqual(["deployer-bot", "repo-bot"]);
+  });
+
+  test("missing or invalid files contribute nothing", () => {
+    expect(effectiveBlockingQuestionAuthors(["deployer-bot"], { state: "missing" })).toEqual(["deployer-bot"]);
+    expect(effectiveBlockingQuestionAuthors(["deployer-bot"], { state: "invalid", error: "bad" })).toEqual([
+      "deployer-bot",
+    ]);
+    expect(effectiveBlockingQuestionAuthors([], { state: "missing" })).toEqual([]);
+  });
+});
+
+describe("loadEffectiveBlockingQuestionAuthors", () => {
+  test("repo file adds authors the deployer did not list", async () => {
+    const api = {
+      getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
+    };
+    expect(await loadEffectiveBlockingQuestionAuthors(api, "o", "r", "main", [])).toEqual(["repo-bot"]);
+    expect(await loadEffectiveBlockingQuestionAuthors(api, "o", "r", "main", ["deployer-bot"])).toEqual([
+      "deployer-bot",
+      "repo-bot",
+    ]);
+  });
+
+  test("missing file falls back to the deployer list", async () => {
+    const api = { getRepoFile: async () => ({ found: false }) };
+    expect(await loadEffectiveBlockingQuestionAuthors(api, "o", "r", "main", ["deployer-bot"])).toEqual([
+      "deployer-bot",
+    ]);
   });
 });
 

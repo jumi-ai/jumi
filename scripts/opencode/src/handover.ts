@@ -4,7 +4,7 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { loadRepoFollowupPolicy } from "./repo_settings.ts";
+import { loadEffectiveBlockingQuestionAuthors, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -129,17 +129,37 @@ export async function enqueueFollowUpFromReview(
 
   // Cheap trailer gate first: incomplete skips without a PR fetch, and a
   // failure or leftover-simplification success enqueues. Only a plain success
-  // trailer needs the PR author to decide whether opt-in blocking questions
-  // keep the follow-up alive.
+  // trailer needs the PR author plus the effective blocking list (deployer
+  // plus the repository's default-branch file) to decide whether opt-in
+  // blocking questions keep the follow-up alive.
   const earlySkip = persistInsertSkipReason(opts.markdown);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
-  if (earlySkip === "success trailer" && !opts.blockingQuestionAuthors?.length) return logSkip(earlySkip);
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
+  // Only a plain success trailer needs the PR author plus the effective
+  // blocking list (deployer plus the repository's default-branch file) to
+  // decide whether opt-in blocking questions keep the follow-up alive.
+  let effectiveBlocking = opts.blockingQuestionAuthors;
   if (earlySkip === "success trailer") {
-    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, opts.blockingQuestionAuthors);
+    try {
+      const repoForSettings = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+      const defaultBranch = repoForSettings.default_branch?.trim() ? repoForSettings.default_branch : "";
+      if (defaultBranch) {
+        effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
+          opts.api,
+          opts.row.owner,
+          opts.row.repo,
+          defaultBranch,
+          opts.blockingQuestionAuthors,
+          opts.logger
+        );
+      }
+    } catch {
+      // Fail-open: the deployer list still decides.
+    }
+    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
     if (trailerSkip) return logSkip(trailerSkip);
   }
 
@@ -190,7 +210,7 @@ export async function enqueueFollowUpFromReview(
   if (
     isLeftoverSimplificationTrailer(opts.markdown) &&
     !isCurrentHeadFailureTrailer(opts.markdown) &&
-    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, opts.blockingQuestionAuthors) &&
+    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking) &&
     !policy.followupOnSuggestions
   ) {
     return logSkip("suggestions disabled");
