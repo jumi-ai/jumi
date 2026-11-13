@@ -4,7 +4,9 @@ import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
 import type { Forge, IssueApi } from "./ports.ts";
 import {
+  compileReviewExcludePatterns,
   loadRepoSettings,
+  partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
   type RepoSettingsLoad,
@@ -121,6 +123,47 @@ function cancelledSettingsNote(): string {
   );
 }
 
+/** Max left-out files named in the auto-merge note; longer lists name the count. Mirrors the review's left-out note. */
+export const MAX_LISTED_EXCLUDED_FILES = 10;
+
+/**
+ * Shared truncated backtick list for left-out files: names up to
+ * `MAX_LISTED_EXCLUDED_FILES`, then "and N more". Same format as the
+ * review's left-out note (`review.ts`).
+ */
+export function formatExcludedFileList(excludedFiles: readonly string[]): string {
+  const names = [...new Set(excludedFiles)];
+  const shown = names.slice(0, MAX_LISTED_EXCLUDED_FILES);
+  const quoted = shown.map((name) => `\`${name}\``).join(", ");
+  return names.length > shown.length ? `${quoted} and ${names.length - shown.length} more` : quoted;
+}
+
+export function excludedFilesNote(excludedFiles: readonly string[]): string {
+  const names = [...new Set(excludedFiles)];
+  const total = names.length;
+  const tail = formatExcludedFileList(names);
+  const filesWord = total === 1 ? "file" : "files";
+  const verb = total === 1 ? "is" : "are";
+  return (
+    `Jumi did not schedule auto-merge on this pull request because ${total} changed ${filesWord} ${verb} ` +
+    `left out of review per \`.jumi.yml\` \`review_exclude\` (patches not read): ${tail}. ` +
+    `A green review does not cover ${total === 1 ? "this file" : "these files"}; a person needs to merge once reviews and CI are green.`
+  );
+}
+
+function cancelledExcludedFilesNote(excludedFiles: readonly string[]): string {
+  const names = [...new Set(excludedFiles)];
+  const total = names.length;
+  const tail = formatExcludedFileList(names);
+  const filesWord = total === 1 ? "file" : "files";
+  const verb = total === 1 ? "is" : "are";
+  return (
+    `Jumi cancelled the auto-merge schedule on this pull request because ${total} changed ${filesWord} ${verb} ` +
+    `left out of review per \`.jumi.yml\` \`review_exclude\` (patches not read): ${tail}. ` +
+    `A green review does not cover ${total === 1 ? "this file" : "these files"}; a person needs to merge once reviews and CI are green.`
+  );
+}
+
 function unrestoredInvalidSettingsNote(error: string): string {
   return (
     `Jumi did not restore auto-merge on this pull request: the repository settings file ` +
@@ -160,22 +203,21 @@ async function cancelAutomergeSchedule(
 }
 
 /**
- * Whether the pull changes the repository settings file. Resolves
- * `undefined` when the pull file list is unreadable, so callers fail
- * closed; a missing list entrypoint resolves `false` (no check possible).
+ * Changed files of the pull. Resolves `undefined` when the pull file list
+ * is unreadable, so callers fail closed; a missing list entrypoint resolves
+ * `[]` (no check possible).
  */
-async function prIncludesSettingsFile(
+async function loadPrFiles(
   api: AutomergeApi,
   owner: string,
   repo: string,
   prNumber: number,
   log: (message: string) => void
-): Promise<boolean | undefined> {
+): Promise<Array<{ filename: string }> | undefined> {
   try {
     const listFiles = api.getPRFiles;
-    if (typeof listFiles !== "function") return false;
-    const files = await listFiles.call(api, owner, repo, prNumber);
-    return prTouchesRepoSettings(files);
+    if (typeof listFiles !== "function") return [];
+    return await listFiles.call(api, owner, repo, prNumber);
   } catch (err) {
     log(
       `automerge pull files unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
@@ -185,12 +227,28 @@ async function prIncludesSettingsFile(
 }
 
 /**
+ * Repository-relative paths left out of the review per the loaded
+ * default-branch settings. Missing, invalid, unreadable (handled by the
+ * caller), or empty means no exclusions. The settings file itself is never
+ * left out.
+ */
+function excludedFilenames(files: ReadonlyArray<{ filename: string }>, settings: RepoSettingsLoad): string[] {
+  if (settings.state !== "valid" || settings.reviewExclude.length === 0) return [];
+  const compiled = compileReviewExcludePatterns(settings.reviewExclude);
+  if (compiled.length === 0) return [];
+  return partitionReviewExcludedFiles(files, compiled).excluded.map((file) => file.filename);
+}
+
+/**
  * Schedule the forge's native auto-merge on a pull request Jumi opened.
  * Two switches are required: the deployer list must allow the repository
  * and the default-branch settings file must turn auto-merge on. A missing
  * file or `automerge: false` schedules nothing with no note. An invalid
  * file schedules nothing and the note names the parser's error. A pull
- * request that changes the settings file is never scheduled.
+ * request that changes the settings file is never scheduled, and neither is
+ * a pull with a file left out of review per the default-branch
+ * `review_exclude` patterns: a left-out change can merge unread, so a person
+ * merges.
  * Fail-closed: any unreadable gate or refused schedule leaves the pull open
  * and posts one sticky note on the pull request. Never throws.
  */
@@ -199,8 +257,8 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   const forge = input.forgeKind;
   if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return { scheduled: false };
 
-  const touchesSettings = await prIncludesSettingsFile(input.api, input.owner, input.repo, input.prNumber, log);
-  if (touchesSettings === undefined) {
+  const files = await loadPrFiles(input.api, input.owner, input.repo, input.prNumber, log);
+  if (files === undefined) {
     log(`automerge pull files unreadable for ${input.owner}/${input.repo}#${input.prNumber}: failing closed`);
     await postAutomergeNote(
       input.api,
@@ -212,7 +270,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     );
     return { scheduled: false };
   }
-  if (touchesSettings) {
+  if (prTouchesRepoSettings(files)) {
     log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: pull changes ${REPO_SETTINGS_PATH}`);
     await postAutomergeNote(
       input.api,
@@ -259,6 +317,23 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   // pull open for a person without a note (off posts nothing at all).
   if (repoMode(settings) !== "full") {
     log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: repository mode is ${settings.mode}`);
+    return { scheduled: false };
+  }
+  // A left-out change can merge unread: a pull with a file the review does
+  // not cover never schedules. A person merges.
+  const excluded = excludedFilenames(files, settings);
+  if (excluded.length > 0) {
+    log(
+      `automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: ${excluded.length} file(s) left out of review`
+    );
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      excludedFilesNote(excluded)
+    );
     return { scheduled: false };
   }
 
@@ -397,6 +472,10 @@ export interface RestoreAutomergeInput {
  *
  * A pull that now changes the repository settings file is never restored:
  * Jumi cancels the schedule it set earlier and posts one note saying why.
+ * A pull with a file left out of review per the default-branch
+ * `review_exclude` patterns is never restored either: Jumi cancels the
+ * schedule it set earlier and posts one note naming the files. A later push
+ * that removes those files does not re-schedule; a person merges.
  * Restoring re-checks the default-branch settings file: an invalid file
  * posts the parser's error, and anything but `automerge: true` restores
  * nothing.
@@ -409,10 +488,10 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   // schedule (person-cancelled or never scheduled) stays silent without any
   // further forge calls.
   if (input.forgeKind === "github" && !input.wasScheduled) return;
-  const touchesSettings = await prIncludesSettingsFile(noteApi, input.owner, input.repo, input.prNumber, log);
+  const files = await loadPrFiles(noteApi, input.owner, input.repo, input.prNumber, log);
   // Unreadable pull files fail closed: neither cancel nor restore.
-  if (touchesSettings === undefined) return;
-  if (touchesSettings) {
+  if (files === undefined) return;
+  if (prTouchesRepoSettings(files)) {
     if (input.forgeKind === "github") {
       await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
       await postAutomergeNote(
@@ -448,8 +527,32 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     }
     return;
   }
-  if (!input.wasScheduled) return;
-  if (input.forgeKind !== "github") return;
+  if (input.forgeKind !== "github") {
+    // Gitea never restores, but a push that brings a left-out file into the
+    // pull still cancels a schedule Jumi set earlier. Like the settings
+    // file, the cancel result drives the note.
+    const excluded = await loadGiteaExcludedFilenames(noteApi, input.owner, input.repo, files, log);
+    if (excluded.length === 0) return;
+    const cancelled = await cancelAutomergeSchedule(
+      noteApi,
+      input.forgeKind,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      log
+    );
+    if (cancelled) {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        cancelledExcludedFilesNote(excluded)
+      );
+    }
+    return;
+  }
   let current: { merged?: boolean; state?: string; autoMergeEnabled?: boolean };
   try {
     current = await input.api.getPR(input.owner, input.repo, input.prNumber);
@@ -460,46 +563,69 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     return;
   }
   if (current.merged || current.state !== "open") return;
-  if (current.autoMergeEnabled === true) return;
-  let mergeMethod = "MERGE";
-  let defaultBranch = "main";
+  let fetchedRepo: Awaited<ReturnType<AutomergeApi["getRepo"]>>;
   try {
-    const repo = await input.api.getRepo(input.owner, input.repo);
-    if (repo.allowAutoMerge === false) return;
-    mergeMethod = githubMergeMethodForRepo(repo) ?? "MERGE";
-    if (repo.default_branch) defaultBranch = repo.default_branch;
+    fetchedRepo = await input.api.getRepo(input.owner, input.repo);
+    if (fetchedRepo.allowAutoMerge === false) return;
   } catch {
     return;
   }
+  const defaultBranch =
+    typeof fetchedRepo.default_branch === "string" && fetchedRepo.default_branch ? fetchedRepo.default_branch : "main";
+  let settings: RepoSettingsLoad;
   try {
-    const settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
-    if (settings.state === "invalid") {
-      log(`automerge settings invalid for ${input.owner}/${input.repo}#${input.prNumber}: ${settings.error}`);
-      await postAutomergeNote(
-        noteApi,
-        input.owner,
-        input.repo,
-        input.prNumber,
-        input.botUsername,
-        unrestoredInvalidSettingsNote(settings.error)
-      );
-      return;
-    }
-    if (settings.state !== "valid" || settings.automerge !== true) return;
-    // Restricted repository modes never restore: the pull stays open for a
-    // person. Silent like a missing/off file, so off mode posts nothing.
-    if (repoMode(settings) !== "full") {
-      log(
-        `automerge not restored for ${input.owner}/${input.repo}#${input.prNumber}: repository mode is ${settings.mode}`
-      );
-      return;
-    }
+    settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
   } catch (err) {
     log(
       `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
     return;
   }
+  if (settings.state === "invalid") {
+    log(`automerge settings invalid for ${input.owner}/${input.repo}#${input.prNumber}: ${settings.error}`);
+    await postAutomergeNote(
+      noteApi,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      unrestoredInvalidSettingsNote(settings.error)
+    );
+    return;
+  }
+  if (settings.state !== "valid") return;
+  // A push that brings a left-out file into an already scheduled pull
+  // cancels the schedule Jumi set earlier. Checked before the kept-schedule
+  // fast path so a kept schedule is still cancelled; a later push that
+  // removes those files sees `wasScheduled: false` and stays silent, so a
+  // person merges.
+  const excluded = excludedFilenames(files, settings);
+  if (excluded.length > 0) {
+    log(
+      `automerge cancelled for ${input.owner}/${input.repo}#${input.prNumber}: ${excluded.length} file(s) left out of review`
+    );
+    await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
+    await postAutomergeNote(
+      noteApi,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      cancelledExcludedFilesNote(excluded)
+    );
+    return;
+  }
+  if (settings.automerge !== true) return;
+  // Restricted repository modes never restore: the pull stays open for a
+  // person. Silent like a missing/off file, so off mode posts nothing.
+  if (repoMode(settings) !== "full") {
+    log(
+      `automerge not restored for ${input.owner}/${input.repo}#${input.prNumber}: repository mode is ${settings.mode}`
+    );
+    return;
+  }
+  if (current.autoMergeEnabled === true) return;
+  const mergeMethod = githubMergeMethodForRepo(fetchedRepo) ?? "MERGE";
   try {
     const schedule = input.api.scheduleAutoMerge;
     if (typeof schedule !== "function") return;
@@ -510,6 +636,36 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       `automerge restore failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
   }
+}
+
+/**
+ * Left-out filenames for the Gitea push path. Missing, invalid,
+ * unreadable, or empty means no exclusions: the pull is left alone instead
+ * of failing. Never throws.
+ */
+async function loadGiteaExcludedFilenames(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  files: ReadonlyArray<{ filename: string }>,
+  log: (message: string) => void
+): Promise<string[]> {
+  let defaultBranch = "main";
+  try {
+    const info = await api.getRepo(owner, repo);
+    if (typeof info.default_branch === "string" && info.default_branch) defaultBranch = info.default_branch;
+  } catch (err) {
+    log(`automerge repo unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log(`automerge settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return [];
+  }
+  return excludedFilenames(files, settings);
 }
 
 /** Schedule state read just before a push (GitHub only; Gitea has no readable state). */
