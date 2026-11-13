@@ -96,7 +96,13 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { loadEffectiveBlockingQuestionAuthors, loadRepoFollowupPolicy } from "./repo_settings.ts";
+import {
+  effectiveBlockingQuestionAuthors,
+  effectiveConflictRounds,
+  effectiveFollowupRounds,
+  isSuggestionFollowupEnabled,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -767,44 +773,33 @@ export async function needsFollowUp(opts: {
   });
   let effectiveMax = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
   let followupOnSuggestions = true;
-  if (opts.defaultBranch?.trim()) {
-    const policy = await loadRepoFollowupPolicy(
-      opts.api,
-      opts.owner,
-      opts.repo,
-      opts.defaultBranch,
-      {
-        maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-        maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-      },
-      undefined
-    );
-    effectiveMax = policy.maxFollowupRounds;
-    followupOnSuggestions = policy.followupOnSuggestions;
-  }
-  if (state.round >= effectiveMax) return false;
   // Effective blocking authors: deployer plus the repository's
   // default-branch file. Fail-open to the deployer list. Prefer the
   // caller-provided default branch so no extra repo lookup is needed.
+  // The settings file is read once; the pure helpers derive both the cap
+  // and the blocking union from that load.
   let effectiveBlocking = opts.blockingQuestionAuthors;
   try {
     let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
-    if (!settingsBranch) {
+    let settingsLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
+    if (settingsBranch) {
+      settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
+    } else {
       const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
       settingsBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+      if (settingsBranch) {
+        settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
+      }
     }
-    if (settingsBranch) {
-      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        settingsBranch,
-        opts.blockingQuestionAuthors
-      );
+    if (settingsLoad) {
+      effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, settingsLoad);
+      followupOnSuggestions = isSuggestionFollowupEnabled(settingsLoad);
+      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, settingsLoad);
     }
   } catch {
-    // Fail-open: the deployer list still decides.
+    // Fail-open: deployment caps and the deployer list still decide.
   }
+  if (state.round >= effectiveMax) return false;
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -1043,17 +1038,35 @@ export async function implementFollowUp(
   opts: ImplementOptions & { sleep?: (ms: number) => Promise<void> }
 ): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
-  const policy = await loadRepoFollowupPolicy(
-    opts.api,
-    opts.job.owner,
-    opts.job.repo,
-    opts.job.defaultBranch,
-    {
-      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-    },
-    log
-  );
+  // Single default-branch file read for both the round caps/suggestion
+  // switch and the effective blocking list. Fail-open to deployment caps
+  // and the deployer list.
+  let policy = {
+    followupOnSuggestions: true,
+    maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+  };
+  let effectiveBlockingUpFront = opts.blockingQuestionAuthors;
+  try {
+    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
+    if (defaultBranch) {
+      const load = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, defaultBranch);
+      if (load.state === "invalid") {
+        log(`follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${defaultBranch}: ${load.error}`);
+      } else {
+        policy = {
+          followupOnSuggestions: isSuggestionFollowupEnabled(load),
+          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
+          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+        };
+      }
+      effectiveBlockingUpFront = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
+    }
+  } catch (err) {
+    log(
+      `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   const maxFollowupRounds = policy.maxFollowupRounds;
   const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
@@ -1090,24 +1103,9 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  // Effective blocking authors: deployer plus the repository's
-  // default-branch file (the job's default branch). Fail-open to deployer.
-  let effectiveBlocking = opts.blockingQuestionAuthors;
-  try {
-    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
-    if (defaultBranch) {
-      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-        opts.api,
-        owner,
-        repo,
-        defaultBranch,
-        opts.blockingQuestionAuthors,
-        log
-      );
-    }
-  } catch {
-    // Fail-open: the deployer list still decides.
-  }
+  // Effective blocking authors were loaded once above with the policy
+  // (the job's default branch). Fail-open to deployer.
+  const effectiveBlocking = effectiveBlockingUpFront;
   const findingOpts = reviewFindingMatchOptsForJob(
     opts.job,
     pr.head.sha,

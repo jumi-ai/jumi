@@ -4,7 +4,13 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { loadEffectiveBlockingQuestionAuthors, loadRepoFollowupPolicy } from "./repo_settings.ts";
+import {
+  effectiveBlockingQuestionAuthors,
+  effectiveConflictRounds,
+  effectiveFollowupRounds,
+  isSuggestionFollowupEnabled,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -138,27 +144,40 @@ export async function enqueueFollowUpFromReview(
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
-  // Only a plain success trailer needs the PR author plus the effective
-  // blocking list (deployer plus the repository's default-branch file) to
-  // decide whether opt-in blocking questions keep the follow-up alive.
-  let effectiveBlocking = opts.blockingQuestionAuthors;
-  if (earlySkip === "success trailer") {
-    try {
-      const repoForSettings = await opts.api.getRepo(opts.row.owner, opts.row.repo);
-      const defaultBranch = repoForSettings.default_branch?.trim() ? repoForSettings.default_branch : "";
-      if (defaultBranch) {
-        effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-          opts.api,
-          opts.row.owner,
-          opts.row.repo,
-          defaultBranch,
-          opts.blockingQuestionAuthors,
-          opts.logger
+  // Fetch the repo once for the settings file and the follow-up job.
+  // The default-branch file is read once; the pure helpers derive both
+  // the follow-up policy and the effective blocking list from that load.
+  // Missing, invalid, or unreadable behaves as today (fail-open).
+  const repo = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+  let effectiveBlocking: readonly string[] | undefined = opts.blockingQuestionAuthors;
+  let policy = {
+    followupOnSuggestions: true,
+    maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+  };
+  try {
+    const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
+    if (defaultBranch) {
+      const load = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
+      if (load.state === "invalid") {
+        opts.logger?.(
+          `follow-up settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${load.error}`
         );
+      } else {
+        policy = {
+          followupOnSuggestions: isSuggestionFollowupEnabled(load),
+          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
+          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+        };
       }
-    } catch {
-      // Fail-open: the deployer list still decides.
+      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
     }
+  } catch (err) {
+    opts.logger?.(
+      `follow-up settings unreadable for ${opts.row.owner}/${opts.row.repo}@${repo.default_branch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (earlySkip === "success trailer") {
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
     if (trailerSkip) return logSkip(trailerSkip);
   }
@@ -181,28 +200,13 @@ export async function enqueueFollowUpFromReview(
   }
 
   const issueNumber = closer ?? pr.number;
-  const [issue, repo] = await Promise.all([
-    foreign ? Promise.resolve(pr) : opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
-    opts.api.getRepo(opts.row.owner, opts.row.repo),
-  ]);
+  const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);
   if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, opts))) {
     return logSkip("unassigned");
   }
 
-  // Per-repository follow-up policy from the default branch. Fail-open:
-  // missing, invalid, or unreadable behaves as today.
-  const policy = await loadRepoFollowupPolicy(
-    opts.api,
-    opts.row.owner,
-    opts.row.repo,
-    repo.default_branch,
-    {
-      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-    },
-    opts.logger
-  );
-
+  // Policy and effective blocking were loaded once above from the same
+  // file read; the gate below sees the same list `needsFollowUp` sees.
   // Suggestion follow-up off: a `success` review with suggestions starts no
   // follow-up in that repository. Failures, blocking questions, red CI, and
   // conflicts run as today; a person asking still follows via the webhook

@@ -44,6 +44,7 @@ import {
   tipTracksAttachments,
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
+import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import {
@@ -273,7 +274,7 @@ export async function needsConflict(opts: {
       opts.repo,
       opts.defaultBranch,
       {
-        maxFollowupRounds: opts.maxFollowupRounds ?? 3,
+        maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
         maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
       },
       undefined
@@ -658,7 +659,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     opts.job.defaultBranch,
     {
       // Follow-up cap unused here; passed through for a single policy load.
-      maxFollowupRounds: opts.maxFollowupRounds ?? 3,
+      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
       maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
     },
     log
