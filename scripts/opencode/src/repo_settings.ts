@@ -13,6 +13,9 @@ export const REPO_SETTINGS_PATH = ".jumi.yml";
 
 export interface RepoSettings {
   automerge: boolean;
+  followupOnSuggestions: boolean;
+  maxFollowupRounds?: number;
+  maxConflictRounds?: number;
   takeoverAuthors: string[];
   ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
@@ -23,6 +26,9 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 
 const KNOWN_KEYS = new Set([
   "automerge",
+  "followup_on_suggestions",
+  "max_followup_rounds",
+  "max_conflict_rounds",
   "takeover_authors",
   "takeover-authors",
   "takeoverAuthors",
@@ -40,14 +46,19 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * absent author lists mean empty; no schema-version key exists. The error
- * string is the parser's error and is surfaced verbatim in the auto-merge
- * note and the review status. Author lists match whole logins,
- * case-insensitive. Canonical keys are `takeover_authors` and
- * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted
- * as aliases for the same setting. `blocking_question_authors` must be a
- * list of login strings when present; blank entries are dropped like the
- * deployer CSV.
+ * no schema-version key exists. `followup_on_suggestions` absent means on:
+ * a `success` review with suggestions follows up as today; `false` turns
+ * that off while failures, blocking questions, red CI, and conflicts run
+ * as today. `max_followup_rounds` / `max_conflict_rounds` absent mean the
+ * deployment value; `0` is valid and means no rounds of that kind.
+ * Absent author lists mean empty; absent `blocking_question_authors` means
+ * no repo-listed authors. The error string is the parser's error and is
+ * surfaced verbatim in the auto-merge note and the review status.
+ * Author lists match whole logins, case-insensitive. Canonical keys are
+ * `takeover_authors` and `ignore_conflicts_authors`; hyphen and camelCase
+ * spellings are accepted as aliases for the same setting.
+ * `blocking_question_authors` must be a list of login strings when present;
+ * blank entries are dropped like the deployer CSV.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -59,7 +70,13 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if (parsed === null || parsed === undefined)
     return {
       ok: true,
-      settings: { automerge: false, takeoverAuthors: [], ignoreConflictsAuthors: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
@@ -70,6 +87,19 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   const record = parsed as Record<string, unknown>;
   if (!("automerge" in record) || record.automerge === undefined) record.automerge = false as unknown as boolean;
   if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+  if (
+    "followup_on_suggestions" in record &&
+    record.followup_on_suggestions !== undefined &&
+    typeof record.followup_on_suggestions !== "boolean"
+  )
+    return { ok: false, error: `"followup_on_suggestions" must be a boolean` };
+  for (const key of ["max_followup_rounds", "max_conflict_rounds"] as const) {
+    if (key in record && record[key] !== undefined) {
+      const value = record[key];
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+        return { ok: false, error: `"${key}" must be a non-negative integer` };
+    }
+  }
   const takeover = parseAuthorList(record, ["takeover_authors", "takeover-authors", "takeoverAuthors"]);
   if (!takeover.ok) return takeover;
   const ignoreConflicts = parseAuthorList(record, [
@@ -91,15 +121,21 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     blockingQuestionAuthors = logins;
   }
-  return {
-    ok: true,
-    settings: {
-      automerge: record.automerge,
-      takeoverAuthors: takeover.authors,
-      ignoreConflictsAuthors: ignoreConflicts.authors,
-      blockingQuestionAuthors,
-    },
+  const settings: RepoSettings = {
+    automerge: record.automerge === true,
+    followupOnSuggestions:
+      "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
+        ? record.followup_on_suggestions === true
+        : true,
+    takeoverAuthors: takeover.authors,
+    ignoreConflictsAuthors: ignoreConflicts.authors,
+    blockingQuestionAuthors,
   };
+  if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
+    settings.maxFollowupRounds = record.max_followup_rounds as number;
+  if ("max_conflict_rounds" in record && record.max_conflict_rounds !== undefined)
+    settings.maxConflictRounds = record.max_conflict_rounds as number;
+  return { ok: true, settings };
 }
 
 function canonicalKey(aliases: readonly string[]): string {
@@ -131,6 +167,9 @@ export type RepoSettingsLoad =
   | {
       state: "valid";
       automerge: boolean;
+      followupOnSuggestions: boolean;
+      maxFollowupRounds?: number;
+      maxConflictRounds?: number;
       takeoverAuthors: string[];
       ignoreConflictsAuthors: string[];
       blockingQuestionAuthors: string[];
@@ -171,10 +210,80 @@ export async function loadRepoSettings(
   return {
     state: "valid",
     automerge: parsed.settings.automerge,
+    followupOnSuggestions: parsed.settings.followupOnSuggestions,
+    ...(parsed.settings.maxFollowupRounds !== undefined
+      ? { maxFollowupRounds: parsed.settings.maxFollowupRounds }
+      : {}),
+    ...(parsed.settings.maxConflictRounds !== undefined
+      ? { maxConflictRounds: parsed.settings.maxConflictRounds }
+      : {}),
     takeoverAuthors: parsed.settings.takeoverAuthors,
     ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
   };
+}
+
+/**
+ * Follow-up policy from a loaded settings file. Missing or invalid behaves
+ * as today: suggestions still follow up and both caps stay at the
+ * deployment values. A higher file value never exceeds the deployment
+ * ceiling; zero is valid and means no rounds of that kind.
+ */
+export function effectiveFollowupRounds(deploymentMax: number, load: RepoSettingsLoad): number {
+  if (load.state === "valid" && load.maxFollowupRounds !== undefined)
+    return Math.min(deploymentMax, load.maxFollowupRounds);
+  return deploymentMax;
+}
+
+export function effectiveConflictRounds(deploymentMax: number, load: RepoSettingsLoad): number {
+  if (load.state === "valid" && load.maxConflictRounds !== undefined)
+    return Math.min(deploymentMax, load.maxConflictRounds);
+  return deploymentMax;
+}
+
+export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return load.followupOnSuggestions !== false;
+}
+
+export interface RepoFollowupPolicy {
+  followupOnSuggestions: boolean;
+  maxFollowupRounds: number;
+  maxConflictRounds: number;
+}
+
+/**
+ * Load the follow-up policy from the default branch. Fail-open: missing,
+ * invalid, unreadable, or no file API behaves as today (deployment caps,
+ * suggestions on) and never throws. Callers that need fail-closed (auto-
+ * merge) keep using `loadRepoSettings` directly.
+ */
+export async function loadRepoFollowupPolicy(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployment: { maxFollowupRounds: number; maxConflictRounds: number },
+  log?: (message: string) => void
+): Promise<RepoFollowupPolicy> {
+  const fallback: RepoFollowupPolicy = {
+    followupOnSuggestions: true,
+    maxFollowupRounds: deployment.maxFollowupRounds,
+    maxConflictRounds: deployment.maxConflictRounds,
+  };
+  try {
+    const load = await loadRepoSettings(api, owner, repo, defaultBranch);
+    return {
+      followupOnSuggestions: isSuggestionFollowupEnabled(load),
+      maxFollowupRounds: effectiveFollowupRounds(deployment.maxFollowupRounds, load),
+      maxConflictRounds: effectiveConflictRounds(deployment.maxConflictRounds, load),
+    };
+  } catch (err) {
+    log?.(
+      `follow-up settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
+  }
 }
 
 /**
