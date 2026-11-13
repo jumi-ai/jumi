@@ -25,10 +25,15 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import {
+  effectiveLeaseMs,
+  effectiveTimeoutMsForKind,
+  loadDefaultBranchSettings,
   REPO_MODE_DISABLED_NOTE,
   REPO_MODE_OFF_REASON,
   REPO_MODE_REVIEW_ONLY_REASON,
   type RepoMode,
+  type RepoSettingsFileApi,
+  type RepoSettingsLoad,
   resolveRepoMode,
 } from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
@@ -65,6 +70,36 @@ export interface RunWorkerJobExtras {
 
 function log(message: string) {
   console.log(`[worker] ${message}`);
+}
+
+/**
+ * Repository timeouts for one worker job, read once from the default branch
+ * at job start. A change does not affect an already running job. Fail-open to
+ * deployment defaults when the file is missing, invalid, or unreadable.
+ */
+export async function resolveWorkerTimeouts(
+  api: RepoSettingsFileApi,
+  config: Pick<
+    WorkerConfig,
+    | "opencodeTimeoutMs"
+    | "opencodeTimeoutMaxMs"
+    | "followupTimeoutMs"
+    | "followupTimeoutMaxMs"
+    | "conflictTimeoutMs"
+    | "conflictTimeoutMaxMs"
+  >,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined,
+  logger: (message: string) => void = log
+): Promise<{ load: RepoSettingsLoad; implementMs: number; followupMs: number; conflictMs: number }> {
+  const { load } = await loadDefaultBranchSettings(api, owner, repo, defaultBranch, logger);
+  return {
+    load,
+    implementMs: effectiveTimeoutMsForKind(load, "implement", config.opencodeTimeoutMs, config.opencodeTimeoutMaxMs),
+    followupMs: effectiveTimeoutMsForKind(load, "follow-up", config.followupTimeoutMs, config.followupTimeoutMaxMs),
+    conflictMs: effectiveTimeoutMsForKind(load, "conflict", config.conflictTimeoutMs, config.conflictTimeoutMaxMs),
+  };
 }
 
 /**
@@ -125,6 +160,14 @@ export function createIssueQueue(
           logger(`${key} skipped: ${REPO_MODE_REVIEW_ONLY_REASON}`);
           return;
         }
+        // Local/dev path also reads the default-branch timeouts once at job
+        // start so it behaves like the ledger tick. Fail-open to deployment
+        // defaults when the file is missing, invalid, or unreadable.
+        const {
+          implementMs: localImplementMs,
+          followupMs: localFollowupMs,
+          conflictMs: localConflictMs,
+        } = await resolveWorkerTimeouts(api, config, job.owner, job.repo, job.defaultBranch, logger);
         const shared = {
           api,
           tracker: api,
@@ -169,22 +212,22 @@ export function createIssueQueue(
           job.mode === "conflict"
             ? await implementConflict({
                 ...shared,
-                timeoutMs: config.conflictTimeoutMs,
+                timeoutMs: localConflictMs,
                 maxConflictRounds: config.maxConflictRounds,
               })
             : job.mode === "follow-up"
               ? await implementFollowUp({
                   ...shared,
-                  timeoutMs: config.followupTimeoutMs,
-                  conflictTimeoutMs: config.conflictTimeoutMs,
+                  timeoutMs: localFollowupMs,
+                  conflictTimeoutMs: localConflictMs,
                   maxFollowupRounds: config.maxFollowupRounds,
                   maxConflictRounds: config.maxConflictRounds,
                 })
               : await implementIssue({
                   ...shared,
-                  timeoutMs: config.opencodeTimeoutMs,
-                  followupTimeoutMs: config.followupTimeoutMs,
-                  conflictTimeoutMs: config.conflictTimeoutMs,
+                  timeoutMs: localImplementMs,
+                  followupTimeoutMs: localFollowupMs,
+                  conflictTimeoutMs: localConflictMs,
                   maxFollowupRounds: config.maxFollowupRounds,
                   maxConflictRounds: config.maxConflictRounds,
                 });
@@ -470,6 +513,50 @@ export async function processWorkerTick(
     else await store.recordRoleSuccess("worker");
     return "processed";
   }
+  // Repository timeouts for this job, read once from the default branch at
+  // job start. A change does not affect an already running job. The lease
+  // follows the effective value for this kind so a longer run is not
+  // reclaimed halfway, and the credential-refresh budget at job start uses
+  // the same effective value.
+  const defaultBranchHint =
+    row.payload && typeof row.payload === "object" && "defaultBranch" in row.payload
+      ? (row.payload as { defaultBranch?: unknown }).defaultBranch
+      : undefined;
+  const {
+    implementMs: effectiveImplementMs,
+    followupMs: effectiveFollowupMs,
+    conflictMs: effectiveConflictMs,
+  } = await resolveWorkerTimeouts(
+    api,
+    config,
+    row.owner,
+    row.repo,
+    typeof defaultBranchHint === "string" && defaultBranchHint ? defaultBranchHint : undefined,
+    logger
+  );
+  const effectiveTimeoutForLease =
+    row.kind === "conflict"
+      ? effectiveConflictMs
+      : row.kind === "follow-up"
+        ? effectiveFollowupMs
+        : effectiveImplementMs;
+  const effectiveLease = effectiveLeaseMs(config.leaseMs, effectiveTimeoutForLease);
+  const effectiveConfig =
+    effectiveImplementMs === config.opencodeTimeoutMs &&
+    effectiveFollowupMs === config.followupTimeoutMs &&
+    effectiveConflictMs === config.conflictTimeoutMs &&
+    effectiveLease === config.leaseMs
+      ? config
+      : {
+          ...config,
+          opencodeTimeoutMs: effectiveImplementMs,
+          followupTimeoutMs: effectiveFollowupMs,
+          conflictTimeoutMs: effectiveConflictMs,
+          leaseMs: effectiveLease,
+        };
+  if (effectiveLease !== config.leaseMs) {
+    await store.heartbeat(row.id, leasedBy, effectiveLease).catch(() => undefined);
+  }
   // Same ambient ledger recorder as the engine tick: runner spawns record
   // per-run usage against this row before the tick ends. A failed metric
   // write never fails the job (the wrapper swallows it).
@@ -523,7 +610,7 @@ export async function processWorkerTick(
   };
   const heartbeat = setInterval(() => {
     if (heartbeatStopped) return;
-    void store.heartbeat(rowId, leasedBy, config.leaseMs).then(
+    void store.heartbeat(rowId, leasedBy, effectiveLease).then(
       (ok) => {
         if (!ok) loseLease();
         else void checkCancelMark();
@@ -627,37 +714,37 @@ export async function processWorkerTick(
       forge: api,
       job,
       runtime: extras.runtime ?? standingPodRuntime,
-      giteaUrl: config.giteaUrl,
-      giteaToken: config.giteaToken,
-      gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
-      ...pickupPolicyForForge(config.forge, config.botUsername),
-      followupIgnoreLogins: config.followupIgnoreLogins,
-      trustedSenderLogins: config.trustedSenderLogins,
-      blockingQuestionAuthors: config.blockingQuestionAuthors,
-      ignoreConflictsLabel: config.ignoreConflictsLabel,
-      automergeRepos: config.automergeRepos,
-      forgeKind: config.forge,
-      model: config.model,
-      variant: config.variant,
-      fallbackModel: config.fallbackModel,
-      fallbackVariant: config.fallbackVariant,
-      chain: orderedRunners(config),
-      runnerSelection: config.runnerSelection,
-      independentReview: config.independentReview,
+      giteaUrl: effectiveConfig.giteaUrl,
+      giteaToken: effectiveConfig.giteaToken,
+      gitAuthResolver: gitAuthResolverFor(effectiveConfig, api, { owner: job.owner, repo: job.repo }),
+      ...pickupPolicyForForge(effectiveConfig.forge, effectiveConfig.botUsername),
+      followupIgnoreLogins: effectiveConfig.followupIgnoreLogins,
+      trustedSenderLogins: effectiveConfig.trustedSenderLogins,
+      blockingQuestionAuthors: effectiveConfig.blockingQuestionAuthors,
+      ignoreConflictsLabel: effectiveConfig.ignoreConflictsLabel,
+      automergeRepos: effectiveConfig.automergeRepos,
+      forgeKind: effectiveConfig.forge,
+      model: effectiveConfig.model,
+      variant: effectiveConfig.variant,
+      fallbackModel: effectiveConfig.fallbackModel,
+      fallbackVariant: effectiveConfig.fallbackVariant,
+      chain: orderedRunners(effectiveConfig),
+      runnerSelection: effectiveConfig.runnerSelection,
+      independentReview: effectiveConfig.independentReview,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
         return Math.max(0, current.leasedUntil - Date.now());
       },
-      extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
-      home: config.home,
+      extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
+      home: effectiveConfig.home,
       skipLatches: store.skipLatches,
       handoffs: store.handoffs,
-      workdir: config.workdir,
-      maxOutputBytes: config.maxOutputBytes,
-      checkpointEnabled: config.checkpointEnabled,
-      checkpointIntervalMs: config.checkpointIntervalMs,
-      checkpointMaxAgeMs: config.checkpointMaxAgeMs,
+      workdir: effectiveConfig.workdir,
+      maxOutputBytes: effectiveConfig.maxOutputBytes,
+      checkpointEnabled: effectiveConfig.checkpointEnabled,
+      checkpointIntervalMs: effectiveConfig.checkpointIntervalMs,
+      checkpointMaxAgeMs: effectiveConfig.checkpointMaxAgeMs,
       sanitizeOpenCodeEnv: true,
       useClaim: false,
       abortSignal: abort.signal,
@@ -674,7 +761,7 @@ export async function processWorkerTick(
         jobKey: row.jobKey,
         delivery: row.delivery,
         kind: row.kind,
-        forge: config.forge,
+        forge: effectiveConfig.forge,
         issueNumber: job.issueNumber,
       },
     };
@@ -685,24 +772,24 @@ export async function processWorkerTick(
       job.mode === "conflict"
         ? await runConflict({
             ...shared,
-            timeoutMs: config.conflictTimeoutMs,
-            maxConflictRounds: config.maxConflictRounds,
+            timeoutMs: effectiveConfig.conflictTimeoutMs,
+            maxConflictRounds: effectiveConfig.maxConflictRounds,
           })
         : job.mode === "follow-up"
           ? await runFollowUp({
               ...shared,
-              timeoutMs: config.followupTimeoutMs,
-              conflictTimeoutMs: config.conflictTimeoutMs,
-              maxFollowupRounds: config.maxFollowupRounds,
-              maxConflictRounds: config.maxConflictRounds,
+              timeoutMs: effectiveConfig.followupTimeoutMs,
+              conflictTimeoutMs: effectiveConfig.conflictTimeoutMs,
+              maxFollowupRounds: effectiveConfig.maxFollowupRounds,
+              maxConflictRounds: effectiveConfig.maxConflictRounds,
             })
           : await runImplement({
               ...shared,
-              timeoutMs: config.opencodeTimeoutMs,
-              followupTimeoutMs: config.followupTimeoutMs,
-              conflictTimeoutMs: config.conflictTimeoutMs,
-              maxFollowupRounds: config.maxFollowupRounds,
-              maxConflictRounds: config.maxConflictRounds,
+              timeoutMs: effectiveConfig.opencodeTimeoutMs,
+              followupTimeoutMs: effectiveConfig.followupTimeoutMs,
+              conflictTimeoutMs: effectiveConfig.conflictTimeoutMs,
+              maxFollowupRounds: effectiveConfig.maxFollowupRounds,
+              maxConflictRounds: effectiveConfig.maxConflictRounds,
             });
     stopHeartbeat();
     if (await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job))) return "processed";

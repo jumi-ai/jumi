@@ -33,7 +33,13 @@ import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
-import { REPO_MODE_OFF_REASON, resolveRepoMode } from "./repo_settings.ts";
+import {
+  effectiveLeaseMs,
+  effectiveTimeoutMsForKind,
+  loadDefaultBranchSettings,
+  REPO_MODE_OFF_REASON,
+  resolveRepoMode,
+} from "./repo_settings.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
@@ -809,6 +815,25 @@ export async function processEngineTick(
     else await store.recordRoleSuccess("engine");
     return "processed";
   }
+  // Repository timeout for this job, read once from the default branch at
+  // job start. A change does not affect an already running job. The lease
+  // follows the effective value so a longer run is not reclaimed halfway,
+  // and the credential-refresh budget at job start uses the same value.
+  const { load: settingsLoad } = await loadDefaultBranchSettings(api, row.owner, row.repo, undefined, logger);
+  const effectiveTimeoutMs = effectiveTimeoutMsForKind(
+    settingsLoad,
+    "review",
+    config.opencodeTimeoutMs,
+    config.opencodeTimeoutMaxMs
+  );
+  const effectiveLease = effectiveLeaseMs(config.leaseMs, effectiveTimeoutMs);
+  const effectiveConfig =
+    effectiveTimeoutMs === config.opencodeTimeoutMs && effectiveLease === config.leaseMs
+      ? config
+      : { ...config, opencodeTimeoutMs: effectiveTimeoutMs, leaseMs: effectiveLease };
+  if (effectiveLease !== config.leaseMs) {
+    await store.heartbeat(row.id, leasedBy, effectiveLease).catch(() => undefined);
+  }
   // Ambient ledger recorder for this tick: engine spawns record per-run usage
   // (tokens, exit class, start/end) against this row before the tick ends, so
   // the router keeps serving totals after this pod is gone. Single-flight: the
@@ -828,7 +853,7 @@ export async function processEngineTick(
   };
   const heartbeat = setInterval(() => {
     if (heartbeatStopped) return;
-    void store.heartbeat(row.id, leasedBy, config.leaseMs).then(
+    void store.heartbeat(row.id, leasedBy, effectiveLease).then(
       (ok) => {
         if (!ok) loseLease();
       },
@@ -863,7 +888,7 @@ export async function processEngineTick(
         if (current?.leasedUntil == null) return 0;
         return Math.max(0, current.leasedUntil - Date.now());
       },
-      extendLease: () => store.heartbeat(row.id, leasedBy, config.leaseMs),
+      extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
       persistResult: async (persisted) => {
         await store.saveResult(row.id, leasedBy, persisted);
       },
@@ -877,7 +902,7 @@ export async function processEngineTick(
           }
         }),
     };
-    let result = await runReviewJob(config, job, api, logger, runExtras);
+    let result = await runReviewJob(effectiveConfig, job, api, logger, runExtras);
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
       stopHeartbeat();
@@ -886,11 +911,21 @@ export async function processEngineTick(
     }
     if (result.status === "skipped" && result.reason === CI_LOOKUP_FAILED_REASON) {
       stopHeartbeat();
-      await settleCiLookupFailure(store, api, config, current, leasedBy, nowMs, logger);
+      await settleCiLookupFailure(store, api, effectiveConfig, current, leasedBy, nowMs, logger);
       return "processed";
     }
     if (result.status === "skipped" && result.reason === CI_ABSENT_REASON) {
-      const reviewed = await settleCiAbsent(store, config, api, current, job, leasedBy, nowMs, runExtras, logger);
+      const reviewed = await settleCiAbsent(
+        store,
+        effectiveConfig,
+        api,
+        current,
+        job,
+        leasedBy,
+        nowMs,
+        runExtras,
+        logger
+      );
       if (!reviewed) {
         stopHeartbeat();
         return "processed";
@@ -904,7 +939,7 @@ export async function processEngineTick(
       result = reviewed;
       if (result.status === "skipped" && result.reason === CI_LOOKUP_FAILED_REASON) {
         stopHeartbeat();
-        await settleCiLookupFailure(store, api, config, after, leasedBy, nowMs, logger);
+        await settleCiLookupFailure(store, api, effectiveConfig, after, leasedBy, nowMs, logger);
         return "processed";
       }
     }

@@ -14,8 +14,16 @@ import { globToRegExp } from "./review_md.ts";
 
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
+export interface RepoTimeouts {
+  review?: number;
+  implement?: number;
+  followup?: number;
+  conflict?: number;
+}
+
 export interface RepoSettings {
   automerge: boolean;
+  timeouts: RepoTimeouts;
   /**
    * Runner allow-list for the repository. `undefined` (key absent) means no
    * restriction: the repository uses the full active chain. A defined list
@@ -51,6 +59,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 const KNOWN_KEYS = new Set([
   "automerge",
   "allowed_runners",
+  "timeouts",
   "review_exclude",
   "followup_on_suggestions",
   "max_followup_rounds",
@@ -65,6 +74,60 @@ const KNOWN_KEYS = new Set([
   "mode",
 ]);
 
+/** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
+export const TIMEOUT_KEYS = ["review", "implement", "followup", "conflict"] as const;
+export type RepoTimeoutKey = (typeof TIMEOUT_KEYS)[number];
+
+/** Documented minimum for every repository timeout: 1 minute. Below this the file is invalid. */
+export const MIN_TIMEOUT_MINUTES = 1;
+
+export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
+
+function parseTimeoutsValue(value: unknown): RepoSettingsParse {
+  if (value === undefined)
+    return {
+      ok: true,
+      settings: {
+        automerge: false,
+        timeouts: {},
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        mode: "full",
+      },
+    };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"timeouts" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  const timeouts: RepoTimeouts = {};
+  for (const key of Object.keys(record)) {
+    if (!(TIMEOUT_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: `unknown key "timeouts.${key}"` };
+    }
+    const minutes = record[key];
+    if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < MIN_TIMEOUT_MINUTES) {
+      return { ok: false, error: `"timeouts.${key}" must be an integer number of minutes >= ${MIN_TIMEOUT_MINUTES}` };
+    }
+    (timeouts as Record<string, number>)[key] = minutes;
+  }
+  return {
+    ok: true,
+    settings: {
+      automerge: false,
+      timeouts,
+      reviewExclude: [],
+      followupOnSuggestions: true,
+      takeoverAuthors: [],
+      ignoreConflictsAuthors: [],
+      blockingQuestionAuthors: [],
+      mode: "full",
+    },
+  };
+}
+
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   const single = message.replace(/\s+/g, " ").trim();
@@ -75,20 +138,25 @@ function parserErrorMessage(err: unknown): string {
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
  * absent `allowed_runners` means no runner restriction;
  * absent `review_exclude` means nothing is left out; absent author lists
- * mean empty; absent `mode` means `full`. No schema-version key exists.
- * `followup_on_suggestions` absent means on: a `success` review with
- * suggestions follows up as today; `false` turns that off while failures,
- * blocking questions, red CI, and conflicts run as today.
- * `max_followup_rounds` / `max_conflict_rounds` absent mean the deployment
- * value; `0` is valid and means no rounds of that kind. Absent
- * `blocking_question_authors` means no repo-listed authors. The error
- * string is the parser's error and is surfaced verbatim in the auto-merge
- * note and the review status. Author lists match whole logins,
+ * mean empty; absent `mode` means `full`. No schema-version key exists. The
+ * error string is the parser's error and is surfaced verbatim in the
+ * auto-merge note and the review status. Author lists match whole logins,
  * case-insensitive. Canonical keys are `takeover_authors` and
  * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted
  * as aliases for the same setting. `blocking_question_authors` must be a
  * list of login strings when present; blank entries are dropped like the
- * deployer CSV. `mode` must be `full`, `review-only`, or `off` when present.
+ * deployer CSV.
+ * `followup_on_suggestions` absent means on: a `success` review with
+ * suggestions follows up as today; `false` turns that off while failures,
+ * blocking questions, red CI, and conflicts run as today.
+ * `max_followup_rounds` / `max_conflict_rounds` absent mean the deployment
+ * value; `0` is valid and means no rounds of that kind. Absent `timeouts`
+ * (or an empty mapping) means no timeout overrides; each present key is
+ * whole minutes for that kind (`followup` controls `follow-up` jobs). A
+ * value above the deployer maximum runs with the maximum; a value below
+ * the documented minimum makes the whole file invalid. Absent
+ * `blocking_question_authors` means no repo-listed authors. `mode` must be
+ * `full`, `review-only`, or `off` when present.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -102,6 +170,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       ok: true,
       settings: {
         automerge: false,
+        timeouts: {},
         allowedRunners: undefined,
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -122,6 +191,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if ("automerge" in record && record.automerge !== undefined) {
     if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
     automerge = record.automerge;
+  }
+  let timeouts: RepoTimeouts = {};
+  if ("timeouts" in record && record.timeouts !== undefined) {
+    const timeoutsParsed = parseTimeoutsValue(record.timeouts);
+    if (!timeoutsParsed.ok) return timeoutsParsed;
+    timeouts = timeoutsParsed.settings.timeouts;
   }
   let allowedRunners: string[] | undefined;
   if ("allowed_runners" in record && record.allowed_runners !== undefined) {
@@ -191,6 +266,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   }
   const settings: RepoSettings = {
     automerge,
+    timeouts,
     allowedRunners,
     reviewExclude,
     followupOnSuggestions:
@@ -238,6 +314,7 @@ export type RepoSettingsLoad =
   | {
       state: "valid";
       automerge: boolean;
+      timeouts: RepoTimeouts;
       allowedRunners?: string[];
       reviewExclude: string[];
       followupOnSuggestions: boolean;
@@ -250,8 +327,43 @@ export type RepoSettingsLoad =
     }
   | { state: "invalid"; error: string };
 
+/** Ledger kind to repository timeout key: `follow-up` reads `followup`. */
+export function timeoutKeyForKind(kind: string): RepoTimeoutKey | undefined {
+  if (kind === "follow-up") return "followup";
+  if ((TIMEOUT_KEYS as readonly string[]).includes(kind)) return kind as RepoTimeoutKey;
+  return undefined;
+}
+
+/**
+ * Effective run timeout for one kind. Missing settings, a missing key, or an
+ * invalid file runs with the deployment default (`baseMs`). A value above
+ * the deployer maximum (`maxMs`) is applied as the maximum. Unset, the
+ * maximum is the deployment timeout itself, so a repository can only shorten.
+ */
+export function effectiveTimeoutMsForKind(load: RepoSettingsLoad, kind: string, baseMs: number, maxMs: number): number {
+  if (load.state !== "valid") return baseMs;
+  const key = timeoutKeyForKind(kind);
+  if (!key) return baseMs;
+  const minutes = load.timeouts[key];
+  if (minutes === undefined) return baseMs;
+  const wanted = minutes * 60 * 1000;
+  const cap = maxMs > 0 ? maxMs : baseMs;
+  return Math.min(wanted, cap);
+}
+
+/**
+ * Queue lease that covers the effective timeout. The buffer is the
+ * deployment's 10-minute reclaim margin: the effective lease never drops
+ * below the configured `LEASE_MS`, and grows past it when a longer repository
+ * timeout needs it, so a job allowed to run longer is not reclaimed halfway.
+ */
+export function effectiveLeaseMs(configLeaseMs: number, effectiveTimeoutMs: number): number {
+  return Math.max(configLeaseMs, effectiveTimeoutMs + TIMEOUT_LEASE_BUFFER_MS);
+}
+
 export interface RepoSettingsFileApi {
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
+  getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
 }
 
 function isNotFoundError(err: unknown): boolean {
@@ -284,6 +396,7 @@ export async function loadRepoSettings(
   return {
     state: "valid",
     automerge: parsed.settings.automerge,
+    timeouts: parsed.settings.timeouts,
     allowedRunners: parsed.settings.allowedRunners,
     reviewExclude: parsed.settings.reviewExclude,
     followupOnSuggestions: parsed.settings.followupOnSuggestions,
@@ -298,6 +411,46 @@ export async function loadRepoSettings(
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
     mode: parsed.settings.mode,
   };
+}
+
+/**
+ * Load the settings file once from the default branch. Never throws:
+ * unreadable stays `{state:"missing"}` so the caller runs with deployment
+ * defaults. Resolves the default branch via `getRepo` when no hint is
+ * given (review jobs); worker jobs pass `job.defaultBranch` directly.
+ */
+export async function loadDefaultBranchSettings(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined,
+  log?: (message: string) => void
+): Promise<{ load: RepoSettingsLoad; ref: string | undefined }> {
+  let ref = defaultBranch;
+  if (!ref) {
+    try {
+      const getRepo = api.getRepo;
+      if (typeof getRepo !== "function") return { load: { state: "missing" }, ref: undefined };
+      const info = await getRepo.call(api, owner, repo);
+      ref = info?.default_branch;
+    } catch (err) {
+      log?.(`settings timeouts unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+      return { load: { state: "missing" }, ref: undefined };
+    }
+    if (!ref) return { load: { state: "missing" }, ref: undefined };
+  }
+  try {
+    const load = await loadRepoSettings(api, owner, repo, ref);
+    if (load.state === "invalid") {
+      log?.(`settings timeouts invalid for ${owner}/${repo}@${ref}: ${load.error}`);
+    }
+    return { load, ref };
+  } catch (err) {
+    log?.(
+      `settings timeouts unreadable for ${owner}/${repo}@${ref}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return { load: { state: "missing" }, ref };
+  }
 }
 
 /**

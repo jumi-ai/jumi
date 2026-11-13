@@ -200,6 +200,26 @@ describe("loadWorkerConfig", () => {
     expect(config.opencodeTimeoutMs).toBe(14_400_000);
     expect(config.followupTimeoutMs).toBe(3_600_000);
     expect(config.conflictTimeoutMs).toBe(3_600_000);
+    expect(config.opencodeTimeoutMaxMs).toBe(14_400_000);
+    expect(config.followupTimeoutMaxMs).toBe(3_600_000);
+    expect(config.conflictTimeoutMaxMs).toBe(3_600_000);
+  });
+
+  test("deployer maxima default to the deployment timeout and can be raised", () => {
+    const defaults = loadWorkerConfig(required);
+    expect(defaults.opencodeTimeoutMaxMs).toBe(defaults.opencodeTimeoutMs);
+    expect(defaults.followupTimeoutMaxMs).toBe(defaults.followupTimeoutMs);
+    expect(defaults.conflictTimeoutMaxMs).toBe(defaults.conflictTimeoutMs);
+    const raised = loadWorkerConfig({
+      ...required,
+      OPENCODE_TIMEOUT_MS: "900000",
+      OPENCODE_TIMEOUT_MAX_MS: "3600000",
+      FOLLOWUP_TIMEOUT_MAX_MS: "7200000",
+      CONFLICT_TIMEOUT_MAX_MS: "7200000",
+    });
+    expect(raised.opencodeTimeoutMaxMs).toBe(3_600_000);
+    expect(raised.followupTimeoutMaxMs).toBe(7_200_000);
+    expect(raised.conflictTimeoutMaxMs).toBe(7_200_000);
   });
 
   test("rejects invalid follow-up and conflict cap env", () => {

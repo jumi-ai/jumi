@@ -52,6 +52,10 @@ export interface WorkerConfig {
   opencodeTimeoutMs: number;
   followupTimeoutMs: number;
   conflictTimeoutMs: number;
+  /** Deployer maxima for repository timeouts. Unset, each maximum is the deployment timeout for that kind, so a repository can only shorten. */
+  opencodeTimeoutMaxMs: number;
+  followupTimeoutMaxMs: number;
+  conflictTimeoutMaxMs: number;
   maxFollowupRounds: number;
   maxConflictRounds: number;
   databaseUrl?: string;
@@ -134,6 +138,8 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
+  const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);
+  const conflictTimeoutMs = intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000);
   const fromEnv = {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
@@ -172,8 +178,11 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
-    followupTimeoutMs: intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000),
-    conflictTimeoutMs: intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000),
+    followupTimeoutMs,
+    conflictTimeoutMs,
+    opencodeTimeoutMaxMs: intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs),
+    followupTimeoutMaxMs: intEnv(resolved, "FOLLOWUP_TIMEOUT_MAX_MS", followupTimeoutMs),
+    conflictTimeoutMaxMs: intEnv(resolved, "CONFLICT_TIMEOUT_MAX_MS", conflictTimeoutMs),
     maxFollowupRounds: intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3),
     maxConflictRounds: intEnv(resolved, "MAX_CONFLICT_ROUNDS", 3),
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),

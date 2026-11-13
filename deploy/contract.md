@@ -61,6 +61,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `MAX_OUTPUT_BYTES`
 - `MAX_WEBHOOK_BYTES`
 - `OPENCODE_TIMEOUT_MS`
+- `OPENCODE_TIMEOUT_MAX_MS`
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `MAX_FOLLOWUP_ROUNDS`
@@ -146,6 +147,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `OPENCODE_TIMEOUT_MS`
 - `FOLLOWUP_TIMEOUT_MS`
 - `CONFLICT_TIMEOUT_MS`
+- `OPENCODE_TIMEOUT_MAX_MS`
+- `FOLLOWUP_TIMEOUT_MAX_MS`
+- `CONFLICT_TIMEOUT_MAX_MS`
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_CONFLICT_ROUNDS`
 - `LEASE_MS`
@@ -243,7 +247,7 @@ The Job template files (`CONTROL_ENGINE_JOB_TEMPLATE_FILE`, `CONTROL_WORKER_JOB_
 
 `control` turns runnable ledger rows into one Kubernetes Job per row (`engine` rows use the reviewer image, `worker` rows use the worker image; each Job runs `bun run src/job.ts` with `JUMI_JOB_ID`). Dispatch peeks with the same conditions as `lease` (not the `queued` count, which includes backoff rows and same-issue-held rows), oldest row first, and starts nothing for a role while its cooldown/breaker (`#354`) is active. Each enabled role has its own pod cap (`CONTROL_ENGINE_MAX_JOBS` / `CONTROL_WORKER_MAX_JOBS`); the cap is required when dispatch is enabled for that role and there is no unlimited default. `CONTROL_DISPATCH_ENGINE` / `CONTROL_DISPATCH_WORKER` enable each role independently.
 
-The deployment supplies one Job template per role as a mounted JSON file. `control` fills in only `metadata.name` and the `JUMI_JOB_ID` container env; image, service account, security context, volumes, and labels stay in GitOps, and any `ownerReferences` are stripped (never point one at anything that rolls). The name is deterministic (`jumi-<role>-<row id>-g<generation>-a<attempt>`) so a repeated create returns `AlreadyExists`. All Kubernetes calls are plain authenticated HTTP with the service-account bearer token; no client library. Deleting a Job passes `propagationPolicy=Background`, or its pods are orphaned. The template must set `backoffLimit: 0` and `restartPolicy: Never`; `activeDeadlineSeconds` must exceed `LEASE_MS` (`leaseAllowsHop` needs the lease to cover the run timeout, or runner hops are silently declined — do not shorten `LEASE_MS` to speed recovery). A failed Job (its pod died, `#356` exit codes) expires the lease at once so the row moves within seconds instead of waiting for `LEASE_MS`; this counts as one attempt and `MAX_JOB_ATTEMPTS` still applies. A Job whose pod has not started within `CONTROL_JOB_STARTUP_TIMEOUT_MS` (default 10 minutes) is deleted; the row stays queued with no attempt used. Cancelling a running job goes through the ledger (`#361`), never through deleting its Job.
+The deployment supplies one Job template per role as a mounted JSON file. `control` fills in only `metadata.name` and the `JUMI_JOB_ID` container env; image, service account, security context, volumes, and labels stay in GitOps, and any `ownerReferences` are stripped (never point one at anything that rolls). The name is deterministic (`jumi-<role>-<row id>-g<generation>-a<attempt>`) so a repeated create returns `AlreadyExists`. All Kubernetes calls are plain authenticated HTTP with the service-account bearer token; no client library. Deleting a Job passes `propagationPolicy=Background`, or its pods are orphaned. The template must set `backoffLimit: 0` and `restartPolicy: Never`; `activeDeadlineSeconds` must exceed the largest effective lease (`LEASE_MS` by default, larger when a repository timeout with a raised deployer maximum allows a longer run; `leaseAllowsHop` needs the lease to cover the run timeout, or runner hops are silently declined — do not shorten `LEASE_MS` to speed recovery). A failed Job (its pod died, `#356` exit codes) expires the lease at once so the row moves within seconds instead of waiting for `LEASE_MS`; this counts as one attempt and `MAX_JOB_ATTEMPTS` still applies. A Job whose pod has not started within `CONTROL_JOB_STARTUP_TIMEOUT_MS` (default 10 minutes) is deleted; the row stays queued with no attempt used. Cancelling a running job goes through the ledger (`#361`), never through deleting its Job.
 
 Required RBAC on the Job namespace: `jobs` create, get, list, watch, delete; `pods` get, list, watch. This access effectively reaches the namespace's Secrets, so pair it with an admission policy that only admits Jobs from `control`'s service account when they match the mounted template (image, service account, security context, volumes, labels). Jumi does not ship that policy.
 
@@ -294,6 +298,9 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `OPENCODE_TIMEOUT_MS`
 - `FOLLOWUP_TIMEOUT_MS`
 - `CONFLICT_TIMEOUT_MS`
+- `OPENCODE_TIMEOUT_MAX_MS`
+- `FOLLOWUP_TIMEOUT_MAX_MS`
+- `CONFLICT_TIMEOUT_MAX_MS`
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_CONFLICT_ROUNDS`
 - `MAX_INCOMPLETE_RETRIES`
