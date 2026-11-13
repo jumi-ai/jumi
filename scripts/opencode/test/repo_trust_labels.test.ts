@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { shouldEnqueuePullLabel } from "../src/followup_webhook.ts";
+import { shouldEnqueueGithubIssue } from "../src/github_webhook.ts";
 import { senderCanSteer } from "../src/permissions.ts";
 import {
   effectiveFollowupIgnoreLogins,
@@ -11,8 +13,6 @@ import {
   loadEffectiveTrustedSenderLogins,
   parseRepoSettingsText,
 } from "../src/repo_settings.ts";
-import { shouldEnqueueGithubIssue } from "../src/github_webhook.ts";
-import { shouldEnqueuePullLabel } from "../src/followup_webhook.ts";
 import { maybeTakeoverPr } from "../src/takeover.ts";
 import { makeIssue, makeIssuePayload, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
@@ -357,7 +357,10 @@ describe("takeover with repo trusted_senders", () => {
   test("narrows the deployer list and never widens it", async () => {
     const added: string[] = [];
     const baseApi = {
-      getRepoFile: async () => ({ found: true, content: "takeover_authors:\n  - alice\n  - bob\ntrusted_senders:\n  - alice\n" }),
+      getRepoFile: async () => ({
+        found: true,
+        content: "takeover_authors:\n  - alice\n  - bob\ntrusted_senders:\n  - alice\n",
+      }),
       getCollaboratorPermission: async () => ({ permission: "read", role_name: "read" }),
       addIssueLabel: async (_o: string, _r: string, _n: number, label: string) => {
         added.push(label);
@@ -395,7 +398,10 @@ describe("takeover with repo trusted_senders", () => {
 
   test("repo list alone admits when the env is unset", async () => {
     const api = {
-      getRepoFile: async () => ({ found: true, content: "takeover_authors:\n  - carol\ntrusted_senders:\n  - carol\n" }),
+      getRepoFile: async () => ({
+        found: true,
+        content: "takeover_authors:\n  - carol\ntrusted_senders:\n  - carol\n",
+      }),
       getCollaboratorPermission: async () => ({ permission: "read", role_name: "read" }),
       addIssueLabel: async () => undefined,
     };

@@ -269,12 +269,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
       const branch = typeof input.defaultBranch === "string" ? input.defaultBranch.trim() : "";
       if (branch && input.api && typeof (input.api as { getRepoFile?: unknown }).getRepoFile === "function") {
         try {
-          const loaded = await loadRepoSettings(
-            input.api as never,
-            input.owner,
-            input.repo,
-            branch
-          );
+          const loaded = await loadRepoSettings(input.api as never, input.owner, input.repo, branch);
           if (loaded.state === "valid") {
             effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, loaded);
             pickupLabel = effectivePickupLabel(loaded);

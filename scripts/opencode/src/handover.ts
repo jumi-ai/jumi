@@ -1,4 +1,4 @@
-import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
+import { hasLabel, isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
@@ -14,7 +14,6 @@ import {
   type RepoSettingsLoad,
   repoMode,
 } from "./repo_settings.ts";
-import { hasLabel } from "./assignee.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -188,7 +187,9 @@ export async function enqueueFollowUpFromReview(
   // assignment and ignores the key. Missing, invalid, or unreadable falls back
   // to `jumi` via the loader default (`repoSettings` is `missing` there).
   const effectivePickup =
-    repoSettings.state === "valid" && repoSettings.pickupLabel ? repoSettings.pickupLabel : effectivePickupLabel(repoSettings);
+    repoSettings.state === "valid" && repoSettings.pickupLabel
+      ? repoSettings.pickupLabel
+      : effectivePickupLabel(repoSettings);
   const usesGithubPickup = Boolean(opts.isPickedUp);
   const effectivePickupPolicy: PickupPolicy = usesGithubPickup
     ? { botUsername: opts.botUsername, isPickedUp: (issue) => hasLabel(issue, effectivePickup) }

@@ -66,14 +66,13 @@ export async function classifyCloserWork(opts: {
         .getRepo(opts.owner, opts.repo)
         .then((r) => r.default_branch)
         .catch(() => undefined));
-    if (typeof branch === "string" && branch.trim() && typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function") {
+    if (
+      typeof branch === "string" &&
+      branch.trim() &&
+      typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function"
+    ) {
       const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
-      const loaded = await loadRepoSettings(
-        opts.api as never,
-        opts.owner,
-        opts.repo,
-        branch.trim()
-      );
+      const loaded = await loadRepoSettings(opts.api as never, opts.owner, opts.repo, branch.trim());
       effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
     }
   } catch {

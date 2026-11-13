@@ -2531,12 +2531,9 @@ async function handleImplementKick(
               ? info.default_branch.trim()
               : "";
           if (defaultBranch) {
-            const loaded = await loadRepoSettings(
-              forgeApi as never,
-              item.owner,
-              item.repo,
-              defaultBranch
-            ).catch(() => ({ state: "missing" }) as const);
+            const loaded = await loadRepoSettings(forgeApi as never, item.owner, item.repo, defaultBranch).catch(
+              () => ({ state: "missing" }) as const
+            );
             pickupLabel = effectivePickupLabel(loaded);
           }
         }

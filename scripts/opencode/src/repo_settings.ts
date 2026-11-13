@@ -794,7 +794,8 @@ export async function loadEffectiveTrustedSenderLogins(
   deployerLogins: readonly string[] | undefined | null,
   log?: (message: string) => void
 ): Promise<readonly string[] | undefined> {
-  if (!defaultBranch.trim()) return (deployerLogins ?? []).some((entry) => entry.trim() !== "") ? [...(deployerLogins ?? [])] : undefined;
+  if (!defaultBranch.trim())
+    return (deployerLogins ?? []).some((entry) => entry.trim() !== "") ? [...(deployerLogins ?? [])] : undefined;
   let settings: RepoSettingsLoad;
   try {
     settings = await loadRepoSettings(api, owner, repo, defaultBranch);
@@ -898,7 +899,8 @@ export async function loadEffectiveIgnoreConflictsLabel(
   try {
     const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
     if (settings.state !== "valid") {
-      if (settings.state === "invalid") log?.(`ignore-conflicts label settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+      if (settings.state === "invalid")
+        log?.(`ignore-conflicts label settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
       return fallback;
     }
     return effectiveIgnoreConflictsLabel(deployerLabel, settings);

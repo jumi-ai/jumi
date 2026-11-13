@@ -7,13 +7,6 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
-  effectiveFollowupIgnoreLogins,
-  effectiveIgnoreConflictsLabel,
-  effectivePickupLabel,
-  effectiveTrustedSenderLogins,
-  loadRepoSettings,
-} from "./repo_settings.ts";
-import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   requireSenderPush,
@@ -34,6 +27,13 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
+import {
+  effectiveFollowupIgnoreLogins,
+  effectiveIgnoreConflictsLabel,
+  effectivePickupLabel,
+  effectiveTrustedSenderLogins,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
@@ -217,10 +217,7 @@ export function hasPickupLabel(issue: IssueAssignees, pickupLabel?: string): boo
   return hasLabel(issue, label);
 }
 
-export function isJumiLabel(
-  label: { name?: string } | string | null | undefined,
-  pickupLabel?: string
-): boolean {
+export function isJumiLabel(label: { name?: string } | string | null | undefined, pickupLabel?: string): boolean {
   const name = typeof label === "string" ? label : (label?.name ?? "");
   const needle = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
   return name.toLowerCase() === needle.toLowerCase();
@@ -239,7 +236,16 @@ export function isGithubBotSender(sender: { login?: string; type?: string } | un
  * lists). Never throws. Gitea callers ignore the pickup label.
  */
 export async function effectiveGithubPolicyForRepo(
-  api: { getRepoFile?: (owner: string, repo: string, path: string, ref: string) => Promise<{ found: boolean; content?: string }> } | undefined,
+  api:
+    | {
+        getRepoFile?: (
+          owner: string,
+          repo: string,
+          path: string,
+          ref: string
+        ) => Promise<{ found: boolean; content?: string }>;
+      }
+    | undefined,
   owner: string,
   repo: string,
   defaultBranch: string | undefined | null,
@@ -252,7 +258,9 @@ export async function effectiveGithubPolicyForRepo(
   try {
     settings = await loadRepoSettings(api, owner, repo, branch);
   } catch (err) {
-    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`);
+    log?.(
+      `repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return basePolicy;
   }
   if (settings.state === "invalid") {

@@ -560,8 +560,7 @@ export async function processWorkerTick(
   const repoTrusted = effectiveTrustedSenderLogins(config.trustedSenderLogins, tickSettingsLoad);
   const repoFollowupIgnore = effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, tickSettingsLoad);
   const repoIgnoreLabel = effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, tickSettingsLoad);
-  const repoPickup =
-    config.forge === "github" ? effectivePickupLabel(tickSettingsLoad) : undefined;
+  const repoPickup = config.forge === "github" ? effectivePickupLabel(tickSettingsLoad) : undefined;
   const effectiveConfig =
     effectiveImplementMs === config.opencodeTimeoutMs &&
     effectiveFollowupMs === config.followupTimeoutMs &&

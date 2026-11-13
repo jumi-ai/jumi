@@ -6,12 +6,6 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
-  effectiveFollowupIgnoreLogins,
-  effectiveIgnoreConflictsLabel,
-  effectiveTrustedSenderLogins,
-  loadRepoSettings,
-} from "./repo_settings.ts";
-import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   requireSenderPush,
@@ -31,6 +25,12 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
+import {
+  effectiveFollowupIgnoreLogins,
+  effectiveIgnoreConflictsLabel,
+  effectiveTrustedSenderLogins,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
@@ -54,7 +54,16 @@ export type WorkerWebhookPolicy = WebhookPolicy & {
  * back to the deployment policy. Never throws. Gitea ignores `pickup_label`.
  */
 export async function effectiveWorkerPolicyForRepo(
-  api: { getRepoFile?: (owner: string, repo: string, path: string, ref: string) => Promise<{ found: boolean; content?: string }> } | undefined,
+  api:
+    | {
+        getRepoFile?: (
+          owner: string,
+          repo: string,
+          path: string,
+          ref: string
+        ) => Promise<{ found: boolean; content?: string }>;
+      }
+    | undefined,
   owner: string,
   repo: string,
   defaultBranch: string | undefined | null,
@@ -66,7 +75,8 @@ export async function effectiveWorkerPolicyForRepo(
   try {
     const settings = await loadRepoSettings(api, owner, repo, branch);
     if (settings.state !== "valid") {
-      if (settings.state === "invalid") log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${settings.error}`);
+      if (settings.state === "invalid")
+        log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${settings.error}`);
       return basePolicy;
     }
     return {
@@ -76,7 +86,9 @@ export async function effectiveWorkerPolicyForRepo(
       ignoreConflictsLabel: effectiveIgnoreConflictsLabel(basePolicy.ignoreConflictsLabel, settings),
     };
   } catch (err) {
-    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`);
+    log?.(
+      `repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return basePolicy;
   }
 }
@@ -533,7 +545,14 @@ export async function handleWorkerWebhookEvent(
       const [paOwner, paRepo] = payload.repository.full_name.split("/");
       const effectivePaPolicy =
         paOwner && paRepo
-          ? await effectiveWorkerPolicyForRepo(deps.api, paOwner, paRepo, payload.repository.default_branch, policy, logger)
+          ? await effectiveWorkerPolicyForRepo(
+              deps.api,
+              paOwner,
+              paRepo,
+              payload.repository.default_branch,
+              policy,
+              logger
+            )
           : policy;
       const decision = await requireSenderPush(
         await shouldEnqueuePullAssign(payload, effectivePaPolicy, deps.api, logger),
@@ -761,7 +780,11 @@ export async function handleWorkerWebhookEvent(
     if (isFollowUpWebhookEvent(event, eventType)) {
       const eventName = event ?? eventType ?? "issue_comment";
       let rawPayload:
-        | { repository?: { full_name?: string; default_branch?: string }; issue?: { number?: number }; pull_request?: { number?: number } }
+        | {
+            repository?: { full_name?: string; default_branch?: string };
+            issue?: { number?: number };
+            pull_request?: { number?: number };
+          }
         | undefined;
       try {
         rawPayload = JSON.parse(new TextDecoder().decode(rawBody)) as {
@@ -844,7 +867,14 @@ export async function handleWorkerWebhookEvent(
     const [issueOwner, issueRepo] = payload.repository.full_name.split("/");
     const effectiveIssuePolicy =
       issueOwner && issueRepo
-        ? await effectiveWorkerPolicyForRepo(deps.api, issueOwner, issueRepo, payload.repository.default_branch, policy, logger)
+        ? await effectiveWorkerPolicyForRepo(
+            deps.api,
+            issueOwner,
+            issueRepo,
+            payload.repository.default_branch,
+            policy,
+            logger
+          )
         : policy;
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
     const decision = await requireSenderPush(
