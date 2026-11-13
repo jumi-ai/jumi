@@ -291,11 +291,6 @@ export async function loadRepoSettings(
   };
 }
 
-export interface DefaultBranchTimeouts {
-  baseMs: number;
-  maxMs: number;
-}
-
 /**
  * Load the settings file once from the default branch. Never throws:
  * unreadable stays `{state:"missing"}` so the caller runs with deployment
@@ -334,29 +329,6 @@ export async function loadDefaultBranchSettings(
     );
     return { load: { state: "missing" }, ref };
   }
-}
-
-/**
- * Read the settings file once from the default branch when a job starts and
- * resolve the effective timeout for one kind. Never throws: an unreadable
- * file (or an unknown default branch) runs with the deployment default, and
- * an invalid file is never treated as "no file" for auto-merge but still
- * runs timeouts with the deployment default. Call once per job; a change
- * does not affect an already running job.
- */
-export async function resolveEffectiveTimeoutMs(
-  api: RepoSettingsFileApi,
-  owner: string,
-  repo: string,
-  kind: string,
-  defaultBranch: string | undefined,
-  baseMs: number,
-  maxMs: number,
-  log?: (message: string) => void
-): Promise<{ timeoutMs: number; load: RepoSettingsLoad }> {
-  const { load } = await loadDefaultBranchSettings(api, owner, repo, defaultBranch, log);
-  if (load.state !== "valid") return { timeoutMs: baseMs, load };
-  return { timeoutMs: effectiveTimeoutMsForKind(load, kind, baseMs, maxMs), load };
 }
 
 /**
