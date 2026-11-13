@@ -39,8 +39,8 @@ describe("allowed_runners parsing", () => {
     });
   });
 
-  test("list parses, trims, drops blanks and dedupes", () => {
-    expect(parseRepoSettingsText("allowed_runners: [grok, opus, grok, '  ']\n")).toEqual({
+  test("list parses, trims, and dedupes", () => {
+    expect(parseRepoSettingsText("allowed_runners: [grok, opus, grok]\n")).toEqual({
       ok: true,
       settings: {
         automerge: false,
@@ -56,25 +56,27 @@ describe("allowed_runners parsing", () => {
     });
   });
 
-  test("empty list is valid and means no runner", () => {
+  test("empty list is invalid", () => {
     expect(parseRepoSettingsText("allowed_runners: []\n")).toEqual({
-      ok: true,
-      settings: {
-        automerge: false,
-        timeouts: {},
-        allowedRunners: [],
-        reviewExclude: [],
-        followupOnSuggestions: true,
-        takeoverAuthors: [],
-        ignoreConflictsAuthors: [],
-        blockingQuestionAuthors: [],
-        mode: "full",
-      },
+      ok: false,
+      error:
+        '"allowed_runners" is empty, so no runner could work on the repository; use mode: off or mode: review-only',
     });
   });
 
+  test("blank or non-string entries are invalid", () => {
+    for (const text of [
+      "allowed_runners: [grok, '  ']\n",
+      'allowed_runners: [""]\n',
+      "allowed_runners: [grok, 42]\n",
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({ ok: false, error: '"allowed_runners" must not contain blank entries' });
+    }
+  });
+
   test("wrong types are invalid", () => {
-    for (const text of ["allowed_runners: grok\n", "allowed_runners: [grok, 42]\n", "allowed_runners: null\n"]) {
+    for (const text of ["allowed_runners: grok\n", "allowed_runners: null\n"]) {
       const parsed = parseRepoSettingsText(text);
       expect(parsed).toEqual({ ok: false, error: `"allowed_runners" must be a list of runner names` });
     }
