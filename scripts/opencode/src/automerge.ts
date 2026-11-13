@@ -1,4 +1,4 @@
-import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import { branchRequiresReviewCheck, JUMI_REVIEW_CONTEXT } from "./ci.ts";
 import type { ClaimedLoop } from "./claimed_worktree.ts";
 import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
@@ -342,7 +342,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     const getBranch = input.api.getBranch;
     if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
     const branch = await getBranch.call(input.api, input.owner, input.repo, input.baseBranch);
-    gateOk = branch.enableStatusCheck === true && (branch.requiredContexts ?? []).includes(JUMI_REVIEW_CONTEXT);
+    gateOk = branchRequiresReviewCheck(branch);
     if (!gateOk) {
       log(`automerge gate closed for ${input.owner}/${input.repo}#${input.prNumber}: review check not required`);
       await postAutomergeNote(

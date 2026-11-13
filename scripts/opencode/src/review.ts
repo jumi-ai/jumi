@@ -1,7 +1,7 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isAutomergeRepo } from "./automerge.ts";
 import {
+  branchRequiresReviewCheck,
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
   type CiCheckSummary,
@@ -9,6 +9,7 @@ import {
   inspectCi,
   isCiLookupRetryMarker,
   isCiWaitMarker,
+  JUMI_REVIEW_CONTEXT,
   reviewSkipReasonForCi,
 } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
@@ -61,6 +62,7 @@ import {
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
+  prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
 } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
@@ -197,9 +199,9 @@ export interface ReviewOptions {
   /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
   blockingQuestionAuthors?: readonly string[];
   /**
-   * Opt-in `owner/repo` list for the repository settings file. The head
-   * invalid-file check runs only where this allows the repository; unset or
-   * empty keeps today's behavior with no extra forge calls.
+   * Retained for compatibility (auto-merge scheduling still uses it
+   * elsewhere). The head settings check no longer reads it and runs in
+   * every repository.
    */
   automergeRepos?: readonly string[];
   gitAuthResolver?: GitAuthResolver;
@@ -274,9 +276,8 @@ export interface PublishReviewOptions {
   /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
   blockingQuestionAuthors?: readonly string[];
   /**
-   * Opt-in `owner/repo` list for the repository settings file. The head
-   * invalid-file check runs only where this allows the repository; unset or
-   * empty keeps today's behavior with no extra forge calls.
+   * Retained for compatibility. The head settings check no longer reads it
+   * and runs in every repository.
    */
   automergeRepos?: readonly string[];
   resultMarkdown?: string | null;
@@ -298,6 +299,12 @@ export interface PublishReviewOptions {
   excludedFiles?: readonly string[];
   /** True when every changed file was left out (no patches were read). */
   allExcluded?: boolean;
+  /**
+   * Already-fetched PR files. When set, the head settings check reuses them
+   * instead of listing PR files again; when unset it lists them itself (the
+   * reclaim path has no fetched files).
+   */
+  changedFiles?: readonly { filename: string }[];
 }
 
 const encoder = new TextEncoder();
@@ -1081,20 +1088,57 @@ async function resolveThreadPermissions(
 
 /**
  * Failure reason when the pull head leaves the repository settings file
- * invalid, else undefined. Reads the head file only where the deployer list
- * allows the repository, so unset/empty keeps today's behavior with no extra
- * forge calls. Read failures are fail-open (no failure); only an invalid
- * file fails, with the parser's error.
+ * invalid, else undefined. Runs in every repository, but reads the head
+ * file only when the pull changes it: callers pass the changed-file list
+ * the review already has, or the function lists the pull files itself (the
+ * same check as `prIncludesSettingsFile` in `automerge.ts`), so pulls
+ * that do not touch the file cost no extra head-file read. Read failures
+ * (pull files, head file, or branch) are fail-open (no failure); only an
+ * invalid file fails, with the parser's error, and a valid file that sets
+ * `mode: off` where the base branch requires `jumi/opencode-review` fails
+ * because pull requests there would become unable to merge.
  */
 export async function invalidHeadSettingsFailure(opts: {
-  api: Pick<ReviewApi, "getRepoFile">;
+  api: {
+    getRepoFile?: ReviewApi["getRepoFile"];
+    getPRFiles?: ReviewApi["getPRFiles"];
+    getBranch?: (
+      owner: string,
+      repo: string,
+      branch: string
+    ) => Promise<{
+      enableStatusCheck?: boolean;
+      requiredContexts?: string[];
+    }>;
+  };
   owner: string;
   repo: string;
+  prNumber: number;
   headSha: string;
-  automergeRepos: readonly string[] | undefined;
+  baseBranch: string;
+  changedFiles?: readonly { filename: string }[];
+  /** Retained for compatibility; no longer gates the check. */
+  automergeRepos?: readonly string[] | undefined;
   log: (message: string) => void;
 }): Promise<string | undefined> {
-  if (!isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos)) return undefined;
+  let touches: boolean;
+  if (opts.changedFiles !== undefined) {
+    touches = prTouchesRepoSettings(opts.changedFiles);
+  } else {
+    const listFiles = opts.api.getPRFiles;
+    if (typeof listFiles !== "function") return undefined;
+    let files: Awaited<ReturnType<NonNullable<ReviewApi["getPRFiles"]>>>;
+    try {
+      files = await listFiles.call(opts.api, opts.owner, opts.repo, opts.prNumber);
+    } catch (err) {
+      opts.log(
+        `settings pull files unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return undefined;
+    }
+    touches = prTouchesRepoSettings(files);
+  }
+  if (!touches) return undefined;
   let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
   try {
     settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.headSha);
@@ -1104,8 +1148,27 @@ export async function invalidHeadSettingsFailure(opts: {
     );
     return undefined;
   }
-  if (settings.state !== "invalid") return undefined;
-  return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
+  if (settings.state === "invalid") return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
+  if (settings.state !== "valid" || settings.mode !== "off") return undefined;
+  const getBranch = opts.api.getBranch;
+  if (typeof getBranch !== "function") {
+    opts.log(
+      `settings branch unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: branch requirements are not readable`
+    );
+    return undefined;
+  }
+  let branch: Awaited<ReturnType<NonNullable<typeof opts.api.getBranch>>>;
+  try {
+    branch = await getBranch.call(opts.api, opts.owner, opts.repo, opts.baseBranch);
+  } catch (err) {
+    opts.log(
+      `settings branch unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return undefined;
+  }
+  const required = branchRequiresReviewCheck(branch);
+  if (!required) return undefined;
+  return `${REPO_SETTINGS_PATH} sets mode: off, but \`${JUMI_REVIEW_CONTEXT}\` is required on ${opts.baseBranch}; pull requests would become unable to merge`;
 }
 
 /** Max left-out files named in the published note; longer lists name the count. */
@@ -1215,16 +1278,20 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     return result;
   }
 
-  // A pull whose head leaves the repository settings file invalid fails the
-  // review check with the parser's error. The parser decides: the reviewer
-  // model is never consulted. Only where the deployer list allows the
-  // repository is the head file read at all.
+  // A pull that changes the repository settings file to an invalid file
+  // fails the review check with the parser's error, and a valid head file
+  // that sets `mode: off` where the base branch requires the review check
+  // fails because those pulls could never merge. The parser decides: the
+  // reviewer model is never consulted. The head file is read only when the
+  // pull changes it, so other pulls cost no extra head-file read.
   const settingsFailure = await invalidHeadSettingsFailure({
     api: forgeApi,
     owner: opts.owner,
     repo: opts.repo,
+    prNumber: pr.number,
     headSha: opts.expectedHeadSha,
-    automergeRepos: opts.automergeRepos,
+    baseBranch: pr.base.ref,
+    changedFiles: opts.changedFiles,
     log,
   });
   if (settingsFailure) {
@@ -2157,6 +2224,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               forgeKind: opts.forgeKind,
               previousFindings: previousReview?.findings,
               recordSuggestions: opts.recordSuggestions,
+              changedFiles: prFiles,
               ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
             });
           }

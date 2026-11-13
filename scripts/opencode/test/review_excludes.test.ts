@@ -191,7 +191,10 @@ describe("review_exclude end to end", () => {
         },
       });
       expect(refs.length).toBeGreaterThan(0);
-      for (const ref of refs) expect(ref).toBe("main");
+      expect(refs).toContain("main");
+      // The head file is also read because the pull changes it, but the
+      // exclude patterns still come from the default branch.
+      for (const ref of refs) expect(["main", "headsha"]).toContain(ref);
       expect(task).toContain("APP_PATCH_BODY");
       expect(task).not.toContain("<excluded_files");
     });
