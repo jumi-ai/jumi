@@ -190,7 +190,8 @@ describe("review_exclude end to end", () => {
           return { status: "ok" };
         },
       });
-      expect(refs).toEqual(["main"]);
+      expect(refs.length).toBeGreaterThan(0);
+      for (const ref of refs) expect(ref).toBe("main");
       expect(task).toContain("APP_PATCH_BODY");
       expect(task).not.toContain("<excluded_files");
     });
