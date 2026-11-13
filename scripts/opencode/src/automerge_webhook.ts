@@ -27,6 +27,8 @@ interface ParsedLabelEvent {
   labelName: string;
   senderLogin?: string;
   baseBranch?: string;
+  htmlUrl?: string;
+  cloneUrl?: string;
 }
 
 /**
@@ -46,7 +48,9 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
   const record = parsed as Record<string, unknown>;
   const action = typeof record["action"] === "string" ? (record["action"] as string) : "";
   if (action !== "labeled" && action !== "unlabeled") return undefined;
-  const repository = record["repository"] as { full_name?: string; default_branch?: string } | undefined;
+  const repository = record["repository"] as
+    | { full_name?: string; default_branch?: string; html_url?: string; clone_url?: string }
+    | undefined;
   const fullName = typeof repository?.full_name === "string" ? repository.full_name : "";
   const [owner, repo] = fullName.split("/");
   if (!owner || !repo) return undefined;
@@ -54,6 +58,8 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
   const labelName = typeof label === "string" ? label : (label?.name ?? "");
   if (!labelName.trim()) return undefined;
   const sender = record["sender"] as { login?: string } | undefined;
+  const htmlUrl = typeof repository?.html_url === "string" ? repository.html_url : undefined;
+  const cloneUrl = typeof repository?.clone_url === "string" ? repository.clone_url : undefined;
   // PR number: prefer pull_request.number, else issue.number when it is a PR.
   const pr = record["pull_request"] as { number?: number } | undefined;
   if (typeof pr?.number === "number") {
@@ -65,6 +71,8 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
       labelName,
       senderLogin: sender?.login,
       baseBranch: typeof repository?.default_branch === "string" ? repository.default_branch : undefined,
+      ...(htmlUrl ? { htmlUrl } : {}),
+      ...(cloneUrl ? { cloneUrl } : {}),
     };
   }
   const issue = record["issue"] as { number?: number; pull_request?: unknown; is_pull?: boolean } | undefined;
@@ -79,6 +87,8 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
       labelName,
       senderLogin: sender?.login,
       baseBranch: typeof repository?.default_branch === "string" ? repository.default_branch : undefined,
+      ...(htmlUrl ? { htmlUrl } : {}),
+      ...(cloneUrl ? { cloneUrl } : {}),
     };
   }
   return undefined;
@@ -104,7 +114,14 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   if (!parsed) return { handled: false };
   const policy = opts.policy;
   try {
-    assertRepositoryPolicy({ full_name: `${parsed.owner}/${parsed.repo}` } as never, policy);
+    assertRepositoryPolicy(
+      {
+        full_name: `${parsed.owner}/${parsed.repo}`,
+        ...(parsed.htmlUrl ? { html_url: parsed.htmlUrl } : {}),
+        ...(parsed.cloneUrl ? { clone_url: parsed.cloneUrl } : {}),
+      } as never,
+      policy
+    );
   } catch {
     return { handled: false };
   }
@@ -174,8 +191,6 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   if (needle !== automergeLabel.toLowerCase() && needle !== noAutomergeLabel.toLowerCase()) {
     return { handled: false };
   }
-  const enabled = opts.policy.automergeEnabled ?? true;
-  if (!enabled) return { handled: false };
   const { extractWorkingIssueNumber } = await import("./gitea_issues.ts");
   const issueNumber = extractWorkingIssueNumber({
     title: (pr as { title?: string }).title ?? "",

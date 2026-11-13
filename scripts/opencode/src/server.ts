@@ -1095,7 +1095,13 @@ function engineId(): string {
 }
 
 export function workerMailboxApi(
-  api: ReviewApi & Partial<Pick<Forge, "deleteGitRef">>
+  api: ReviewApi &
+    Partial<
+      Pick<
+        Forge,
+        "deleteGitRef" | "getBranch" | "scheduleAutoMerge" | "cancelAutoMerge" | "listIssueTimeline" | "getPRFiles"
+      >
+    >
 ): HandleWorkerWebhookDeps["api"] {
   const extra = api as ReviewApi &
     Partial<
@@ -1104,6 +1110,9 @@ export function workerMailboxApi(
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
   const full = api as unknown as Partial<IssueApi>;
+  const forge = api as unknown as Partial<
+    Pick<Forge, "getBranch" | "scheduleAutoMerge" | "cancelAutoMerge" | "listIssueTimeline" | "getPRFiles">
+  >;
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
@@ -1125,6 +1134,17 @@ export function workerMailboxApi(
       : undefined,
     addIssueLabel: full.addIssueLabel
       ? (owner, repo, index, label) => full.addIssueLabel!(owner, repo, index, label)
+      : undefined,
+    getBranch: forge.getBranch ? (owner, repo, branch) => forge.getBranch!(owner, repo, branch) : undefined,
+    scheduleAutoMerge: forge.scheduleAutoMerge
+      ? (owner, repo, index, opts) => forge.scheduleAutoMerge!(owner, repo, index, opts)
+      : undefined,
+    cancelAutoMerge: forge.cancelAutoMerge
+      ? (owner, repo, index) => forge.cancelAutoMerge!(owner, repo, index)
+      : undefined,
+    getPRFiles: forge.getPRFiles ? (owner, repo, index) => forge.getPRFiles!(owner, repo, index) : undefined,
+    listIssueTimeline: forge.listIssueTimeline
+      ? (owner, repo, index) => forge.listIssueTimeline!(owner, repo, index)
       : undefined,
     findStickyIssueComment: (owner, repo, index, bot, marker) =>
       api.findStickyIssueComment(owner, repo, index, bot, marker),

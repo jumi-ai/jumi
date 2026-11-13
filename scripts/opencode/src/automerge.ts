@@ -525,18 +525,6 @@ async function loadPrLabels(
   }
 }
 
-type GateRefusal =
-  | { kind: "touches-settings" }
-  | { kind: "invalid-settings"; error: string }
-  | { kind: "mode"; mode: string }
-  | { kind: "excluded"; files: string[] }
-  | { kind: "gate-unreadable" }
-  | { kind: "gate-closed"; baseBranch: string }
-  | { kind: "repo-unreadable" }
-  | { kind: "auto-merge-disabled" }
-  | { kind: "no-merge-method" }
-  | { kind: "repo-style-unknown" };
-
 /**
  * Schedule the forge's native auto-merge on a pull request Jumi opened.
  * Two switches are required: the deployment must allow auto-merge
@@ -1256,90 +1244,6 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   }
 }
 
-async function giteaLabelNames(
-  api: AutomergeApi,
-  owner: string,
-  repo: string,
-  prNumber: number,
-  log: (message: string) => void
-): Promise<{ automergeLabel: string; noAutomergeLabel: string }> {
-  try {
-    const info = await api.getRepo(owner, repo);
-    const ref = typeof info.default_branch === "string" && info.default_branch ? info.default_branch : "main";
-    const settings = await loadRepoSettings(api, owner, repo, ref);
-    if (settings.state === "valid") {
-      return { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
-    }
-  } catch (err) {
-    log(`automerge labels unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  void prNumber;
-  return { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
-}
-
-/**
- * Gitea push-path decision: `ok` leaves the pull alone, `cancel` cancels
- * silently (label opt-out), `conflict` cancels with a conflict note, and
- * `{excluded}` cancels with the left-out note.
- */
-async function giteaRestoreDecision(
-  api: AutomergeApi,
-  owner: string,
-  repo: string,
-  prNumber: number,
-  files: ReadonlyArray<{ filename: string }>,
-  log: (message: string) => void
-): Promise<"ok" | "cancel" | "conflict" | { excluded: string[] }> {
-  const excluded = await loadGiteaExcludedFilenames(api, owner, repo, files, log);
-  if (excluded.length > 0) return { excluded };
-  let prLabels: AutomergeLabelList = [];
-  try {
-    const pr = await api.getPR(owner, repo, prNumber);
-    prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
-  } catch (err) {
-    log(
-      `automerge re-read failed for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
-    return "ok";
-  }
-  const names = await giteaLabelNames(api, owner, repo, prNumber, log);
-  const hasNo = hasLabelCaseInsensitive(prLabels, names.noAutomergeLabel);
-  const hasYes = hasLabelCaseInsensitive(prLabels, names.automergeLabel);
-  if (hasNo && hasYes) return "conflict";
-  if (hasNo) return "cancel";
-  return "ok";
-}
-
-/**
- * Left-out filenames for the Gitea push path. Missing, invalid,
- * unreadable, or empty means no exclusions: the pull is left alone instead
- * of failing. Never throws.
- */
-async function loadGiteaExcludedFilenames(
-  api: AutomergeApi,
-  owner: string,
-  repo: string,
-  files: ReadonlyArray<{ filename: string }>,
-  log: (message: string) => void
-): Promise<string[]> {
-  let defaultBranch = "main";
-  try {
-    const info = await api.getRepo(owner, repo);
-    if (typeof info.default_branch === "string" && info.default_branch) defaultBranch = info.default_branch;
-  } catch (err) {
-    log(`automerge repo unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
-  }
-  let settings: RepoSettingsLoad;
-  try {
-    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
-  } catch (err) {
-    log(`automerge settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
-    return [];
-  }
-  return excludedFilenames(files, settings);
-}
-
 /** Schedule state read just before a push (GitHub only; Gitea has no readable state). */
 export async function readAutomergeScheduled(
   api: Pick<AutomergeApi, "getPR">,
@@ -1454,8 +1358,6 @@ export async function handleAutomergeLabelChange(opts: {
   log?: (message: string) => void;
 }): Promise<{ action: "scheduled" | "cancelled" | "none" }> {
   const log = opts.log ?? (() => undefined);
-  const enabled = opts.automergeEnabled ?? true;
-  if (!enabled) return { action: "none" };
   if (!isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos)) return { action: "none" };
   let prLabels: AutomergeLabelList = [];
   try {
@@ -1466,6 +1368,34 @@ export async function handleAutomergeLabelChange(opts: {
     log(
       `automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
+    return { action: "none" };
+  }
+  const enabled = opts.automergeEnabled ?? true;
+  if (!enabled) {
+    // Mirror the open-time disabled branch in scheduleAutomergeForPr: when the
+    // PR carries the (possibly custom) automerge label while the deployment
+    // switch is off, leave one sticky disabled note.
+    let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
+    try {
+      const settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.baseBranch);
+      if (settings.state === "valid") {
+        names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
+      }
+    } catch {
+      // Best-effort: default label names still drive the disabled note.
+    }
+    if (hasLabelCaseInsensitive(prLabels, names.automergeLabel)) {
+      log(`automerge skipped for ${opts.owner}/${opts.repo}#${opts.prNumber}: deployment switch off`);
+      await postAutomergeNote(
+        opts.api,
+        opts.owner,
+        opts.repo,
+        opts.prNumber,
+        opts.botUsername,
+        automergeDisabledNote()
+      );
+      return { action: "cancelled" };
+    }
     return { action: "none" };
   }
   let settings: RepoSettingsLoad;
@@ -1489,9 +1419,8 @@ export async function handleAutomergeLabelChange(opts: {
     return { action: "none" };
   }
   const names = resolveLabelNames(settings);
-  const hasNo = hasLabelCaseInsensitive(prLabels, names.noAutomergeLabel);
-  const hasYes = hasLabelCaseInsensitive(prLabels, names.automergeLabel);
-  if (hasNo && hasYes) {
+  const decision = automergeLabelEventAction(prLabels, settings);
+  if (decision.conflict) {
     await cancelAutomergeSchedule(opts.api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
     await postAutomergeNote(
       opts.api,
@@ -1503,12 +1432,9 @@ export async function handleAutomergeLabelChange(opts: {
     );
     return { action: "cancelled" };
   }
-  if (hasNo) {
-    await cancelAutomergeSchedule(opts.api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
-    return { action: "cancelled" };
-  }
-  if (!hasYes && !(settings.state === "valid" && settings.automerge === true)) {
-    // Label removed and the file does not opt in: cancel anything scheduled.
+  if (decision.action === "cancel") {
+    // No-automerge label, or the label was removed and the file does not opt in:
+    // cancel anything scheduled.
     await cancelAutomergeSchedule(opts.api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
     return { action: "cancelled" };
   }

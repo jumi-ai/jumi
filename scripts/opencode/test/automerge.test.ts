@@ -9,7 +9,7 @@ import {
 } from "../src/automerge.ts";
 import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
 import type { IssueApi } from "../src/ports.ts";
-import { makeComment, makePR } from "./fixtures.ts";
+import { makeBranch, makeComment, makePR, makeUser } from "./fixtures.ts";
 
 type TestApi = IssueApi & {
   getPRFiles: (
@@ -1057,5 +1057,175 @@ describe("automerge override labels", () => {
     const held = await scheduleAutomergeForPr(labelInput(api2));
     expect(held).toEqual({ scheduled: false });
     expect(api2.calls).not.toContain("scheduleAutoMerge");
+  });
+});
+
+describe("router mailbox automerge label path", () => {
+  function jumiPr(api: ReturnType<typeof makeApi>, labels: Array<string | { name?: string }>, index = 3) {
+    api.getPR = async (_o: string, _r: string, n: number) => {
+      api.calls.push("getPR");
+      return makePR({
+        number: n || index,
+        user: makeUser({ login: "jumi" }),
+        head: makeBranch({ ref: "jumi/issue-12-foo", sha: "headsha" }),
+        title: "Jumi: fix the thing",
+        body: "Fixes #12",
+        labels: labels as never,
+      });
+    };
+  }
+
+  function labelWebhookBody(action: string, label: string, sender = "alice", prNumber = 3) {
+    return new TextEncoder().encode(
+      JSON.stringify({
+        action,
+        repository: {
+          full_name: "kirmanak/demo",
+          default_branch: "main",
+          html_url: "https://gitea.example.test/kirmanak/demo",
+          clone_url: "https://gitea.example.test/kirmanak/demo.git",
+        },
+        label: { name: label },
+        sender: { login: sender },
+        pull_request: { number: prNumber },
+      })
+    );
+  }
+
+  function webhookPolicy(overrides: Record<string, unknown> = {}) {
+    return {
+      giteaUrl: "https://gitea.example.test",
+      allowedOrgs: ["kirmanak"],
+      allowedRepos: [] as string[],
+      botUsername: "jumi",
+      forgeKind: "gitea",
+      ...overrides,
+    };
+  }
+
+  test("mailbox forwards the five label-path forge methods", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const api = makeApi();
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [];
+    };
+    const mailbox = workerMailboxApi(api as never);
+    expect(typeof mailbox?.getBranch).toBe("function");
+    expect(typeof mailbox?.scheduleAutoMerge).toBe("function");
+    expect(typeof mailbox?.cancelAutoMerge).toBe("function");
+    expect(typeof mailbox?.getPRFiles).toBe("function");
+    expect(typeof mailbox?.listIssueTimeline).toBe("function");
+    await mailbox?.getBranch?.("o", "r", "main");
+    await mailbox?.getPRFiles?.("o", "r", 3);
+    await mailbox?.listIssueTimeline?.("o", "r", 3);
+    expect(api.calls).toContain("getBranch");
+    expect(api.calls).toContain("getPRFiles");
+    expect(api.calls).toContain("listIssueTimeline");
+
+    const bare = makeApi();
+    delete (bare as unknown as Record<string, unknown>)["getBranch"];
+    delete (bare as unknown as Record<string, unknown>)["scheduleAutoMerge"];
+    delete (bare as unknown as Record<string, unknown>)["cancelAutoMerge"];
+    delete (bare as unknown as Record<string, unknown>)["getPRFiles"];
+    const bareMailbox = workerMailboxApi(bare as never);
+    expect(bareMailbox?.getBranch).toBeUndefined();
+    expect(bareMailbox?.scheduleAutoMerge).toBeUndefined();
+    expect(bareMailbox?.cancelAutoMerge).toBeUndefined();
+    expect(bareMailbox?.getPRFiles).toBeUndefined();
+    expect(bareMailbox?.listIssueTimeline).toBeUndefined();
+  });
+
+  test("label add through the mailbox schedules even with automerge:false", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { tryHandleAutomergeLabelEvent } = await import("../src/automerge_webhook.ts");
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    jumiPr(api, ["automerge"]);
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const mailbox = workerMailboxApi(api as never);
+    const handled = await tryHandleAutomergeLabelEvent({
+      rawBody: labelWebhookBody("labeled", "automerge"),
+      policy: webhookPolicy(),
+      api: mailbox as never,
+      log: () => undefined,
+    });
+    expect(handled).toEqual({ handled: true, reason: expect.stringContaining("scheduled") });
+    expect(api.calls).toContain("scheduleAutoMerge");
+  });
+
+  test("label remove through the mailbox cancels", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    jumiPr(api, []);
+    api.cancelAutoMerge = async () => {
+      api.calls.push("cancelAutoMerge");
+      return true;
+    };
+    const mailbox = workerMailboxApi(api as never);
+    const result = await handleAutomergeLabelChange({
+      api: mailbox as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(result.action).toBe("cancelled");
+    expect(api.calls).toContain("cancelAutoMerge");
+  });
+
+  test("disabled switch posts the disabled note through the mailbox instead of falling through", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const { tryHandleAutomergeLabelEvent } = await import("../src/automerge_webhook.ts");
+    const api = makeApi();
+    jumiPr(api, ["automerge"]);
+    const mailbox = workerMailboxApi(api as never);
+    const result = await handleAutomergeLabelChange({
+      api: mailbox as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      automergeEnabled: false,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(result.action).toBe("cancelled");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("turned off");
+
+    const api2 = makeApi();
+    jumiPr(api2, ["automerge"]);
+    const mailbox2 = workerMailboxApi(api2 as never);
+    const handled = await tryHandleAutomergeLabelEvent({
+      rawBody: labelWebhookBody("labeled", "automerge"),
+      policy: webhookPolicy({ automergeEnabled: false }),
+      api: mailbox2 as never,
+      log: () => undefined,
+    });
+    expect(handled.handled).toBe(true);
+    expect(api2.notes).toHaveLength(1);
+    expect(api2.notes[0]).toContain("turned off");
   });
 });
