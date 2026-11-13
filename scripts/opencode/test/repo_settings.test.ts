@@ -1078,6 +1078,33 @@ describe("invalidHeadSettingsFailure", () => {
     expect(failure).toContain('"automerge" must be a boolean');
   });
 
+  test("binds the forge receiver for pull file and branch reads", async () => {
+    const api: Record<string, unknown> = {};
+    api.getPRFiles = async function (this: unknown, _owner: string, _repo: string, _pr: number) {
+      if (this !== api) throw new Error("getPRFiles called without receiver");
+      return [settingsFile];
+    };
+    api.getRepoFile = async function (this: unknown, _owner: string, _repo: string, _path: string, _ref: string) {
+      if (this !== api) throw new Error("getRepoFile called without receiver");
+      return { found: true, content: "mode: off\n" };
+    };
+    api.getBranch = async function (this: unknown, _owner: string, _repo: string, _branch: string) {
+      if (this !== api) throw new Error("getBranch called without receiver");
+      return requiredBranch;
+    };
+    const failure = await invalidHeadSettingsFailure({
+      // biome-ignore lint/suspicious/noExplicitAny: receiver-binding regression fake.
+      api: api as any,
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      log,
+    });
+    expect(failure).toContain(".jumi.yml sets mode: off");
+  });
+
   test("pull that does not touch the settings file reads no head file", async () => {
     let calls = 0;
     const failure = await invalidHeadSettingsFailure({

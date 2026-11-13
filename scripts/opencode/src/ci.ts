@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionJob, Check, CheckState, Forge } from "./ports.ts";
+import type { ActionJob, BranchProtection, Check, CheckState, Forge } from "./ports.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
@@ -287,6 +287,17 @@ export function commitStatusState(status: Check): CheckState | undefined {
 
 export function isJumiReviewContext(context: string | undefined): boolean {
   return (context ?? "") === JUMI_REVIEW_CONTEXT;
+}
+
+/**
+ * True when the base branch requires the `jumi/opencode-review` status
+ * check. Shared by the automerge gate and the head settings `mode: off`
+ * failure so the gate changes in one place.
+ */
+export function branchRequiresReviewCheck(
+  branch: Pick<BranchProtection, "enableStatusCheck" | "requiredContexts">
+): boolean {
+  return branch.enableStatusCheck === true && (branch.requiredContexts ?? []).includes(JUMI_REVIEW_CONTEXT);
 }
 
 export function checkDurationMs(check: Check): number | undefined {

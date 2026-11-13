@@ -1,6 +1,7 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  branchRequiresReviewCheck,
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
   type CiCheckSummary,
@@ -1128,7 +1129,7 @@ export async function invalidHeadSettingsFailure(opts: {
     if (typeof listFiles !== "function") return undefined;
     let files: Awaited<ReturnType<NonNullable<ReviewApi["getPRFiles"]>>>;
     try {
-      files = await listFiles(opts.owner, opts.repo, opts.prNumber);
+      files = await listFiles.call(opts.api, opts.owner, opts.repo, opts.prNumber);
     } catch (err) {
       opts.log(
         `settings pull files unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
@@ -1158,14 +1159,14 @@ export async function invalidHeadSettingsFailure(opts: {
   }
   let branch: Awaited<ReturnType<NonNullable<typeof opts.api.getBranch>>>;
   try {
-    branch = await getBranch(opts.owner, opts.repo, opts.baseBranch);
+    branch = await getBranch.call(opts.api, opts.owner, opts.repo, opts.baseBranch);
   } catch (err) {
     opts.log(
       `settings branch unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
     );
     return undefined;
   }
-  const required = branch.enableStatusCheck === true && (branch.requiredContexts ?? []).includes(JUMI_REVIEW_CONTEXT);
+  const required = branchRequiresReviewCheck(branch);
   if (!required) return undefined;
   return `${REPO_SETTINGS_PATH} sets mode: off, but \`${JUMI_REVIEW_CONTEXT}\` is required on ${opts.baseBranch}; pull requests would become unable to merge`;
 }
