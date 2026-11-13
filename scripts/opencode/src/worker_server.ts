@@ -141,6 +141,9 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           followupIgnoreLogins: config.followupIgnoreLogins,
           trustedSenderLogins: config.trustedSenderLogins,
           ignoreConflictsLabel: config.ignoreConflictsLabel,
+          automergeRepos: config.automergeRepos,
+          automergeEnabled: config.automergeEnabled,
+          forgeKind: config.forge,
         },
         { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs }
       );
@@ -186,6 +189,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 async function main() {
   const config = loadWorkerConfig();
   scrubSecretEnv();
+  const { automergeDeprecationWarning } = await import("./worker_config.ts");
+  const automergeWarning = automergeDeprecationWarning(process.env);
+  if (automergeWarning) log(automergeWarning);
   const shutdown = new AbortController();
   installProcessShutdown(shutdown, log);
   await adoptOrphanXaiSibling(config.home, log).catch((err) =>

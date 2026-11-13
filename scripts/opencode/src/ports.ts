@@ -238,6 +238,18 @@ export interface AttachmentSupport {
   downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
 }
 
+/** One label history entry from the forge timeline/events API (Gitea or GitHub shape). */
+export interface IssueTimelineEvent {
+  /** Gitea `type` or GitHub `event`, e.g. `label`, `labeled`, `unlabeled`. */
+  type?: string;
+  event?: string;
+  /** Label name, either a string or `{name}`. */
+  label?: string | { name?: string } | null;
+  /** Who performed the event: Gitea `user.login`, GitHub `actor.login`. */
+  user?: { login?: string } | null;
+  actor?: { login?: string } | string | null;
+}
+
 /** Forge: clone + PR + sticky + status (git host identity). */
 export interface Forge extends AttachmentSupport {
   getRepo(owner: string, repo: string): Promise<Repo>;
@@ -269,6 +281,12 @@ export interface Forge extends AttachmentSupport {
   getCollaboratorPermission(owner: string, repo: string, username: string): Promise<CollaboratorPermission>;
   /** GitHub only: permissions an App's installations hold, e.g. `{ contents: "write" }`. */
   getAppPermissions?(slug: string): Promise<Record<string, string> | undefined>;
+  /**
+   * Label history for one issue or pull number (both forges number them together).
+   * Gitea reads `/issues/{index}/timeline`; GitHub reads `/issues/{index}/events`.
+   * Missing entrypoint means the labeller cannot be read (fail closed where labels decide).
+   */
+  listIssueTimeline?(owner: string, repo: string, index: number): Promise<IssueTimelineEvent[]>;
   /** Best-effort delete of a git ref (e.g. a checkpoint hidden ref). Missing refs are not an error. */
   deleteGitRef?(owner: string, repo: string, ref: string): Promise<void>;
   createPullRequest(

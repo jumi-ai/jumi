@@ -2,7 +2,7 @@ import { lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { PickupPolicy } from "./assignee.ts";
 import { stageIssueAttachments } from "./attachments.ts";
-import { scheduleAutomergeForPr } from "./automerge.ts";
+import { scheduleAutomergeForNewPr, scheduleAutomergeForPr } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -185,13 +185,17 @@ export interface ImplementOptions extends PickupPolicy {
   /** Opt-in logins whose open `❓` questions count as follow-up feedback. */
   blockingQuestionAuthors?: readonly string[];
   /**
-   * Opt-in `owner/repo` list (also `owner` for a whole owner, `*` for every
-   * repository) for forge-native auto-merge on pull requests Jumi opens.
-   * Unset or empty disables scheduling with no extra forge calls. Scheduling
-   * also needs the repository's default-branch `.jumi.yml` to set
-   * `automerge: true`.
+   * Opt-in `owner/repo` narrowing list (also `owner` for a whole owner, `*`
+   * for every repository) for forge-native auto-merge on pull requests Jumi
+   * opens. Deprecated: unset means every repository may opt in through its
+   * own `.jumi.yml`. When set and non-empty it still narrows exactly as
+   * before. Scheduling also needs the repository's default-branch `.jumi.yml`
+   * to set `automerge: true`, unless an admitted per-PR `automerge` label
+   * opts that PR in.
    */
   automergeRepos?: readonly string[];
+  /** Global kill switch (default on). Off never schedules; labels do nothing. */
+  automergeEnabled?: boolean;
   /** Forge kind for auto-merge (Gitea merge style vs GitHub auto-merge). Unset defaults to `gitea`. */
   forgeKind?: ForgeKind;
   model: string;
@@ -827,6 +831,8 @@ async function implementExternalIssue(
         prNumber: pr.number,
         baseBranch: effectiveJob.defaultBranch,
         automergeRepos: opts.automergeRepos,
+        automergeEnabled: opts.automergeEnabled,
+        trustedSenderLogins: opts.trustedSenderLogins,
         botUsername: opts.botUsername,
         log,
       });
@@ -1431,7 +1437,7 @@ export async function implementIssue(
         await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
         throw err;
       }
-      await scheduleAutomergeForPr({
+      await scheduleAutomergeForNewPr({
         api: opts.api,
         forgeKind: opts.forgeKind ?? "gitea",
         owner,
@@ -1439,6 +1445,9 @@ export async function implementIssue(
         prNumber: pr.number,
         baseBranch: opts.job.defaultBranch,
         automergeRepos: opts.automergeRepos,
+        automergeEnabled: opts.automergeEnabled,
+        trustedSenderLogins: opts.trustedSenderLogins,
+        issueNumber,
         botUsername: opts.botUsername,
         log,
       });

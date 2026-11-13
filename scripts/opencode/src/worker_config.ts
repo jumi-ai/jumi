@@ -30,6 +30,8 @@ export interface WorkerConfig {
   ignoreConflictsLabel: string;
   blockingQuestionAuthors: string[];
   automergeRepos: string[];
+  /** Global auto-merge kill switch. Unset defaults to on; `false` disables every schedule. */
+  automergeEnabled: boolean;
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -100,6 +102,25 @@ function checkpointBit(value: string | undefined, fallback: boolean): boolean {
   throw new Error(`Invalid boolean for JUMI_CHECKPOINT_ENABLED: ${value}`);
 }
 
+function automergeBit(value: string | undefined, fallback = true): boolean {
+  if (value === undefined || value === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  throw new Error(`Invalid boolean for JUMI_AUTOMERGE_ENABLED: ${value}`);
+}
+
+export function automergeDeprecationWarning(env: Record<string, string | undefined> = process.env): string | undefined {
+  const raw = env["JUMI_AUTOMERGE_REPOS"];
+  if (raw !== undefined && raw.trim() !== "") {
+    return (
+      `JUMI_AUTOMERGE_REPOS is deprecated and will be removed in a later release: ` +
+      `it still narrows auto-merge to the listed repositories, but unset it to let repositories opt in through .jumi.yml alone`
+    );
+  }
+  return undefined;
+}
+
 function checkpointInterval(resolved: Env): number {
   const raw = resolved.JUMI_CHECKPOINT_INTERVAL_MS;
   if (raw === undefined || raw === "") return 300_000;
@@ -160,6 +181,7 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",
     blockingQuestionAuthors: csvEnv(resolved, "REVIEW_BLOCKING_QUESTION_AUTHORS"),
     automergeRepos: csvEnv(resolved, "JUMI_AUTOMERGE_REPOS"),
+    automergeEnabled: automergeBit(resolved.JUMI_AUTOMERGE_ENABLED, true),
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,

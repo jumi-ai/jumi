@@ -60,6 +60,8 @@ export type GithubMailboxConfig = {
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   ignoreConflictsLabel?: string;
+  automergeRepos?: readonly string[];
+  automergeEnabled?: boolean;
 };
 
 export type GithubReviewQueue = {
@@ -176,6 +178,9 @@ export function githubWebhookPolicy(config: GithubMailboxConfig): GithubWebhookP
     followupIgnoreLogins: [...ignore],
     trustedSenderLogins: config.trustedSenderLogins,
     ignoreConflictsLabel: config.ignoreConflictsLabel,
+    automergeRepos: config.automergeRepos,
+    automergeEnabled: config.automergeEnabled,
+    forgeKind: "github",
     isPickedUp: hasJumiLabel,
   };
 }
@@ -585,6 +590,23 @@ export async function handleGithubWebhookEvent(
       }
     }
     if (deps.worker && (action === "labeled" || action === "unlabeled")) {
+      try {
+        const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
+        const automergeHandled = await tryHandleAutomergeLabelEvent({
+          rawBody,
+          policy: {
+            ...policy,
+            forgeKind: "github",
+            automergeRepos: (policy as { automergeRepos?: readonly string[] }).automergeRepos,
+            automergeEnabled: (policy as { automergeEnabled?: boolean }).automergeEnabled,
+          },
+          api: deps.worker.api as never,
+          log: logger,
+        });
+        if (automergeHandled.handled) return json(202, { queued: false, reason: automergeHandled.reason });
+      } catch (err) {
+        logger(`automerge label webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
       try {
         const payload = parsePullRequestPayload(rawBody);
         const decision = await requireSenderPush(

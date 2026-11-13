@@ -36,6 +36,9 @@ export type WorkerWebhookPolicy = WebhookPolicy & {
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   ignoreConflictsLabel?: string;
+  automergeRepos?: readonly string[];
+  automergeEnabled?: boolean;
+  forgeKind?: string;
 };
 
 export interface WorkerWebhookQueue {
@@ -60,8 +63,12 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "findStickyIssueComment"
       | "createIssueComment"
       | "updateIssueComment"
+      | "getBranch"
+      | "scheduleAutoMerge"
+      | "cancelAutoMerge"
     >
-  > & {
+  > &
+  Partial<Pick<import("./ports.ts").Forge, "getPRFiles" | "listIssueTimeline">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -347,6 +354,29 @@ export async function handleWorkerWebhookEvent(
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
   if (event === "ping" || eventType === "ping") return json(200, { ok: true });
+  // Per-PR auto-merge override labels on a Jumi PR schedule or cancel without
+  // enqueueing worker work. The bot's own copy event is ignored. Falls through
+  // when the event is not an automerge label on a Jumi PR.
+  {
+    const action = peekWebhookAction(rawBody);
+    if (action === "labeled" || action === "unlabeled") {
+      try {
+        const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
+        const handled = await tryHandleAutomergeLabelEvent({
+          rawBody,
+          policy: {
+            ...policy,
+            forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
+          },
+          api: deps.api as never,
+          log: logger,
+        });
+        if (handled.handled) return json(202, { queued: false, reason: handled.reason });
+      } catch (err) {
+        logger(`automerge label webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
   // Gitea 1.27: PR assignment is pull_request_assign; X-Gitea-Event is still pull_request.
   // Handle only assigned/unassigned. Any other pull_request action skips 202, never 400.
   if (isPullAssignWebhookEvent(event, eventType)) {

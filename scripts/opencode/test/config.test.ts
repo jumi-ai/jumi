@@ -289,7 +289,7 @@ describe("loadConfig", () => {
     ).toEqual(["renovate-bot", "Renovate[bot]"]);
   });
 
-  test("parses JUMI_AUTOMERGE_REPOS CSV and treats empty as off", () => {
+  test("parses JUMI_AUTOMERGE_REPOS CSV; empty means no narrowing", () => {
     expect(loadConfig(required).automergeRepos).toEqual([]);
     expect(loadConfig({ ...required, JUMI_AUTOMERGE_REPOS: "" }).automergeRepos).toEqual([]);
     expect(loadConfig({ ...required, JUMI_AUTOMERGE_REPOS: " , " }).automergeRepos).toEqual([]);
@@ -297,6 +297,21 @@ describe("loadConfig", () => {
       "kirmanak/demo",
       "acme",
     ]);
+  });
+
+  test("JUMI_AUTOMERGE_ENABLED defaults on and parses booleans", async () => {
+    const { automergeDeprecationWarning } = await import("../src/config.ts");
+    expect(loadConfig(required).automergeEnabled).toBe(true);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_ENABLED: "" }).automergeEnabled).toBe(true);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_ENABLED: "false" }).automergeEnabled).toBe(false);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_ENABLED: "0" }).automergeEnabled).toBe(false);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_ENABLED: "yes" }).automergeEnabled).toBe(true);
+    expect(() => loadConfig({ ...required, JUMI_AUTOMERGE_ENABLED: "maybe" })).toThrow(
+      "Invalid boolean for JUMI_AUTOMERGE_ENABLED"
+    );
+    expect(automergeDeprecationWarning({})).toBeUndefined();
+    expect(automergeDeprecationWarning({ JUMI_AUTOMERGE_REPOS: "" })).toBeUndefined();
+    expect(automergeDeprecationWarning({ JUMI_AUTOMERGE_REPOS: "kirmanak/demo" })).toContain("deprecated");
   });
 
   test("parses wildcard owner allowlist", () => {

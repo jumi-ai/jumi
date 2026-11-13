@@ -8,6 +8,7 @@ import type {
   Comment,
   CreatePullReviewOptions,
   InlineComment,
+  IssueTimelineEvent,
   LinkedIssue,
   Pull,
   PullCommit,
@@ -645,6 +646,24 @@ export class GiteaAPI {
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
     return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
+  }
+
+  /**
+   * Label history for one issue or pull number. Gitea exposes comments and
+   * label events together at `/issues/{index}/timeline`. Entries pass through
+   * as `IssueTimelineEvent` (`type`, `label`, `user`).
+   */
+  async listIssueTimeline(owner: string, repo: string, index: number): Promise<IssueTimelineEvent[]> {
+    const events = await this.getAll<Record<string, unknown>>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/timeline`
+    );
+    return events.map((entry) => ({
+      type: typeof entry["type"] === "string" ? (entry["type"] as string) : undefined,
+      event: typeof entry["event"] === "string" ? (entry["event"] as string) : undefined,
+      label: (entry["label"] as IssueTimelineEvent["label"]) ?? undefined,
+      user: (entry["user"] as IssueTimelineEvent["user"]) ?? undefined,
+      actor: (entry["actor"] as IssueTimelineEvent["actor"]) ?? undefined,
+    }));
   }
 
   async addIssueAssignees(owner: string, repo: string, index: number, assignees: string[]): Promise<unknown> {

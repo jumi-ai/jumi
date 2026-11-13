@@ -499,6 +499,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               followupIgnoreLogins: config.followupIgnoreLogins,
               trustedSenderLogins: config.trustedSenderLogins,
               ignoreConflictsLabel: config.ignoreConflictsLabel,
+              automergeRepos: config.automergeRepos,
+              automergeEnabled: config.automergeEnabled,
+              forgeKind: config.forge,
             },
             { ...deps.worker, logger: deps.worker.logger ?? logger }
           )
@@ -1193,6 +1196,9 @@ async function serveAndWait(
 
 export async function startReviewer(config: ServiceConfig, deps: StartReviewerDeps = {}): Promise<StartedReviewer> {
   const logger = deps.logger ?? log;
+  const { automergeDeprecationWarning } = await import("./config.ts");
+  const automergeWarning = automergeDeprecationWarning(process.env);
+  if (automergeWarning) logger(automergeWarning);
   const api = deps.api ?? createForge(config);
   // The board's close-then-reopen kick needs the full forge client. deps.api
   // is a narrower ReviewApi test seam without close/reopenPullRequest, so it

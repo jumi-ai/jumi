@@ -29,7 +29,9 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 
 | Key | Type | Default when absent | Effect | Combines with deployer setting |
 |-----|------|---------------------|--------|-------------------------------|
-| `automerge` | boolean | `false` (off) | `true` lets Jumi schedule the forge's native auto-merge on pull requests it opens, once every other gate passes | Both switches: the deployer list (`JUMI_AUTOMERGE_REPOS`) must allow the repository **and** this key must be `true`. Either one alone schedules nothing |
+| `automerge` | boolean | `false` (off) | `true` lets Jumi schedule the forge's native auto-merge on pull requests it opens, once every other gate passes | Both switches: the deployment (`JUMI_AUTOMERGE_ENABLED` on, and deprecated `JUMI_AUTOMERGE_REPOS` when set must allow the repository) **and** this key must be `true` — unless a per-PR override label decides (see below). Either one alone schedules nothing |
+| `automerge_label` | non-blank string | `automerge` | Name of the per-PR label that opts one Jumi PR into auto-merge, even when `automerge` is `false` or absent. Matches case-insensitively. A blank, non-string, or identical (case-insensitive) pair with `no_automerge_label` makes the whole file invalid; hyphen/camel spellings are unknown keys rejected with the usual "did you mean" error | The label only counts when the person who added it passes the same sender check a handover needs (`TRUSTED_SENDER_LOGINS` when set, write access otherwise). Jumi copies the label from the worked issue onto the PR at open time, then the PR's labels decide; label history that cannot be read fails closed |
+| `no_automerge_label` | non-blank string | `no-automerge` | Name of the per-PR label that opts one Jumi PR out of auto-merge, even when `automerge` is `true`. Honoured whoever added it (safe direction). Matches case-insensitively; same validation as `automerge_label` | Overrides `automerge` and `automerge_label`: both labels together never schedule, with one conflict note. Adding/removing either label on an open Jumi PR re-runs every gate |
 | `allowed_runners` | list of runner names | no restriction (the full active chain) | Narrows every job for the repository — review, implement, follow-up, conflict — to the chain entries whose name is on the list, keeping chain order | Narrowing only: names outside the active chain grant nothing and are only logged. An explicitly empty list is invalid (the whole file is invalid — use `mode: off` or `mode: review-only` instead); a non-empty list that matches nothing fails closed with no runner job starting (see Runners row below). Without `JUMI_RUNNERS_FILE` the chain is synthesized and its entries are stably named `primary` (and `fallback` when a fallback model is set) |
 | `review_exclude` | list of glob strings | `[]` (nothing is left out) | A changed file whose repository-relative path matches is left out of the review: its patch is withheld from the reviewer in first and later reviews. The file is still listed as changed and marked as left out, and the published review names the files (or the count, when the list is long) | No deployer setting. Uses the same gitignore-style glob dialect as `REVIEW.md` path sections (`**/generated/**`, `pnpm-lock.yaml`, `docs/`; a bare word is not a glob, so scope it like `**/Dockerfile`). The settings file itself can never be left out: a pattern matching it has no effect on it. Patterns come from the default branch only, so a pull that adds a pattern is still reviewed in full |
 | `followup_on_suggestions` | boolean | `true` (follow up, as today) | `false` turns off follow-up on a `success` review that only has suggestions. Failing reviews, blocking questions, red CI, and conflicts still run as today, and a comment or review from someone allowed to steer follow-up still starts it whatever this setting says | No deployer setting |
@@ -53,7 +55,10 @@ which keeps this page and the parser from drifting apart).
 
 ```yaml
 # .jumi.yml at the root of the default branch.
-automerge: true # both switches needed: JUMI_AUTOMERGE_REPOS must also allow this repo
+automerge: true # needs the deployment switch (JUMI_AUTOMERGE_ENABLED on, no
+  # JUMI_AUTOMERGE_REPOS narrowing) plus the base branch requiring jumi/opencode-review
+automerge_label: automerge # per-PR opt-in label (default automerge)
+no_automerge_label: no-automerge # per-PR opt-out label (default no-automerge)
 
 allowed_runners: # absent means no restriction; present narrows every job to these chain names
   - primary
@@ -87,8 +92,8 @@ timeouts: # whole minutes per kind; absent keys run with the deployment timeout
 
 ## Recipes
 
-Auto-merge only (still needs the deployer switch `JUMI_AUTOMERGE_REPOS` to allow the
-repository, and the base branch to require the `jumi/opencode-review` check):
+Auto-merge only (still needs the deployment switch `JUMI_AUTOMERGE_ENABLED` on and no
+`JUMI_AUTOMERGE_REPOS` narrowing, and the base branch to require the `jumi/opencode-review` check):
 
 ```yaml
 automerge: true
@@ -108,7 +113,8 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 
 | Feature | Missing | Invalid (whole file) | Unreadable |
 |---------|---------|----------------------|------------|
-| Auto-merge | No schedule, silent (same as `automerge: false`) | No schedule; the pull request gets one note naming the parser's error | No schedule; the pull request gets one note saying the file could not be read |
+| Auto-merge | No schedule, silent (same as `automerge: false`), unless an admitted `automerge` label opts that PR in (copied from the worked issue at open time) | No schedule; the pull request gets one note naming the parser's error | No schedule; the pull request gets one note saying the file could not be read |
+| Override labels | Label names fall back to `automerge` / `no-automerge`; `no-automerge` present opts out silently, an admitted `automerge` forces a schedule through every gate, both together cancel with a conflict note, an untrusted or unreadable `automerge` labeller posts one note and never schedules | Custom label names are invalid with the rest of the file, so the invalid note above applies and labels change nothing | Label history that cannot be read fails closed with one note |
 | `review_exclude` | No exclusions; the review runs in full | No exclusions; the review runs in full (the pull still carries the parser-error note via auto-merge/head validation, but nothing is left out) | No exclusions; the review runs in full |
 | Follow-up (`followup_on_suggestions`, `max_*_rounds`) | Deployment caps, suggestions on | Policy falls back to deployment caps with suggestions on — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Deployment caps, suggestions on (fail-open); a runner job still runs on the full chain |
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |

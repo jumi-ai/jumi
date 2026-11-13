@@ -1143,6 +1143,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           repo,
           prNumber: pr.number,
           automergeRepos: opts.automergeRepos,
+          automergeEnabled: opts.automergeEnabled,
+          trustedSenderLogins: opts.trustedSenderLogins,
+          issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,
         });

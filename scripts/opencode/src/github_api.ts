@@ -11,6 +11,7 @@ import type {
   CreatePullReviewComment,
   CreatePullReviewOptions,
   InlineComment,
+  IssueTimelineEvent,
   LinkedIssue,
   Pull,
   PullCommit,
@@ -1088,6 +1089,24 @@ export class GithubAPI {
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
     return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
+  }
+
+  /**
+   * Label history for one issue or pull number. Uses the issue events API
+   * (`labeled` / `unlabeled` with `label` and `actor`); entries pass through
+   * as `IssueTimelineEvent`.
+   */
+  async listIssueTimeline(owner: string, repo: string, index: number): Promise<IssueTimelineEvent[]> {
+    const events = await this.getPages<Record<string, unknown>>(
+      `/repos/${this.repoPath(owner, repo)}/issues/${index}/events`
+    );
+    return events.map((entry) => ({
+      type: typeof entry["event"] === "string" ? (entry["event"] as string) : undefined,
+      event: typeof entry["event"] === "string" ? (entry["event"] as string) : undefined,
+      label: (entry["label"] as IssueTimelineEvent["label"]) ?? undefined,
+      user: (entry["actor"] as IssueTimelineEvent["user"]) ?? undefined,
+      actor: (entry["actor"] as IssueTimelineEvent["actor"]) ?? undefined,
+    }));
   }
 
   async addIssueAssignees(owner: string, repo: string, index: number, assignees: string[]): Promise<unknown> {
