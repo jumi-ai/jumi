@@ -1481,3 +1481,74 @@ describe("GithubAPI automerge gate", () => {
     await expect(api().getBranch("owner", "repo", "main")).rejects.toThrow("→ 404");
   });
 });
+
+describe("GithubAPI repository settings file", () => {
+  test("reads the settings file at a ref and decodes base64", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      urls.push(String(url));
+      return Response.json({
+        type: "file",
+        name: ".jumi.yml",
+        content: Buffer.from("automerge: true\n", "utf8").toString("base64"),
+        encoding: "base64",
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(api().getRepoFile("owner", "repo", ".jumi.yml", "abc123")).resolves.toEqual({
+      found: true,
+      content: "automerge: true\n",
+    });
+    expect(urls[0]).toContain("/repos/owner/repo/contents/.jumi.yml?ref=abc123");
+  });
+
+  test("treats a missing file and a directory as not found", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("ref=missing")) return new Response("not found", { status: 404 });
+      return Response.json([{ type: "dir", name: ".jumi.yml" }]);
+    }) as unknown as typeof fetch;
+
+    await expect(api().getRepoFile("owner", "repo", ".jumi.yml", "missing")).resolves.toEqual({ found: false });
+    await expect(api().getRepoFile("owner", "repo", ".jumi.yml", "abc123")).resolves.toEqual({ found: false });
+  });
+});
+
+describe("GithubAPI cancelAutoMerge", () => {
+  const prJson = {
+    number: 7,
+    title: "Jumi",
+    body: "",
+    state: "open",
+    html_url: "https://github.com/owner/repo/pull/7",
+    user: { login: "jumi" },
+    node_id: "PR_node_7",
+    head: { ref: "jumi/issue-1-x", sha: "abc123" },
+    base: { ref: "main", sha: "def456" },
+    created_at: "2026-05-23T00:00:00Z",
+    updated_at: "2026-05-23T00:00:00Z",
+  };
+
+  test("disables auto-merge through the pull request node id", async () => {
+    const requests: Array<{ url: string; method: string; body: string | undefined }> = [];
+    globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(url), method: init?.method ?? "GET", body: init?.body as string | undefined });
+      if (String(url).includes("/pulls/7")) return Response.json(prJson);
+      return Response.json({ data: { disablePullRequestAutoMerge: { pullRequest: { id: "PR_node_7" } } } });
+    }) as unknown as typeof fetch;
+
+    await expect(api().cancelAutoMerge("owner", "repo", 7)).resolves.toBe(true);
+    const graphql = requests.find((request) => request.url.endsWith("/graphql"));
+    expect(graphql?.method).toBe("POST");
+    expect(graphql?.body).toContain("disablePullRequestAutoMerge");
+    expect(graphql?.body).toContain("PR_node_7");
+  });
+
+  test("treats an already-disabled schedule as false", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      if (String(url).includes("/pulls/7")) return Response.json(prJson);
+      return Response.json({ errors: [{ message: "Auto-merge is not enabled for this pull request" }] });
+    }) as unknown as typeof fetch;
+
+    await expect(api().cancelAutoMerge("owner", "repo", 7)).resolves.toBe(false);
+  });
+});

@@ -184,8 +184,11 @@ export interface ImplementOptions extends PickupPolicy {
   /** Opt-in logins whose open `❓` questions count as follow-up feedback. */
   blockingQuestionAuthors?: readonly string[];
   /**
-   * Opt-in `owner/repo` list for forge-native auto-merge on pull requests
-   * Jumi opens. Unset or empty disables scheduling with no extra forge calls.
+   * Opt-in `owner/repo` list (also `owner` for a whole owner, `*` for every
+   * repository) for forge-native auto-merge on pull requests Jumi opens.
+   * Unset or empty disables scheduling with no extra forge calls. Scheduling
+   * also needs the repository's default-branch `.jumi.yml` to set
+   * `automerge: true`.
    */
   automergeRepos?: readonly string[];
   /** Forge kind for auto-merge (Gitea merge style vs GitHub auto-merge). Unset defaults to `gitea`. */

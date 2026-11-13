@@ -1,5 +1,6 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isAutomergeRepo } from "./automerge.ts";
 import {
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
@@ -54,6 +55,7 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
+import { loadRepoSettings, REPO_SETTINGS_PATH } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -187,6 +189,12 @@ export interface ReviewOptions {
   botUsername: string;
   /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
   blockingQuestionAuthors?: readonly string[];
+  /**
+   * Opt-in `owner/repo` list for the repository settings file. The head
+   * invalid-file check runs only where this allows the repository; unset or
+   * empty keeps today's behavior with no extra forge calls.
+   */
+  automergeRepos?: readonly string[];
   gitAuthResolver?: GitAuthResolver;
   home?: string;
   /** Postgres ledger for review stuck state. When present (production always
@@ -258,6 +266,12 @@ export interface PublishReviewOptions {
   botUsername: string;
   /** Opt-in logins whose open `❓` questions block the status. Unset/empty preserves today's behavior. */
   blockingQuestionAuthors?: readonly string[];
+  /**
+   * Opt-in `owner/repo` list for the repository settings file. The head
+   * invalid-file check runs only where this allows the repository; unset or
+   * empty keeps today's behavior with no extra forge calls.
+   */
+  automergeRepos?: readonly string[];
   resultMarkdown?: string | null;
   resultReason?: string | null;
   /** Formatted stamp for the runner that produced `resultMarkdown`. */
@@ -1054,6 +1068,35 @@ async function resolveThreadPermissions(
   return { permissions, permissionDetail: detail, lookups, failures };
 }
 
+/**
+ * Failure reason when the pull head leaves the repository settings file
+ * invalid, else undefined. Reads the head file only where the deployer list
+ * allows the repository, so unset/empty keeps today's behavior with no extra
+ * forge calls. Read failures are fail-open (no failure); only an invalid
+ * file fails, with the parser's error.
+ */
+export async function invalidHeadSettingsFailure(opts: {
+  api: Pick<ReviewApi, "getRepoFile">;
+  owner: string;
+  repo: string;
+  headSha: string;
+  automergeRepos: readonly string[] | undefined;
+  log: (message: string) => void;
+}): Promise<string | undefined> {
+  if (!isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos)) return undefined;
+  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
+  try {
+    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.headSha);
+  } catch (err) {
+    opts.log(
+      `settings head unreadable for ${opts.owner}/${opts.repo}@${opts.headSha}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return undefined;
+  }
+  if (settings.state !== "invalid") return undefined;
+  return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
+}
+
 export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const forgeApi = opts.forge ?? opts.api;
@@ -1065,6 +1108,31 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     const { state, description } = statusForResult(result);
     await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
     return result;
+  }
+
+  // A pull whose head leaves the repository settings file invalid fails the
+  // review check with the parser's error. The parser decides: the reviewer
+  // model is never consulted. Only where the deployer list allows the
+  // repository is the head file read at all.
+  const settingsFailure = await invalidHeadSettingsFailure({
+    api: forgeApi,
+    owner: opts.owner,
+    repo: opts.repo,
+    headSha: opts.expectedHeadSha,
+    automergeRepos: opts.automergeRepos,
+    log,
+  });
+  if (settingsFailure) {
+    await postReviewStatus(
+      forgeApi,
+      opts.owner,
+      opts.repo,
+      opts.expectedHeadSha,
+      "failure",
+      settingsFailure,
+      pr.html_url
+    );
+    return { status: "skipped", reason: settingsFailure };
   }
 
   if (opts.error && !opts.resultMarkdown) {
@@ -1868,6 +1936,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               expectedHeadSha: reviewedHeadSha,
               botUsername: opts.botUsername,
               blockingQuestionAuthors: opts.blockingQuestionAuthors,
+              automergeRepos: opts.automergeRepos,
               resultMarkdown: markdown,
               resultRunner: runner,
               logger: log,

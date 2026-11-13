@@ -1685,6 +1685,7 @@ export async function implementFollowUp(
           repo,
           prNumber: pr.number,
           automergeRepos: opts.automergeRepos,
+          botUsername: opts.botUsername,
           log,
         });
       } catch (err) {

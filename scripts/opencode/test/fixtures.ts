@@ -298,6 +298,7 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     trustedSenderLogins: [],
     ignoreConflictsLabel: "ignore-conflicts",
     blockingQuestionAuthors: [],
+    automergeRepos: [],
     model: "openai/gpt-5.5",
     runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },
     chain: ["primary"],

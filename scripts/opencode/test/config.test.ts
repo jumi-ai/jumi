@@ -289,6 +289,16 @@ describe("loadConfig", () => {
     ).toEqual(["renovate-bot", "Renovate[bot]"]);
   });
 
+  test("parses JUMI_AUTOMERGE_REPOS CSV and treats empty as off", () => {
+    expect(loadConfig(required).automergeRepos).toEqual([]);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_REPOS: "" }).automergeRepos).toEqual([]);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_REPOS: " , " }).automergeRepos).toEqual([]);
+    expect(loadConfig({ ...required, JUMI_AUTOMERGE_REPOS: "kirmanak/demo, acme, " }).automergeRepos).toEqual([
+      "kirmanak/demo",
+      "acme",
+    ]);
+  });
+
   test("parses wildcard owner allowlist", () => {
     const config = loadConfig({
       ...required,

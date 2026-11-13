@@ -2,7 +2,8 @@ import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
 import type { ClaimedLoop } from "./claimed_worktree.ts";
 import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
-import type { IssueApi } from "./ports.ts";
+import type { Forge, IssueApi } from "./ports.ts";
+import { loadRepoSettings, prTouchesRepoSettings, REPO_SETTINGS_PATH, type RepoSettingsLoad } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 
 export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
@@ -17,13 +18,36 @@ type AutomergeApi = Pick<
   | "findStickyIssueComment"
   | "createIssueComment"
   | "updateIssueComment"
->;
+> &
+  Partial<Pick<Forge, "getPRFiles" | "getRepoFile" | "cancelAutoMerge">>;
 
-/** Deployment-level per-repository opt-in, same `owner/repo` CSV style as the allowlists. */
+/**
+ * Deployment-level auto-merge opt-in, same CSV style as the allowlists.
+ * Besides `owner/repo` entries it accepts a whole-owner entry (`owner`, also
+ * written `owner/*`) and an every-repository entry (`*`, also written with a
+ * slash-star suffix). Matching is case-insensitive; blank entries are ignored.
+ */
 export function isAutomergeRepo(owner: string, repo: string, list: readonly string[] | undefined): boolean {
   if (!list || list.length === 0) return false;
-  const wanted = `${owner}/${repo}`.toLowerCase();
-  return list.some((entry) => entry.trim().toLowerCase() === wanted);
+  const wantedOwner = owner.trim().toLowerCase();
+  const wantedRepo = repo.trim().toLowerCase();
+  const wanted = `${wantedOwner}/${wantedRepo}`;
+  for (const raw of list) {
+    const entry = raw.trim().toLowerCase();
+    if (!entry) continue;
+    if (entry === "*" || entry === "*/*") return true;
+    if (entry.endsWith("/*")) {
+      const prefix = entry.slice(0, -2);
+      if (prefix === "*" || prefix === wantedOwner) return true;
+      continue;
+    }
+    if (!entry.includes("/")) {
+      if (entry === wantedOwner) return true;
+      continue;
+    }
+    if (entry === wanted) return true;
+  }
+  return false;
 }
 
 const GITEA_MERGE_STYLES = new Set(["merge", "rebase", "rebase-merge", "squash", "fast-forward-only"]);
@@ -70,8 +94,97 @@ export interface ScheduleAutomergeInput {
   log?: (message: string) => void;
 }
 
+export function touchedSettingsNote(): string {
+  return (
+    `Jumi did not schedule auto-merge on this pull request because it changes the repository settings file ` +
+    `\`${REPO_SETTINGS_PATH}\`. Turning auto-merge on, and every later settings change, takes a person's merge.`
+  );
+}
+
+export function invalidSettingsNote(error: string): string {
+  return (
+    `Jumi did not schedule auto-merge on this pull request: the repository settings file ` +
+    `\`${REPO_SETTINGS_PATH}\` is invalid: ${error} A person needs to merge once reviews and CI are green.`
+  );
+}
+
+function cancelledSettingsNote(): string {
+  return (
+    `Jumi cancelled the auto-merge schedule on this pull request because it changes the repository settings file ` +
+    `\`${REPO_SETTINGS_PATH}\`. Turning auto-merge on, and every later settings change, takes a person's merge.`
+  );
+}
+
+function unrestoredInvalidSettingsNote(error: string): string {
+  return (
+    `Jumi did not restore auto-merge on this pull request: the repository settings file ` +
+    `\`${REPO_SETTINGS_PATH}\` is invalid: ${error} A person needs to merge once reviews and CI are green.`
+  );
+}
+
+/** Best-effort cancel of a schedule Jumi set earlier. Never throws. Resolves
+ * `true` when a schedule was removed; `false` (missing cancel entrypoint,
+ * nothing to remove, or a failed cancel) keeps Gitea silent, where the
+ * schedule state is unreadable. */
+async function cancelAutomergeSchedule(
+  api: AutomergeApi,
+  forgeKind: ForgeKind,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<boolean> {
+  void forgeKind;
+  try {
+    const cancel = api.cancelAutoMerge;
+    if (typeof cancel !== "function") return false;
+    const removed = await cancel.call(api, owner, repo, prNumber);
+    log(`automerge cancelled for ${owner}/${repo}#${prNumber} (settings file in pull)`);
+    // Older fakes resolve `void`: only an explicit `false` means "nothing
+    // to remove"; anything else keeps the previous claim-a-cancel behaviour.
+    return removed !== false;
+  } catch (err) {
+    // A missing schedule is the steady state; any other failure stays in the
+    // server log and never fails the job.
+    log(
+      `automerge cancel failed for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Whether the pull changes the repository settings file. Resolves
+ * `undefined` when the pull file list is unreadable, so callers fail
+ * closed; a missing list entrypoint resolves `false` (no check possible).
+ */
+async function prIncludesSettingsFile(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<boolean | undefined> {
+  try {
+    const listFiles = api.getPRFiles;
+    if (typeof listFiles !== "function") return false;
+    const files = await listFiles.call(api, owner, repo, prNumber);
+    return prTouchesRepoSettings(files);
+  } catch (err) {
+    log(
+      `automerge pull files unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return undefined;
+  }
+}
+
 /**
  * Schedule the forge's native auto-merge on a pull request Jumi opened.
+ * Two switches are required: the deployer list must allow the repository
+ * and the default-branch settings file must turn auto-merge on. A missing
+ * file or `automerge: false` schedules nothing with no note. An invalid
+ * file schedules nothing and the note names the parser's error. A pull
+ * request that changes the settings file is never scheduled.
  * Fail-closed: any unreadable gate or refused schedule leaves the pull open
  * and posts one sticky note on the pull request. Never throws.
  */
@@ -79,6 +192,63 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   const log = input.log ?? (() => undefined);
   const forge = input.forgeKind;
   if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return { scheduled: false };
+
+  const touchesSettings = await prIncludesSettingsFile(input.api, input.owner, input.repo, input.prNumber, log);
+  if (touchesSettings === undefined) {
+    log(`automerge pull files unreadable for ${input.owner}/${input.repo}#${input.prNumber}: failing closed`);
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      `Jumi did not schedule auto-merge on this pull request: the pull request files could not be read. A person needs to merge once reviews and CI are green.`
+    );
+    return { scheduled: false };
+  }
+  if (touchesSettings) {
+    log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: pull changes ${REPO_SETTINGS_PATH}`);
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      touchedSettingsNote()
+    );
+    return { scheduled: false };
+  }
+
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(input.api, input.owner, input.repo, input.baseBranch);
+  } catch (err) {
+    log(
+      `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      `Jumi did not schedule auto-merge on this pull request: the repository settings file could not be read. A person needs to merge once reviews and CI are green.`
+    );
+    return { scheduled: false };
+  }
+  if (settings.state === "invalid") {
+    log(`automerge settings invalid for ${input.owner}/${input.repo}#${input.prNumber}: ${settings.error}`);
+    await postAutomergeNote(
+      input.api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      invalidSettingsNote(settings.error)
+    );
+    return { scheduled: false };
+  }
+  if (settings.state !== "valid" || settings.automerge !== true) return { scheduled: false };
 
   let gateOk = false;
   try {
@@ -194,7 +364,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
 }
 
 export interface RestoreAutomergeInput {
-  api: Pick<AutomergeApi, "getRepo" | "getPR" | "scheduleAutoMerge">;
+  api: AutomergeApi;
   forgeKind: ForgeKind;
   owner: string;
   repo: string;
@@ -202,6 +372,7 @@ export interface RestoreAutomergeInput {
   /** Schedule state read just before Jumi's push. Absent (person-cancelled or never scheduled) stays absent. */
   wasScheduled: boolean;
   automergeRepos: readonly string[] | undefined;
+  botUsername: string;
   log?: (message: string) => void;
 }
 
@@ -211,10 +382,60 @@ export interface RestoreAutomergeInput {
  * dropped it; a person-cancelled (or never scheduled) pull is left alone.
  * Only GitHub exposes a readable schedule state, and only there are extra
  * forge calls made. Never throws; restore failures stay silent (no retry loop).
+ *
+ * A pull that now changes the repository settings file is never restored:
+ * Jumi cancels the schedule it set earlier and posts one note saying why.
+ * Restoring re-checks the default-branch settings file: an invalid file
+ * posts the parser's error, and anything but `automerge: true` restores
+ * nothing.
  */
 export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Promise<void> {
   const log = input.log ?? (() => undefined);
+  const noteApi = input.api as AutomergeApi;
   if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return;
+  // GitHub exposes a readable schedule state: a pull that never had a
+  // schedule (person-cancelled or never scheduled) stays silent without any
+  // further forge calls.
+  if (input.forgeKind === "github" && !input.wasScheduled) return;
+  const touchesSettings = await prIncludesSettingsFile(noteApi, input.owner, input.repo, input.prNumber, log);
+  // Unreadable pull files fail closed: neither cancel nor restore.
+  if (touchesSettings === undefined) return;
+  if (touchesSettings) {
+    if (input.forgeKind === "github") {
+      await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        cancelledSettingsNote()
+      );
+      return;
+    }
+    // Gitea has no readable schedule state (`wasScheduled` is always
+    // false), so the cancel result drives the note: only claim a
+    // cancellation when a schedule was actually removed.
+    const cancelled = await cancelAutomergeSchedule(
+      noteApi,
+      input.forgeKind,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      log
+    );
+    if (cancelled) {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        cancelledSettingsNote()
+      );
+    }
+    return;
+  }
   if (!input.wasScheduled) return;
   if (input.forgeKind !== "github") return;
   let current: { merged?: boolean; state?: string; autoMergeEnabled?: boolean };
@@ -229,11 +450,34 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   if (current.merged || current.state !== "open") return;
   if (current.autoMergeEnabled === true) return;
   let mergeMethod = "MERGE";
+  let defaultBranch = "main";
   try {
     const repo = await input.api.getRepo(input.owner, input.repo);
     if (repo.allowAutoMerge === false) return;
     mergeMethod = githubMergeMethodForRepo(repo) ?? "MERGE";
+    if (repo.default_branch) defaultBranch = repo.default_branch;
   } catch {
+    return;
+  }
+  try {
+    const settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
+    if (settings.state === "invalid") {
+      log(`automerge settings invalid for ${input.owner}/${input.repo}#${input.prNumber}: ${settings.error}`);
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        unrestoredInvalidSettingsNote(settings.error)
+      );
+      return;
+    }
+    if (settings.state !== "valid" || settings.automerge !== true) return;
+  } catch (err) {
+    log(
+      `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
     return;
   }
   try {
@@ -269,19 +513,22 @@ export async function readAutomergeScheduled(
 }
 
 export interface PushWithAutomergeRestoreInput {
-  api: Pick<AutomergeApi, "getRepo" | "getPR" | "scheduleAutoMerge">;
+  api: AutomergeApi;
   forgeKind: ForgeKind;
   owner: string;
   repo: string;
   prNumber: number;
   automergeRepos: readonly string[] | undefined;
+  botUsername: string;
   log?: (message: string) => void;
 }
 
 /**
  * Read the schedule state, push the claimed branch, then restore the
  * schedule when the forge dropped it. Person-cancelled stays cancelled.
- * Shared by the follow-up and conflict flows so the restore logic has one home.
+ * A push that brings the settings file into the pull cancels the schedule
+ * Jumi set earlier instead. Shared by the follow-up and conflict flows so
+ * the restore logic has one home.
  */
 export async function pushClaimedBranchWithAutomergeRestore(
   loop: ClaimedLoop,
@@ -305,6 +552,7 @@ export async function pushClaimedBranchWithAutomergeRestore(
     prNumber: input.prNumber,
     wasScheduled,
     automergeRepos: input.automergeRepos,
+    botUsername: input.botUsername,
     log: input.log,
   });
 }
