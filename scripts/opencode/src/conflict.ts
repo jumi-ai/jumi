@@ -54,7 +54,15 @@ import {
   injectStoredHandoff,
   saveWorktreeHandoff,
 } from "./handoff.ts";
-import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
+import {
+  hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
+  ignoreConflictsReason,
+  isIgnoreConflictsAuthor,
+  isLeftToAuthor,
+  leaveConflictsAuthorReason,
+  loadIgnoreConflictsAuthors,
+} from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
   confirmProvenancePublication,
@@ -71,7 +79,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { withIssueAuthorPermission } from "./permissions.ts";
 import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -233,12 +241,14 @@ export async function needsConflict(opts: {
   maxConflictRounds?: number;
   skipLatches?: SkipLatchStore;
   ignoreConflictsLabel?: string;
+  ignoreConflictsAuthors?: readonly string[];
   hasJumiCommit?: boolean;
 }): Promise<boolean> {
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
-  if (opts.hasJumiCommit === false && hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
-    return false;
+  if (opts.hasJumiCommit === false) {
+    if (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) return false;
+    if (isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors)) return false;
   }
   const state = await readConflictLatch(skipLatchesFor(opts), {
     owner: opts.owner,
@@ -655,18 +665,33 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "skipped", reason: "refusing to merge on the default branch" };
   }
 
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  if (ignoreAuthors === undefined) {
+    await forgetClaim();
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  }
+  const leftLabeled = hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel);
   if (
     await isLeftToAuthor(
       opts.api,
       owner,
       repo,
       pr,
-      { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+      {
+        botUsername: opts.botUsername,
+        ignoreConflictsLabel: opts.ignoreConflictsLabel,
+        ignoreConflictsAuthors: ignoreAuthors,
+        prAuthor: pr.user?.login,
+        defaultBranch: opts.job.defaultBranch,
+      },
       log
     )
   ) {
     await forgetClaim();
-    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
+    const reason = !leftLabeled
+      ? leaveConflictsAuthorReason(pr.user?.login)
+      : ignoreConflictsReason(opts.ignoreConflictsLabel);
+    return { status: "skipped", reason };
   }
 
   const state = await readConflictLatch(latches, latchKey);
@@ -677,7 +702,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
-    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    await sticky(quotaStuckReasonForText(stuckState.quota?.reason), pr.number);
     await forgetClaim();
     return { status: "stuck" };
   }
@@ -872,8 +897,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             chain: jobChain,
             previousError: opts.previousError,
           });
-          await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+          await sticky(quotaReason, pr.number);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "stuck" };
@@ -974,9 +1000,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 chain: jobChain,
                 previousError: opts.previousError,
               });
-              await sticky(QUOTA_STUCK_TEXT, pr.number);
-              await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-              throw new Error(QUOTA_STUCK_TEXT);
+              const quotaReason = quotaStuckReasonForText(continued.message);
+              await sticky(quotaReason, pr.number);
+              await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+              throw new Error(quotaReason);
             }
             throwIfEngineFailed(continued);
             await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
@@ -1094,8 +1121,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           chain: jobChain,
           previousError: opts.previousError,
         });
-        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        await sticky(quotaReason, pr.number).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
           pushLanded: false,
           logger: log,
