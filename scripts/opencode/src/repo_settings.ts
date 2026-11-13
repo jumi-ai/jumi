@@ -16,13 +16,25 @@ export const REPO_SETTINGS_PATH = ".jumi.yml";
 export interface RepoSettings {
   automerge: boolean;
   reviewExclude: string[];
+  takeoverAuthors: string[];
+  ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
   blockingQuestionAuthors: string[];
 }
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set(["automerge", "review_exclude", "blocking_question_authors"]);
+const KNOWN_KEYS = new Set([
+  "automerge",
+  "review_exclude",
+  "takeover_authors",
+  "takeover-authors",
+  "takeoverAuthors",
+  "ignore_conflicts_authors",
+  "ignore-conflicts-authors",
+  "ignoreConflictsAuthors",
+  "blocking_question_authors",
+]);
 
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -32,12 +44,14 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * absent `review_exclude` means nothing is left out; absent
- * `blocking_question_authors` means no repo-listed authors.
- * `blocking_question_authors` must be a list of login strings when present;
- * blank entries are dropped like the deployer CSV. No schema-version key
- * exists. The error string is the parser's error and is surfaced verbatim in
- * the auto-merge note and the review status.
+ * absent `review_exclude` means nothing is left out; absent author lists
+ * mean empty; no schema-version key exists. The error string is the
+ * parser's error and is surfaced verbatim in the auto-merge note and the
+ * review status. Author lists match whole logins, case-insensitive.
+ * Canonical keys are `takeover_authors` and `ignore_conflicts_authors`;
+ * hyphen and camelCase spellings are accepted as aliases for the same
+ * setting. `blocking_question_authors` must be a list of login strings when
+ * present; blank entries are dropped like the deployer CSV.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -47,7 +61,16 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     return { ok: false, error: parserErrorMessage(err) };
   }
   if (parsed === null || parsed === undefined)
-    return { ok: true, settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] } };
+    return {
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -72,6 +95,14 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     reviewExclude = [...(record.review_exclude as string[])];
   }
+  const takeover = parseAuthorList(record, ["takeover_authors", "takeover-authors", "takeoverAuthors"]);
+  if (!takeover.ok) return takeover;
+  const ignoreConflicts = parseAuthorList(record, [
+    "ignore_conflicts_authors",
+    "ignore-conflicts-authors",
+    "ignoreConflictsAuthors",
+  ]);
+  if (!ignoreConflicts.ok) return ignoreConflicts;
   let blockingQuestionAuthors: string[] = [];
   if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
     const value = record.blocking_question_authors;
@@ -85,12 +116,52 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     blockingQuestionAuthors = logins;
   }
-  return { ok: true, settings: { automerge, reviewExclude, blockingQuestionAuthors } };
+  return {
+    ok: true,
+    settings: {
+      automerge,
+      reviewExclude,
+      takeoverAuthors: takeover.authors,
+      ignoreConflictsAuthors: ignoreConflicts.authors,
+      blockingQuestionAuthors,
+    },
+  };
+}
+
+function canonicalKey(aliases: readonly string[]): string {
+  return aliases[0] ?? "";
+}
+
+function parseAuthorList(
+  record: Record<string, unknown>,
+  aliases: readonly string[]
+): { ok: true; authors: string[] } | { ok: false; error: string } {
+  const present = aliases.filter((key) => key in record && (record as Record<string, unknown>)[key] !== undefined);
+  if (present.length > 1) return { ok: false, error: `duplicate setting "${canonicalKey(aliases)}"` };
+  const key = present[0];
+  if (!key) return { ok: true, authors: [] };
+  const value = (record as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
+  const authors: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.trim()) {
+      return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
+    }
+    authors.push(entry.trim());
+  }
+  return { ok: true, authors };
 }
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean; reviewExclude: string[]; blockingQuestionAuthors: string[] }
+  | {
+      state: "valid";
+      automerge: boolean;
+      reviewExclude: string[];
+      takeoverAuthors: string[];
+      ignoreConflictsAuthors: string[];
+      blockingQuestionAuthors: string[];
+    }
   | { state: "invalid"; error: string };
 
 export interface RepoSettingsFileApi {
@@ -128,6 +199,8 @@ export async function loadRepoSettings(
     state: "valid",
     automerge: parsed.settings.automerge,
     reviewExclude: parsed.settings.reviewExclude,
+    takeoverAuthors: parsed.settings.takeoverAuthors,
+    ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
   };
 }

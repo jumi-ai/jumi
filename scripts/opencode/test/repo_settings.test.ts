@@ -15,25 +15,49 @@ describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: true,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
   test("absent automerge means off", () => {
     expect(parseRepoSettingsText("{}\n")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
   test("explicit false means off", () => {
     expect(parseRepoSettingsText("automerge: false\n")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
@@ -53,11 +77,23 @@ describe("parseRepoSettingsText", () => {
   test("an empty file means off", () => {
     expect(parseRepoSettingsText("")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
@@ -78,21 +114,39 @@ describe("parseRepoSettingsText", () => {
   test("review_exclude parses a list of globs", () => {
     expect(parseRepoSettingsText('review_exclude:\n  - "**/generated/**"\n  - "pnpm-lock.yaml"\n')).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: ["**/generated/**", "pnpm-lock.yaml"], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        reviewExclude: ["**/generated/**", "pnpm-lock.yaml"],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
   test("absent review_exclude means nothing is left out", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: true,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
   test("review_exclude combines with automerge", () => {
     expect(parseRepoSettingsText('automerge: true\nreview_exclude:\n  - "docs/**"\n')).toEqual({
       ok: true,
-      settings: { automerge: true, reviewExclude: ["docs/**"], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: true,
+        reviewExclude: ["docs/**"],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
@@ -111,15 +165,111 @@ describe("parseRepoSettingsText", () => {
     }
   });
 
+  test("takeover authors parse as logins", () => {
+    expect(parseRepoSettingsText("takeover_authors: [renovate, Dependabot]\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: ["renovate", "Dependabot"],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+    expect(parseRepoSettingsText("takeover_authors: []\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("ignore-conflicts authors parse as logins", () => {
+    expect(parseRepoSettingsText('ignore_conflicts_authors: ["renovate[bot]"]\n')).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: ["renovate[bot]"],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("author aliases parse to the same setting", () => {
+    expect(parseRepoSettingsText("takeover-authors: [a]\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: ["a"],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+    expect(parseRepoSettingsText("takeoverAuthors: [a]\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: ["a"],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+    expect(parseRepoSettingsText("ignore-conflicts-authors: [a]\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: ["a"],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("author lists must be lists of non-empty strings", () => {
+    for (const text of [
+      "takeover_authors: renovate\n",
+      "takeover_authors: 1\n",
+      "takeover_authors: [renovate, 1]\n",
+      "ignore_conflicts_authors: nope\n",
+      'ignore_conflicts_authors: ["", renovate]\n',
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed.ok).toBe(false);
+    }
+    expect(parseRepoSettingsText("takeover_authors: []\n").ok).toBe(true);
+    expect(parseRepoSettingsText("takeover_authors: [renovate, renovate]\n").ok).toBe(true);
+  });
+
   test("blocking_question_authors parses a login list", () => {
     expect(parseRepoSettingsText("blocking_question_authors:\n  - renovate-bot\n")).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: ["renovate-bot"] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: ["renovate-bot"],
+      },
     });
     expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
       {
         ok: true,
-        settings: { automerge: true, reviewExclude: [], blockingQuestionAuthors: ["Alice", "renovate-bot"] },
+        settings: {
+          automerge: true,
+          reviewExclude: [],
+          takeoverAuthors: [],
+          ignoreConflictsAuthors: [],
+          blockingQuestionAuthors: ["Alice", "renovate-bot"],
+        },
       }
     );
   });
@@ -127,7 +277,13 @@ describe("parseRepoSettingsText", () => {
   test("absent blocking_question_authors means none", () => {
     expect(parseRepoSettingsText("automerge: true\n")).toEqual({
       ok: true,
-      settings: { automerge: true, reviewExclude: [], blockingQuestionAuthors: [] },
+      settings: {
+        automerge: true,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     });
   });
 
@@ -146,7 +302,13 @@ describe("parseRepoSettingsText", () => {
   test("blank blocking entries are dropped", () => {
     expect(parseRepoSettingsText('blocking_question_authors:\n  - "  "\n  - alice\n')).toEqual({
       ok: true,
-      settings: { automerge: false, reviewExclude: [], blockingQuestionAuthors: ["alice"] },
+      settings: {
+        automerge: false,
+        reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: ["alice"],
+      },
     });
   });
 });
@@ -170,7 +332,14 @@ describe("loadRepoSettings", () => {
         "r",
         "main"
       )
-    ).toEqual({ state: "valid", automerge: true, reviewExclude: [], blockingQuestionAuthors: [] });
+    ).toEqual({
+      state: "valid",
+      automerge: true,
+      reviewExclude: [],
+      takeoverAuthors: [],
+      ignoreConflictsAuthors: [],
+      blockingQuestionAuthors: [],
+    });
   });
 
   test("valid file loads review_exclude", async () => {
@@ -181,7 +350,38 @@ describe("loadRepoSettings", () => {
         "r",
         "main"
       )
-    ).toEqual({ state: "valid", automerge: false, reviewExclude: ["**/generated/**"], blockingQuestionAuthors: [] });
+    ).toEqual({
+      state: "valid",
+      automerge: false,
+      reviewExclude: ["**/generated/**"],
+      takeoverAuthors: [],
+      ignoreConflictsAuthors: [],
+      blockingQuestionAuthors: [],
+    });
+  });
+
+  test("valid file loads author lists", async () => {
+    expect(
+      await loadRepoSettings(
+        {
+          getRepoFile: async () => ({
+            found: true,
+            content:
+              'takeover_authors: [renovate]\nignore_conflicts_authors: ["renovate[bot]"]\nblocking_question_authors: [alice]\n',
+          }),
+        },
+        "o",
+        "r",
+        "main"
+      )
+    ).toEqual({
+      state: "valid",
+      automerge: false,
+      reviewExclude: [],
+      takeoverAuthors: ["renovate"],
+      ignoreConflictsAuthors: ["renovate[bot]"],
+      blockingQuestionAuthors: ["alice"],
+    });
   });
 
   test("invalid file carries the parser error", async () => {
@@ -333,6 +533,8 @@ describe("effectiveBlockingQuestionAuthors", () => {
         state: "valid",
         automerge: false,
         reviewExclude: [],
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["repo-bot", "DEPLOYER-bot"],
       })
     ).toEqual(["deployer-bot", "repo-bot"]);

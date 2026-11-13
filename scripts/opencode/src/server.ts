@@ -419,6 +419,53 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             logger,
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          if (payload.action === "opened" && deps.worker?.api) {
+            try {
+              const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+              const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
+              if (takeoverOwner && takeoverRepo) {
+                const decision = await shouldEnqueueTakeoverForOpenedPull({
+                  api: deps.worker.api as never,
+                  forgeKind: config.forge,
+                  owner: takeoverOwner,
+                  repo: takeoverRepo,
+                  prNumber: payload.pull_request.number,
+                  prTitle: payload.pull_request.title,
+                  prDraft: payload.pull_request.draft,
+                  prState: payload.pull_request.state,
+                  prMerged: payload.pull_request.merged,
+                  prAuthorLogin: payload.pull_request.user?.login,
+                  prHeadRef: payload.pull_request.head?.ref ?? "",
+                  prHeadSha: payload.pull_request.head?.sha ?? job.headSha,
+                  prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+                  defaultBranch: payload.repository.default_branch,
+                  cloneUrl: payload.repository.clone_url,
+                  htmlUrl: payload.pull_request.html_url,
+                  updatedAt: payload.pull_request.updated_at,
+                  prBody: payload.pull_request.body,
+                  botUsername: config.botUsername,
+                  trustedSenderLogins: config.trustedSenderLogins,
+                  action: payload.action,
+                  log: (message) => logger(message),
+                });
+                if (decision.type === "enqueue") {
+                  const workerJob = {
+                    ...decision.job,
+                    delivery: `takeover-${delivery}`,
+                    receivedAt: new Date().toISOString(),
+                  };
+                  const enqueued = await deps.worker.queue.enqueue(workerJob);
+                  logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} delivery=${workerJob.delivery}`);
+                } else {
+                  logger(
+                    `takeover skipped ${takeoverOwner}/${takeoverRepo}#${payload.pull_request.number}: ${decision.reason}`
+                  );
+                }
+              }
+            } catch (err) {
+              logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
           return markDurable(json(202, result));
         } catch (err) {
           if (isQueueUnavailable(err)) {
@@ -995,6 +1042,7 @@ export function workerMailboxApi(
     > & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
     };
+  const full = api as unknown as Partial<IssueApi>;
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
@@ -1010,6 +1058,17 @@ export function workerMailboxApi(
       ? (owner, repo, index) => extra.listPullCommits!(owner, repo, index)
       : undefined,
     deleteGitRef: extra.deleteGitRef ? (owner, repo, ref) => extra.deleteGitRef!(owner, repo, ref) : undefined,
+    getRepoFile: full.getRepoFile ? (owner, repo, path, ref) => full.getRepoFile!(owner, repo, path, ref) : undefined,
+    addIssueAssignees: full.addIssueAssignees
+      ? (owner, repo, index, assignees) => full.addIssueAssignees!(owner, repo, index, assignees)
+      : undefined,
+    addIssueLabel: full.addIssueLabel
+      ? (owner, repo, index, label) => full.addIssueLabel!(owner, repo, index, label)
+      : undefined,
+    findStickyIssueComment: (owner, repo, index, bot, marker) =>
+      api.findStickyIssueComment(owner, repo, index, bot, marker),
+    createIssueComment: (owner, repo, index, body) => api.createIssueComment(owner, repo, index, body),
+    updateIssueComment: (owner, repo, id, body) => api.updateIssueComment(owner, repo, id, body),
     rememberInstallation: extra.rememberInstallation?.bind(extra),
   };
 }
