@@ -1,6 +1,6 @@
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { claudeApiKeyVarNames } from "./claude_credentials.ts";
+import { claudeApiKeyVarNames, RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
@@ -18,7 +18,6 @@ import {
   runnerStamp,
   usesEffort,
 } from "./runners.ts";
-import { RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 /** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
@@ -193,12 +192,7 @@ function shouldHopFromResult(
   return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
 }
 
-function shouldHopFromError(
-  err: unknown,
-  opts: EngineRunOptions,
-  current: NamedRunner,
-  next: NamedRunner
-): boolean {
+function shouldHopFromError(err: unknown, opts: EngineRunOptions, current: NamedRunner, next: NamedRunner): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
   if (!(err instanceof EngineFailedError) || err.infra) return false;
   if (err.auth) return true;
@@ -218,12 +212,7 @@ function shouldHopQuotaResult(
   return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
 }
 
-function shouldHopQuotaError(
-  err: unknown,
-  opts: EngineRunOptions,
-  current: NamedRunner,
-  next: NamedRunner
-): boolean {
+function shouldHopQuotaError(err: unknown, opts: EngineRunOptions, current: NamedRunner, next: NamedRunner): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
   if (!(err instanceof EngineFailedError) || err.infra || err.auth) return false;
   if (isCreditQuotaError(err)) return shouldHopForCreditExhaustion(current, next);

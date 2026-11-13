@@ -68,7 +68,7 @@ import { withIssueAuthorPermission } from "./permissions.ts";
 import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";

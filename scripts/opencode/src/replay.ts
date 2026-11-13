@@ -15,7 +15,7 @@ import {
   buildNoTrailerWritePrompt,
   buildPROpenedPrompt,
 } from "./prompt.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";

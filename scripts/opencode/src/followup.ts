@@ -87,7 +87,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { loadEffectiveBlockingQuestionAuthors } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";

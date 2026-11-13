@@ -37,12 +37,7 @@ import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
-import {
-  CREDIT_QUOTA_MESSAGE,
-  isCreditBalanceText,
-  QUOTA_MESSAGE,
-  type QuotaClass,
-} from "./quota.ts";
+import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
 

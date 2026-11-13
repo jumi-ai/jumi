@@ -45,7 +45,7 @@ import {
   buildPROpenedPrompt,
 } from "./prompt.ts";
 import type { ProvenanceLookup, ProvenanceStore } from "./provenance.ts";
-import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
+import { isQuotaError, isQuotaText, isQuotaWaitError, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   CONTRACT_PATH,

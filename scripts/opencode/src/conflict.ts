@@ -71,7 +71,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { withIssueAuthorPermission } from "./permissions.ts";
 import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT, quotaStuckReasonForText } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
