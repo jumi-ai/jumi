@@ -89,6 +89,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { loadEffectiveBlockingQuestionAuthors } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -725,6 +726,24 @@ export async function needsFollowUp(opts: {
     issueNumber: opts.issueNumber,
   });
   if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
+  // Effective blocking authors: deployer plus the repository's
+  // default-branch file. Fail-open to the deployer list.
+  let effectiveBlocking = opts.blockingQuestionAuthors;
+  try {
+    const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
+    const defaultBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+    if (defaultBranch) {
+      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
+        opts.api,
+        opts.owner,
+        opts.repo,
+        defaultBranch,
+        opts.blockingQuestionAuthors
+      );
+    }
+  } catch {
+    // Fail-open: the deployer list still decides.
+  }
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -735,7 +754,7 @@ export async function needsFollowUp(opts: {
     opts.followupIgnoreLogins,
     {
       prAuthor: opts.pr.user?.login,
-      ...(opts.blockingQuestionAuthors ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+      ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
     },
     opts.trustedSenderLogins
   );
@@ -996,7 +1015,25 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha, pr.user?.login, opts.blockingQuestionAuthors);
+  // Effective blocking authors: deployer plus the repository's
+  // default-branch file (the job's default branch). Fail-open to deployer.
+  let effectiveBlocking = opts.blockingQuestionAuthors;
+  try {
+    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
+    if (defaultBranch) {
+      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
+        opts.api,
+        owner,
+        repo,
+        defaultBranch,
+        opts.blockingQuestionAuthors,
+        log
+      );
+    }
+  } catch {
+    // Fail-open: the deployer list still decides.
+  }
+  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha, pr.user?.login, effectiveBlocking);
 
   const branch = pr.head.ref;
   claim.branch = branch;
