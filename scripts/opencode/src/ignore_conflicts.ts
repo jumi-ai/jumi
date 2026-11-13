@@ -21,6 +21,23 @@ export function ignoreConflictsReason(labelName: string | undefined | null): str
   return `conflicted, left to author (label \`${label}\`)`;
 }
 
+export function isIgnoreConflictsAuthor(
+  login: string | undefined | null,
+  authors: readonly string[] | undefined | null
+): boolean {
+  if (typeof login !== "string" || !login.trim()) return false;
+  const needle = login.trim().toLowerCase();
+  for (const entry of authors ?? []) {
+    if (typeof entry === "string" && entry.trim().toLowerCase() === needle) return true;
+  }
+  return false;
+}
+
+export function leaveConflictsAuthorReason(authorLogin: string | undefined | null): string {
+  const who = typeof authorLogin === "string" && authorLogin.trim() ? authorLogin.trim() : "listed author";
+  return `conflicted, left to author (author \`${who}\`)`;
+}
+
 export function isIgnoreConflictsSkipReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return reason.trim().toLowerCase().startsWith("conflicted, left to author");
@@ -97,19 +114,46 @@ export async function hasJumiCommitOnPull(
 }
 
 export async function isLeftToAuthor(
-  api: { listPullCommits?: (owner: string, repo: string, index: number) => Promise<PullCommit[]> } | undefined,
+  api:
+    | {
+        listPullCommits?: (owner: string, repo: string, index: number) => Promise<PullCommit[]>;
+        getRepoFile?: (
+          owner: string,
+          repo: string,
+          path: string,
+          ref: string
+        ) => Promise<{ found: boolean; content?: string }>;
+      }
+    | undefined,
   owner: string,
   repo: string,
-  pr: { number: number; labels?: Array<string | { name?: string }> | null },
+  pr: {
+    number: number;
+    labels?: Array<string | { name?: string }> | null;
+    user?: { login?: string } | null;
+  },
   opts: {
     botUsername: string;
     ignoreConflictsLabel?: string;
     extraNames?: readonly (string | undefined)[];
     extraEmails?: readonly (string | undefined)[];
+    /** Pre-loaded `ignore_conflicts_authors` list. When absent and `defaultBranch` is given, loaded best-effort. */
+    ignoreConflictsAuthors?: readonly string[] | undefined;
+    /** Author login override; defaults to `pr.user.login`. */
+    prAuthor?: string | undefined | null;
+    /** Default branch to load the settings file from when `ignoreConflictsAuthors` is absent. */
+    defaultBranch?: string | undefined | null;
   },
   logger?: (message: string) => void
 ): Promise<boolean> {
-  if (!hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel)) return false;
+  const labeled = hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel);
+  let authors = opts.ignoreConflictsAuthors;
+  if (authors === undefined && typeof opts.defaultBranch === "string" && opts.defaultBranch.trim()) {
+    authors = await loadIgnoreConflictsAuthors(api, owner, repo, opts.defaultBranch, logger);
+  }
+  const authorLogin = opts.prAuthor ?? pr.user?.login;
+  const authorListed = isIgnoreConflictsAuthor(authorLogin, authors);
+  if (!labeled && !authorListed) return false;
   const committed = await hasJumiCommitOnPull(
     api,
     owner,
@@ -131,4 +175,56 @@ export async function isLeftToAuthor(
     return false;
   }
   return !committed;
+}
+
+/**
+ * Best-effort load of the `ignore_conflicts_authors` list from the
+ * default-branch settings file. Missing, invalid, unreadable, or
+ * file-API-less resolves to an empty list (no leave): an invalid file never
+ * leaves conflicts to anyone.
+ */
+export async function loadIgnoreConflictsAuthors(
+  api:
+    | {
+        getRepoFile?: (
+          owner: string,
+          repo: string,
+          path: string,
+          ref: string
+        ) => Promise<{ found: boolean; content?: string }>;
+      }
+    | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null,
+  logger?: (message: string) => void
+): Promise<string[]> {
+  try {
+    if (!api || typeof api.getRepoFile !== "function") return [];
+    if (typeof defaultBranch !== "string" || !defaultBranch.trim()) return [];
+    const { loadRepoSettings } = await import("./repo_settings.ts");
+    const loaded = await loadRepoSettings(api, owner, repo, defaultBranch.trim());
+    if (loaded.state !== "valid") return [];
+    return [...(loaded.ignoreConflictsAuthors ?? [])];
+  } catch (err) {
+    logger?.(
+      `ignore-conflicts authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [];
+  }
+}
+
+/**
+ * Skip reason for a pull left to its author. The label form keeps today's
+ * text; the author-list form names the author instead. Both share the
+ * `conflicted, left to author` prefix so `isIgnoreConflictsSkipReason`
+ * still matches.
+ */
+export function leaveConflictsReason(opts: {
+  ignoreConflictsLabel?: string | undefined | null;
+  authorLogin?: string | undefined | null;
+  viaAuthor?: boolean;
+}): string {
+  if (opts.viaAuthor) return leaveConflictsAuthorReason(opts.authorLogin);
+  return ignoreConflictsReason(opts.ignoreConflictsLabel);
 }

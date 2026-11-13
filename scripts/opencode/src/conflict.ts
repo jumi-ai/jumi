@@ -54,7 +54,13 @@ import {
   injectStoredHandoff,
   saveWorktreeHandoff,
 } from "./handoff.ts";
-import { hasIgnoreConflictsLabel, ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
+import {
+  hasIgnoreConflictsLabel,
+  ignoreConflictsReason,
+  isLeftToAuthor,
+  leaveConflictsAuthorReason,
+  loadIgnoreConflictsAuthors,
+} from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
   confirmProvenancePublication,
@@ -233,12 +239,15 @@ export async function needsConflict(opts: {
   maxConflictRounds?: number;
   skipLatches?: SkipLatchStore;
   ignoreConflictsLabel?: string;
+  ignoreConflictsAuthors?: readonly string[];
   hasJumiCommit?: boolean;
 }): Promise<boolean> {
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
-  if (opts.hasJumiCommit === false && hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) {
-    return false;
+  if (opts.hasJumiCommit === false) {
+    if (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) return false;
+    const { isIgnoreConflictsAuthor } = await import("./ignore_conflicts.ts");
+    if (isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors)) return false;
   }
   const state = await readConflictLatch(skipLatchesFor(opts), {
     owner: opts.owner,
@@ -655,18 +664,29 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     return { status: "skipped", reason: "refusing to merge on the default branch" };
   }
 
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  const leftLabeled = hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel);
   if (
     await isLeftToAuthor(
       opts.api,
       owner,
       repo,
       pr,
-      { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+      {
+        botUsername: opts.botUsername,
+        ignoreConflictsLabel: opts.ignoreConflictsLabel,
+        ignoreConflictsAuthors: ignoreAuthors,
+        prAuthor: pr.user?.login,
+        defaultBranch: opts.job.defaultBranch,
+      },
       log
     )
   ) {
     await forgetClaim();
-    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
+    const reason = !leftLabeled
+      ? leaveConflictsAuthorReason(pr.user?.login)
+      : ignoreConflictsReason(opts.ignoreConflictsLabel);
+    return { status: "skipped", reason };
   }
 
   const state = await readConflictLatch(latches, latchKey);

@@ -243,6 +243,9 @@ export interface Forge extends AttachmentSupport {
   getRepo(owner: string, repo: string): Promise<Repo>;
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;
+  /** Best-effort pickup marker for takeovers (Gitea assignee). Missing is not an error for callers. */
+  addIssueAssignees?(owner: string, repo: string, index: number, assignees: string[]): Promise<unknown>;
+  addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
   /** Branch protection readable with a write-level token (gate for auto-merge). Throws when unreadable. */
   getBranch?(owner: string, repo: string, branch: string): Promise<BranchProtection>;
   /**
@@ -346,6 +349,8 @@ export type IssueApi = Tracker &
     | "scheduleAutoMerge"
     | "cancelAutoMerge"
     | "getRepoFile"
+    | "addIssueAssignees"
+    | "addIssueLabel"
     | "createPullRequest"
     | "closePullRequest"
     | "updatePullRequestBody"
