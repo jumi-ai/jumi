@@ -9,7 +9,7 @@ import {
 } from "../src/automerge.ts";
 import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
 import type { IssueApi } from "../src/ports.ts";
-import { makeComment, makePR } from "./fixtures.ts";
+import { makeBranch, makeComment, makePR, makeUser } from "./fixtures.ts";
 
 type TestApi = IssueApi & {
   getPRFiles: (
@@ -118,7 +118,7 @@ function makeApi(overrides: Partial<TestApi> = {}): TestApi & {
 }
 
 describe("automerge opt-in", () => {
-  test("off by default: no forge calls, no note", async () => {
+  test("deployment switch off: no schedule calls, no settings read", async () => {
     const api = makeApi();
     const result = await scheduleAutomergeForPr({
       api,
@@ -128,11 +128,12 @@ describe("automerge opt-in", () => {
       prNumber: 3,
       baseBranch: "main",
       automergeRepos: [],
+      automergeEnabled: false,
       botUsername: "jumi",
       log: () => undefined,
     });
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual([]);
+    expect(api.calls).toEqual(["getPR", "getRepoFile"]);
     expect(api.notes).toEqual([]);
   });
 
@@ -156,8 +157,9 @@ describe("automerge opt-in", () => {
   test("matching is case-insensitive", () => {
     expect(isAutomergeRepo("Kirmanak", "Demo", ["kirmanak/demo"])).toBe(true);
     expect(isAutomergeRepo("kirmanak", "demo", [" Kirmanak/Demo "])).toBe(true);
-    expect(isAutomergeRepo("kirmanak", "demo", undefined)).toBe(false);
-    expect(isAutomergeRepo("kirmanak", "demo", [])).toBe(false);
+    expect(isAutomergeRepo("kirmanak", "demo", undefined)).toBe(true);
+    expect(isAutomergeRepo("kirmanak", "demo", [])).toBe(true);
+    expect(isAutomergeRepo("kirmanak", "demo", ["other/repo"])).toBe(false);
   });
 
   test("whole-owner entries allow every repository of that owner", () => {
@@ -196,7 +198,7 @@ describe("automerge gate", () => {
       log: () => undefined,
     });
     expect(result).toEqual({ scheduled: true });
-    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getBranch", "getRepo", "scheduleAutoMerge"]);
+    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getPR", "getBranch", "getRepo", "scheduleAutoMerge"]);
     expect(api.notes).toEqual([]);
     expect(api.scheduled).toEqual([{ mergeMethod: "merge" }]);
   });
@@ -219,7 +221,7 @@ describe("automerge gate", () => {
       log: () => undefined,
     });
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getBranch", "createIssueComment"]);
+    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getPR", "getBranch", "createIssueComment"]);
     expect(api.notes).toHaveLength(1);
     expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
     expect(api.notes[0]).toContain(JUMI_REVIEW_CONTEXT);
@@ -299,7 +301,7 @@ describe("automerge gate", () => {
       log: () => undefined,
     });
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getBranch", "getRepo", "createIssueComment"]);
+    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getPR", "getBranch", "getRepo", "createIssueComment"]);
     expect(api.notes[0]).toContain("disabled on this repository");
   });
 });
@@ -327,7 +329,7 @@ describe("automerge after push", () => {
       repo: "demo",
       prNumber: 3,
       wasScheduled: true,
-      automergeRepos: [],
+      automergeRepos: ["other/repo"],
       botUsername: "jumi",
       log: () => undefined,
     });
@@ -386,7 +388,7 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles", "getRepo", "getRepoFile"]);
+    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile"]);
     expect(api.calls).not.toContain("scheduleAutoMerge");
     expect(api.calls).not.toContain("cancelAutoMerge");
     expect(api.notes).toEqual([]);
@@ -471,9 +473,9 @@ describe("automerge after push", () => {
     expect(api.calls).toEqual(["getPRFiles", "getPR"]);
   });
 
-  test("readAutomergeScheduled is false off-opt-in, on gitea, and without calls", async () => {
+  test("readAutomergeScheduled is false off-list, on gitea, and without calls", async () => {
     const api = makeApi();
-    expect(await readAutomergeScheduled(api, "github", "k", "d", 3, [])).toBe(false);
+    expect(await readAutomergeScheduled(api, "github", "k", "d", 3, ["other/repo"])).toBe(false);
     expect(await readAutomergeScheduled(api, "gitea", "k", "d", 3, ["k/d"])).toBe(false);
     expect(api.calls).toEqual([]);
   });
@@ -504,7 +506,7 @@ describe("automerge repository settings file", () => {
     const result = await scheduleAutomergeForPr(scheduleInput(api));
     expect(result).toEqual({ scheduled: false });
     expect(api.notes).toEqual([]);
-    expect(api.calls).toEqual(["getPRFiles", "getRepoFile"]);
+    expect(api.calls).toEqual(["getPRFiles", "getRepoFile", "getPR"]);
   });
 
   test("automerge off schedules nothing with no note", async () => {
@@ -832,5 +834,398 @@ describe("automerge settings after push", () => {
     await ensureAutomergeAfterPush(restoreInput(api, { forgeKind: "gitea" as const, wasScheduled: false }));
     expect(api.calls).toContain("cancelAutoMerge");
     expect(api.notes).toEqual([]);
+  });
+});
+
+describe("automerge override labels", () => {
+  function labelInput(api: ReturnType<typeof makeApi>, overrides: Record<string, unknown> = {}) {
+    return {
+      api,
+      forgeKind: "gitea" as const,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined as readonly string[] | undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+      ...overrides,
+    };
+  }
+
+  function withPrLabels(api: ReturnType<typeof makeApi>, labels: Array<string | { name?: string }>) {
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: labels as never });
+    };
+  }
+
+  function withTimeline(
+    api: ReturnType<typeof makeApi>,
+    events: Array<{ label?: string | { name?: string }; actor?: string; user?: string; event?: string; type?: string }>
+  ) {
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return events.map((entry) => ({
+        ...(entry.event ? { event: entry.event } : {}),
+        ...(entry.type ? { type: entry.type } : {}),
+        ...(entry.label !== undefined ? { label: entry.label } : {}),
+        ...(entry.actor ? { actor: { login: entry.actor } } : {}),
+        ...(entry.user ? { user: { login: entry.user } } : {}),
+      }));
+    };
+  }
+
+  test("unset deployer list still opts in by file alone", async () => {
+    const api = makeApi();
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const result = await scheduleAutomergeForPr(labelInput(api, { automergeRepos: undefined }));
+    expect(result).toEqual({ scheduled: true });
+    expect(api.calls).toContain("scheduleAutoMerge");
+  });
+
+  test("non-empty deployer list still narrows even with the file on", async () => {
+    const api = makeApi();
+    const result = await scheduleAutomergeForPr(labelInput(api, { automergeRepos: ["other/repo"] }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).toEqual([]);
+  });
+
+  test("switch off schedules nothing; automerge label gets the disabled note", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["automerge"]);
+    const result = await scheduleAutomergeForPr(labelInput(api, { automergeEnabled: false }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("turned off");
+  });
+
+  test("label on issue copied to PR and scheduled with automerge:false", async () => {
+    const api = makeApi();
+    api.getIssue = async () => {
+      api.calls.push("getIssue");
+      return { labels: ["automerge"], number: 12 } as never;
+    };
+    withTimeline(api, [{ label: "automerge", actor: "alice", event: "labeled" }]);
+    const added: string[] = [];
+    api.addIssueLabel = async (_o: string, _r: string, _n: number, label: string) => {
+      api.calls.push("addIssueLabel");
+      added.push(label);
+      return {};
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const { scheduleAutomergeForNewPr } = await import("../src/automerge.ts");
+    const result = await scheduleAutomergeForNewPr({
+      ...labelInput(api, { issueNumber: 12 }),
+      baseBranch: "main",
+    } as never);
+    expect(added).toEqual(["automerge"]);
+    expect(result).toEqual({ scheduled: true });
+    expect(api.calls).toContain("scheduleAutoMerge");
+  });
+
+  test("no_automerge with automerge:true does not schedule", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["no-automerge"]);
+    const result = await scheduleAutomergeForPr(labelInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toEqual([]);
+  });
+
+  test("both labels do not schedule with a conflict note", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["automerge", "no-automerge"]);
+    withTimeline(api, [{ label: "automerge", actor: "alice", event: "labeled" }]);
+    const result = await scheduleAutomergeForPr(labelInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("both");
+  });
+
+  test("automerge by an untrusted sender does not schedule with a note", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["automerge"]);
+    withTimeline(api, [{ label: "automerge", actor: "mallory", event: "labeled" }]);
+    api.getCollaboratorPermission = async () => ({ permission: "read" });
+    const result = await scheduleAutomergeForPr(labelInput(api, { trustedSenderLogins: ["alice"] }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("may not turn auto-merge on");
+  });
+
+  test("unreadable labeller fails closed with a note", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["automerge"]);
+    // No listIssueTimeline: history unreadable.
+    const result = await scheduleAutomergeForPr(labelInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("could not be read");
+  });
+
+  test("adding the label schedules; removing it cancels", async () => {
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const api = makeApi();
+    withPrLabels(api, [{ name: "automerge" }]);
+    withTimeline(api, [{ label: "automerge", actor: "alice", event: "labeled" }]);
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const scheduled = await handleAutomergeLabelChange({
+      ...labelInput(api, { baseBranch: "main" }),
+      forgeKind: "gitea",
+    } as never);
+    expect(scheduled.action).toBe("scheduled");
+    expect(api.calls).toContain("scheduleAutoMerge");
+
+    const api2 = makeApi();
+    api2.getRepoFile = async () => {
+      api2.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    api2.getPR = async (_o: string, _r: string, index: number) => {
+      api2.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    api2.cancelAutoMerge = async () => {
+      api2.calls.push("cancelAutoMerge");
+      return true;
+    };
+    const cancelled = await handleAutomergeLabelChange({
+      ...labelInput(api2, { baseBranch: "main" }),
+      forgeKind: "gitea",
+    } as never);
+    expect(cancelled.action).toBe("cancelled");
+    expect(api2.calls).toContain("cancelAutoMerge");
+  });
+
+  test("a gate refusal still wins with the label present", async () => {
+    const api = makeApi();
+    withPrLabels(api, ["automerge"]);
+    withTimeline(api, [{ label: "automerge", actor: "alice", event: "labeled" }]);
+    api.getBranch = async () => {
+      api.calls.push("getBranch");
+      return { protected: true, enableStatusCheck: true, requiredContexts: ["ci/build"] };
+    };
+    const result = await scheduleAutomergeForPr(labelInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(JUMI_REVIEW_CONTEXT);
+  });
+
+  test("custom label names from .jumi.yml decide", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\nautomerge_label: ship-it\nno_automerge_label: hold\n" };
+    };
+    withPrLabels(api, ["SHIP-IT"]);
+    withTimeline(api, [{ label: "ship-it", actor: "alice", event: "labeled" }]);
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const result = await scheduleAutomergeForPr(labelInput(api));
+    expect(result).toEqual({ scheduled: true });
+
+    const api2 = makeApi();
+    api2.getRepoFile = async () => {
+      api2.calls.push("getRepoFile");
+      return { found: true, content: "automerge: true\nautomerge_label: ship-it\nno_automerge_label: hold\n" };
+    };
+    api2.getPR = async (_o: string, _r: string, index: number) => {
+      api2.calls.push("getPR");
+      return makePR({ number: index, labels: ["hold"] as never });
+    };
+    const held = await scheduleAutomergeForPr(labelInput(api2));
+    expect(held).toEqual({ scheduled: false });
+    expect(api2.calls).not.toContain("scheduleAutoMerge");
+  });
+});
+
+describe("router mailbox automerge label path", () => {
+  function jumiPr(api: ReturnType<typeof makeApi>, labels: Array<string | { name?: string }>, index = 3) {
+    api.getPR = async (_o: string, _r: string, n: number) => {
+      api.calls.push("getPR");
+      return makePR({
+        number: n || index,
+        user: makeUser({ login: "jumi" }),
+        head: makeBranch({ ref: "jumi/issue-12-foo", sha: "headsha" }),
+        title: "Jumi: fix the thing",
+        body: "Fixes #12",
+        labels: labels as never,
+      });
+    };
+  }
+
+  function labelWebhookBody(action: string, label: string, sender = "alice", prNumber = 3) {
+    return new TextEncoder().encode(
+      JSON.stringify({
+        action,
+        repository: {
+          full_name: "kirmanak/demo",
+          default_branch: "main",
+          html_url: "https://gitea.example.test/kirmanak/demo",
+          clone_url: "https://gitea.example.test/kirmanak/demo.git",
+        },
+        label: { name: label },
+        sender: { login: sender },
+        pull_request: { number: prNumber },
+      })
+    );
+  }
+
+  function webhookPolicy(overrides: Record<string, unknown> = {}) {
+    return {
+      giteaUrl: "https://gitea.example.test",
+      allowedOrgs: ["kirmanak"],
+      allowedRepos: [] as string[],
+      botUsername: "jumi",
+      forgeKind: "gitea",
+      ...overrides,
+    };
+  }
+
+  test("mailbox forwards the five label-path forge methods", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const api = makeApi();
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [];
+    };
+    const mailbox = workerMailboxApi(api as never);
+    expect(typeof mailbox?.getBranch).toBe("function");
+    expect(typeof mailbox?.scheduleAutoMerge).toBe("function");
+    expect(typeof mailbox?.cancelAutoMerge).toBe("function");
+    expect(typeof mailbox?.getPRFiles).toBe("function");
+    expect(typeof mailbox?.listIssueTimeline).toBe("function");
+    await mailbox?.getBranch?.("o", "r", "main");
+    await mailbox?.getPRFiles?.("o", "r", 3);
+    await mailbox?.listIssueTimeline?.("o", "r", 3);
+    expect(api.calls).toContain("getBranch");
+    expect(api.calls).toContain("getPRFiles");
+    expect(api.calls).toContain("listIssueTimeline");
+
+    const bare = makeApi();
+    delete (bare as unknown as Record<string, unknown>)["getBranch"];
+    delete (bare as unknown as Record<string, unknown>)["scheduleAutoMerge"];
+    delete (bare as unknown as Record<string, unknown>)["cancelAutoMerge"];
+    delete (bare as unknown as Record<string, unknown>)["getPRFiles"];
+    const bareMailbox = workerMailboxApi(bare as never);
+    expect(bareMailbox?.getBranch).toBeUndefined();
+    expect(bareMailbox?.scheduleAutoMerge).toBeUndefined();
+    expect(bareMailbox?.cancelAutoMerge).toBeUndefined();
+    expect(bareMailbox?.getPRFiles).toBeUndefined();
+    expect(bareMailbox?.listIssueTimeline).toBeUndefined();
+  });
+
+  test("label add through the mailbox schedules even with automerge:false", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { tryHandleAutomergeLabelEvent } = await import("../src/automerge_webhook.ts");
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    jumiPr(api, ["automerge"]);
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    const mailbox = workerMailboxApi(api as never);
+    const handled = await tryHandleAutomergeLabelEvent({
+      rawBody: labelWebhookBody("labeled", "automerge"),
+      policy: webhookPolicy(),
+      api: mailbox as never,
+      log: () => undefined,
+    });
+    expect(handled).toEqual({ handled: true, reason: expect.stringContaining("scheduled") });
+    expect(api.calls).toContain("scheduleAutoMerge");
+  });
+
+  test("label remove through the mailbox cancels", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    jumiPr(api, []);
+    api.cancelAutoMerge = async () => {
+      api.calls.push("cancelAutoMerge");
+      return true;
+    };
+    const mailbox = workerMailboxApi(api as never);
+    const result = await handleAutomergeLabelChange({
+      api: mailbox as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(result.action).toBe("cancelled");
+    expect(api.calls).toContain("cancelAutoMerge");
+  });
+
+  test("disabled switch posts the disabled note through the mailbox instead of falling through", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const { tryHandleAutomergeLabelEvent } = await import("../src/automerge_webhook.ts");
+    const api = makeApi();
+    jumiPr(api, ["automerge"]);
+    const mailbox = workerMailboxApi(api as never);
+    const result = await handleAutomergeLabelChange({
+      api: mailbox as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      automergeEnabled: false,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(result.action).toBe("cancelled");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("turned off");
+
+    const api2 = makeApi();
+    jumiPr(api2, ["automerge"]);
+    const mailbox2 = workerMailboxApi(api2 as never);
+    const handled = await tryHandleAutomergeLabelEvent({
+      rawBody: labelWebhookBody("labeled", "automerge"),
+      policy: webhookPolicy({ automergeEnabled: false }),
+      api: mailbox2 as never,
+      log: () => undefined,
+    });
+    expect(handled.handled).toBe(true);
+    expect(api2.notes).toHaveLength(1);
+    expect(api2.notes[0]).toContain("turned off");
   });
 });

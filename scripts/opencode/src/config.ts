@@ -32,6 +32,8 @@ export interface ServiceConfig {
   ignoreConflictsLabel: string;
   blockingQuestionAuthors: string[];
   automergeRepos: string[];
+  /** Global auto-merge kill switch. Unset defaults to on; `false` disables every schedule. */
+  automergeEnabled: boolean;
   model: string;
   variant?: string;
   fallbackModel?: string;
@@ -133,6 +135,27 @@ function csvEnv(env: Env, name: string, fallback: string[] = []): string[] {
     .split(",")
     .map((part) => part.trim())
     .filter(Boolean);
+}
+
+export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
+
+function parseAutomergeEnabled(value: string | undefined): boolean {
+  if (value === undefined || value === "") return true;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "n", "off"].includes(normalized)) return false;
+  throw new Error(`Invalid boolean for ${AUTOMERGE_ENABLED_ENV}: ${value}`);
+}
+
+export function automergeDeprecationWarning(env: Env = process.env): string | undefined {
+  const raw = env["JUMI_AUTOMERGE_REPOS"];
+  if (raw !== undefined && raw.trim() !== "") {
+    return (
+      `JUMI_AUTOMERGE_REPOS is deprecated and will be removed in a later release: ` +
+      `it still narrows auto-merge to the listed repositories, but unset it to let repositories opt in through .jumi.yml alone`
+    );
+  }
+  return undefined;
 }
 
 function normalizeUrl(value: string): string {
@@ -247,6 +270,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     ignoreConflictsLabel: optionalEnv(resolved, "IGNORE_CONFLICTS_LABEL", "ignore-conflicts") ?? "ignore-conflicts",
     blockingQuestionAuthors: csvEnv(resolved, "REVIEW_BLOCKING_QUESTION_AUTHORS"),
     automergeRepos: csvEnv(resolved, "JUMI_AUTOMERGE_REPOS"),
+    automergeEnabled: parseAutomergeEnabled(optionalEnv(resolved, AUTOMERGE_ENABLED_ENV)),
     ...(runnersFile ? modelsFromCatalog(runnersCatalog) : fromEnv),
     runners: runnersCatalog.runners,
     chain: runnersCatalog.chain,

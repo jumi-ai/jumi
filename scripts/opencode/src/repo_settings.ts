@@ -23,6 +23,10 @@ export interface RepoTimeouts {
 
 export interface RepoSettings {
   automerge: boolean;
+  /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
+  automergeLabel: string;
+  /** Label that opts one Jumi PR out of auto-merge. Case-insensitive. Default `no-automerge`. */
+  noAutomergeLabel: string;
   timeouts: RepoTimeouts;
   /**
    * Runner allow-list for the repository. `undefined` (key absent) means no
@@ -58,6 +62,8 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 
 export const KNOWN_KEYS = new Set([
   "automerge",
+  "automerge_label",
+  "no_automerge_label",
   "allowed_runners",
   "timeouts",
   "review_exclude",
@@ -79,10 +85,17 @@ export const MIN_TIMEOUT_MINUTES = 1;
 
 export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 
+/** Default per-issue auto-merge opt-in label. Repository `.jumi.yml` may rename it. */
+export const DEFAULT_AUTOMERGE_LABEL = "automerge";
+/** Default per-issue auto-merge opt-out label. Repository `.jumi.yml` may rename it. */
+export const DEFAULT_NO_AUTOMERGE_LABEL = "no-automerge";
+
 /** Default settings: every site that needs default values uses this. */
 function defaultRepoSettings(): RepoSettings {
   return {
     automerge: false,
+    automergeLabel: DEFAULT_AUTOMERGE_LABEL,
+    noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL,
     timeouts: {},
     allowedRunners: undefined,
     reviewExclude: [],
@@ -149,6 +162,9 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
+ * absent `automerge_label` means `automerge`; absent `no_automerge_label`
+ * means `no-automerge`; a blank, non-string, or identical (case-insensitive)
+ * label pair makes the whole file invalid;
  * absent `allowed_runners` means no runner restriction (an explicitly empty
  * list is invalid: no runner could work on the repository, so use
  * `mode: off` or `mode: review-only` instead);
@@ -238,6 +254,23 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if (!takeover.ok) return takeover;
   const ignoreConflicts = parseAuthorList(record, "ignore_conflicts_authors");
   if (!ignoreConflicts.ok) return ignoreConflicts;
+  let automergeLabel = DEFAULT_AUTOMERGE_LABEL;
+  if ("automerge_label" in record && record.automerge_label !== undefined) {
+    if (typeof record.automerge_label !== "string" || !record.automerge_label.trim()) {
+      return { ok: false, error: `"automerge_label" must be a non-blank string` };
+    }
+    automergeLabel = record.automerge_label.trim();
+  }
+  let noAutomergeLabel = DEFAULT_NO_AUTOMERGE_LABEL;
+  if ("no_automerge_label" in record && record.no_automerge_label !== undefined) {
+    if (typeof record.no_automerge_label !== "string" || !record.no_automerge_label.trim()) {
+      return { ok: false, error: `"no_automerge_label" must be a non-blank string` };
+    }
+    noAutomergeLabel = record.no_automerge_label.trim();
+  }
+  if (automergeLabel.toLowerCase() === noAutomergeLabel.toLowerCase()) {
+    return { ok: false, error: `"automerge_label" and "no_automerge_label" must be different` };
+  }
   let blockingQuestionAuthors: string[] = [];
   if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
     const parsed = parseStringList(record.blocking_question_authors, "blocking_question_authors", {
@@ -255,6 +288,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   }
   const settings: RepoSettings = {
     automerge,
+    automergeLabel,
+    noAutomergeLabel,
     timeouts,
     allowedRunners,
     reviewExclude,
@@ -313,6 +348,8 @@ export type RepoSettingsLoad =
   | {
       state: "valid";
       automerge: boolean;
+      automergeLabel: string;
+      noAutomergeLabel: string;
       timeouts: RepoTimeouts;
       allowedRunners?: string[];
       reviewExclude: string[];
@@ -395,6 +432,8 @@ export async function loadRepoSettings(
   return {
     state: "valid",
     automerge: parsed.settings.automerge,
+    automergeLabel: parsed.settings.automergeLabel,
+    noAutomergeLabel: parsed.settings.noAutomergeLabel,
     timeouts: parsed.settings.timeouts,
     allowedRunners: parsed.settings.allowedRunners,
     reviewExclude: parsed.settings.reviewExclude,

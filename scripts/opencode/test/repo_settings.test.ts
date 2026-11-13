@@ -27,6 +27,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -43,6 +45,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -56,6 +60,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -72,6 +78,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -101,6 +109,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -114,6 +124,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -139,11 +151,72 @@ describe("parseRepoSettingsText", () => {
     }
   });
 
+  test("override label names parse, default, and validate", () => {
+    expect(parseRepoSettingsText("automerge_label: ship-it\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        automergeLabel: "ship-it",
+        noAutomergeLabel: "no-automerge",
+        timeouts: {},
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        mode: "full",
+      },
+    });
+    expect(parseRepoSettingsText("no_automerge_label: hold\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "hold",
+        timeouts: {},
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        mode: "full",
+      },
+    });
+    for (const text of [
+      "automerge_label: ''\n",
+      "automerge_label: '   '\n",
+      "automerge_label: 42\n",
+      "no_automerge_label: []\n",
+      "automerge_label: same\nno_automerge_label: SAME\n",
+      "automerge_label: same\nno_automerge_label: ' same '\n",
+    ]) {
+      expect(parseRepoSettingsText(text).ok).toBe(false);
+    }
+    expect(parseRepoSettingsText("automerge_label: 42\n")).toEqual({
+      ok: false,
+      error: '"automerge_label" must be a non-blank string',
+    });
+    expect(parseRepoSettingsText("automerge-label: x\n")).toEqual({
+      ok: false,
+      error: 'unknown key "automerge-label" (did you mean "automerge_label"?)',
+    });
+    expect(parseRepoSettingsText("automergeLabel: x\n")).toEqual({
+      ok: false,
+      error: 'unknown key "automergeLabel" (did you mean "automerge_label"?)',
+    });
+    expect(parseRepoSettingsText("no-automerge-label: x\n")).toEqual({
+      ok: false,
+      error: 'unknown key "no-automerge-label" (did you mean "no_automerge_label"?)',
+    });
+  });
+
   test("review_exclude parses a list of globs", () => {
     expect(parseRepoSettingsText('review_exclude:\n  - "**/generated/**"\n  - "pnpm-lock.yaml"\n')).toEqual({
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: ["**/generated/**", "pnpm-lock.yaml"],
         followupOnSuggestions: true,
@@ -160,6 +233,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -176,6 +251,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: ["docs/**"],
         followupOnSuggestions: true,
@@ -216,6 +293,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -229,6 +308,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -245,6 +326,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -309,6 +392,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -322,6 +407,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -338,6 +425,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -352,6 +441,8 @@ describe("parseRepoSettingsText", () => {
         ok: true,
         settings: {
           automerge: true,
+          automergeLabel: "automerge",
+          noAutomergeLabel: "no-automerge",
           timeouts: {},
           reviewExclude: [],
           followupOnSuggestions: true,
@@ -369,6 +460,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -407,6 +500,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -420,6 +515,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -433,6 +530,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -449,6 +548,8 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -492,6 +593,8 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: true,
+      automergeLabel: "automerge",
+      noAutomergeLabel: "no-automerge",
       timeouts: {},
       reviewExclude: [],
       followupOnSuggestions: true,
@@ -513,6 +616,8 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: false,
+      automergeLabel: "automerge",
+      noAutomergeLabel: "no-automerge",
       timeouts: {},
       reviewExclude: ["**/generated/**"],
       followupOnSuggestions: true,
@@ -529,6 +634,8 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: false,
+      automergeLabel: "automerge",
+      noAutomergeLabel: "no-automerge",
       timeouts: {},
       reviewExclude: [],
       followupOnSuggestions: true,
@@ -556,6 +663,8 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: false,
+      automergeLabel: "automerge",
+      noAutomergeLabel: "no-automerge",
       timeouts: {},
       reviewExclude: [],
       followupOnSuggestions: true,
@@ -714,6 +823,8 @@ describe("effectiveBlockingQuestionAuthors", () => {
       effectiveBlockingQuestionAuthors(["deployer-bot"], {
         state: "valid",
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -745,6 +856,8 @@ describe("repoMode", () => {
       repoMode({
         state: "valid",
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -758,6 +871,8 @@ describe("repoMode", () => {
       repoMode({
         state: "valid",
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -771,6 +886,8 @@ describe("repoMode", () => {
       repoMode({
         state: "valid",
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -878,6 +995,8 @@ describe("parseRepoSettingsTimeouts", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: { review: 10, implement: 120, followup: 60, conflict: 30 },
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -894,6 +1013,8 @@ describe("parseRepoSettingsTimeouts", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -910,6 +1031,8 @@ describe("parseRepoSettingsTimeouts", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
@@ -975,6 +1098,8 @@ describe("effectiveTimeoutMsForKind", () => {
         {
           state: "valid",
           automerge: false,
+          automergeLabel: "automerge",
+          noAutomergeLabel: "no-automerge",
           timeouts: {},
           reviewExclude: [],
           followupOnSuggestions: true,
@@ -997,6 +1122,8 @@ describe("effectiveTimeoutMsForKind", () => {
         {
           state: "valid",
           automerge: false,
+          automergeLabel: "automerge",
+          noAutomergeLabel: "no-automerge",
           timeouts: { review: 5 },
           reviewExclude: [],
           followupOnSuggestions: true,
@@ -1015,6 +1142,8 @@ describe("effectiveTimeoutMsForKind", () => {
         {
           state: "valid",
           automerge: false,
+          automergeLabel: "automerge",
+          noAutomergeLabel: "no-automerge",
           timeouts: { review: 60 },
           reviewExclude: [],
           followupOnSuggestions: true,
@@ -1036,6 +1165,8 @@ describe("effectiveTimeoutMsForKind", () => {
       {
         state: "valid",
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: { followup: 120 },
         reviewExclude: [],
         followupOnSuggestions: true,

@@ -27,6 +27,8 @@ describe("allowed_runners parsing", () => {
       ok: true,
       settings: {
         automerge: true,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         allowedRunners: undefined,
         reviewExclude: [],
@@ -44,6 +46,8 @@ describe("allowed_runners parsing", () => {
       ok: true,
       settings: {
         automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
         timeouts: {},
         allowedRunners: ["grok", "opus"],
         reviewExclude: [],
