@@ -298,6 +298,12 @@ export interface PublishReviewOptions {
   excludedFiles?: readonly string[];
   /** True when every changed file was left out (no patches were read). */
   allExcluded?: boolean;
+  /**
+   * Already-fetched PR files. When set, the head settings check reuses them
+   * instead of listing PR files again; when unset it lists them itself (the
+   * reclaim path has no fetched files).
+   */
+  changedFiles?: readonly { filename: string }[];
 }
 
 const encoder = new TextEncoder();
@@ -1284,6 +1290,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     prNumber: pr.number,
     headSha: opts.expectedHeadSha,
     baseBranch: pr.base.ref,
+    changedFiles: opts.changedFiles,
     log,
   });
   if (settingsFailure) {
@@ -2216,6 +2223,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               forgeKind: opts.forgeKind,
               previousFindings: previousReview?.findings,
               recordSuggestions: opts.recordSuggestions,
+              changedFiles: prFiles,
               ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
             });
           }

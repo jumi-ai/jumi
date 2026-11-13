@@ -12,7 +12,14 @@ import {
   repoMode,
   resolveRepoMode,
 } from "../src/repo_settings.ts";
-import { formatReviewExcludedNote, invalidHeadSettingsFailure, loadReviewExcludeMatchers } from "../src/review.ts";
+import {
+  formatReviewExcludedNote,
+  invalidHeadSettingsFailure,
+  loadReviewExcludeMatchers,
+  publishReviewResult,
+  type ReviewApi,
+} from "../src/review.ts";
+import { emptyCiMethods, makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
@@ -1265,5 +1272,72 @@ describe("invalidHeadSettingsFailure", () => {
       log,
     });
     expect(failure).toBeUndefined();
+  });
+});
+
+describe("publishReviewResult head settings file listing", () => {
+  function publishApi(calls: { prFiles: number; refs: string[] }): ReviewApi {
+    return {
+      getRepo: async () => makeRepo(),
+      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+      getPR: async () => makePR(),
+      getPRFiles: async () => {
+        calls.prFiles++;
+        return [makeFile({ filename: "README.md" })];
+      },
+      getRepoFile: async (_owner, _repo, _path, ref) => {
+        calls.refs.push(ref);
+        return { found: true, content: "automerge: true\n" };
+      },
+      getIssue: async () => {
+        throw new Error("not used");
+      },
+      listIssueComments: async () => [],
+      findStickyIssueComment: async () => undefined,
+      createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
+      updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
+      listPullReviewComments: async () => [],
+      listPullReviews: async () => [],
+      createPullReview: async () => ({ id: 1 }),
+      submitPullReview: async () => ({ id: 1 }),
+      resolvePullComment: async () => undefined,
+      unresolvePullComment: async () => undefined,
+      dismissPullReview: async () => ({ id: 1 }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => status,
+      ...emptyCiMethods(),
+      listCommitStatuses: async () => [],
+    };
+  }
+
+  const publishOpts = {
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 7,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+  };
+
+  test("reuses pre-fetched changedFiles instead of listing PR files", async () => {
+    const calls = { prFiles: 0, refs: [] as string[] };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      api: publishApi(calls),
+      changedFiles: [{ filename: "README.md" }],
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
+    expect(calls.prFiles).toBe(0);
+    expect(calls.refs).not.toContain("headsha");
+  });
+
+  test("lists PR files itself when changedFiles is unset (reclaim path)", async () => {
+    const calls = { prFiles: 0, refs: [] as string[] };
+    const result = await publishReviewResult({
+      ...publishOpts,
+      api: publishApi(calls),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
+    expect(calls.prFiles).toBe(1);
+    expect(calls.refs).not.toContain("headsha");
   });
 });
