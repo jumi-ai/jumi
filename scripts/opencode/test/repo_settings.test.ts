@@ -4,16 +4,25 @@ import { invalidHeadSettingsFailure } from "../src/review.ts";
 
 describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
-    expect(parseRepoSettingsText("automerge: true\n")).toEqual({ ok: true, settings: { automerge: true } });
+    expect(parseRepoSettingsText("automerge: true\n")).toEqual({
+      ok: true,
+      settings: { automerge: true, timeouts: {} },
+    });
   });
 
   test("absent automerge means off", () => {
-    expect(parseRepoSettingsText("{}\n")).toEqual({ ok: true, settings: { automerge: false } });
-    expect(parseRepoSettingsText("# only a comment\n")).toEqual({ ok: true, settings: { automerge: false } });
+    expect(parseRepoSettingsText("{}\n")).toEqual({ ok: true, settings: { automerge: false, timeouts: {} } });
+    expect(parseRepoSettingsText("# only a comment\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, timeouts: {} },
+    });
   });
 
   test("explicit false means off", () => {
-    expect(parseRepoSettingsText("automerge: false\n")).toEqual({ ok: true, settings: { automerge: false } });
+    expect(parseRepoSettingsText("automerge: false\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, timeouts: {} },
+    });
   });
 
   test("unparsable text is invalid", () => {
@@ -30,8 +39,8 @@ describe("parseRepoSettingsText", () => {
   });
 
   test("an empty file means off", () => {
-    expect(parseRepoSettingsText("")).toEqual({ ok: true, settings: { automerge: false } });
-    expect(parseRepoSettingsText("null\n")).toEqual({ ok: true, settings: { automerge: false } });
+    expect(parseRepoSettingsText("")).toEqual({ ok: true, settings: { automerge: false, timeouts: {} } });
+    expect(parseRepoSettingsText("null\n")).toEqual({ ok: true, settings: { automerge: false, timeouts: {} } });
   });
 
   test("an unknown key is invalid", () => {
@@ -68,7 +77,7 @@ describe("loadRepoSettings", () => {
         "r",
         "main"
       )
-    ).toEqual({ state: "valid", automerge: true });
+    ).toEqual({ state: "valid", automerge: true, timeouts: {} });
   });
 
   test("invalid file carries the parser error", async () => {
@@ -100,6 +109,111 @@ describe("prTouchesRepoSettings", () => {
     expect(prTouchesRepoSettings([{ filename: "docs/.jumi.yml" }])).toBe(false);
     expect(prTouchesRepoSettings([{ filename: "src/a.ts" }])).toBe(false);
     expect(prTouchesRepoSettings([])).toBe(false);
+  });
+});
+
+describe("parseRepoSettingsTimeouts", () => {
+  test("timeouts parse in whole minutes per kind", () => {
+    expect(
+      parseRepoSettingsText("timeouts:\n  review: 10\n  implement: 120\n  followup: 60\n  conflict: 30\n")
+    ).toEqual({
+      ok: true,
+      settings: { automerge: false, timeouts: { review: 10, implement: 120, followup: 60, conflict: 30 } },
+    });
+  });
+
+  test("absent timeouts means no overrides", () => {
+    expect(parseRepoSettingsText("automerge: true\n")).toEqual({
+      ok: true,
+      settings: { automerge: true, timeouts: {} },
+    });
+  });
+
+  test("empty timeouts mapping means no overrides", () => {
+    expect(parseRepoSettingsText("timeouts: {}\n")).toEqual({
+      ok: true,
+      settings: { automerge: false, timeouts: {} },
+    });
+  });
+
+  test("unknown timeout key is invalid", () => {
+    expect(parseRepoSettingsText("timeouts:\n  bogus: 10\n")).toEqual({
+      ok: false,
+      error: 'unknown key "timeouts.bogus"',
+    });
+  });
+
+  test("below-minimum timeout is invalid", () => {
+    expect(parseRepoSettingsText("timeouts:\n  review: 0\n")).toEqual({
+      ok: false,
+      error: '"timeouts.review" must be an integer number of minutes >= 1',
+    });
+  });
+
+  test("non-integer and non-numeric timeouts are invalid", () => {
+    for (const text of [
+      "timeouts:\n  review: 1.5\n",
+      "timeouts:\n  review: ten\n",
+      "timeouts:\n  review: null\n",
+      "timeouts:\n  review: []\n",
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({
+        ok: false,
+        error: '"timeouts.review" must be an integer number of minutes >= 1',
+      });
+    }
+  });
+
+  test("non-mapping timeouts is invalid", () => {
+    expect(parseRepoSettingsText("timeouts: 10\n")).toEqual({
+      ok: false,
+      error: '"timeouts" must be a mapping',
+    });
+  });
+});
+
+describe("effectiveTimeoutMsForKind", () => {
+  test("missing, invalid, or absent key runs with the deployment timeout", async () => {
+    const { effectiveTimeoutMsForKind } = await import("../src/repo_settings.ts");
+    expect(effectiveTimeoutMsForKind({ state: "missing" }, "review", 900_000, 900_000)).toBe(900_000);
+    expect(effectiveTimeoutMsForKind({ state: "invalid", error: "bad" }, "review", 900_000, 1_800_000)).toBe(900_000);
+    expect(
+      effectiveTimeoutMsForKind({ state: "valid", automerge: false, timeouts: {} }, "review", 900_000, 900_000)
+    ).toBe(900_000);
+  });
+
+  test("shorter value shortens, longer clamps to the deployer maximum", async () => {
+    const { effectiveTimeoutMsForKind } = await import("../src/repo_settings.ts");
+    expect(
+      effectiveTimeoutMsForKind(
+        { state: "valid", automerge: false, timeouts: { review: 5 } },
+        "review",
+        900_000,
+        900_000
+      )
+    ).toBe(300_000);
+    expect(
+      effectiveTimeoutMsForKind(
+        { state: "valid", automerge: false, timeouts: { review: 60 } },
+        "review",
+        900_000,
+        1_800_000
+      )
+    ).toBe(1_800_000);
+  });
+
+  test("follow-up kind reads the followup key and lease follows the effective value", async () => {
+    const { effectiveLeaseMs, effectiveTimeoutMsForKind } = await import("../src/repo_settings.ts");
+    const effective = effectiveTimeoutMsForKind(
+      { state: "valid", automerge: false, timeouts: { followup: 120 } },
+      "follow-up",
+      3_600_000,
+      7_200_000
+    );
+    expect(effective).toBe(7_200_000);
+    expect(effectiveLeaseMs(4_200_000, effective)).toBe(effective + 600_000);
+    expect(effectiveLeaseMs(9_000_000, 300_000)).toBe(9_000_000);
   });
 });
 

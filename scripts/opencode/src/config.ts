@@ -53,6 +53,8 @@ export interface ServiceConfig {
   maxOutputBytes: number;
   maxWebhookBytes: number;
   opencodeTimeoutMs: number;
+  /** Deployer maximum for the review timeout. Unset defaults to `opencodeTimeoutMs`, so a repository can only shorten. */
+  opencodeTimeoutMaxMs: number;
   role: JumiRole;
   databaseUrl?: string;
   leaseMs: number;
@@ -224,6 +226,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
+  const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: role !== "engine" });
   const fromEnv = {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
@@ -263,6 +266,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
+    opencodeTimeoutMaxMs,
     role,
     databaseUrl: requireEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),
