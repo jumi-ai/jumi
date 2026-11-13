@@ -3,7 +3,12 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { loadEffectiveBlockingQuestionAuthors, resolveRepoMode } from "./repo_settings.ts";
+import {
+  effectiveBlockingQuestionAuthors,
+  loadRepoSettings,
+  type RepoSettingsLoad,
+  repoMode,
+} from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -127,13 +132,27 @@ export async function enqueueFollowUpFromReview(
 
   // Restricted repository modes start no worker jobs: review-only and off
   // never enqueue follow-up from a review. The worker start gate is the
-  // backstop for jobs queued before the mode changed.
+  // backstop for jobs queued before the mode changed. One default-branch
+  // read covers both the mode gate and the success-trailer blocking list
+  // below; lookup failures fail open (mode `full`, deployer blocking list).
+  let repoSettings: RepoSettingsLoad = { state: "missing" };
   try {
-    if ((await resolveRepoMode(opts.api, opts.row.owner, opts.row.repo, opts.logger)) !== "full") {
-      return logSkip("repository mode is restricted");
+    const repoForSettings = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+    const defaultBranch = repoForSettings.default_branch?.trim() ? repoForSettings.default_branch : "";
+    if (defaultBranch) {
+      repoSettings = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
     }
-  } catch {
-    // Fail-open: an unexpected mode-gate failure still enqueues.
+  } catch (err) {
+    opts.logger?.(
+      `repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    repoSettings = { state: "missing" };
+  }
+  if (repoSettings.state === "invalid") {
+    opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}: ${repoSettings.error}`);
+  }
+  if (repoMode(repoSettings) !== "full") {
+    return logSkip("repository mode is restricted");
   }
 
   // Cheap trailer gate first: incomplete skips without a PR fetch, and a
@@ -148,23 +167,7 @@ export async function enqueueFollowUpFromReview(
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
   if (earlySkip === "success trailer") {
-    let effectiveBlocking = opts.blockingQuestionAuthors;
-    try {
-      const repoForSettings = await opts.api.getRepo(opts.row.owner, opts.row.repo);
-      const defaultBranch = repoForSettings.default_branch?.trim() ? repoForSettings.default_branch : "";
-      if (defaultBranch) {
-        effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-          opts.api,
-          opts.row.owner,
-          opts.row.repo,
-          defaultBranch,
-          opts.blockingQuestionAuthors,
-          opts.logger
-        );
-      }
-    } catch {
-      // Fail-open: the deployer list still decides.
-    }
+    const effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, repoSettings);
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
     if (trailerSkip) return logSkip(trailerSkip);
   }
