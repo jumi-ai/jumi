@@ -246,6 +246,55 @@ describe("publishReviewResult with excludes", () => {
     expect(bodies.join("\n")).toContain("src/generated/foo.ts");
     expect(bodies.join("\n")).toContain("`review_exclude`");
   });
+
+  test("a child disclosure mentioning review_exclude does not suppress the parent note", async () => {
+    const bodies: string[] = [];
+    await publishReviewResult({
+      api: makeApi({
+        createPullReview: async (_o, _r, _n, review) => {
+          bodies.push(review.body ?? "");
+          return { id: 1 };
+        },
+      }),
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      resultMarkdown:
+        "Left out per `.jumi.yml` `review_exclude`: `src/generated/foo.ts`.\n" +
+        "src/app.ts:1: 🔴 bug: bad.\n" +
+        "<!-- jumi-check: failure -->",
+      excludedFiles: ["src/generated/foo.ts"],
+    });
+    const published = bodies.join("\n");
+    expect(published).toContain("src/generated/foo.ts");
+    expect(published).toContain("Left out of review per");
+    expect(published).toContain("src/app.ts");
+  });
+
+  test("a finding that mentions review_exclude survives intact", async () => {
+    const bodies: string[] = [];
+    await publishReviewResult({
+      api: makeApi({
+        createPullReview: async (_o, _r, _n, review) => {
+          bodies.push(review.body ?? "");
+          return { id: 1 };
+        },
+      }),
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 7,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      resultMarkdown: "src/auth.ts:12: 🔴 bug: `review_exclude` pattern `**` hides auth\n<!-- jumi-check: failure -->",
+      excludedFiles: ["src/generated/foo.ts"],
+    });
+    const published = bodies.join("\n");
+    expect(published).toContain("src/auth.ts");
+    expect(published).toContain("hides auth");
+    expect(published).toContain("src/generated/foo.ts");
+  });
 });
 
 describe("buildPROpenedPrompt with excludes", () => {
@@ -273,5 +322,22 @@ describe("buildPROpenedPrompt with excludes", () => {
     expect(prompt).toContain("src/generated/foo.ts");
     expect(prompt).not.toContain("GENERATED");
     expect(prompt).toContain("APP");
+  });
+
+  test("later reviews resolve the repeat/excluded conflict in favor of excluded_files", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [makeFile({ filename: "src/app.ts", patch: "APP" })],
+      excludedFiles: ["src/generated/foo.ts"],
+      delta: {
+        previousSha: "abc1234",
+        findings: ["src/generated/foo.ts:1: 🔴 bug: old."],
+        commits: ["abc1234 fix"],
+        files: [makeFile({ filename: "src/app.ts", patch: "APP" })],
+      },
+    });
+    expect(prompt).toContain("<excluded_files");
+    expect(prompt).toContain("<excluded_files> wins that conflict");
   });
 });

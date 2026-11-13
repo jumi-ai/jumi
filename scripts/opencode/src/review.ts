@@ -1113,6 +1113,19 @@ export const REVIEW_EXCLUDE_KEEP = "`review_exclude`";
 export const MAX_LISTED_EXCLUDED_FILES = 10;
 
 /**
+ * Shared truncated backtick list for left-out files: names up to
+ * `MAX_LISTED_EXCLUDED_FILES`, then "and N more". Used by both the published
+ * note and the child-directed `JUMI_TASK.md` review note so the listing
+ * format edits in one place.
+ */
+function formatExcludedFileList(excludedFiles: readonly string[]): string {
+  const names = [...new Set(excludedFiles)];
+  const shown = names.slice(0, MAX_LISTED_EXCLUDED_FILES);
+  const quoted = shown.map((name) => `\`${name}\``).join(", ");
+  return names.length > shown.length ? `${quoted} and ${names.length - shown.length} more` : quoted;
+}
+
+/**
  * Single-line published note naming the files left out of the review.
  * Empty when nothing was left out. The parent appends it, so a green
  * review is never read as covering these files.
@@ -1121,9 +1134,7 @@ export function formatReviewExcludedNote(excludedFiles: readonly string[], opts?
   if (excludedFiles.length === 0) return "";
   const names = [...new Set(excludedFiles)];
   const total = names.length;
-  const shown = names.slice(0, MAX_LISTED_EXCLUDED_FILES);
-  const quoted = (list: string[]) => list.map((name) => `\`${name}\``).join(", ");
-  const tail = total > shown.length ? `${quoted(shown)} and ${total - shown.length} more` : quoted(shown);
+  const tail = formatExcludedFileList(names);
   const filesWord = total === 1 ? "file" : "files";
   if (opts?.allExcluded) {
     return (
@@ -1274,22 +1285,25 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
   // Publish finding blocks and the trailer only; the child's tour is not published.
   // A finding keeps its indented/list continuation; unrelated prose is dropped.
-  const excludedKeep = [CI_ABSENT_NOTE, REVIEW_EXCLUDE_KEEP];
-  const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: excludedKeep });
+  // The left-out disclosure is parent-enforced below, so the keep lists must
+  // not contain the `` `review_exclude` `` marker: `collectFindingBlocks`
+  // would collapse any line containing it (a child disclosure, or a real
+  // finding about the setting) to the bare marker.
+  const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
   // Parent-enforced 💡 cap: at most MAX_SUGGESTION_FINDINGS publish. 🔴/🟡/❓
   // are never dropped. The dropped count rides in one body line so the next
   // follow-up still sees the trailer but not a wall of suggestions.
-  const capped = capSuggestionFindings(kept, { singleFilePath, keep: excludedKeep });
+  const capped = capSuggestionFindings(kept, { singleFilePath, keep: [CI_ABSENT_NOTE] });
   // Parent-enforced left-out disclosure: a green review must never read as
-  // covering files whose patches were withheld. Appended here so it
-  // publishes even when the child omitted it; it is not a finding.
+  // covering files whose patches were withheld. Always appended when non-empty
+  // so it publishes exactly once with the canonical names/count even when the
+  // child omitted it or wrote its own disclosure line; it is not a finding.
   const excludedNote = formatReviewExcludedNote(opts.excludedFiles ?? [], { allExcluded: opts.allExcluded });
-  const comment =
-    excludedNote && !capped.comment.includes(REVIEW_EXCLUDE_KEEP)
-      ? capped.comment
-        ? `${capped.comment.trimEnd()}\n\n${excludedNote}`
-        : excludedNote
-      : capped.comment;
+  const comment = excludedNote
+    ? capped.comment
+      ? `${capped.comment.trimEnd()}\n\n${excludedNote}`
+      : excludedNote
+    : capped.comment;
   let suggestionAddressed = 0;
   if (opts.previousFindings && opts.previousFindings.length > 0) {
     try {
@@ -1631,13 +1645,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
     if (excludedFiles.length > 0) {
-      const preview =
-        excludedFiles.length <= MAX_LISTED_EXCLUDED_FILES
-          ? excludedFiles.map((name) => `\`${name}\``).join(", ")
-          : `${excludedFiles
-              .slice(0, MAX_LISTED_EXCLUDED_FILES)
-              .map((name) => `\`${name}\``)
-              .join(", ")} and ${excludedFiles.length - MAX_LISTED_EXCLUDED_FILES} more`;
+      const preview = formatExcludedFileList(excludedFiles);
       notes.push(
         allExcluded
           ? `No patches were read: all ${excludedFiles.length} changed file${excludedFiles.length === 1 ? "" : "s"} per \`.jumi.yml\` \`review_exclude\`: ${preview}. Do not review them. Mention it in the review. It is not a finding.`
