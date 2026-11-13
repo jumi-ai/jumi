@@ -15,6 +15,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: true,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -28,6 +29,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -38,6 +40,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -51,6 +54,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -77,6 +81,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -87,6 +92,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -114,6 +120,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: ["renovate", "Dependabot"],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -124,6 +131,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -137,6 +145,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: ["renovate[bot]"],
         blockingQuestionAuthors: [],
@@ -150,6 +159,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: ["a"],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -160,6 +170,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: ["a"],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -170,6 +181,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: ["a"],
         blockingQuestionAuthors: [],
@@ -198,6 +210,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["renovate-bot"],
@@ -209,6 +222,7 @@ describe("parseRepoSettingsText", () => {
         settings: {
           automerge: true,
           timeouts: {},
+          followupOnSuggestions: true,
           takeoverAuthors: [],
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: ["Alice", "renovate-bot"],
@@ -223,6 +237,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: true,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -248,6 +263,7 @@ describe("parseRepoSettingsText", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["alice"],
@@ -279,6 +295,7 @@ describe("loadRepoSettings", () => {
       state: "valid",
       automerge: true,
       timeouts: {},
+      followupOnSuggestions: true,
       takeoverAuthors: [],
       ignoreConflictsAuthors: [],
       blockingQuestionAuthors: [],
@@ -303,6 +320,7 @@ describe("loadRepoSettings", () => {
       state: "valid",
       automerge: false,
       timeouts: {},
+      followupOnSuggestions: true,
       takeoverAuthors: ["renovate"],
       ignoreConflictsAuthors: ["renovate[bot]"],
       blockingQuestionAuthors: ["alice"],
@@ -338,6 +356,7 @@ describe("effectiveBlockingQuestionAuthors", () => {
         state: "valid",
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["repo-bot", "DEPLOYER-bot"],
@@ -393,6 +412,7 @@ describe("parseRepoSettingsTimeouts", () => {
       settings: {
         automerge: false,
         timeouts: { review: 10, implement: 120, followup: 60, conflict: 30 },
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -406,6 +426,7 @@ describe("parseRepoSettingsTimeouts", () => {
       settings: {
         automerge: true,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -419,6 +440,7 @@ describe("parseRepoSettingsTimeouts", () => {
       settings: {
         automerge: false,
         timeouts: {},
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
@@ -474,6 +496,7 @@ describe("effectiveTimeoutMsForKind", () => {
           state: "valid",
           automerge: false,
           timeouts: {},
+          followupOnSuggestions: true,
           takeoverAuthors: [],
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
@@ -493,6 +516,7 @@ describe("effectiveTimeoutMsForKind", () => {
           state: "valid",
           automerge: false,
           timeouts: { review: 5 },
+          followupOnSuggestions: true,
           takeoverAuthors: [],
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
@@ -508,6 +532,7 @@ describe("effectiveTimeoutMsForKind", () => {
           state: "valid",
           automerge: false,
           timeouts: { review: 60 },
+          followupOnSuggestions: true,
           takeoverAuthors: [],
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
@@ -526,6 +551,7 @@ describe("effectiveTimeoutMsForKind", () => {
         state: "valid",
         automerge: false,
         timeouts: { followup: 120 },
+        followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
