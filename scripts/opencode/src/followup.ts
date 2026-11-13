@@ -48,6 +48,7 @@ import {
   shouldResetConflictRound,
   writeConflictLatch,
 } from "./conflict.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import {
   type EngineResult,
   type EngineRunOptions,
@@ -89,6 +90,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { resolveRepoChain } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -1150,6 +1152,49 @@ export async function implementFollowUp(
 
   const loop = openClaimedLoop(claimed, opts);
 
+  // Repository runner allow-list (default branch only) narrows every job for
+  // the repository. Invalid or an allow-list that matches nothing fails closed
+  // before any runner starts: one sticky on the pull request, then a skipped
+  // result. Unreadable fails open with a log. Narrowing runs before the sticky
+  // writer-family restart so that restart stays inside the narrowed set.
+  let repoChain = opts.chain ?? claimed.effectiveChain;
+  let repoFallbackCleared = false;
+  if ((opts.chain && opts.chain.length > 0) || (claimed.effectiveChain && claimed.effectiveChain.length > 0)) {
+    try {
+      const resolution = await resolveRepoChain({
+        api: opts.api,
+        owner,
+        repo,
+        defaultBranch: opts.job.defaultBranch,
+        chain: opts.chain ?? claimed.effectiveChain,
+        log,
+      });
+      if (resolution.state === "invalid" || resolution.state === "empty") {
+        logDiagnostic(log, "repo_settings", {
+          job: `${owner}/${repo}#${issueNumber}`,
+          head: pr.head.sha,
+          state: resolution.state,
+          reason: resolution.reason,
+        });
+        await sticky(resolution.reason, pr.number);
+        await forgetClaim();
+        return { status: "skipped", reason: resolution.reason };
+      }
+      if (resolution.state === "narrowed") {
+        logDiagnostic(log, "repo_settings", {
+          job: `${owner}/${repo}#${issueNumber}`,
+          head: pr.head.sha,
+          state: "narrowed",
+          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
+        });
+        repoChain = resolution.chain;
+        repoFallbackCleared = true;
+      }
+    } catch (err) {
+      log(`runner settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // Sticky writer family per PR: restart on the existing writer family when the
   // current head has known Jumi provenance, so random-start does not accumulate
   // writers until no reviewer is eligible. Falls back to ordinary selection with
@@ -1158,8 +1203,8 @@ export async function implementFollowUp(
     const baseEngine = resolveEngine(opts, registeredEngine);
     const active = await buildActiveWorkerEngine({
       baseEngine,
-      baseChain: opts.chain,
-      effectiveChain: claimed.effectiveChain,
+      baseChain: repoChain,
+      effectiveChain: repoChain,
       runnerSelection: opts.runnerSelection,
       runnerRandom: opts.runnerRandom,
       independentReview: opts.independentReview,
@@ -1176,6 +1221,7 @@ export async function implementFollowUp(
       remainingLeaseMs: opts.remainingLeaseMs,
       extendLease: opts.extendLease,
     });
+    void repoFallbackCleared;
     jobChain = active.chain;
     activeEngine = active.engine;
     provenanceCollector = active.collector;

@@ -13,11 +13,19 @@ export const REPO_SETTINGS_PATH = ".jumi.yml";
 
 export interface RepoSettings {
   automerge: boolean;
+  /**
+   * Runner allow-list for the repository. `undefined` (key absent) means no
+   * restriction: the repository uses the full active chain. A defined list
+   * (possibly empty) narrows every job for the repository to chain entries
+   * whose name is on the list. Narrowing only: names outside the active
+   * chain grant nothing.
+   */
+  allowedRunners?: string[];
 }
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set(["automerge"]);
+const KNOWN_KEYS = new Set(["automerge", "allowed_runners"]);
 
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -27,8 +35,9 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * no schema-version key exists. The error string is the parser's error and
- * is surfaced verbatim in the auto-merge note and the review status.
+ * absent `allowed_runners` means no runner restriction; no schema-version
+ * key exists. The error string is the parser's error and is surfaced
+ * verbatim in the auto-merge note and the review status.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -37,7 +46,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   } catch (err) {
     return { ok: false, error: parserErrorMessage(err) };
   }
-  if (parsed === null || parsed === undefined) return { ok: true, settings: { automerge: false } };
+  if (parsed === null || parsed === undefined)
+    return { ok: true, settings: { automerge: false, allowedRunners: undefined } };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -45,14 +55,30 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!KNOWN_KEYS.has(key)) return { ok: false, error: `unknown key "${key}"` };
   }
   const record = parsed as Record<string, unknown>;
-  if (!("automerge" in record) || record.automerge === undefined) return { ok: true, settings: { automerge: false } };
-  if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
-  return { ok: true, settings: { automerge: record.automerge } };
+  let automerge = false;
+  if ("automerge" in record && record.automerge !== undefined) {
+    if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+    automerge = record.automerge;
+  }
+  let allowedRunners: string[] | undefined;
+  if ("allowed_runners" in record && record.allowed_runners !== undefined) {
+    const value = record.allowed_runners;
+    if (!Array.isArray(value)) return { ok: false, error: `"allowed_runners" must be a list of runner names` };
+    const names: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string") return { ok: false, error: `"allowed_runners" must be a list of runner names` };
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      if (!names.includes(trimmed)) names.push(trimmed);
+    }
+    allowedRunners = names;
+  }
+  return { ok: true, settings: { automerge, allowedRunners } };
 }
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean }
+  | { state: "valid"; automerge: boolean; allowedRunners?: string[] }
   | { state: "invalid"; error: string };
 
 export interface RepoSettingsFileApi {
@@ -86,7 +112,7 @@ export async function loadRepoSettings(
   if (file.found !== true || typeof file.content !== "string") return { state: "missing" };
   const parsed = parseRepoSettingsText(file.content);
   if (!parsed.ok) return { state: "invalid", error: parsed.error };
-  return { state: "valid", automerge: parsed.settings.automerge };
+  return { state: "valid", automerge: parsed.settings.automerge, allowedRunners: parsed.settings.allowedRunners };
 }
 
 function normalizePath(filename: string): string {
@@ -96,4 +122,89 @@ function normalizePath(filename: string): string {
 /** Whether any changed file is the root settings file. */
 export function prTouchesRepoSettings(files: ReadonlyArray<{ filename: string }>): boolean {
   return files.some((file) => normalizePath(file.filename) === REPO_SETTINGS_PATH);
+}
+
+/** Failure text for an invalid default-branch settings file. Names the parser error. */
+export function invalidRepoSettingsReason(error: string): string {
+  return `${REPO_SETTINGS_PATH} is invalid: ${error}`;
+}
+
+/**
+ * Fail-closed text when the repository's runner allow-list leaves no
+ * eligible runner. Names the repository setting as the cause.
+ */
+export function noAllowedRunnerReason(owner: string, repo: string, allowed: readonly string[]): string {
+  const listed = allowed.length > 0 ? allowed.join(", ") : "(empty list)";
+  return (
+    `repository settings left no eligible runner for ${owner}/${repo}: ` +
+    `` +
+    `allowed_runners [${listed}] matches no runner in the active chain`
+  );
+}
+
+export interface NarrowedChain<T extends { name: string }> {
+  /** Chain entries whose name is on the allow-list, in configured order. */
+  chain: T[];
+  /** Allow-list names that match no chain entry. Never an error. */
+  unknownNames: string[];
+}
+
+/**
+ * Narrowing only: keep the chain entries whose name is on the repository
+ * allow-list, preserving configured order. `undefined` (key absent) keeps
+ * the full chain. Names outside the active chain grant nothing; they are
+ * reported via `log` and otherwise ignored.
+ */
+export function narrowChainForRepo<T extends { name: string }>(
+  chain: readonly T[],
+  allowedRunners: readonly string[] | undefined,
+  log?: (message: string) => void
+): NarrowedChain<T> {
+  if (allowedRunners === undefined) return { chain: [...chain], unknownNames: [] };
+  const allowed = new Set(allowedRunners);
+  const narrowed = chain.filter((entry) => allowed.has(entry.name));
+  const chainNames = new Set(chain.map((entry) => entry.name));
+  const unknownNames = [...allowed].filter((name) => !chainNames.has(name));
+  if (unknownNames.length > 0) {
+    log?.(`repository settings list unknown runner(s): ${unknownNames.join(", ")} (not in the active chain)`);
+  }
+  return { chain: narrowed, unknownNames };
+}
+
+export type RepoChainResolution<T extends { name: string }> =
+  | { state: "unrestricted"; chain: T[] }
+  | { state: "narrowed"; chain: T[]; unknownNames: string[] }
+  | { state: "empty"; reason: string; unknownNames: string[] }
+  | { state: "invalid"; reason: string };
+
+/**
+ * Resolve the effective chain for one repository job from the default-branch
+ * settings. Missing (or no file API, or an empty ref) is unrestricted.
+ * Reads that fail for another reason throw so the caller can log and fail
+ * open; only an invalid file and an allow-list that matches nothing fail
+ * closed here.
+ */
+export async function resolveRepoChain<T extends { name: string }>(opts: {
+  api: RepoSettingsFileApi;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  chain: readonly T[] | undefined;
+  log?: (message: string) => void;
+}): Promise<RepoChainResolution<T>> {
+  const base = opts.chain ? [...opts.chain] : [];
+  if (!opts.defaultBranch.trim()) return { state: "unrestricted", chain: base };
+  const settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.defaultBranch);
+  if (settings.state === "missing") return { state: "unrestricted", chain: base };
+  if (settings.state === "invalid") return { state: "invalid", reason: invalidRepoSettingsReason(settings.error) };
+  if (settings.allowedRunners === undefined) return { state: "unrestricted", chain: base };
+  const narrowed = narrowChainForRepo(base, settings.allowedRunners, opts.log);
+  if (narrowed.chain.length === 0) {
+    return {
+      state: "empty",
+      reason: noAllowedRunnerReason(opts.owner, opts.repo, settings.allowedRunners),
+      unknownNames: narrowed.unknownNames,
+    };
+  }
+  return { state: "narrowed", chain: narrowed.chain, unknownNames: narrowed.unknownNames };
 }

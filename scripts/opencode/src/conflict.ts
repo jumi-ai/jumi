@@ -30,6 +30,7 @@ import {
   withoutEngineTempPorcelain,
   worktreePorcelain,
 } from "./claimed_worktree.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import {
   type EngineResult,
   type EngineRunOptions,
@@ -73,6 +74,7 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
+import { resolveRepoChain } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -690,12 +692,53 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   const loop = openClaimedLoop(claimed, opts);
 
+  // Repository runner allow-list (default branch only). Invalid or an
+  // allow-list that matches nothing fails closed before any runner starts:
+  // one sticky on the pull request, then a skipped result. Unreadable fails
+  // open with a log. Narrowing runs before the sticky writer-family restart
+  // so that restart stays inside the narrowed set.
+  let repoChain = opts.chain ?? claimed.effectiveChain;
+  if ((opts.chain && opts.chain.length > 0) || (claimed.effectiveChain && claimed.effectiveChain.length > 0)) {
+    try {
+      const resolution = await resolveRepoChain({
+        api: opts.api,
+        owner,
+        repo,
+        defaultBranch: opts.job.defaultBranch,
+        chain: opts.chain ?? claimed.effectiveChain,
+        log,
+      });
+      if (resolution.state === "invalid" || resolution.state === "empty") {
+        logDiagnostic(log, "repo_settings", {
+          job: `${owner}/${repo}#${issueNumber}`,
+          head: pr.head.sha,
+          state: resolution.state,
+          reason: resolution.reason,
+        });
+        await sticky(resolution.reason, pr.number);
+        await forgetClaim();
+        return { status: "skipped", reason: resolution.reason };
+      }
+      if (resolution.state === "narrowed") {
+        logDiagnostic(log, "repo_settings", {
+          job: `${owner}/${repo}#${issueNumber}`,
+          head: pr.head.sha,
+          state: "narrowed",
+          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
+        });
+        repoChain = resolution.chain;
+      }
+    } catch (err) {
+      log(`runner settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   {
     const baseEngine = resolveEngine(opts, registeredEngine);
     const active = await buildActiveWorkerEngine({
       baseEngine,
-      baseChain: opts.chain,
-      effectiveChain: claimed.effectiveChain,
+      baseChain: repoChain,
+      effectiveChain: repoChain,
       runnerSelection: opts.runnerSelection,
       runnerRandom: opts.runnerRandom,
       independentReview: opts.independentReview,
