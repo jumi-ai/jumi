@@ -56,6 +56,29 @@ export async function classifyCloserWork(opts: {
     ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.owner, opts.repo, branch);
     if (ignoreAuthors === undefined) return undefined;
   }
+  // Effective ignore-conflicts label from the default-branch file (override,
+  // otherwise the deployment value). Fail-open to the deployment value.
+  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
+  try {
+    const branch =
+      opts.defaultBranch ??
+      (await opts.api
+        .getRepo(opts.owner, opts.repo)
+        .then((r) => r.default_branch)
+        .catch(() => undefined));
+    if (typeof branch === "string" && branch.trim() && typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function") {
+      const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
+      const loaded = await loadRepoSettings(
+        opts.api as never,
+        opts.owner,
+        opts.repo,
+        branch.trim()
+      );
+      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
   const followUp = await needsFollowUp({
     api: opts.api,
     owner: opts.owner,
@@ -83,7 +106,7 @@ export async function classifyCloserWork(opts: {
   });
   const authorListed = isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
   let hasJumiCommit: boolean | undefined;
-  if (!followUp && !ci && (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel) || authorListed)) {
+  if (!followUp && !ci && (hasIgnoreConflictsLabel(opts.pr, effectiveIgnoreLabel) || authorListed)) {
     hasJumiCommit = await hasJumiCommitOnPull(opts.api, opts.owner, opts.repo, opts.pr.number, {
       botUsername: opts.botUsername,
     });
@@ -98,7 +121,7 @@ export async function classifyCloserWork(opts: {
     maxConflictRounds: opts.maxConflictRounds,
     maxFollowupRounds: opts.maxFollowupRounds,
     skipLatches: opts.skipLatches,
-    ignoreConflictsLabel: opts.ignoreConflictsLabel,
+    ignoreConflictsLabel: effectiveIgnoreLabel,
     ignoreConflictsAuthors: ignoreAuthors,
     ...(hasJumiCommit !== undefined ? { hasJumiCommit } : {}),
     ...(opts.defaultBranch
@@ -194,7 +217,17 @@ export async function conflictJobIfUnmergeable(
     authors = await loadIgnoreConflictsAuthors(api, job.owner, job.repo, job.defaultBranch, logger);
     if (authors === undefined) return undefined;
   }
-  const labeled = opts?.botUsername ? hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel) : false;
+  let effectiveIgnoreLabel = opts?.ignoreConflictsLabel;
+  try {
+    if (job.defaultBranch?.trim() && typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
+      const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
+      const loaded = await loadRepoSettings(api as never, job.owner, job.repo, job.defaultBranch.trim());
+      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts?.ignoreConflictsLabel, loaded);
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
+  const labeled = opts?.botUsername ? hasIgnoreConflictsLabel(pr, effectiveIgnoreLabel) : false;
   if (opts?.botUsername && (labeled || isIgnoreConflictsAuthor(pr.user?.login, authors))) {
     const committed = await hasJumiCommitOnPull(
       api,

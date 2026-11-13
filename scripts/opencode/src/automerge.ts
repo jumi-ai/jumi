@@ -8,6 +8,7 @@ import {
   compileReviewExcludePatterns,
   DEFAULT_AUTOMERGE_LABEL,
   DEFAULT_NO_AUTOMERGE_LABEL,
+  effectiveTrustedSenderLogins,
   loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
@@ -427,10 +428,12 @@ export async function scheduleAutomergeForNewPr(
   const log = input.log ?? (() => undefined);
   const api = input.api as AutomergeApi;
   let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
+  let effectiveTrusted = input.trustedSenderLogins;
   try {
     const settings = await loadRepoSettings(api, input.owner, input.repo, input.baseBranch);
     if (settings.state === "valid") {
       names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
+      effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, settings);
     }
   } catch (err) {
     log(
@@ -448,7 +451,7 @@ export async function scheduleAutomergeForNewPr(
       automergeLabel: names.automergeLabel,
       noAutomergeLabel: names.noAutomergeLabel,
       botUsername: input.botUsername,
-      trustedSenderLogins: input.trustedSenderLogins,
+      trustedSenderLogins: effectiveTrusted,
       log,
     });
     if (copied.copiedAutomerge && copied.copiedAutomergeTrusted !== undefined) {
@@ -667,6 +670,10 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   }
   let forcedByLabel = false;
   if (hasAutomerge) {
+    // Repository `trusted_senders` narrows the deployment list (intersection,
+    // never widening): the same settings read that named the labels supplies
+    // the effective trust list.
+    const effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, settings);
     const verdict = await isAutomergeLabelAdmitted({
       api,
       owner: input.owner,
@@ -675,7 +682,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
       issueNumber: input.issueNumber,
       automergeLabel: names.automergeLabel,
       botUsername: input.botUsername,
-      trustedSenderLogins: input.trustedSenderLogins,
+      trustedSenderLogins: effectiveTrusted,
       copiedTrusted: input.copiedAutomergeTrusted,
       log,
     });
@@ -1172,7 +1179,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       issueNumber: input.issueNumber,
       automergeLabel: names.automergeLabel,
       botUsername: input.botUsername,
-      trustedSenderLogins: input.trustedSenderLogins,
+      trustedSenderLogins: effectiveTrustedSenderLogins(input.trustedSenderLogins, settings),
       log,
     });
     if (!verdict.admitted) {

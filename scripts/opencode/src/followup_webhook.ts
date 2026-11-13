@@ -17,6 +17,7 @@ export type FollowUpWebhookPolicy = WebhookPolicy &
     followupIgnoreLogins?: readonly string[];
     trustedSenderLogins?: readonly string[];
     ignoreConflictsLabel?: string;
+    pickupLabel?: string;
   };
 
 export const SENDER_CANNOT_PUSH = "sender lacks write access";
@@ -162,9 +163,21 @@ export function followUpSkipReason(
   owner: string,
   repo: string,
   botUsername: string,
-  policy?: PickupPolicy
+  policy?: PickupPolicy & { pickupLabel?: string }
 ): string | undefined {
-  const pickup = policy ?? { botUsername };
+  const rawPickupLabel =
+    typeof (policy as { pickupLabel?: string } | undefined)?.pickupLabel === "string" &&
+    (policy as { pickupLabel?: string }).pickupLabel?.trim()
+      ? ((policy as { pickupLabel?: string }).pickupLabel as string).trim()
+      : "jumi";
+  // When the caller names a pickup label but did not build `isPickedUp`
+  // (unit tests, direct calls), still match that label instead of falling
+  // back to assignment. Production GitHub callers always pass `isPickedUp`.
+  const pickup: PickupPolicy =
+    policy?.isPickedUp || !policy?.pickupLabel
+      ? ((policy ?? { botUsername }) as PickupPolicy)
+      : { botUsername, isPickedUp: (target) => hasLabel(target, rawPickupLabel) };
+  const pickupLabel = rawPickupLabel;
   if (pr.state !== "open" || pr.merged) return "pull request not open";
   if (isWipOrDraft(pr)) return "draft or WIP pull request";
   if (pr.head?.repo && pr.head.repo.full_name !== `${owner}/${repo}`) return "fork pull request";
@@ -174,7 +187,8 @@ export function followUpSkipReason(
     if (issue) {
       if (issue.number !== working) return "closing issue mismatch";
       if (issue.state !== "open") return "issue not open";
-      if (!isIssuePickedUp(issue, pickup)) return pickup.isPickedUp ? "not labeled jumi" : "not assigned to bot";
+      if (!isIssuePickedUp(issue, pickup))
+        return pickup.isPickedUp ? `not labeled ${pickupLabel}` : "not assigned to bot";
     }
     if (pr.head?.repo && !isInScopeJumiPR(pr, owner, repo, botUsername) && pr.head.ref) {
       return "not an in-scope jumi pull request";
@@ -429,9 +443,14 @@ export async function shouldEnqueuePullAssign(
   };
 }
 
-function payloadJumiLabel(label: GiteaPRPayload["label"]): boolean {
+function payloadPickupLabel(label: GiteaPRPayload["label"], pickupLabel?: string): boolean {
   if (label == null) return false;
-  return hasLabel({ labels: [label] }, "jumi");
+  const needle = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : "jumi";
+  return hasLabel({ labels: [label] }, needle);
+}
+
+function payloadJumiLabel(label: GiteaPRPayload["label"]): boolean {
+  return payloadPickupLabel(label, "jumi");
 }
 
 function prWithEventLabel(pr: GiteaPR, label: GiteaPRPayload["label"]): GiteaPR {
@@ -447,9 +466,10 @@ export async function shouldEnqueuePullLabel(
 ): Promise<PullAssignWebhookDecision> {
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   const pr = prWithEventLabel(payload.pull_request, payload.label);
+  const pickupLabel = (policy.pickupLabel ?? "").trim() ? (policy.pickupLabel as string).trim() : "jumi";
 
   if (payload.action === "unlabeled") {
-    if (!payloadJumiLabel(payload.label)) return { type: "skip", reason: "unlabeled other label" };
+    if (!payloadPickupLabel(payload.label, pickupLabel)) return { type: "skip", reason: "unlabeled other label" };
     return { type: "cancel", owner, repo, issueNumber: pr.number };
   }
 
@@ -460,7 +480,7 @@ export async function shouldEnqueuePullLabel(
   if (loginEquals(payload.sender?.login, policy.botUsername)) {
     return { type: "skip", reason: "sender is bot" };
   }
-  if (!payloadJumiLabel(payload.label)) return { type: "skip", reason: "labeled other label" };
+  if (!payloadPickupLabel(payload.label, pickupLabel)) return { type: "skip", reason: "labeled other label" };
 
   const skip = followUpSkipReason(pr, undefined, owner, repo, policy.botUsername, policy);
   if (skip) return { type: "skip", reason: skip };

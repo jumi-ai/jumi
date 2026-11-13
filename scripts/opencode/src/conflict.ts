@@ -82,7 +82,12 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { applyRepoChain, loadRepoFollowupPolicy } from "./repo_settings.ts";
+import {
+  applyRepoChain,
+  effectiveIgnoreConflictsLabel,
+  loadRepoFollowupPolicy,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -255,10 +260,25 @@ export async function needsConflict(opts: {
   /** Forge file read for the settings file. Absent keeps today's behavior. */
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
 }): Promise<boolean> {
+  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
+  if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
+    try {
+      const { loadRepoSettings } = await import("./repo_settings.ts");
+      const loaded = await loadRepoSettings(
+        { getRepoFile: opts.getRepoFile },
+        opts.owner,
+        opts.repo,
+        opts.defaultBranch
+      );
+      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+    } catch {
+      // Fail-open to the deployment value.
+    }
+  }
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
   if (opts.hasJumiCommit === false) {
-    if (hasIgnoreConflictsLabel(opts.pr, opts.ignoreConflictsLabel)) return false;
+    if (hasIgnoreConflictsLabel(opts.pr, effectiveIgnoreLabel)) return false;
     if (isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors)) return false;
   }
   const state = await readConflictLatch(skipLatchesFor(opts), {
@@ -666,6 +686,20 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   );
   const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? CONFLICT_TIMEOUT_MS;
+  // Effective ignore-conflicts label from the same default-branch file.
+  // Missing, invalid, or unreadable falls back to the deployment value.
+  // `opts` already carries the worker's effective value; re-resolving here is
+  // idempotent and keeps direct callers repo-aware.
+  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
+  try {
+    const branch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch.trim() : "";
+    if (branch) {
+      const loaded = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, branch);
+      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
   const claimed = await beginClaimedWorktree({
     ...opts,
     fallbackEngine: registeredEngine,
@@ -708,7 +742,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await forgetClaim();
     return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   }
-  const leftLabeled = hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel);
+  const leftLabeled = hasIgnoreConflictsLabel(pr, effectiveIgnoreLabel);
   if (
     await isLeftToAuthor(
       opts.api,
@@ -717,7 +751,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       pr,
       {
         botUsername: opts.botUsername,
-        ignoreConflictsLabel: opts.ignoreConflictsLabel,
+        ignoreConflictsLabel: effectiveIgnoreLabel,
         ignoreConflictsAuthors: ignoreAuthors,
         prAuthor: pr.user?.login,
         defaultBranch: opts.job.defaultBranch,
@@ -728,7 +762,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     await forgetClaim();
     const reason = !leftLabeled
       ? leaveConflictsAuthorReason(pr.user?.login)
-      : ignoreConflictsReason(opts.ignoreConflictsLabel);
+      : ignoreConflictsReason(effectiveIgnoreLabel);
     return { status: "skipped", reason };
   }
 

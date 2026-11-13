@@ -100,7 +100,10 @@ import {
   applyRepoChain,
   effectiveBlockingQuestionAuthors,
   effectiveConflictRounds,
+  effectiveFollowupIgnoreLogins,
   effectiveFollowupRounds,
+  effectiveIgnoreConflictsLabel,
+  effectiveTrustedSenderLogins,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
 } from "./repo_settings.ts";
@@ -780,6 +783,8 @@ export async function needsFollowUp(opts: {
   // The settings file is read once; the pure helpers derive both the cap
   // and the blocking union from that load.
   let effectiveBlocking = opts.blockingQuestionAuthors;
+  let effectiveIgnore = opts.followupIgnoreLogins;
+  let effectiveTrusted = opts.trustedSenderLogins;
   try {
     let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
     let settingsLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
@@ -796,6 +801,8 @@ export async function needsFollowUp(opts: {
       effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, settingsLoad);
       followupOnSuggestions = isSuggestionFollowupEnabled(settingsLoad);
       effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, settingsLoad);
+      effectiveIgnore = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, settingsLoad);
+      effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, settingsLoad);
     }
   } catch {
     // Fail-open: deployment caps and the deployer list still decide.
@@ -808,13 +815,13 @@ export async function needsFollowUp(opts: {
     opts.pr.number,
     opts.botUsername,
     opts.pr.head.sha,
-    opts.followupIgnoreLogins,
+    effectiveIgnore,
     {
       prAuthor: opts.pr.user?.login,
       ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
       ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
     },
-    opts.trustedSenderLogins
+    effectiveTrusted
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
@@ -1048,6 +1055,9 @@ export async function implementFollowUp(
     maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
   };
   let effectiveBlockingUpFront = opts.blockingQuestionAuthors;
+  let effectiveFollowupIgnoreUpFront = opts.followupIgnoreLogins;
+  let effectiveTrustedUpFront = opts.trustedSenderLogins;
+  let effectiveIgnoreLabelUpFront = opts.ignoreConflictsLabel;
   try {
     const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
     if (defaultBranch) {
@@ -1062,6 +1072,9 @@ export async function implementFollowUp(
         };
       }
       effectiveBlockingUpFront = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
+      effectiveFollowupIgnoreUpFront = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, load);
+      effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, load);
+      effectiveIgnoreLabelUpFront = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, load);
     }
   } catch (err) {
     log(
@@ -1130,9 +1143,9 @@ export async function implementFollowUp(
     pr.number,
     opts.botUsername,
     pr.head.sha,
-    opts.followupIgnoreLogins,
+    effectiveFollowupIgnoreUpFront,
     findingOpts,
-    opts.trustedSenderLogins
+    effectiveTrustedUpFront
   );
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
@@ -1184,7 +1197,7 @@ export async function implementFollowUp(
     pr,
     {
       botUsername: opts.botUsername,
-      ignoreConflictsLabel: opts.ignoreConflictsLabel,
+      ignoreConflictsLabel: effectiveIgnoreLabelUpFront,
       ignoreConflictsAuthors: ignoreAuthors,
       prAuthor: pr.user?.login,
       defaultBranch: opts.job.defaultBranch,
@@ -1192,10 +1205,10 @@ export async function implementFollowUp(
     log
   );
   const leftViaAuthorOnly =
-    leftToAuthor && !hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel) && ignoreAuthors.length > 0;
+    leftToAuthor && !hasIgnoreConflictsLabel(pr, effectiveIgnoreLabelUpFront) && ignoreAuthors.length > 0;
   const leftReason = leftViaAuthorOnly
     ? leaveConflictsAuthorReason(pr.user?.login)
-    : ignoreConflictsReason(opts.ignoreConflictsLabel);
+    : ignoreConflictsReason(effectiveIgnoreLabelUpFront);
   const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
   // The conflict cap gates conflict-resolution work only: a mergeable pull
   // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
@@ -1607,9 +1620,9 @@ export async function implementFollowUp(
           pr.number,
           opts.botUsername,
           pr.head.sha,
-          opts.followupIgnoreLogins,
+          effectiveFollowupIgnoreUpFront,
           findingOpts,
-          opts.trustedSenderLogins
+          effectiveTrustedUpFront
         );
         const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
         const feedback = buildFeedbackMarkdown({
@@ -1855,7 +1868,7 @@ export async function implementFollowUp(
           prNumber: pr.number,
           automergeRepos: opts.automergeRepos,
           automergeEnabled: opts.automergeEnabled,
-          trustedSenderLogins: opts.trustedSenderLogins,
+          trustedSenderLogins: effectiveTrustedUpFront,
           issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,

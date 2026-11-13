@@ -877,6 +877,8 @@ export interface BoardPullForge {
    * adds the pickup label so the forge matches; it never opens a pull.
    */
   addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
+  getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
+  getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
 }
 
 function normalizePathname(raw: string): string {
@@ -2513,9 +2515,35 @@ async function handleImplementKick(
     // The latch clear + job insert already committed. Now make the forge
     // match by ensuring the pickup label is present. Best-effort: the job
     // is already queued, so a label failure is logged, never a rollback
-    // and never a second pull request.
+    // and never a second pull request. The label is the repository's
+    // `pickup_label` when the file names one (`jumi` otherwise); Gitea
+    // ignores the key and keeps using assignment.
     try {
-      await forgeApi.addIssueLabel(item.owner, item.repo, item.issueNumber, "jumi");
+      let pickupLabel = "jumi";
+      try {
+        const getRepo = forgeApi.getRepo;
+        const getRepoFile = forgeApi.getRepoFile;
+        if (typeof getRepo === "function" && typeof getRepoFile === "function") {
+          const { loadRepoSettings, effectivePickupLabel } = await import("./repo_settings.ts");
+          const info = await getRepo.call(forgeApi, item.owner, item.repo).catch(() => undefined);
+          const defaultBranch =
+            info && typeof info.default_branch === "string" && info.default_branch.trim()
+              ? info.default_branch.trim()
+              : "";
+          if (defaultBranch) {
+            const loaded = await loadRepoSettings(
+              forgeApi as never,
+              item.owner,
+              item.repo,
+              defaultBranch
+            ).catch(() => ({ state: "missing" }) as const);
+            pickupLabel = effectivePickupLabel(loaded);
+          }
+        }
+      } catch {
+        // Fall back to `jumi`.
+      }
+      await forgeApi.addIssueLabel(item.owner, item.repo, item.issueNumber, pickupLabel);
     } catch (err) {
       logger(
         `implement kick label failed actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: ${err instanceof Error ? err.message : String(err)}`

@@ -7,6 +7,13 @@ import {
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
 import {
+  effectiveFollowupIgnoreLogins,
+  effectiveIgnoreConflictsLabel,
+  effectivePickupLabel,
+  effectiveTrustedSenderLogins,
+  loadRepoSettings,
+} from "./repo_settings.ts";
+import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
   requireSenderPush,
@@ -60,6 +67,7 @@ export type GithubMailboxConfig = {
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   ignoreConflictsLabel?: string;
+  pickupLabel?: string;
   automergeRepos?: readonly string[];
   automergeEnabled?: boolean;
 };
@@ -161,8 +169,15 @@ export function githubMailboxSecret(config: GithubMailboxConfig): string {
   return "";
 }
 
-export function pickupPolicyForForge(forge: ForgeKind | undefined, botUsername: string): PickupPolicy {
-  return { botUsername, isPickedUp: forge === "github" ? hasJumiLabel : undefined };
+export function pickupPolicyForForge(
+  forge: ForgeKind | undefined,
+  botUsername: string,
+  pickupLabel?: string
+): PickupPolicy {
+  if (forge !== "github") return { botUsername };
+  const label = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
+  if (label.toLowerCase() === JUMI_LABEL) return { botUsername, isPickedUp: hasJumiLabel };
+  return { botUsername, isPickedUp: (issue) => hasLabel(issue, label) };
 }
 
 export function githubWebhookPolicy(config: GithubMailboxConfig): GithubWebhookPolicy {
@@ -170,6 +185,8 @@ export function githubWebhookPolicy(config: GithubMailboxConfig): GithubWebhookP
     ...(config.followupIgnoreLogins ?? []).map((login) => login.toLowerCase()),
     ...DEFAULT_GITHUB_FOLLOWUP_IGNORES.map((login) => login.toLowerCase()),
   ]);
+  const pickupLabel = (config.pickupLabel ?? "").trim() ? (config.pickupLabel as string).trim() : JUMI_LABEL;
+  const isPickedUp = (issue: IssueAssignees) => hasLabel(issue, pickupLabel);
   return {
     giteaUrl: GITHUB_ORIGIN,
     allowedOrgs: config.allowedOrgs,
@@ -181,7 +198,8 @@ export function githubWebhookPolicy(config: GithubMailboxConfig): GithubWebhookP
     automergeRepos: config.automergeRepos,
     automergeEnabled: config.automergeEnabled,
     forgeKind: "github",
-    isPickedUp: hasJumiLabel,
+    pickupLabel,
+    isPickedUp,
   };
 }
 
@@ -189,15 +207,72 @@ export function hasJumiLabel(issue: IssueAssignees): boolean {
   return hasLabel(issue, JUMI_LABEL);
 }
 
-export function isJumiLabel(label: { name?: string } | string | null | undefined): boolean {
+export function pickupLabelForPolicy(policy: { pickupLabel?: string } | undefined): string {
+  const raw = policy?.pickupLabel;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : JUMI_LABEL;
+}
+
+export function hasPickupLabel(issue: IssueAssignees, pickupLabel?: string): boolean {
+  const label = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
+  return hasLabel(issue, label);
+}
+
+export function isJumiLabel(
+  label: { name?: string } | string | null | undefined,
+  pickupLabel?: string
+): boolean {
   const name = typeof label === "string" ? label : (label?.name ?? "");
-  return name.toLowerCase() === JUMI_LABEL;
+  const needle = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
+  return name.toLowerCase() === needle.toLowerCase();
 }
 
 export function isGithubBotSender(sender: { login?: string; type?: string } | undefined): boolean {
   if (!sender) return false;
   if (sender.type && sender.type.toLowerCase() === "bot") return true;
   return /\[bot\]$/i.test(sender.login ?? "");
+}
+
+/**
+ * Resolve the effective per-repository webhook policy from one
+ * default-branch settings read. Missing, invalid, or unreadable files fall
+ * back to the deployment policy (`jumi` pickup, deployer trust/ignore
+ * lists). Never throws. Gitea callers ignore the pickup label.
+ */
+export async function effectiveGithubPolicyForRepo(
+  api: { getRepoFile?: (owner: string, repo: string, path: string, ref: string) => Promise<{ found: boolean; content?: string }> } | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null,
+  basePolicy: GithubWebhookPolicy,
+  log?: (message: string) => void
+): Promise<GithubWebhookPolicy> {
+  const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
+  if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
+  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, branch);
+  } catch (err) {
+    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`);
+    return basePolicy;
+  }
+  if (settings.state === "invalid") {
+    log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${settings.error}`);
+    return basePolicy;
+  }
+  const pickupLabel = effectivePickupLabel(settings);
+  const trustedSenderLogins = effectiveTrustedSenderLogins(basePolicy.trustedSenderLogins, settings);
+  // `basePolicy.followupIgnoreLogins` already merges the deployer list with
+  // the GitHub defaults; the repository list unions on top.
+  const followupIgnoreLogins = effectiveFollowupIgnoreLogins(basePolicy.followupIgnoreLogins, settings);
+  const ignoreConflictsLabel = effectiveIgnoreConflictsLabel(basePolicy.ignoreConflictsLabel, settings);
+  return {
+    ...basePolicy,
+    trustedSenderLogins,
+    followupIgnoreLogins,
+    ignoreConflictsLabel,
+    pickupLabel,
+    isPickedUp: (issue) => hasLabel(issue, pickupLabel),
+  };
 }
 
 export function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
@@ -229,22 +304,23 @@ export async function verifyGithubSignature(
 
 export function shouldEnqueueGithubIssue(
   payload: GiteaIssuePayload,
-  policy: WebhookPolicy & { botUsername: string }
+  policy: WebhookPolicy & { botUsername: string; pickupLabel?: string }
 ): IssueWebhookDecision {
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
+  const pickupLabel = pickupLabelForPolicy(policy);
 
   if (payload.issue.pull_request != null) {
     return { type: "skip", reason: "pull request issue" };
   }
 
   if (payload.action === "unlabeled") {
-    if (!isJumiLabel(payload.label)) return { type: "skip", reason: "unlabeled other label" };
+    if (!isJumiLabel(payload.label, pickupLabel)) return { type: "skip", reason: "unlabeled other label" };
     return { type: "cancel", owner, repo, issueNumber: payload.issue.number };
   }
 
   if (payload.action === "labeled") {
     if (isFactoryBotSender(payload.sender, policy.botUsername)) return { type: "skip", reason: "sender is bot" };
-    if (!isJumiLabel(payload.label)) return { type: "skip", reason: "labeled other label" };
+    if (!isJumiLabel(payload.label, pickupLabel)) return { type: "skip", reason: "labeled other label" };
     if (payload.issue.state && payload.issue.state !== "open") {
       return { type: "skip", reason: "issue not open" };
     }
@@ -609,11 +685,23 @@ export async function handleGithubWebhookEvent(
       }
       try {
         const payload = parsePullRequestPayload(rawBody);
+        const [effOwner, effRepo] = payload.repository.full_name.split("/");
+        const effectivePolicy =
+          effOwner && effRepo
+            ? await effectiveGithubPolicyForRepo(
+                deps.worker.api,
+                effOwner,
+                effRepo,
+                payload.repository.default_branch,
+                policy,
+                logger
+              )
+            : policy;
         const decision = await requireSenderPush(
-          await shouldEnqueuePullLabel(payload, policy, deps.worker.api, logger),
+          await shouldEnqueuePullLabel(payload, effectivePolicy, deps.worker.api, logger),
           deps.worker.api,
           payload.sender?.login,
-          policy.trustedSenderLogins
+          effectivePolicy.trustedSenderLogins
         );
         if (decision.type === "skip") {
           const [owner, repo] = payload.repository.full_name.split("/");
@@ -789,12 +877,35 @@ export async function handleGithubWebhookEvent(
         return skipped(`unsupported action ${action}`, logger);
       }
       const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+      // Union the repository's `followup_ignore_logins` and intersect its
+      // `trusted_senders` before the bot/ignore skips: an unreadable or
+      // invalid file falls back to the deployment policy.
+      let effectiveFollowupPolicy = policy;
+      try {
+        if (isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string") {
+          const [fuOwner, fuRepo] = (parsed.repository.full_name as string).split("/");
+          const fuBranch =
+            typeof parsed.repository.default_branch === "string" ? parsed.repository.default_branch : undefined;
+          if (fuOwner && fuRepo) {
+            effectiveFollowupPolicy = await effectiveGithubPolicyForRepo(
+              deps.worker.api,
+              fuOwner,
+              fuRepo,
+              fuBranch,
+              policy,
+              logger
+            );
+          }
+        }
+      } catch {
+        // Fall back to the deployment policy.
+      }
       const sender = isObject(parsed) && isObject(parsed.sender) ? parsed.sender : undefined;
       const githubSender = sender as { login?: string; type?: string } | undefined;
-      if (isFactoryBotSender(githubSender, policy.botUsername)) {
+      if (isFactoryBotSender(githubSender, effectiveFollowupPolicy.botUsername)) {
         return skipped("sender is bot", logger);
       }
-      if (isIgnoredFollowupSender(githubSender, policy.followupIgnoreLogins)) {
+      if (isIgnoredFollowupSender(githubSender, effectiveFollowupPolicy.followupIgnoreLogins)) {
         return skipped("sender ignored", logger);
       }
       const eventName = event ?? "issue_comment";
@@ -809,14 +920,14 @@ export async function handleGithubWebhookEvent(
         event === "pull_request_review"
           ? await shouldEnqueuePullRejectedFollowUpWithTrust(
               parsePullRejectedPayload(rawBody),
-              policy,
+              effectiveFollowupPolicy,
               eventName,
               undefined,
               deps.worker.api
             )
           : await shouldEnqueueIssueCommentFollowUpWithTrust(
               parseIssueCommentPayload(commentBody),
-              policy,
+              effectiveFollowupPolicy,
               eventName,
               undefined,
               deps.worker.api
@@ -875,12 +986,28 @@ export async function handleGithubWebhookEvent(
         // Best-effort handoff/checkpoint cleanup only.
       }
     }
+    // The label webhook reads the repository's default-branch settings for
+    // its name: missing, unreadable, or invalid falls back to `jumi`. The
+    // same read supplies the effective trusted list (intersection, never
+    // widening on invalid).
+    const [issueOwner, issueRepo] = payload.repository.full_name.split("/");
+    const effectiveIssuePolicy =
+      issueOwner && issueRepo
+        ? await effectiveGithubPolicyForRepo(
+            deps.worker.api,
+            issueOwner,
+            issueRepo,
+            payload.repository.default_branch,
+            policy,
+            logger
+          )
+        : policy;
     // Dependency wakes below only re-check work a pusher already picked up; the gate is this event's own trigger.
     const decision = await requireSenderPush(
-      shouldEnqueueGithubIssue(payload, policy),
+      shouldEnqueueGithubIssue(payload, effectiveIssuePolicy),
       deps.worker.api,
       payload.sender?.login,
-      policy.trustedSenderLogins
+      effectiveIssuePolicy.trustedSenderLogins
     );
 
     if (decision.type === "cancel") {
@@ -922,7 +1049,7 @@ export async function handleGithubWebhookEvent(
 
     if (isDependencyWakeAction(payload.action) && deps.worker.api?.listIssueBlocks) {
       try {
-        const woken = await blockedIssueJobsToEnqueue(payload, policy, {
+        const woken = await blockedIssueJobsToEnqueue(payload, effectiveIssuePolicy, {
           listIssueBlocks: deps.worker.api.listIssueBlocks,
           getIssue: deps.worker.api.getIssue,
           getRepo: deps.worker.api.getRepo,
