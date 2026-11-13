@@ -186,12 +186,21 @@ describe("parseRepoSettingsText", () => {
       "review_exclude: 1\n",
       "review_exclude: null\n",
       "review_exclude: lockfile\n",
-      "review_exclude:\n  - 1\n",
-      'review_exclude:\n  - ""\n',
-      'review_exclude:\n  - "  "\n',
     ]) {
       const parsed = parseRepoSettingsText(text);
       expect(parsed).toEqual({ ok: false, error: '"review_exclude" must be a list of glob strings' });
+    }
+  });
+
+  test("a blank or non-string review_exclude entry is invalid", () => {
+    for (const text of [
+      "review_exclude:\n  - 1\n",
+      'review_exclude:\n  - ""\n',
+      'review_exclude:\n  - "  "\n',
+      'review_exclude:\n  - "docs/**"\n  - 1\n',
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({ ok: false, error: '"review_exclude" must not contain blank entries' });
     }
   });
 
@@ -240,34 +249,69 @@ describe("parseRepoSettingsText", () => {
     });
   });
 
-  test("author aliases parse to the same setting", () => {
-    expect(parseRepoSettingsText("takeover-authors: [a]\n")).toEqual({
+  test("former author alias spellings are invalid with a suggestion", () => {
+    for (const [text, canonical] of [
+      ["takeover-authors: [a]\n", "takeover_authors"],
+      ["takeoverAuthors: [a]\n", "takeover_authors"],
+      ["ignore-conflicts-authors: [a]\n", "ignore_conflicts_authors"],
+      ["ignoreConflictsAuthors: [a]\n", "ignore_conflicts_authors"],
+    ] as const) {
+      const key = text.split(":")[0] as string;
+      expect(parseRepoSettingsText(text)).toEqual({
+        ok: false,
+        error: `unknown key "${key}" (did you mean "${canonical}"?)`,
+      });
+    }
+  });
+
+  test("near-miss spellings of other keys suggest the canonical key", () => {
+    expect(parseRepoSettingsText("review-exclude: [a]\n")).toEqual({
+      ok: false,
+      error: 'unknown key "review-exclude" (did you mean "review_exclude"?)',
+    });
+    expect(parseRepoSettingsText("maxFollowupRounds: 1\n")).toEqual({
+      ok: false,
+      error: 'unknown key "maxFollowupRounds" (did you mean "max_followup_rounds"?)',
+    });
+    expect(parseRepoSettingsText("totally-unknown: 1\n")).toEqual({
+      ok: false,
+      error: 'unknown key "totally-unknown"',
+    });
+  });
+
+  test("author lists must be lists of non-empty strings", () => {
+    for (const text of ["takeover_authors: renovate\n", "takeover_authors: 1\n", "ignore_conflicts_authors: nope\n"]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed.ok).toBe(false);
+    }
+    for (const text of [
+      "takeover_authors: [renovate, 1]\n",
+      'takeover_authors: ["", renovate]\n',
+      'takeover_authors: ["  "]\n',
+      'ignore_conflicts_authors: ["", renovate]\n',
+      'ignore_conflicts_authors: [renovate, "  "]\n',
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed.ok).toBe(false);
+    }
+    expect(parseRepoSettingsText("takeover_authors: []\n").ok).toBe(true);
+  });
+
+  test("duplicate authors are deduplicated, not an error", () => {
+    expect(parseRepoSettingsText("takeover_authors: [renovate, renovate]\n")).toEqual({
       ok: true,
       settings: {
         automerge: false,
         timeouts: {},
         reviewExclude: [],
         followupOnSuggestions: true,
-        takeoverAuthors: ["a"],
+        takeoverAuthors: ["renovate"],
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
       },
     });
-    expect(parseRepoSettingsText("takeoverAuthors: [a]\n")).toEqual({
-      ok: true,
-      settings: {
-        automerge: false,
-        timeouts: {},
-        reviewExclude: [],
-        followupOnSuggestions: true,
-        takeoverAuthors: ["a"],
-        ignoreConflictsAuthors: [],
-        blockingQuestionAuthors: [],
-        mode: "full",
-      },
-    });
-    expect(parseRepoSettingsText("ignore-conflicts-authors: [a]\n")).toEqual({
+    expect(parseRepoSettingsText("ignore_conflicts_authors: [a, a, b]\n")).toEqual({
       ok: true,
       settings: {
         automerge: false,
@@ -275,26 +319,11 @@ describe("parseRepoSettingsText", () => {
         reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
-        ignoreConflictsAuthors: ["a"],
+        ignoreConflictsAuthors: ["a", "b"],
         blockingQuestionAuthors: [],
         mode: "full",
       },
     });
-  });
-
-  test("author lists must be lists of non-empty strings", () => {
-    for (const text of [
-      "takeover_authors: renovate\n",
-      "takeover_authors: 1\n",
-      "takeover_authors: [renovate, 1]\n",
-      "ignore_conflicts_authors: nope\n",
-      'ignore_conflicts_authors: ["", renovate]\n',
-    ]) {
-      const parsed = parseRepoSettingsText(text);
-      expect(parsed.ok).toBe(false);
-    }
-    expect(parseRepoSettingsText("takeover_authors: []\n").ok).toBe(true);
-    expect(parseRepoSettingsText("takeover_authors: [renovate, renovate]\n").ok).toBe(true);
   });
 
   test("blocking_question_authors parses a login list", () => {
@@ -349,27 +378,21 @@ describe("parseRepoSettingsText", () => {
       "blocking_question_authors: renovate-bot\n",
       "blocking_question_authors: 1\n",
       "blocking_question_authors: null\n",
-      "blocking_question_authors:\n  - renovate-bot\n  - 1\n",
     ]) {
       const parsed = parseRepoSettingsText(text);
       expect(parsed).toEqual({ ok: false, error: '"blocking_question_authors" must be a list of logins' });
     }
   });
 
-  test("blank blocking entries are dropped", () => {
-    expect(parseRepoSettingsText('blocking_question_authors:\n  - "  "\n  - alice\n')).toEqual({
-      ok: true,
-      settings: {
-        automerge: false,
-        timeouts: {},
-        reviewExclude: [],
-        followupOnSuggestions: true,
-        takeoverAuthors: [],
-        ignoreConflictsAuthors: [],
-        blockingQuestionAuthors: ["alice"],
-        mode: "full",
-      },
-    });
+  test("a blank or non-string blocking entry is invalid", () => {
+    for (const text of [
+      "blocking_question_authors:\n  - renovate-bot\n  - 1\n",
+      'blocking_question_authors:\n  - ""\n',
+      'blocking_question_authors:\n  - "  "\n',
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({ ok: false, error: '"blocking_question_authors" must not contain blank entries' });
+    }
   });
 
   test("mode parses the three repository modes", () => {
@@ -895,6 +918,13 @@ describe("parseRepoSettingsTimeouts", () => {
     expect(parseRepoSettingsText("timeouts:\n  bogus: 10\n")).toEqual({
       ok: false,
       error: 'unknown key "timeouts.bogus"',
+    });
+  });
+
+  test("near-miss timeout key suggests the canonical key", () => {
+    expect(parseRepoSettingsText("timeouts:\n  Review: 10\n")).toEqual({
+      ok: false,
+      error: 'unknown key "timeouts.Review" (did you mean "timeouts.review"?)',
     });
   });
 
