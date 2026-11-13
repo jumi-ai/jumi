@@ -373,7 +373,7 @@ describe("automerge after push", () => {
     expect(api.notes).toEqual([]);
   });
 
-  test("gitea without a settings touch makes no extra calls", async () => {
+  test("gitea without a settings touch makes no schedule calls", async () => {
     const api = makeApi();
     await ensureAutomergeAfterPush({
       api,
@@ -386,7 +386,10 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles"]);
+    expect(api.calls).toEqual(["getPRFiles", "getRepo", "getRepoFile"]);
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.calls).not.toContain("cancelAutoMerge");
+    expect(api.notes).toEqual([]);
   });
 
   test("kept schedule is not re-scheduled", async () => {
@@ -406,7 +409,10 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles", "getPR"]);
+    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile"]);
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.calls).not.toContain("cancelAutoMerge");
+    expect(api.notes).toEqual([]);
   });
 
   test("schedule dropped by the push is restored", async () => {
@@ -566,6 +572,59 @@ describe("automerge repository settings file", () => {
     expect(result).toEqual({ scheduled: true });
   });
 
+  test("a pull with a file matching review_exclude is not scheduled with one note", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: "generated/bundle.js", status: "modified", additions: 10, deletions: 2, changes: 12 }];
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: 'automerge: true\nreview_exclude:\n  - "**/generated/**"\n' };
+    };
+    const result = await scheduleAutomergeForPr(scheduleInput(api));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
+    expect(api.notes[0]).toContain("`generated/bundle.js`");
+    expect(api.notes[0]).toContain("a person needs to merge");
+  });
+
+  test("a pull with review_exclude patterns but no matching file is scheduled", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: "src/app.ts", status: "modified", additions: 10, deletions: 2, changes: 12 }];
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: 'automerge: true\nreview_exclude:\n  - "**/generated/**"\n' };
+    };
+    api.scheduleAutoMerge = async (_o: string, _r: string, _n: number, opts?: { mergeMethod?: string }) => {
+      api.calls.push("scheduleAutoMerge");
+      api.scheduled.push({ mergeMethod: opts?.mergeMethod });
+    };
+    const result = await scheduleAutomergeForPr(scheduleInput(api));
+    expect(result).toEqual({ scheduled: true });
+    expect(api.notes).toEqual([]);
+  });
+
+  test("no review_exclude schedules a matching pull as today", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: "src/app.ts", status: "modified", additions: 10, deletions: 2, changes: 12 }];
+    };
+    api.scheduleAutoMerge = async (_o: string, _r: string, _n: number, opts?: { mergeMethod?: string }) => {
+      api.calls.push("scheduleAutoMerge");
+      api.scheduled.push({ mergeMethod: opts?.mergeMethod });
+    };
+    const result = await scheduleAutomergeForPr(scheduleInput(api));
+    expect(result).toEqual({ scheduled: true });
+    expect(api.notes).toEqual([]);
+  });
+
   test("unreadable pull files fail closed with a note and no schedule call", async () => {
     const api = makeApi();
     api.getPRFiles = async () => {
@@ -614,6 +673,78 @@ describe("automerge settings after push", () => {
     expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
     expect(api.notes[0]).toContain("cancelled");
     expect(api.notes[0]).toContain(".jumi.yml");
+  });
+
+  test("a push adding a matching file to a scheduled pull cancels with one note", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: "pnpm-lock.yaml", status: "modified", additions: 20, deletions: 5, changes: 25 }];
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index });
+    };
+    api.getRepo = async () => {
+      api.calls.push("getRepo");
+      return {
+        name: "demo",
+        full_name: "kirmanak/demo",
+        html_url: "https://gitea.example.test/kirmanak/demo",
+        clone_url: "https://gitea.example.test/kirmanak/demo.git",
+        default_branch: "main",
+        owner: { login: "kirmanak" },
+        allowAutoMerge: true,
+        allowSquashMerge: true,
+      };
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: 'automerge: true\nreview_exclude:\n  - "pnpm-lock.yaml"\n' };
+    };
+    await ensureAutomergeAfterPush(restoreInput(api));
+    expect(api.calls).toContain("cancelAutoMerge");
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
+    expect(api.notes[0]).toContain("`pnpm-lock.yaml`");
+    expect(api.notes[0]).toContain("a person needs to merge");
+  });
+
+  test("a push with review_exclude patterns but no matching file restores as today", async () => {
+    const api = makeApi();
+    api.getPRFiles = async () => {
+      api.calls.push("getPRFiles");
+      return [{ filename: "src/app.ts", status: "modified", additions: 10, deletions: 2, changes: 12 }];
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index });
+    };
+    api.getRepo = async () => {
+      api.calls.push("getRepo");
+      return {
+        name: "demo",
+        full_name: "kirmanak/demo",
+        html_url: "https://gitea.example.test/kirmanak/demo",
+        clone_url: "https://gitea.example.test/kirmanak/demo.git",
+        default_branch: "main",
+        owner: { login: "kirmanak" },
+        allowAutoMerge: true,
+        allowSquashMerge: true,
+      };
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: 'automerge: true\nreview_exclude:\n  - "**/generated/**"\n' };
+    };
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+    };
+    await ensureAutomergeAfterPush(restoreInput(api));
+    expect(api.calls).toContain("scheduleAutoMerge");
+    expect(api.calls).not.toContain("cancelAutoMerge");
+    expect(api.notes).toEqual([]);
   });
 
   test("an invalid default-branch file is not restored and the note names the error", async () => {
