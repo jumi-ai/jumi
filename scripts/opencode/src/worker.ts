@@ -25,15 +25,15 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import {
+  effectiveLeaseMs,
+  effectiveTimeoutMsForKind,
+  loadDefaultBranchSettings,
   REPO_MODE_DISABLED_NOTE,
   REPO_MODE_OFF_REASON,
   REPO_MODE_REVIEW_ONLY_REASON,
   type RepoMode,
   type RepoSettingsFileApi,
   type RepoSettingsLoad,
-  effectiveLeaseMs,
-  effectiveTimeoutMsForKind,
-  loadDefaultBranchSettings,
   resolveRepoMode,
 } from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
