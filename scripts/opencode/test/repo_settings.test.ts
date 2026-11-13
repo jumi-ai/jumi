@@ -1019,56 +1019,74 @@ describe("effectiveTimeoutMsForKind", () => {
 
 describe("invalidHeadSettingsFailure", () => {
   const log = () => undefined;
+  const settingsFile = { filename: ".jumi.yml", status: "modified" as const, additions: 1, deletions: 0, changes: 1 };
+  const otherFile = { filename: "README.md", status: "modified" as const, additions: 1, deletions: 0, changes: 1 };
+  const requiredBranch = { enableStatusCheck: true, requiredContexts: ["jumi/opencode-review"] };
 
-  test("unset deployer list reads nothing and never fails", async () => {
-    let calls = 0;
+  test("invalid head file fails outside the automerge list", async () => {
     const failure = await invalidHeadSettingsFailure({
       api: {
-        getRepoFile: async () => {
-          calls++;
-          return { found: true, content: "nope: 1\n" };
-        },
+        getPRFiles: async () => [settingsFile],
+        getRepoFile: async () => ({ found: true, content: "automerge: 1\n" }),
       },
       owner: "o",
       repo: "r",
+      prNumber: 7,
       headSha: "abc",
+      baseBranch: "main",
       automergeRepos: [],
-      log,
-    });
-    expect(failure).toBeUndefined();
-    expect(calls).toBe(0);
-  });
-
-  test("unlisted repository reads nothing", async () => {
-    let calls = 0;
-    const failure = await invalidHeadSettingsFailure({
-      api: {
-        getRepoFile: async () => {
-          calls++;
-          return { found: true, content: "nope: 1\n" };
-        },
-      },
-      owner: "o",
-      repo: "r",
-      headSha: "abc",
-      automergeRepos: ["other/repo"],
-      log,
-    });
-    expect(failure).toBeUndefined();
-    expect(calls).toBe(0);
-  });
-
-  test("invalid head file fails with the parser error", async () => {
-    const failure = await invalidHeadSettingsFailure({
-      api: { getRepoFile: async () => ({ found: true, content: "automerge: 1\n" }) },
-      owner: "o",
-      repo: "r",
-      headSha: "abc",
-      automergeRepos: ["o/r"],
       log,
     });
     expect(failure).toContain(".jumi.yml is invalid");
     expect(failure).toContain('"automerge" must be a boolean');
+  });
+
+  test("pull that does not touch the settings file reads no head file", async () => {
+    let calls = 0;
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getPRFiles: async () => [otherFile],
+        getRepoFile: async () => {
+          calls++;
+          return { found: true, content: "nope: 1\n" };
+        },
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      log,
+    });
+    expect(failure).toBeUndefined();
+    expect(calls).toBe(0);
+  });
+
+  test("pre-fetched changed files skip the pull file list", async () => {
+    let fileCalls = 0;
+    let headCalls = 0;
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getPRFiles: async () => {
+          fileCalls++;
+          return [settingsFile];
+        },
+        getRepoFile: async () => {
+          headCalls++;
+          return { found: true, content: "automerge: true\n" };
+        },
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      changedFiles: [otherFile],
+      log,
+    });
+    expect(failure).toBeUndefined();
+    expect(fileCalls).toBe(0);
+    expect(headCalls).toBe(0);
   });
 
   test("invalid review_exclude in the head file fails", async () => {
@@ -1076,8 +1094,10 @@ describe("invalidHeadSettingsFailure", () => {
       api: { getRepoFile: async () => ({ found: true, content: "review_exclude: 1\n" }) },
       owner: "o",
       repo: "r",
+      prNumber: 7,
       headSha: "abc",
-      automergeRepos: ["o/r"],
+      baseBranch: "main",
+      changedFiles: [settingsFile],
       log,
     });
     expect(failure).toContain(".jumi.yml is invalid");
@@ -1089,8 +1109,10 @@ describe("invalidHeadSettingsFailure", () => {
       api: { getRepoFile: async () => ({ found: true, content: "automerge: true\n" }) },
       owner: "o",
       repo: "r",
+      prNumber: 7,
       headSha: "abc",
-      automergeRepos: ["o"],
+      baseBranch: "main",
+      changedFiles: [settingsFile],
       log,
     });
     expect(failure).toBeUndefined();
@@ -1105,8 +1127,111 @@ describe("invalidHeadSettingsFailure", () => {
       },
       owner: "o",
       repo: "r",
+      prNumber: 7,
       headSha: "abc",
-      automergeRepos: ["o/r"],
+      baseBranch: "main",
+      changedFiles: [settingsFile],
+      log,
+    });
+    expect(failure).toBeUndefined();
+  });
+
+  test("unreadable pull files are fail-open", async () => {
+    let headCalls = 0;
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getPRFiles: async () => {
+          throw new Error("GitHub API → 500");
+        },
+        getRepoFile: async () => {
+          headCalls++;
+          return { found: true, content: "nope: 1\n" };
+        },
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      log,
+    });
+    expect(failure).toBeUndefined();
+    expect(headCalls).toBe(0);
+  });
+
+  test("head mode off fails where the base requires the review check", async () => {
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getRepoFile: async () => ({ found: true, content: "mode: off\n" }),
+        getBranch: async () => requiredBranch,
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      changedFiles: [settingsFile],
+      log,
+    });
+    expect(failure).toContain(".jumi.yml sets mode: off");
+    expect(failure).toContain("`jumi/opencode-review` is required on main");
+    expect(failure).toContain("unable to merge");
+  });
+
+  test("head mode off passes where the base does not require the check", async () => {
+    for (const branch of [
+      { enableStatusCheck: false, requiredContexts: ["jumi/opencode-review"] },
+      { enableStatusCheck: true, requiredContexts: ["other-check"] },
+      { enableStatusCheck: true, requiredContexts: [] },
+    ]) {
+      const failure = await invalidHeadSettingsFailure({
+        api: {
+          getRepoFile: async () => ({ found: true, content: "mode: off\n" }),
+          getBranch: async () => branch,
+        },
+        owner: "o",
+        repo: "r",
+        prNumber: 7,
+        headSha: "abc",
+        baseBranch: "main",
+        changedFiles: [settingsFile],
+        log,
+      });
+      expect(failure).toBeUndefined();
+    }
+  });
+
+  test("head mode off is fail-open when the branch is unreadable", async () => {
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getRepoFile: async () => ({ found: true, content: "mode: off\n" }),
+        getBranch: async () => {
+          throw new Error("GitHub API → 500");
+        },
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      changedFiles: [settingsFile],
+      log,
+    });
+    expect(failure).toBeUndefined();
+  });
+
+  test("head mode review-only passes with the check required", async () => {
+    const failure = await invalidHeadSettingsFailure({
+      api: {
+        getRepoFile: async () => ({ found: true, content: "mode: review-only\n" }),
+        getBranch: async () => requiredBranch,
+      },
+      owner: "o",
+      repo: "r",
+      prNumber: 7,
+      headSha: "abc",
+      baseBranch: "main",
+      changedFiles: [settingsFile],
       log,
     });
     expect(failure).toBeUndefined();
