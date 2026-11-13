@@ -79,7 +79,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { withIssueAuthorPermission } from "./permissions.ts";
 import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -702,7 +702,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   }
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
-    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    await sticky(quotaStuckReasonForText(stuckState.quota?.reason), pr.number);
     await forgetClaim();
     return { status: "stuck" };
   }
@@ -897,8 +897,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             chain: jobChain,
             previousError: opts.previousError,
           });
-          await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+          await sticky(quotaReason, pr.number);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "stuck" };
@@ -999,9 +1000,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 chain: jobChain,
                 previousError: opts.previousError,
               });
-              await sticky(QUOTA_STUCK_TEXT, pr.number);
-              await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
-              throw new Error(QUOTA_STUCK_TEXT);
+              const quotaReason = quotaStuckReasonForText(continued.message);
+              await sticky(quotaReason, pr.number);
+              await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+              throw new Error(quotaReason);
             }
             throwIfEngineFailed(continued);
             await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
@@ -1119,8 +1121,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           chain: jobChain,
           previousError: opts.previousError,
         });
-        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        await sticky(quotaReason, pr.number).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
           pushLanded: false,
           logger: log,
