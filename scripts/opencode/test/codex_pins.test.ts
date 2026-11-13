@@ -38,14 +38,14 @@ const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
 
 // Official stable pin exercised successfully (see JUMI_TASK evidence). Digests
 // are the GitHub API `digest` fields for the musl-package assets of
-// rust-v0.167.0, verified byte-for-byte against the 0.166.0 pins they replace.
-const CODEX_VERSION = "0.167.0";
-const CODEX_TAG = "rust-v0.167.0";
-const CODEX_SHA256_AMD64 = "3bbf75e83de6b58aed28f2cf6e33ad423ec31fd4700a1457b94be557ea5a7c6e";
-const CODEX_SHA256_ARM64 = "0de261ecf1e7f3028a7952f03fca2093f749277d38590b78bb32f8567756bbb7";
-const OLD_VERSION = "0.166.0";
-const OLD_SHA256_AMD64 = "1d44b28bc4ac9937d7d3532264baa68a507ce364956a0d4ebb856f331cdee254";
-const OLD_SHA256_ARM64 = "7821b77dda2e6283fb1f63f3165177a271da8833e857cf673c6ca1c9db3bfcc6";
+// rust-v0.167.1, verified byte-for-byte against the 0.167.0 pins they replace.
+const CODEX_VERSION = "0.167.1";
+const CODEX_TAG = "rust-v0.167.1";
+const CODEX_SHA256_AMD64 = "a945df3df83e849dd7b74787e27f8a459c1946b0e3afe3dc8eef8a8d1845fd4f";
+const CODEX_SHA256_ARM64 = "ef3e1443a7795d596f1601a533d7225a1030488d60c965af1f0610ab95889031";
+const OLD_VERSION = "0.167.0";
+const OLD_SHA256_AMD64 = "3bbf75e83de6b58aed28f2cf6e33ad423ec31fd4700a1457b94be557ea5a7c6e";
+const OLD_SHA256_ARM64 = "0de261ecf1e7f3028a7952f03fca2093f749277d38590b78bb32f8567756bbb7";
 
 function codexDigestManagers() {
   return renovate.customManagers?.filter(
@@ -207,17 +207,17 @@ describe("codex pin coherence", () => {
     const armPattern = armManager?.matchStrings?.[0] ?? "";
     const oldContent = [
       "# renovate: datasource=github-release-attachments depName=openai/codex",
-      "CODEX_AMD64_TAG=rust-v0.166.0",
+      "CODEX_AMD64_TAG=rust-v0.167.0",
       `CODEX_SHA256_AMD64=${OLD_SHA256_AMD64}`,
       "# renovate: datasource=github-release-attachments depName=openai/codex",
-      "CODEX_ARM64_TAG=rust-v0.166.0",
+      "CODEX_ARM64_TAG=rust-v0.167.0",
       `CODEX_SHA256_ARM64=${OLD_SHA256_ARM64}`,
     ].join("\n");
     const amd = extractFirst(amdPattern, oldContent);
     const arm = extractFirst(armPattern, oldContent);
-    expect(amd?.groups.currentValue).toBe("rust-v0.166.0");
+    expect(amd?.groups.currentValue).toBe("rust-v0.167.0");
     expect(amd?.groups.currentDigest).toBe(OLD_SHA256_AMD64);
-    expect(arm?.groups.currentValue).toBe("rust-v0.166.0");
+    expect(arm?.groups.currentValue).toBe("rust-v0.167.0");
     expect(arm?.groups.currentDigest).toBe(OLD_SHA256_ARM64);
     // The lookup yields the tag verbatim (tag-form versioning, no
     // extractVersion); each arch autoReplace template writes that tag with
@@ -237,7 +237,7 @@ describe("codex pin coherence", () => {
     expect(updated).toContain(CODEX_TAG);
     expect(updated).toContain(CODEX_SHA256_AMD64);
     expect(updated).toContain(CODEX_SHA256_ARM64);
-    expect(updated).not.toContain("0.166.0");
+    expect(updated).not.toContain("0.167.0");
     expect(updated).not.toContain(OLD_SHA256_AMD64);
     expect(updated).not.toContain(OLD_SHA256_ARM64);
     // Re-extract after the update: both entries land on the new tag+digest.
@@ -262,7 +262,7 @@ describe("codex build consumes one effective pin and fails closed", () => {
     expect(dockerfile).toMatch(/^ARG CODEX_VERSION$/m);
     expect(dockerfile).toMatch(/^ARG CODEX_SHA256_AMD64$/m);
     expect(dockerfile).toMatch(/^ARG CODEX_SHA256_ARM64$/m);
-    expect(dockerfile).not.toMatch(/^ARG CODEX_VERSION=0\.166\.0$/m);
+    expect(dockerfile).not.toMatch(/^ARG CODEX_VERSION=0\.167\.0$/m);
     expect(dockerfile).not.toMatch(OLD_SHA256_AMD64);
     expect(dockerfile).not.toMatch(OLD_SHA256_ARM64);
     // Fail closed on missing wiring.
