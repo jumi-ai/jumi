@@ -24,6 +24,7 @@ import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./in
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import type { RepoSettingsFileApi, RepoSettingsLoad } from "./repo_settings.ts";
 import { effectiveLeaseMs, effectiveTimeoutMsForKind, loadDefaultBranchSettings } from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
@@ -61,6 +62,36 @@ function log(message: string) {
   console.log(`[worker] ${message}`);
 }
 
+/**
+ * Repository timeouts for one worker job, read once from the default branch
+ * at job start. A change does not affect an already running job. Fail-open to
+ * deployment defaults when the file is missing, invalid, or unreadable.
+ */
+export async function resolveWorkerTimeouts(
+  api: RepoSettingsFileApi,
+  config: Pick<
+    WorkerConfig,
+    | "opencodeTimeoutMs"
+    | "opencodeTimeoutMaxMs"
+    | "followupTimeoutMs"
+    | "followupTimeoutMaxMs"
+    | "conflictTimeoutMs"
+    | "conflictTimeoutMaxMs"
+  >,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined,
+  logger: (message: string) => void = log
+): Promise<{ load: RepoSettingsLoad; implementMs: number; followupMs: number; conflictMs: number }> {
+  const { load } = await loadDefaultBranchSettings(api, owner, repo, defaultBranch, logger);
+  return {
+    load,
+    implementMs: effectiveTimeoutMsForKind(load, "implement", config.opencodeTimeoutMs, config.opencodeTimeoutMaxMs),
+    followupMs: effectiveTimeoutMsForKind(load, "follow-up", config.followupTimeoutMs, config.followupTimeoutMaxMs),
+    conflictMs: effectiveTimeoutMsForKind(load, "conflict", config.conflictTimeoutMs, config.conflictTimeoutMaxMs),
+  };
+}
+
 export function createIssueQueue(
   config: WorkerConfig,
   api: IssueApi = createForge(config),
@@ -79,31 +110,11 @@ export function createIssueQueue(
         // Local/dev path also reads the default-branch timeouts once at job
         // start so it behaves like the ledger tick. Fail-open to deployment
         // defaults when the file is missing, invalid, or unreadable.
-        const { load: localLoad } = await loadDefaultBranchSettings(
-          api,
-          job.owner,
-          job.repo,
-          job.defaultBranch,
-          logger
-        );
-        const localImplementMs = effectiveTimeoutMsForKind(
-          localLoad,
-          "implement",
-          config.opencodeTimeoutMs,
-          config.opencodeTimeoutMaxMs
-        );
-        const localFollowupMs = effectiveTimeoutMsForKind(
-          localLoad,
-          "follow-up",
-          config.followupTimeoutMs,
-          config.followupTimeoutMaxMs
-        );
-        const localConflictMs = effectiveTimeoutMsForKind(
-          localLoad,
-          "conflict",
-          config.conflictTimeoutMs,
-          config.conflictTimeoutMaxMs
-        );
+        const {
+          implementMs: localImplementMs,
+          followupMs: localFollowupMs,
+          conflictMs: localConflictMs,
+        } = await resolveWorkerTimeouts(api, config, job.owner, job.repo, job.defaultBranch, logger);
         const shared = {
           api,
           tracker: api,
@@ -441,30 +452,17 @@ export async function processWorkerTick(
     row.payload && typeof row.payload === "object" && "defaultBranch" in row.payload
       ? (row.payload as { defaultBranch?: unknown }).defaultBranch
       : undefined;
-  const { load: settingsLoad } = await loadDefaultBranchSettings(
+  const {
+    implementMs: effectiveImplementMs,
+    followupMs: effectiveFollowupMs,
+    conflictMs: effectiveConflictMs,
+  } = await resolveWorkerTimeouts(
     api,
+    config,
     row.owner,
     row.repo,
     typeof defaultBranchHint === "string" && defaultBranchHint ? defaultBranchHint : undefined,
     logger
-  );
-  const effectiveImplementMs = effectiveTimeoutMsForKind(
-    settingsLoad,
-    "implement",
-    config.opencodeTimeoutMs,
-    config.opencodeTimeoutMaxMs
-  );
-  const effectiveFollowupMs = effectiveTimeoutMsForKind(
-    settingsLoad,
-    "follow-up",
-    config.followupTimeoutMs,
-    config.followupTimeoutMaxMs
-  );
-  const effectiveConflictMs = effectiveTimeoutMsForKind(
-    settingsLoad,
-    "conflict",
-    config.conflictTimeoutMs,
-    config.conflictTimeoutMaxMs
   );
   const effectiveTimeoutForLease =
     row.kind === "conflict"
