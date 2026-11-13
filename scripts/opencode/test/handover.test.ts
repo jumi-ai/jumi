@@ -418,6 +418,33 @@ describe("enqueueFollowUpFromReview", () => {
     }
   });
 
+  test("questions-only success enqueues follow-up for a repository-listed author", async () => {
+    const markdown = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          body: "Fixes #12",
+          user: makeUser({ login: "repo-bot" }),
+          head: { ...makePR().head, ref: "repo/x", sha: "headsha" },
+        }),
+      getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+      blockingQuestionAuthors: [],
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("queued");
+  });
+
   test("assigned jumi-identity PR with no closer follows the branch issue", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());

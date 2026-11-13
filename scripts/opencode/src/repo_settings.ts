@@ -21,11 +21,13 @@ export interface RepoTimeouts {
 export interface RepoSettings {
   automerge: boolean;
   timeouts: RepoTimeouts;
+  /** PR-author logins whose open ❓ questions block the review status in this repository. */
+  blockingQuestionAuthors: string[];
 }
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set(["automerge", "timeouts"]);
+const KNOWN_KEYS = new Set(["automerge", "timeouts", "blocking_question_authors"]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
 export const TIMEOUT_KEYS = ["review", "implement", "followup", "conflict"] as const;
@@ -37,7 +39,8 @@ export const MIN_TIMEOUT_MINUTES = 1;
 export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 
 function parseTimeoutsValue(value: unknown): RepoSettingsParse {
-  if (value === undefined) return { ok: true, settings: { automerge: false, timeouts: {} } };
+  if (value === undefined)
+    return { ok: true, settings: { automerge: false, timeouts: {}, blockingQuestionAuthors: [] } };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { ok: false, error: `"timeouts" must be a mapping` };
   }
@@ -53,7 +56,7 @@ function parseTimeoutsValue(value: unknown): RepoSettingsParse {
     }
     (timeouts as Record<string, number>)[key] = minutes;
   }
-  return { ok: true, settings: { automerge: false, timeouts } };
+  return { ok: true, settings: { automerge: false, timeouts, blockingQuestionAuthors: [] } };
 }
 
 function parserErrorMessage(err: unknown): string {
@@ -64,12 +67,15 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * no schema-version key exists. Absent `timeouts` (or an empty mapping)
- * means no timeout overrides; each present key is whole minutes for that
- * kind (`followup` controls `follow-up` jobs). A value above the deployer
- * maximum runs with the maximum; a value below the documented minimum
- * makes the whole file invalid. The error string is the parser's error and
- * is surfaced verbatim in the auto-merge note and the review status.
+ * absent `blocking_question_authors` means no repo-listed authors.
+ * `blocking_question_authors` must be a list of login strings when present;
+ * blank entries are dropped like the deployer CSV. Absent `timeouts` (or an
+ * empty mapping) means no timeout overrides; each present key is whole
+ * minutes for that kind (`followup` controls `follow-up` jobs). A value above
+ * the deployer maximum runs with the maximum; a value below the documented
+ * minimum makes the whole file invalid. No schema-version key exists. The
+ * error string is the parser's error and is surfaced verbatim in the
+ * auto-merge note and the review status.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -78,7 +84,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   } catch (err) {
     return { ok: false, error: parserErrorMessage(err) };
   }
-  if (parsed === null || parsed === undefined) return { ok: true, settings: { automerge: false, timeouts: {} } };
+  if (parsed === null || parsed === undefined)
+    return { ok: true, settings: { automerge: false, timeouts: {}, blockingQuestionAuthors: [] } };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -97,12 +104,25 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!timeoutsParsed.ok) return timeoutsParsed;
     timeouts = timeoutsParsed.settings.timeouts;
   }
-  return { ok: true, settings: { automerge, timeouts } };
+  let blockingQuestionAuthors: string[] = [];
+  if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
+    const value = record.blocking_question_authors;
+    if (!Array.isArray(value)) return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
+    const logins: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string")
+        return { ok: false, error: `"blocking_question_authors" must be a list of logins` };
+      const trimmed = entry.trim();
+      if (trimmed) logins.push(trimmed);
+    }
+    blockingQuestionAuthors = logins;
+  }
+  return { ok: true, settings: { automerge, timeouts, blockingQuestionAuthors } };
 }
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean; timeouts: RepoTimeouts }
+  | { state: "valid"; automerge: boolean; timeouts: RepoTimeouts; blockingQuestionAuthors: string[] }
   | { state: "invalid"; error: string };
 
 /** Ledger kind to repository timeout key: `follow-up` reads `followup`. */
@@ -171,7 +191,12 @@ export async function loadRepoSettings(
   if (file.found !== true || typeof file.content !== "string") return { state: "missing" };
   const parsed = parseRepoSettingsText(file.content);
   if (!parsed.ok) return { state: "invalid", error: parsed.error };
-  return { state: "valid", automerge: parsed.settings.automerge, timeouts: parsed.settings.timeouts };
+  return {
+    state: "valid",
+    automerge: parsed.settings.automerge,
+    timeouts: parsed.settings.timeouts,
+    blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
+  };
 }
 
 export interface DefaultBranchTimeouts {
@@ -240,6 +265,60 @@ export async function resolveEffectiveTimeoutMs(
   const { load } = await loadDefaultBranchSettings(api, owner, repo, defaultBranch, log);
   if (load.state !== "valid") return { timeoutMs: baseMs, load };
   return { timeoutMs: effectiveTimeoutMsForKind(load, kind, baseMs, maxMs), load };
+}
+
+/**
+ * Effective blocking-question authors for a repository: the deployer's list
+ * plus the repository file's list. The file cannot remove a login the
+ * deployer listed; matching stays case-insensitive whole-login. Invalid or
+ * missing files contribute nothing (the deployer list still applies).
+ */
+export function effectiveBlockingQuestionAuthors(
+  deployerAuthors: readonly string[] | undefined | null,
+  settings: RepoSettingsLoad
+): string[] {
+  const merged = [...(deployerAuthors ?? [])];
+  const seen = new Set(merged.map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+  if (settings.state === "valid") {
+    for (const entry of settings.blockingQuestionAuthors) {
+      const key = entry.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry.trim());
+    }
+  }
+  return merged;
+}
+
+/**
+ * Load the default-branch settings file and merge its
+ * `blocking_question_authors` with the deployer list. Missing, invalid, or
+ * unreadable files fall back to the deployer list so one repository's file
+ * never changes another repository. Never throws.
+ */
+export async function loadEffectiveBlockingQuestionAuthors(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployerAuthors: readonly string[] | undefined | null,
+  log?: (message: string) => void
+): Promise<string[]> {
+  if (!defaultBranch.trim()) return [...(deployerAuthors ?? [])];
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `blocking settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [...(deployerAuthors ?? [])];
+  }
+  if (settings.state === "invalid") {
+    log?.(`blocking settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    return [...(deployerAuthors ?? [])];
+  }
+  return effectiveBlockingQuestionAuthors(deployerAuthors, settings);
 }
 
 function normalizePath(filename: string): string {
