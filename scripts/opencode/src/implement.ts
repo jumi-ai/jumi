@@ -43,7 +43,6 @@ import {
   type QueueCandidate,
   validateYield,
 } from "./dependencies.ts";
-import { logDiagnostic } from "./diagnostics.ts";
 import { type Engine, type EngineResult, type EngineRunOptions, throwIfEngineFailed, thrownRunner } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import {
@@ -71,7 +70,7 @@ import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { resolveRepoChain } from "./repo_settings.ts";
+import { applyRepoChain } from "./repo_settings.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -608,42 +607,30 @@ async function implementExternalIssue(
   let activeFallbackModel = opts.fallbackModel;
   let activeFallbackVariant = opts.fallbackVariant;
   if (opts.chain && opts.chain.length > 0) {
-    try {
-      const resolution = await resolveRepoChain({
-        api: forge,
-        owner,
-        repo,
-        defaultBranch: job.defaultBranch,
-        chain: opts.chain,
-        log,
-      });
-      if (resolution.state === "invalid" || resolution.state === "empty") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
-          state: resolution.state,
-          reason: resolution.reason,
-        });
+    const applied = await applyRepoChain({
+      api: forge,
+      owner,
+      repo,
+      defaultBranch: job.defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { job: `${owner}/${repo}@${ref.tracker}:${ref.id}` },
+      unreadableContext: `${owner}/${repo}`,
+      publish: async (reason) => {
         if (typeof briefTracker.postBriefComment === "function") {
           try {
-            await briefTracker.postBriefComment(ref, resolution.reason);
+            await briefTracker.postBriefComment(ref, reason);
           } catch {
             // The skipped reason still carries the failure.
           }
         }
-        return { status: "skipped", reason: resolution.reason };
-      }
-      if (resolution.state === "narrowed") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
-          state: "narrowed",
-          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
-        });
-        activeChain = resolution.chain;
-        activeFallbackModel = undefined;
-        activeFallbackVariant = undefined;
-      }
-    } catch (err) {
-      log(`runner settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      activeChain = applied.chain;
+      activeFallbackModel = undefined;
+      activeFallbackVariant = undefined;
     }
   }
 
@@ -892,43 +879,29 @@ export async function implementIssue(
   // started, then a skipped result. Unreadable fails open with a log.
   let activeOpts = opts;
   if (opts.chain && opts.chain.length > 0) {
-    try {
-      const resolution = await resolveRepoChain({
-        api: opts.api,
-        owner: opts.job.owner,
-        repo: opts.job.repo,
-        defaultBranch: opts.job.defaultBranch,
-        chain: opts.chain,
-        log,
-      });
-      if (resolution.state === "invalid" || resolution.state === "empty") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
-          state: resolution.state,
-          reason: resolution.reason,
-        });
+    const applied = await applyRepoChain({
+      api: opts.api,
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      defaultBranch: opts.job.defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { job: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}` },
+      unreadableContext: `${opts.job.owner}/${opts.job.repo}`,
+      publish: async (reason) => {
         await upsertWorkerComment(
           opts.api,
           opts.job.owner,
           opts.job.repo,
           opts.job.issueNumber,
           opts.botUsername,
-          resolution.reason
+          reason
         ).catch(() => undefined);
-        return { status: "skipped", reason: resolution.reason };
-      }
-      if (resolution.state === "narrowed") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`,
-          state: "narrowed",
-          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
-        });
-        activeOpts = { ...opts, chain: resolution.chain, fallbackModel: undefined, fallbackVariant: undefined };
-      }
-    } catch (err) {
-      log(
-        `runner settings unreadable for ${opts.job.owner}/${opts.job.repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      activeOpts = { ...opts, chain: applied.chain, fallbackModel: undefined, fallbackVariant: undefined };
     }
   }
   const branch = issueBranchName(activeOpts.job.issueNumber, activeOpts.job.title);

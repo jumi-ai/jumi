@@ -9,6 +9,8 @@
  * never treated as "no file". A missing file is normal and silent.
  */
 
+import { logDiagnostic } from "./diagnostics.ts";
+
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
 export interface RepoSettings {
@@ -357,4 +359,70 @@ export async function resolveRepoChain<T extends { name: string }>(opts: {
     };
   }
   return { state: "narrowed", chain: narrowed.chain, unknownNames: narrowed.unknownNames };
+}
+
+export type RepoChainApply<T> =
+  | { failedClosed: false; chain: T[] | undefined; narrowed: boolean }
+  | { failedClosed: true; reason: string };
+
+/**
+ * Shared resolve→log→publish→return step for every job that runs on a
+ * runner chain. `resolveRepoChain` runs inside the `try` (unreadable fails
+ * open with a log); the `invalid`/`empty` publish runs after the `catch` so
+ * a publish failure propagates instead of continuing on the full chain.
+ * The caller passes its own `publish` (review status, worker comment, PR
+ * sticky) and returns `skipped` when `failedClosed` is true.
+ */
+export async function applyRepoChain<T extends { name: string }>(opts: {
+  api: RepoSettingsFileApi;
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  chain: readonly T[] | undefined;
+  log?: (message: string) => void;
+  /** Extra diagnostic fields, e.g. `{ review: "o/r#7", head }` or `{ job: "o/r#7", head }`. */
+  diagBase?: Record<string, string | null | undefined>;
+  /** Log context for the fail-open unreadable line. Defaults to `owner/repo`. */
+  unreadableContext?: string;
+  publish: (reason: string) => Promise<void>;
+}): Promise<RepoChainApply<T>> {
+  const base = opts.chain ? [...opts.chain] : undefined;
+  if (!opts.chain || opts.chain.length === 0) return { failedClosed: false, chain: base, narrowed: false };
+  let resolution: RepoChainResolution<T>;
+  try {
+    resolution = await resolveRepoChain({
+      api: opts.api,
+      owner: opts.owner,
+      repo: opts.repo,
+      defaultBranch: opts.defaultBranch,
+      chain: opts.chain,
+      log: opts.log,
+    });
+  } catch (err) {
+    const context = opts.unreadableContext ?? `${opts.owner}/${opts.repo}`;
+    opts.log?.(`runner settings unreadable for ${context}: ${err instanceof Error ? err.message : String(err)}`);
+    return { failedClosed: false, chain: base, narrowed: false };
+  }
+  if (resolution.state === "invalid" || resolution.state === "empty") {
+    if (opts.log) {
+      logDiagnostic(opts.log, "repo_settings", {
+        ...(opts.diagBase ?? {}),
+        state: resolution.state,
+        reason: resolution.reason,
+      });
+    }
+    await opts.publish(resolution.reason);
+    return { failedClosed: true, reason: resolution.reason };
+  }
+  if (resolution.state === "narrowed") {
+    if (opts.log) {
+      logDiagnostic(opts.log, "repo_settings", {
+        ...(opts.diagBase ?? {}),
+        state: "narrowed",
+        eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
+      });
+    }
+    return { failedClosed: false, chain: resolution.chain, narrowed: true };
+  }
+  return { failedClosed: false, chain: base, narrowed: false };
 }

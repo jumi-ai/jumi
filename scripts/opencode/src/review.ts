@@ -56,10 +56,10 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import {
+  applyRepoChain,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   REPO_SETTINGS_PATH,
-  resolveRepoChain,
 } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
@@ -1351,62 +1351,39 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   let effectiveFallbackVariant = opts.fallbackVariant;
   let earlyRepo: Repo | undefined;
   try {
-    if (opts.chain && opts.chain.length > 0) {
-      try {
-        earlyRepo = await forgeApi.getRepo(opts.owner, opts.repo);
-      } catch (err) {
-        log(
-          `runner settings repo unreadable for ${repoFullName}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-      const defaultBranch = earlyRepo?.default_branch ?? "";
-      let resolution: Awaited<ReturnType<typeof resolveRepoChain<NamedRunner>>>;
-      try {
-        resolution = await resolveRepoChain({
-          api: forgeApi,
-          owner: opts.owner,
-          repo: opts.repo,
-          defaultBranch,
-          chain: opts.chain,
-          log,
-        });
-      } catch (err) {
-        log(
-          `runner settings unreadable for ${repoFullName}@${defaultBranch || "(unknown branch)"}: ${err instanceof Error ? err.message : String(err)}`
-        );
-        resolution = { state: "unrestricted", chain: opts.chain ? [...opts.chain] : [] };
-      }
-      if (resolution.state === "invalid" || resolution.state === "empty") {
-        const reason = resolution.reason;
-        logDiagnostic(log, "repo_settings", {
-          review: `${repoFullName}#${opts.prNumber}`,
-          head: reviewedHeadSha,
-          state: resolution.state,
-          reason,
-        });
+    earlyRepo = await forgeApi.getRepo(opts.owner, opts.repo);
+  } catch (err) {
+    log(
+      `runner settings repo unreadable for ${repoFullName}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const defaultBranch = earlyRepo?.default_branch ?? "";
+  if (opts.chain && opts.chain.length > 0) {
+    // Only the resolve runs in the fail-open `try` (inside the helper);
+    // the fail-closed publish below runs after it so a status or ledger
+    // failure propagates instead of continuing on the full chain.
+    const applied = await applyRepoChain({
+      api: forgeApi,
+      owner: opts.owner,
+      repo: opts.repo,
+      defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { review: `${repoFullName}#${opts.prNumber}`, head: reviewedHeadSha },
+      unreadableContext: `${repoFullName}@${defaultBranch || "(unknown branch)"}`,
+      publish: async (reason) => {
         await opts.persistResult?.({ kind: "skip", reason });
         await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
-        return { status: "skipped", reason };
-      }
-      if (resolution.state === "narrowed") {
-        logDiagnostic(log, "repo_settings", {
-          review: `${repoFullName}#${opts.prNumber}`,
-          head: reviewedHeadSha,
-          state: "narrowed",
-          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
-        });
-        effectiveChain = resolution.chain;
-        // Keep hops inside the narrowed set: the legacy fallback model may
-        // name an excluded runner, and the narrowed chain already covers hops.
-        effectiveFallbackModel = undefined;
-        effectiveFallbackVariant = undefined;
-      }
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      effectiveChain = applied.chain;
+      // Keep hops inside the narrowed set: the legacy fallback model may
+      // name an excluded runner, and the narrowed chain already covers hops.
+      effectiveFallbackModel = undefined;
+      effectiveFallbackVariant = undefined;
     }
-  } catch (err) {
-    if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
-    log(
-      `runner settings failed for ${repoFullName}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
   }
 
   if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {

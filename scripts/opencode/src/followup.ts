@@ -48,7 +48,6 @@ import {
   shouldResetConflictRound,
   writeConflictLatch,
 } from "./conflict.ts";
-import { logDiagnostic } from "./diagnostics.ts";
 import {
   type EngineResult,
   type EngineRunOptions,
@@ -97,7 +96,7 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { loadEffectiveBlockingQuestionAuthors, resolveRepoChain } from "./repo_settings.ts";
+import { applyRepoChain, loadEffectiveBlockingQuestionAuthors } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -1217,41 +1216,27 @@ export async function implementFollowUp(
   // result. Unreadable fails open with a log. Narrowing runs before the sticky
   // writer-family restart so that restart stays inside the narrowed set.
   let repoChain = opts.chain ?? claimed.effectiveChain;
-  let repoFallbackCleared = false;
-  if ((opts.chain && opts.chain.length > 0) || (claimed.effectiveChain && claimed.effectiveChain.length > 0)) {
-    try {
-      const resolution = await resolveRepoChain({
-        api: opts.api,
-        owner,
-        repo,
-        defaultBranch: opts.job.defaultBranch,
-        chain: opts.chain ?? claimed.effectiveChain,
-        log,
-      });
-      if (resolution.state === "invalid" || resolution.state === "empty") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${owner}/${repo}#${issueNumber}`,
-          head: pr.head.sha,
-          state: resolution.state,
-          reason: resolution.reason,
-        });
-        await sticky(resolution.reason, pr.number);
+  const repoBaseChain = opts.chain ?? claimed.effectiveChain;
+  if (repoBaseChain && repoBaseChain.length > 0) {
+    // Only the resolve runs in the fail-open `try` (inside the helper);
+    // the fail-closed sticky runs after it so a sticky failure propagates
+    // instead of continuing on the full chain.
+    const applied = await applyRepoChain({
+      api: opts.api,
+      owner,
+      repo,
+      defaultBranch: opts.job.defaultBranch,
+      chain: repoBaseChain,
+      log,
+      diagBase: { job: `${owner}/${repo}#${issueNumber}`, head: pr.head.sha },
+      unreadableContext: `${owner}/${repo}`,
+      publish: async (reason) => {
+        await sticky(reason, pr.number);
         await forgetClaim();
-        return { status: "skipped", reason: resolution.reason };
-      }
-      if (resolution.state === "narrowed") {
-        logDiagnostic(log, "repo_settings", {
-          job: `${owner}/${repo}#${issueNumber}`,
-          head: pr.head.sha,
-          state: "narrowed",
-          eligible: resolution.chain.map((runner) => runner.name).join(",") || null,
-        });
-        repoChain = resolution.chain;
-        repoFallbackCleared = true;
-      }
-    } catch (err) {
-      log(`runner settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
-    }
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) repoChain = applied.chain;
   }
 
   // Sticky writer family per PR: restart on the existing writer family when the
@@ -1280,7 +1265,6 @@ export async function implementFollowUp(
       remainingLeaseMs: opts.remainingLeaseMs,
       extendLease: opts.extendLease,
     });
-    void repoFallbackCleared;
     jobChain = active.chain;
     activeEngine = active.engine;
     provenanceCollector = active.collector;
