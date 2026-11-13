@@ -3,7 +3,13 @@ import type { ClaimedLoop } from "./claimed_worktree.ts";
 import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
 import type { Forge, IssueApi } from "./ports.ts";
-import { loadRepoSettings, prTouchesRepoSettings, REPO_SETTINGS_PATH, type RepoSettingsLoad } from "./repo_settings.ts";
+import {
+  loadRepoSettings,
+  prTouchesRepoSettings,
+  REPO_SETTINGS_PATH,
+  type RepoSettingsLoad,
+  repoMode,
+} from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 
 export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
@@ -249,6 +255,12 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     return { scheduled: false };
   }
   if (settings.state !== "valid" || settings.automerge !== true) return { scheduled: false };
+  // Restricted repository modes never schedule: review-only and off keep the
+  // pull open for a person without a note (off posts nothing at all).
+  if (repoMode(settings) !== "full") {
+    log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: repository mode is ${settings.mode}`);
+    return { scheduled: false };
+  }
 
   let gateOk = false;
   try {
@@ -474,6 +486,14 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       return;
     }
     if (settings.state !== "valid" || settings.automerge !== true) return;
+    // Restricted repository modes never restore: the pull stays open for a
+    // person. Silent like a missing/off file, so off mode posts nothing.
+    if (repoMode(settings) !== "full") {
+      log(
+        `automerge not restored for ${input.owner}/${input.repo}#${input.prNumber}: repository mode is ${settings.mode}`
+      );
+      return;
+    }
   } catch (err) {
     log(
       `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`

@@ -33,7 +33,13 @@ import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
-import { effectiveLeaseMs, effectiveTimeoutMsForKind, loadDefaultBranchSettings } from "./repo_settings.ts";
+import {
+  effectiveLeaseMs,
+  effectiveTimeoutMsForKind,
+  loadDefaultBranchSettings,
+  REPO_MODE_OFF_REASON,
+  resolveRepoMode,
+} from "./repo_settings.ts";
 import type { PersistReviewResult, ReviewApi, ReviewResult, WorkspacePreparer } from "./review.ts";
 import {
   CI_RELIST_DELAY_MS,
@@ -786,6 +792,28 @@ export async function processEngineTick(
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
+  }
+  // Repository mode is read when the job starts so a change on the default
+  // branch applies to the next job without a restart; a running job finishes.
+  // Off mode starts no job of any kind and posts no status: settle the row as
+  // skipped before any runner, CI look, or status call. The lookup never
+  // throws (fail-open to review); settle failures below propagate to the
+  // tick error handling instead of silently running the gated job.
+  let mode: string = "full";
+  try {
+    mode = await resolveRepoMode(api, row.owner, row.repo, logger);
+  } catch {
+    // Fail-open: an unexpected mode-gate failure still reviews.
+    mode = "full";
+  }
+  if (mode === "off") {
+    await store.markPublished(row.id, leasedBy, { state: "skipped", reason: REPO_MODE_OFF_REASON });
+    recordJobCompleted(row.kind, "skipped");
+    logger(`${row.jobKey} skipped: ${REPO_MODE_OFF_REASON}`);
+    await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else await store.recordRoleSuccess("engine");
+    return "processed";
   }
   // Repository timeout for this job, read once from the default branch at
   // job start. A change does not affect an already running job. The lease
