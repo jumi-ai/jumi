@@ -10,6 +10,7 @@
  */
 
 import { logDiagnostic } from "./diagnostics.ts";
+import { globToRegExp } from "./review_md.ts";
 
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
@@ -23,6 +24,7 @@ export interface RepoSettings {
    * chain grant nothing.
    */
   allowedRunners?: string[];
+  reviewExclude: string[];
   followupOnSuggestions: boolean;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
@@ -37,6 +39,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 const KNOWN_KEYS = new Set([
   "automerge",
   "allowed_runners",
+  "review_exclude",
   "followup_on_suggestions",
   "max_followup_rounds",
   "max_conflict_rounds",
@@ -58,19 +61,19 @@ function parserErrorMessage(err: unknown): string {
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
  * absent `allowed_runners` means no runner restriction;
- * no schema-version key exists. `followup_on_suggestions` absent means on:
- * a `success` review with suggestions follows up as today; `false` turns
- * that off while failures, blocking questions, red CI, and conflicts run
- * as today. `max_followup_rounds` / `max_conflict_rounds` absent mean the
- * deployment value; `0` is valid and means no rounds of that kind.
- * Absent author lists mean empty; absent `blocking_question_authors` means
- * no repo-listed authors. The error string is the parser's error and is
- * surfaced verbatim in the auto-merge note and the review status.
- * Author lists match whole logins, case-insensitive. Canonical keys are
- * `takeover_authors` and `ignore_conflicts_authors`; hyphen and camelCase
- * spellings are accepted as aliases for the same setting.
- * `blocking_question_authors` must be a list of login strings when present;
- * blank entries are dropped like the deployer CSV.
+ * absent `review_exclude` means nothing is left out; `followup_on_suggestions`
+ * absent means on: a `success` review with suggestions follows up as today;
+ * `false` turns that off while failures, blocking questions, red CI, and
+ * conflicts run as today. `max_followup_rounds` / `max_conflict_rounds`
+ * absent mean the deployment value; `0` is valid and means no rounds of that
+ * kind. Absent author lists mean empty; absent `blocking_question_authors`
+ * means no repo-listed authors; no schema-version key exists. The error
+ * string is the parser's error and is surfaced verbatim in the auto-merge
+ * note and the review status. Author lists match whole logins,
+ * case-insensitive. Canonical keys are `takeover_authors` and
+ * `ignore_conflicts_authors`; hyphen and camelCase spellings are accepted as
+ * aliases for the same setting. `blocking_question_authors` must be a list of
+ * login strings when present; blank entries are dropped like the deployer CSV.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -85,6 +88,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       settings: {
         automerge: false,
         allowedRunners: undefined,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -115,6 +119,18 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       if (!names.includes(trimmed)) names.push(trimmed);
     }
     allowedRunners = names;
+  }
+  let reviewExclude: string[] = [];
+  if ("review_exclude" in record && record.review_exclude !== undefined) {
+    if (!Array.isArray(record.review_exclude)) {
+      return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+    }
+    for (const entry of record.review_exclude) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+      }
+    }
+    reviewExclude = (record.review_exclude as string[]).map((entry) => entry.trim());
   }
   if (
     "followup_on_suggestions" in record &&
@@ -153,6 +169,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   const settings: RepoSettings = {
     automerge,
     allowedRunners,
+    reviewExclude,
     followupOnSuggestions:
       "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
         ? record.followup_on_suggestions === true
@@ -198,6 +215,7 @@ export type RepoSettingsLoad =
       state: "valid";
       automerge: boolean;
       allowedRunners?: string[];
+      reviewExclude: string[];
       followupOnSuggestions: boolean;
       maxFollowupRounds?: number;
       maxConflictRounds?: number;
@@ -242,6 +260,7 @@ export async function loadRepoSettings(
     state: "valid",
     automerge: parsed.settings.automerge,
     allowedRunners: parsed.settings.allowedRunners,
+    reviewExclude: parsed.settings.reviewExclude,
     followupOnSuggestions: parsed.settings.followupOnSuggestions,
     ...(parsed.settings.maxFollowupRounds !== undefined
       ? { maxFollowupRounds: parsed.settings.maxFollowupRounds }
@@ -530,4 +549,41 @@ export async function applyRepoChain<T extends { name: string }>(opts: {
     return { failedClosed: false, chain: resolution.chain, narrowed: true };
   }
   return { failedClosed: false, chain: base, narrowed: false };
+}
+/**
+ * Compile `review_exclude` patterns to matchers over repository-relative
+ * file paths. Uses the same gitignore-style glob dialect as `REVIEW.md`
+ * path sections (`globToRegExp`). An invalid glob never matches: the
+ * repository still reviews in full instead of failing the review.
+ */
+export function compileReviewExcludePatterns(patterns: readonly string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const pattern of patterns) {
+    try {
+      out.push(globToRegExp(pattern));
+    } catch {}
+  }
+  return out;
+}
+
+/** True when this repository-relative path is left out of the review. */
+export function isReviewExcluded(filename: string, compiled: readonly RegExp[]): boolean {
+  if (compiled.length === 0) return false;
+  const normalized = normalizePath(filename);
+  if (normalized === REPO_SETTINGS_PATH) return false;
+  return compiled.some((matcher) => matcher.test(normalized));
+}
+
+/** Split changed files into reviewed and left-out sets. The settings file itself is never left out. */
+export function partitionReviewExcludedFiles<T extends { filename: string }>(
+  files: readonly T[],
+  compiled: readonly RegExp[]
+): { included: T[]; excluded: T[] } {
+  const included: T[] = [];
+  const excluded: T[] = [];
+  for (const file of files) {
+    if (isReviewExcluded(file.filename, compiled)) excluded.push(file);
+    else included.push(file);
+  }
+  return { included, excluded };
 }

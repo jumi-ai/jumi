@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import {
+  compileReviewExcludePatterns,
   effectiveBlockingQuestionAuthors,
+  isReviewExcluded,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   parseRepoSettingsText,
+  partitionReviewExcludedFiles,
   prTouchesRepoSettings,
 } from "../src/repo_settings.ts";
-import { invalidHeadSettingsFailure } from "../src/review.ts";
+import { formatReviewExcludedNote, invalidHeadSettingsFailure, loadReviewExcludeMatchers } from "../src/review.ts";
 
 describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
@@ -14,6 +17,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -27,6 +31,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -37,6 +42,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -50,6 +56,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -76,6 +83,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -86,6 +94,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -108,11 +117,69 @@ describe("parseRepoSettingsText", () => {
     }
   });
 
+  test("review_exclude parses a list of globs", () => {
+    expect(parseRepoSettingsText('review_exclude:\n  - "**/generated/**"\n  - "pnpm-lock.yaml"\n')).toEqual({
+      ok: true,
+      settings: {
+        automerge: false,
+        reviewExclude: ["**/generated/**", "pnpm-lock.yaml"],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("absent review_exclude means nothing is left out", () => {
+    expect(parseRepoSettingsText("automerge: true\n")).toEqual({
+      ok: true,
+      settings: {
+        automerge: true,
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("review_exclude combines with automerge", () => {
+    expect(parseRepoSettingsText('automerge: true\nreview_exclude:\n  - "docs/**"\n')).toEqual({
+      ok: true,
+      settings: {
+        automerge: true,
+        reviewExclude: ["docs/**"],
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
+    });
+  });
+
+  test("a wrong-type review_exclude is invalid", () => {
+    for (const text of [
+      "review_exclude: true\n",
+      "review_exclude: 1\n",
+      "review_exclude: null\n",
+      "review_exclude: lockfile\n",
+      "review_exclude:\n  - 1\n",
+      'review_exclude:\n  - ""\n',
+      'review_exclude:\n  - "  "\n',
+    ]) {
+      const parsed = parseRepoSettingsText(text);
+      expect(parsed).toEqual({ ok: false, error: '"review_exclude" must be a list of glob strings' });
+    }
+  });
+
   test("takeover authors parse as logins", () => {
     expect(parseRepoSettingsText("takeover_authors: [renovate, Dependabot]\n")).toEqual({
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: ["renovate", "Dependabot"],
         ignoreConflictsAuthors: [],
@@ -123,6 +190,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -136,6 +204,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: ["renovate[bot]"],
@@ -149,6 +218,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: ["a"],
         ignoreConflictsAuthors: [],
@@ -159,6 +229,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: ["a"],
         ignoreConflictsAuthors: [],
@@ -169,6 +240,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: ["a"],
@@ -197,6 +269,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -208,6 +281,7 @@ describe("parseRepoSettingsText", () => {
         ok: true,
         settings: {
           automerge: true,
+          reviewExclude: [],
           followupOnSuggestions: true,
           takeoverAuthors: [],
           ignoreConflictsAuthors: [],
@@ -222,6 +296,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: true,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -247,6 +322,7 @@ describe("parseRepoSettingsText", () => {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -278,6 +354,26 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: true,
+      reviewExclude: [],
+      followupOnSuggestions: true,
+      takeoverAuthors: [],
+      ignoreConflictsAuthors: [],
+      blockingQuestionAuthors: [],
+    });
+  });
+
+  test("valid file loads review_exclude", async () => {
+    expect(
+      await loadRepoSettings(
+        { getRepoFile: async () => ({ found: true, content: 'review_exclude:\n  - "**/generated/**"\n' }) },
+        "o",
+        "r",
+        "main"
+      )
+    ).toEqual({
+      state: "valid",
+      automerge: false,
+      reviewExclude: ["**/generated/**"],
       followupOnSuggestions: true,
       takeoverAuthors: [],
       ignoreConflictsAuthors: [],
@@ -302,6 +398,7 @@ describe("loadRepoSettings", () => {
     ).toEqual({
       state: "valid",
       automerge: false,
+      reviewExclude: [],
       followupOnSuggestions: true,
       takeoverAuthors: ["renovate"],
       ignoreConflictsAuthors: ["renovate[bot]"],
@@ -331,12 +428,133 @@ describe("loadRepoSettings", () => {
   });
 });
 
+describe("review_exclude matching", () => {
+  test("matches with the gitignore-style dialect", () => {
+    const compiled = compileReviewExcludePatterns(["**/generated/**", "pnpm-lock.yaml", "docs/"]);
+    expect(isReviewExcluded("src/generated/foo.ts", compiled)).toBe(true);
+    expect(isReviewExcluded("generated/foo.ts", compiled)).toBe(true);
+    expect(isReviewExcluded("pnpm-lock.yaml", compiled)).toBe(true);
+    expect(isReviewExcluded("a/b/pnpm-lock.yaml", compiled)).toBe(true);
+    expect(isReviewExcluded("docs/guide.md", compiled)).toBe(true);
+    expect(isReviewExcluded("src/app.ts", compiled)).toBe(false);
+  });
+
+  test("the settings file itself can never be left out", () => {
+    const compiled = compileReviewExcludePatterns(["**", ".jumi.yml", "*.yml"]);
+    expect(isReviewExcluded(".jumi.yml", compiled)).toBe(false);
+    expect(isReviewExcluded("src/app.ts", compiled)).toBe(true);
+  });
+
+  test("an invalid glob never matches instead of failing", () => {
+    const compiled = compileReviewExcludePatterns(["[z-a].ts", "**/generated/**"]);
+    expect(isReviewExcluded("src/generated/foo.ts", compiled)).toBe(true);
+    expect(isReviewExcluded("src/app.ts", compiled)).toBe(false);
+  });
+
+  test("partition keeps the settings file included", () => {
+    const compiled = compileReviewExcludePatterns(["**"]);
+    const { included, excluded } = partitionReviewExcludedFiles(
+      [{ filename: ".jumi.yml" }, { filename: "src/app.ts" }],
+      compiled
+    );
+    expect(included.map((file) => file.filename)).toEqual([".jumi.yml"]);
+    expect(excluded.map((file) => file.filename)).toEqual(["src/app.ts"]);
+  });
+});
+
+describe("loadReviewExcludeMatchers", () => {
+  const log = () => undefined;
+
+  test("missing file means no exclusions", async () => {
+    const matchers = await loadReviewExcludeMatchers({
+      api: { getRepoFile: async () => ({ found: false }) },
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      log,
+    });
+    expect(matchers).toEqual([]);
+  });
+
+  test("reads the default branch ref", async () => {
+    let ref = "";
+    const matchers = await loadReviewExcludeMatchers({
+      api: {
+        getRepoFile: async (_o: string, _r: string, _p: string, r: string) => {
+          ref = r;
+          return { found: true, content: 'review_exclude:\n  - "**/generated/**"\n' };
+        },
+      },
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      log,
+    });
+    expect(ref).toBe("main");
+    expect(matchers).toHaveLength(1);
+  });
+
+  test("invalid file means no exclusions", async () => {
+    const matchers = await loadReviewExcludeMatchers({
+      api: { getRepoFile: async () => ({ found: true, content: "review_exclude: 1\n" }) },
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      log,
+    });
+    expect(matchers).toEqual([]);
+  });
+
+  test("unreadable file is fail-open", async () => {
+    const matchers = await loadReviewExcludeMatchers({
+      api: {
+        getRepoFile: async () => {
+          throw new Error("GitHub API → 500");
+        },
+      },
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      log,
+    });
+    expect(matchers).toEqual([]);
+  });
+});
+
+describe("formatReviewExcludedNote", () => {
+  test("empty means no note", () => {
+    expect(formatReviewExcludedNote([])).toBe("");
+  });
+
+  test("names a single file", () => {
+    const note = formatReviewExcludedNote(["pnpm-lock.yaml"]);
+    expect(note).toContain("`pnpm-lock.yaml`");
+    expect(note).toContain("`review_exclude`");
+    expect(note).toContain("can merge without review");
+  });
+
+  test("all-excluded says nothing was read", () => {
+    const note = formatReviewExcludedNote(["a.ts", "b.ts"], { allExcluded: true });
+    expect(note).toContain("No patches were read");
+    expect(note).toContain("`a.ts`");
+    expect(note).toContain("`b.ts`");
+  });
+
+  test("long lists name the count", () => {
+    const files = Array.from({ length: 12 }, (_, i) => `f${i}.ts`);
+    const note = formatReviewExcludedNote(files);
+    expect(note).not.toContain("`f11.ts`");
+    expect(note).toContain("and 2 more");
+  });
+});
+
 describe("effectiveBlockingQuestionAuthors", () => {
   test("merges deployer and repo lists without removing deployer logins", () => {
     expect(
       effectiveBlockingQuestionAuthors(["deployer-bot"], {
         state: "valid",
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -436,6 +654,19 @@ describe("invalidHeadSettingsFailure", () => {
     });
     expect(failure).toContain(".jumi.yml is invalid");
     expect(failure).toContain('"automerge" must be a boolean');
+  });
+
+  test("invalid review_exclude in the head file fails", async () => {
+    const failure = await invalidHeadSettingsFailure({
+      api: { getRepoFile: async () => ({ found: true, content: "review_exclude: 1\n" }) },
+      owner: "o",
+      repo: "r",
+      headSha: "abc",
+      automergeRepos: ["o/r"],
+      log,
+    });
+    expect(failure).toContain(".jumi.yml is invalid");
+    expect(failure).toContain('"review_exclude" must be a list of glob strings');
   });
 
   test("valid head file passes", async () => {

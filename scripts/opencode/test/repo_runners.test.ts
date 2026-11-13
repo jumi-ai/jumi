@@ -28,6 +28,7 @@ describe("allowed_runners parsing", () => {
       settings: {
         automerge: true,
         allowedRunners: undefined,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -42,6 +43,7 @@ describe("allowed_runners parsing", () => {
       settings: {
         automerge: false,
         allowedRunners: ["grok", "opus"],
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -56,6 +58,7 @@ describe("allowed_runners parsing", () => {
       settings: {
         automerge: false,
         allowedRunners: [],
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
