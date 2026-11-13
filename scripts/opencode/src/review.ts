@@ -56,6 +56,7 @@ import {
   WORKER_LOADER_PATH,
 } from "./release.ts";
 import {
+  applyRepoChain,
   compileReviewExcludePatterns,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
@@ -1431,6 +1432,52 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   const initialSkipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, reviewedHeadSha);
   if (initialSkipReason) return { status: "skipped", reason: initialSkipReason };
 
+  // Repository runner allow-list (default branch only) narrows every job for
+  // the repository. Invalid fails closed before any runner starts; an
+  // allow-list that matches nothing fails closed with the same shape as an
+  // independent-review refusal (failure status, no runner). Unreadable
+  // settings fail open with a log so a transient read never blocks the repo.
+  // This runs before stuck/CI so the config reason wins over cached latches.
+  let effectiveChain = opts.chain;
+  let effectiveFallbackModel = opts.fallbackModel;
+  let effectiveFallbackVariant = opts.fallbackVariant;
+  let earlyRepo: Repo | undefined;
+  try {
+    earlyRepo = await forgeApi.getRepo(opts.owner, opts.repo);
+  } catch (err) {
+    log(
+      `runner settings repo unreadable for ${repoFullName}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const defaultBranch = earlyRepo?.default_branch ?? "";
+  if (opts.chain && opts.chain.length > 0) {
+    // Only the resolve runs in the fail-open `try` (inside the helper);
+    // the fail-closed publish below runs after it so a status or ledger
+    // failure propagates instead of continuing on the full chain.
+    const applied = await applyRepoChain({
+      api: forgeApi,
+      owner: opts.owner,
+      repo: opts.repo,
+      defaultBranch,
+      chain: opts.chain,
+      log,
+      diagBase: { review: `${repoFullName}#${opts.prNumber}`, head: reviewedHeadSha },
+      unreadableContext: `${repoFullName}@${defaultBranch || "(unknown branch)"}`,
+      publish: async (reason) => {
+        await opts.persistResult?.({ kind: "skip", reason });
+        await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
+      },
+    });
+    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.narrowed) {
+      effectiveChain = applied.chain;
+      // Keep hops inside the narrowed set: the legacy fallback model may
+      // name an excluded runner, and the narrowed chain already covers hops.
+      effectiveFallbackModel = undefined;
+      effectiveFallbackVariant = undefined;
+    }
+  }
+
   if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
     const stuckRef = {
       home: opts.home,
@@ -1482,9 +1529,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
   // Parent-owned independent reviewer selection from exact-head writer provenance.
   // Unset/disabled preserves today's behavior without touching provenance storage.
-  let effectiveChain = opts.chain;
-  let effectiveFallbackModel = opts.fallbackModel;
-  let effectiveFallbackVariant = opts.fallbackVariant;
+  // The allow-list narrowing above already ran: exclusion works inside the
+  // narrowed set, so a writer-only allow-list refuses like an empty eligible set.
   if (opts.independentReview?.enabled === true) {
     let lookup: ProvenanceLookup;
     try {
@@ -1502,7 +1548,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
       return { status: "skipped", reason };
     }
-    const active = activeReviewChain(opts);
+    const active = effectiveChain && effectiveChain.length > 0 ? [...effectiveChain] : activeReviewChain(opts);
     const outcome = resolveIndependentReviewers({
       chain: active,
       provenance: lookup,
@@ -1597,7 +1643,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
     const [repoInfo, prFiles, prCommentResult, prReviews, prInlines] = await Promise.all([
-      forgeApi.getRepo(opts.owner, opts.repo),
+      earlyRepo ?? forgeApi.getRepo(opts.owner, opts.repo),
       forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
       loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
       forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] => {
