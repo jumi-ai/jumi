@@ -45,7 +45,7 @@ import {
   buildPROpenedPrompt,
 } from "./prompt.ts";
 import type { ProvenanceLookup, ProvenanceStore } from "./provenance.ts";
-import { isQuotaError, isQuotaText, isQuotaWaitError, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, isQuotaWaitError, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   CONTRACT_PATH,
@@ -1401,9 +1401,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // `cancelReviewWork` as the human kill-switch equivalent to the worker
     // cancel path.
     if (isReviewQuotaStuck(stuckState)) {
-      await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
-      await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
-      return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+      const stuckReasonText = quotaStuckReasonForText(stuckState.quota?.reason);
+      await opts.persistResult?.({ kind: "skip", reason: stuckReasonText });
+      await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, stuckReasonText);
+      return { status: "skipped", reason: stuckReasonText };
     }
     if (stuckState.quota) {
       // Expired quota: clear the stale flag so the next run starts clean.
@@ -1865,6 +1866,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           chain: effectiveChain,
           previousError: opts.previousError,
         });
+        const quotaReason = quotaStuckReasonForText(engineResult.message);
         if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
           await markReviewQuotaStuckState(
             {
@@ -1874,10 +1876,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               prNumber: opts.prNumber,
               ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
             },
-            QUOTA_STUCK_TEXT
+            quotaReason
           ).catch(() => undefined);
         }
-        throw new Error(QUOTA_STUCK_TEXT);
+        throw new Error(quotaReason);
       }
       throwIfEngineFailed(engineResult);
 
@@ -2072,7 +2074,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     if (isQuotaError(err)) {
       // Resetting quota with wait budget left waits and retries the same
       // head; QuotaWaitError propagates to the queue. Hard or exhausted
-      // quota falls through to the day-long skip below.
+      // quota (including credit exhaustion, which never waits) falls through
+      // to the day-long skip below.
       // The eligible chain keeps exclusions through the wait-budget decision:
       // an excluded author family is never a later model.
       throwIfQuotaWait({
@@ -2082,6 +2085,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         chain: effectiveChain,
         previousError: opts.previousError,
       });
+      const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         await markReviewQuotaStuckState(
           {
@@ -2091,13 +2095,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             prNumber: opts.prNumber,
             ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
           },
-          QUOTA_STUCK_TEXT
+          quotaReason
         ).catch(() => undefined);
       }
       if (!persisted && !persistFailed) {
-        await opts.persistResult?.({ kind: "skip", reason: QUOTA_STUCK_TEXT });
-        await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, QUOTA_STUCK_TEXT);
-        const skipped: ReviewResult = { status: "skipped", reason: QUOTA_STUCK_TEXT };
+        await opts.persistResult?.({ kind: "skip", reason: quotaReason });
+        await upsertStuckText(forgeApi, opts.owner, opts.repo, opts.prNumber, opts.botUsername, quotaReason);
+        const skipped: ReviewResult = { status: "skipped", reason: quotaReason };
         const { state, description } = statusForResult(skipped);
         await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, state, description, pr.html_url);
         return skipped;
