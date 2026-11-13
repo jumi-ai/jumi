@@ -1090,6 +1090,10 @@ export class GithubAPI {
     return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/labels`, { labels: [label] });
   }
 
+  async addIssueAssignees(owner: string, repo: string, index: number, assignees: string[]): Promise<unknown> {
+    return this.post(`/repos/${this.repoPath(owner, repo)}/issues/${index}/assignees`, { assignees });
+  }
+
   async listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]> {
     const issues = await this.getPagesOrEmptyOn404<GithubIssue>(
       `/repos/${this.repoPath(owner, repo)}/issues/${index}/dependencies/blocked_by`

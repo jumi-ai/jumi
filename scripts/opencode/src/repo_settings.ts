@@ -16,6 +16,8 @@ export interface RepoSettings {
   followupOnSuggestions: boolean;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
+  takeoverAuthors: string[];
+  ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
   blockingQuestionAuthors: string[];
 }
@@ -27,6 +29,12 @@ const KNOWN_KEYS = new Set([
   "followup_on_suggestions",
   "max_followup_rounds",
   "max_conflict_rounds",
+  "takeover_authors",
+  "takeover-authors",
+  "takeoverAuthors",
+  "ignore_conflicts_authors",
+  "ignore-conflicts-authors",
+  "ignoreConflictsAuthors",
   "blocking_question_authors",
 ]);
 
@@ -43,11 +51,14 @@ function parserErrorMessage(err: unknown): string {
  * that off while failures, blocking questions, red CI, and conflicts run
  * as today. `max_followup_rounds` / `max_conflict_rounds` absent mean the
  * deployment value; `0` is valid and means no rounds of that kind.
- * Absent `blocking_question_authors` means no repo-listed authors.
+ * Absent author lists mean empty; absent `blocking_question_authors` means
+ * no repo-listed authors. The error string is the parser's error and is
+ * surfaced verbatim in the auto-merge note and the review status.
+ * Author lists match whole logins, case-insensitive. Canonical keys are
+ * `takeover_authors` and `ignore_conflicts_authors`; hyphen and camelCase
+ * spellings are accepted as aliases for the same setting.
  * `blocking_question_authors` must be a list of login strings when present;
- * blank entries are dropped like the deployer CSV. The error string is
- * the parser's error and is surfaced verbatim in the auto-merge note and
- * the review status.
+ * blank entries are dropped like the deployer CSV.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -59,7 +70,13 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if (parsed === null || parsed === undefined)
     return {
       ok: true,
-      settings: { automerge: false, followupOnSuggestions: true, blockingQuestionAuthors: [] },
+      settings: {
+        automerge: false,
+        followupOnSuggestions: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+      },
     };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
@@ -68,8 +85,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!KNOWN_KEYS.has(key)) return { ok: false, error: `unknown key "${key}"` };
   }
   const record = parsed as Record<string, unknown>;
-  if ("automerge" in record && record.automerge !== undefined && typeof record.automerge !== "boolean")
-    return { ok: false, error: `"automerge" must be a boolean` };
+  if (!("automerge" in record) || record.automerge === undefined) record.automerge = false as unknown as boolean;
+  if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
   if (
     "followup_on_suggestions" in record &&
     record.followup_on_suggestions !== undefined &&
@@ -83,6 +100,14 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
         return { ok: false, error: `"${key}" must be a non-negative integer` };
     }
   }
+  const takeover = parseAuthorList(record, ["takeover_authors", "takeover-authors", "takeoverAuthors"]);
+  if (!takeover.ok) return takeover;
+  const ignoreConflicts = parseAuthorList(record, [
+    "ignore_conflicts_authors",
+    "ignore-conflicts-authors",
+    "ignoreConflictsAuthors",
+  ]);
+  if (!ignoreConflicts.ok) return ignoreConflicts;
   let blockingQuestionAuthors: string[] = [];
   if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
     const value = record.blocking_question_authors;
@@ -102,6 +127,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
         ? record.followup_on_suggestions === true
         : true,
+    takeoverAuthors: takeover.authors,
+    ignoreConflictsAuthors: ignoreConflicts.authors,
     blockingQuestionAuthors,
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
@@ -109,6 +136,30 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   if ("max_conflict_rounds" in record && record.max_conflict_rounds !== undefined)
     settings.maxConflictRounds = record.max_conflict_rounds as number;
   return { ok: true, settings };
+}
+
+function canonicalKey(aliases: readonly string[]): string {
+  return aliases[0] ?? "";
+}
+
+function parseAuthorList(
+  record: Record<string, unknown>,
+  aliases: readonly string[]
+): { ok: true; authors: string[] } | { ok: false; error: string } {
+  const present = aliases.filter((key) => key in record && (record as Record<string, unknown>)[key] !== undefined);
+  if (present.length > 1) return { ok: false, error: `duplicate setting "${canonicalKey(aliases)}"` };
+  const key = present[0];
+  if (!key) return { ok: true, authors: [] };
+  const value = (record as Record<string, unknown>)[key];
+  if (!Array.isArray(value)) return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
+  const authors: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string" || !entry.trim()) {
+      return { ok: false, error: `"${canonicalKey(aliases)}" must be a list of logins` };
+    }
+    authors.push(entry.trim());
+  }
+  return { ok: true, authors };
 }
 
 export type RepoSettingsLoad =
@@ -119,6 +170,8 @@ export type RepoSettingsLoad =
       followupOnSuggestions: boolean;
       maxFollowupRounds?: number;
       maxConflictRounds?: number;
+      takeoverAuthors: string[];
+      ignoreConflictsAuthors: string[];
       blockingQuestionAuthors: string[];
     }
   | { state: "invalid"; error: string };
@@ -164,6 +217,8 @@ export async function loadRepoSettings(
     ...(parsed.settings.maxConflictRounds !== undefined
       ? { maxConflictRounds: parsed.settings.maxConflictRounds }
       : {}),
+    takeoverAuthors: parsed.settings.takeoverAuthors,
+    ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
   };
 }

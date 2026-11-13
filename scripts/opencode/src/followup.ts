@@ -66,7 +66,14 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
-import { ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
+import {
+  hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
+  ignoreConflictsReason,
+  isLeftToAuthor,
+  leaveConflictsAuthorReason,
+  loadIgnoreConflictsAuthors,
+} from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -87,7 +94,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { loadEffectiveBlockingQuestionAuthors, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -1166,14 +1173,30 @@ export async function implementFollowUp(
     }
   }
   const previousConflict = await readConflictLatch(latches, latchKey);
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  if (ignoreAuthors === undefined) {
+    await forgetClaim();
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  }
   const leftToAuthor = await isLeftToAuthor(
     opts.api,
     owner,
     repo,
     pr,
-    { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+    {
+      botUsername: opts.botUsername,
+      ignoreConflictsLabel: opts.ignoreConflictsLabel,
+      ignoreConflictsAuthors: ignoreAuthors,
+      prAuthor: pr.user?.login,
+      defaultBranch: opts.job.defaultBranch,
+    },
     log
   );
+  const leftViaAuthorOnly =
+    leftToAuthor && !hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel) && ignoreAuthors.length > 0;
+  const leftReason = leftViaAuthorOnly
+    ? leaveConflictsAuthorReason(pr.user?.login)
+    : ignoreConflictsReason(opts.ignoreConflictsLabel);
   const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
   // The conflict cap gates conflict-resolution work only: a mergeable pull
   // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
@@ -1226,7 +1249,7 @@ export async function implementFollowUp(
   }
   if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
     await forgetClaim();
-    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
+    return { status: "skipped", reason: leftReason };
   }
 
   const feedbackPreview = buildFeedbackMarkdown({
@@ -1248,9 +1271,10 @@ export async function implementFollowUp(
       : undefined;
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
-    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
+    await sticky(quotaReason, pr.number);
     await forgetClaim();
-    return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+    return { status: "skipped", reason: quotaReason };
   }
   const stuckReason = evaluateStuck(stuckState.fingerprints, currentFingerprint);
   if (stuckReason) {
@@ -1484,11 +1508,12 @@ export async function implementFollowUp(
               chain: jobChain,
               previousError: opts.previousError,
             });
-            await sticky(QUOTA_STUCK_TEXT, pr.number);
-            await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+            const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+            await sticky(quotaReason, pr.number);
+            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-            return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+            return { status: "skipped", reason: quotaReason };
           }
           prefixMergeThrew = true;
           throw err;
@@ -1676,11 +1701,12 @@ export async function implementFollowUp(
             chain: jobChain,
             previousError: opts.previousError,
           });
-          await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          const quotaReason = quotaStuckReasonForText(result.message);
+          await sticky(quotaReason, pr.number);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          return { status: "skipped", reason: quotaReason };
         }
         throwIfEngineFailed(result);
         // Only a successful engine result counts as having run: an
@@ -1722,7 +1748,7 @@ export async function implementFollowUp(
               `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
               { continueSession: true }
             );
-            if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+            if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
           },
         });
       } catch (err) {
@@ -1734,9 +1760,10 @@ export async function implementFollowUp(
             chain: jobChain,
             previousError: opts.previousError,
           });
+          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          return { status: "skipped", reason: quotaReason };
         }
         throw err;
       }
@@ -1840,8 +1867,9 @@ export async function implementFollowUp(
           chain: jobChain,
           previousError: opts.previousError,
         });
-        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        await sticky(quotaReason, pr.number).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
           pushLanded: false,
           logger: log,
