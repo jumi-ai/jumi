@@ -55,7 +55,12 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
-import { loadRepoSettings, REPO_SETTINGS_PATH } from "./repo_settings.ts";
+import {
+  compileReviewExcludePatterns,
+  loadRepoSettings,
+  partitionReviewExcludedFiles,
+  REPO_SETTINGS_PATH,
+} from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -287,6 +292,10 @@ export interface PublishReviewOptions {
    * this to the ledger; tests and local runs may omit it.
    */
   recordSuggestions?: (counts: ReviewSuggestionCounts) => Promise<void>;
+  /** Repository-relative paths left out of this review per the default-branch settings file. */
+  excludedFiles?: readonly string[];
+  /** True when every changed file was left out (no patches were read). */
+  allExcluded?: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -1097,6 +1106,70 @@ export async function invalidHeadSettingsFailure(opts: {
   return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
 }
 
+/** Parent-authored keep marker for the left-out-files note (the setting name survives publishing). */
+export const REVIEW_EXCLUDE_KEEP = "`review_exclude`";
+/** Max left-out files named in the published note; longer lists name the count. */
+export const MAX_LISTED_EXCLUDED_FILES = 10;
+
+/**
+ * Single-line published note naming the files left out of the review.
+ * Empty when nothing was left out. The parent appends it, so a green
+ * review is never read as covering these files.
+ */
+export function formatReviewExcludedNote(excludedFiles: readonly string[], opts?: { allExcluded?: boolean }): string {
+  if (excludedFiles.length === 0) return "";
+  const names = [...new Set(excludedFiles)];
+  const total = names.length;
+  const shown = names.slice(0, MAX_LISTED_EXCLUDED_FILES);
+  const quoted = (list: string[]) => list.map((name) => `\`${name}\``).join(", ");
+  const tail = total > shown.length ? `${quoted(shown)} and ${total - shown.length} more` : quoted(shown);
+  const filesWord = total === 1 ? "file" : "files";
+  if (opts?.allExcluded) {
+    return (
+      `No patches were read: all ${total} changed ${filesWord} ${total === 1 ? "was" : "were"} left out of ` +
+      `review per \`.jumi.yml\` \`review_exclude\` (patches not read): ${tail}. ` +
+      `A green review does not cover these files; they can merge without review.`
+    );
+  }
+  return (
+    `Left out of review per \`.jumi.yml\` \`review_exclude\` (patches not read, ${total} ${filesWord}): ` +
+    `${tail}. A green review does not cover these files; they can merge without review.`
+  );
+}
+
+/**
+ * Load the default-branch `review_exclude` patterns as matchers. Missing,
+ * invalid, unreadable, or empty means no exclusions: the review runs in
+ * full instead of failing. Patterns come from the default branch only, so
+ * a pull that adds patterns is still reviewed in full.
+ */
+export async function loadReviewExcludeMatchers(opts: {
+  api: Pick<ReviewApi, "getRepoFile">;
+  owner: string;
+  repo: string;
+  defaultBranch: string | undefined | null;
+  log: (message: string) => void;
+}): Promise<RegExp[]> {
+  const ref = (opts.defaultBranch ?? "").trim();
+  if (!ref) return [];
+  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
+  try {
+    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, ref);
+  } catch (err) {
+    opts.log(
+      `review excludes unreadable for ${opts.owner}/${opts.repo}@${ref}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [];
+  }
+  if (settings.state === "missing") return [];
+  if (settings.state === "invalid") {
+    opts.log(`review excludes invalid for ${opts.owner}/${opts.repo}@${ref}: ${settings.error}; reviewing in full`);
+    return [];
+  }
+  if (settings.reviewExclude.length === 0) return [];
+  return compileReviewExcludePatterns(settings.reviewExclude);
+}
+
 export async function publishReviewResult(opts: PublishReviewOptions): Promise<ReviewResult> {
   const log = opts.logger ?? defaultLog;
   const forgeApi = opts.forge ?? opts.api;
@@ -1179,12 +1252,22 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
   // Publish finding blocks and the trailer only; the child's tour is not published.
   // A finding keeps its indented/list continuation; unrelated prose is dropped.
-  const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  const excludedKeep = [CI_ABSENT_NOTE, REVIEW_EXCLUDE_KEEP];
+  const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: excludedKeep });
   // Parent-enforced 💡 cap: at most MAX_SUGGESTION_FINDINGS publish. 🔴/🟡/❓
   // are never dropped. The dropped count rides in one body line so the next
   // follow-up still sees the trailer but not a wall of suggestions.
-  const capped = capSuggestionFindings(kept, { singleFilePath, keep: [CI_ABSENT_NOTE] });
-  const comment = capped.comment;
+  const capped = capSuggestionFindings(kept, { singleFilePath, keep: excludedKeep });
+  // Parent-enforced left-out disclosure: a green review must never read as
+  // covering files whose patches were withheld. Appended here so it
+  // publishes even when the child omitted it; it is not a finding.
+  const excludedNote = formatReviewExcludedNote(opts.excludedFiles ?? [], { allExcluded: opts.allExcluded });
+  const comment =
+    excludedNote && !capped.comment.includes(REVIEW_EXCLUDE_KEEP)
+      ? capped.comment
+        ? `${capped.comment.trimEnd()}\n\n${excludedNote}`
+        : excludedNote
+      : capped.comment;
   let suggestionAddressed = 0;
   if (opts.previousFindings && opts.previousFindings.length > 0) {
     try {
@@ -1498,10 +1581,45 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       marker: markerFor(opts.owner, opts.repo, pr.number),
     });
 
+    // Repository settings come from the default branch only, so a pull that
+    // adds patterns is still reviewed in full. Missing, invalid, or
+    // unreadable means no exclusions: the review runs in full.
+    const excludeMatchers = await loadReviewExcludeMatchers({
+      api: forgeApi,
+      owner: opts.owner,
+      repo: opts.repo,
+      defaultBranch: repoInfo.default_branch,
+      log,
+    });
+    const { included: includedPrFiles, excluded: excludedPrFiles } = partitionReviewExcludedFiles(
+      prFiles,
+      excludeMatchers
+    );
+    const excludedFiles = excludedPrFiles.map((file) => file.filename);
+    const excludedSet = new Set(excludedFiles);
+    const allExcluded = prFiles.length > 0 && includedPrFiles.length === 0;
+    const strippedPrFiles = prFiles.map((file) =>
+      excludedSet.has(file.filename) ? { ...file, patch: undefined } : file
+    );
+
     const ids = extractClosingIssueNumbers(pr);
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
+    if (excludedFiles.length > 0) {
+      const preview =
+        excludedFiles.length <= MAX_LISTED_EXCLUDED_FILES
+          ? excludedFiles.map((name) => `\`${name}\``).join(", ")
+          : `${excludedFiles
+              .slice(0, MAX_LISTED_EXCLUDED_FILES)
+              .map((name) => `\`${name}\``)
+              .join(", ")} and ${excludedFiles.length - MAX_LISTED_EXCLUDED_FILES} more`;
+      notes.push(
+        allExcluded
+          ? `No patches were read: all ${excludedFiles.length} changed file${excludedFiles.length === 1 ? "" : "s"} per \`.jumi.yml\` \`review_exclude\`: ${preview}. Do not review them. Mention it in the review. It is not a finding.`
+          : `${excludedFiles.length} changed file${excludedFiles.length === 1 ? " is" : "s are"} left out per \`.jumi.yml\` \`review_exclude\` (patches omitted): ${preview}. Do not review ${excludedFiles.length === 1 ? "it" : "them"}. Mention it in the review. It is not a finding.`
+      );
+    }
     if (prCommentResult.note) notes.push(prCommentResult.note);
     const linkedIssues: Array<{ issue: Task; comments: Comment[] }> = [];
     for (const result of linkedResults) {
@@ -1550,7 +1668,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
     const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
     const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
-    const { files, notes: fileNotes } = prepareFiles(prFiles, maxFiles, maxPatchBytes);
+    const { files, notes: fileNotes } = prepareFiles(strippedPrFiles, maxFiles, maxPatchBytes);
     const includedPatchBytes = files.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const reviewLabel = `${repoFullName}#${pr.number}`;
 
@@ -1566,6 +1684,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       included_patch_bytes_h: formatBytes(includedPatchBytes),
       max_patch_bytes: maxPatchBytes,
       notes: notes.length + fileNotes.length,
+    });
+    logDiagnostic(log, "review_excludes", {
+      review: reviewLabel,
+      excluded: excludedFiles.length,
+      all_excluded: allExcluded,
     });
 
     const prepareWorkspace = opts.workspacePreparer ?? checkoutPullRequestWorkspace;
@@ -1607,7 +1730,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         log,
       });
       if (loaded) {
-        const { files: deltaFiles, notes: deltaNotes } = prepareFiles(loaded.files, maxFiles, maxPatchBytes);
+        const strippedDeltaFiles = loaded.files.map((file) =>
+          excludedSet.has(file.filename) ? { ...file, patch: undefined } : file
+        );
+        const { files: deltaFiles, notes: deltaNotes } = prepareFiles(strippedDeltaFiles, maxFiles, maxPatchBytes);
         delta = { ...loaded, files: deltaFiles };
         scopeNotes =
           prFiles.length > maxFiles
@@ -1669,13 +1795,14 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // Repo rules come from the base commit the review diffs against, not the
     // checked-out head, so a PR cannot rewrite the rules that judge it. Read
     // via read-only git: the worktree and the porcelain checks stay untouched.
-    // Match against every changed file, not only the ones that fit the patch budget.
+    // Match against every reviewed file, not only the ones that fit the patch
+    // budget; left-out files need no path sections.
     const reviewMd = await loadReviewMdSectionsFromBase({
       git,
       cwd: opts.workspace,
       env: gitCmdEnv,
       baseRef: pr.base.sha,
-      files: prFiles,
+      files: includedPrFiles,
       maxBytes: opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES,
     });
     logDiagnostic(log, "review_md", {
@@ -1695,7 +1822,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       git,
       cwd: opts.workspace,
       env: gitCmdEnv,
-      files: prFiles.map((file) => file.filename),
+      files: includedPrFiles.map((file) => file.filename),
       log,
     });
     logDiagnostic(log, "review_history", {
@@ -1709,7 +1836,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
-      prFiles: delta ? prFiles.slice(0, maxFiles) : files,
+      prFiles: delta ? strippedPrFiles.slice(0, maxFiles) : files,
       reviewNotes: notes,
       ...(ciResults ? { ciResults } : {}),
       thread: fitted.thread,
@@ -1717,6 +1844,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       reviewMd,
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, opts.blockingQuestionAuthors),
+      ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
     });
 
     logDiagnostic(log, "review_prompt", {
@@ -1943,6 +2071,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               forgeKind: opts.forgeKind,
               previousFindings: previousReview?.findings,
               recordSuggestions: opts.recordSuggestions,
+              ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
             });
           }
 

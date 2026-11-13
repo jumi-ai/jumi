@@ -9,15 +9,18 @@
  * never treated as "no file". A missing file is normal and silent.
  */
 
+import { globToRegExp } from "./review_md.ts";
+
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
 export interface RepoSettings {
   automerge: boolean;
+  reviewExclude: string[];
 }
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
 
-const KNOWN_KEYS = new Set(["automerge"]);
+const KNOWN_KEYS = new Set(["automerge", "review_exclude"]);
 
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
@@ -27,8 +30,9 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * no schema-version key exists. The error string is the parser's error and
- * is surfaced verbatim in the auto-merge note and the review status.
+ * absent `review_exclude` means nothing is left out; no schema-version key
+ * exists. The error string is the parser's error and is surfaced verbatim in
+ * the auto-merge note and the review status.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -37,7 +41,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   } catch (err) {
     return { ok: false, error: parserErrorMessage(err) };
   }
-  if (parsed === null || parsed === undefined) return { ok: true, settings: { automerge: false } };
+  if (parsed === null || parsed === undefined) return { ok: true, settings: { automerge: false, reviewExclude: [] } };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -45,14 +49,29 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!KNOWN_KEYS.has(key)) return { ok: false, error: `unknown key "${key}"` };
   }
   const record = parsed as Record<string, unknown>;
-  if (!("automerge" in record) || record.automerge === undefined) return { ok: true, settings: { automerge: false } };
-  if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
-  return { ok: true, settings: { automerge: record.automerge } };
+  let automerge = false;
+  if ("automerge" in record && record.automerge !== undefined) {
+    if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+    automerge = record.automerge;
+  }
+  let reviewExclude: string[] = [];
+  if ("review_exclude" in record && record.review_exclude !== undefined) {
+    if (!Array.isArray(record.review_exclude)) {
+      return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+    }
+    for (const entry of record.review_exclude) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+      }
+    }
+    reviewExclude = [...(record.review_exclude as string[])];
+  }
+  return { ok: true, settings: { automerge, reviewExclude } };
 }
 
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | { state: "valid"; automerge: boolean }
+  | { state: "valid"; automerge: boolean; reviewExclude: string[] }
   | { state: "invalid"; error: string };
 
 export interface RepoSettingsFileApi {
@@ -86,7 +105,7 @@ export async function loadRepoSettings(
   if (file.found !== true || typeof file.content !== "string") return { state: "missing" };
   const parsed = parseRepoSettingsText(file.content);
   if (!parsed.ok) return { state: "invalid", error: parsed.error };
-  return { state: "valid", automerge: parsed.settings.automerge };
+  return { state: "valid", automerge: parsed.settings.automerge, reviewExclude: parsed.settings.reviewExclude };
 }
 
 function normalizePath(filename: string): string {
@@ -96,4 +115,42 @@ function normalizePath(filename: string): string {
 /** Whether any changed file is the root settings file. */
 export function prTouchesRepoSettings(files: ReadonlyArray<{ filename: string }>): boolean {
   return files.some((file) => normalizePath(file.filename) === REPO_SETTINGS_PATH);
+}
+
+/**
+ * Compile `review_exclude` patterns to matchers over repository-relative
+ * file paths. Uses the same gitignore-style glob dialect as `REVIEW.md`
+ * path sections (`globToRegExp`). An invalid glob never matches: the
+ * repository still reviews in full instead of failing the review.
+ */
+export function compileReviewExcludePatterns(patterns: readonly string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const pattern of patterns) {
+    try {
+      out.push(globToRegExp(pattern));
+    } catch {}
+  }
+  return out;
+}
+
+/** True when this repository-relative path is left out of the review. */
+export function isReviewExcluded(filename: string, compiled: readonly RegExp[]): boolean {
+  if (compiled.length === 0) return false;
+  const normalized = normalizePath(filename);
+  if (normalized === REPO_SETTINGS_PATH) return false;
+  return compiled.some((matcher) => matcher.test(normalized));
+}
+
+/** Split changed files into reviewed and left-out sets. The settings file itself is never left out. */
+export function partitionReviewExcludedFiles<T extends { filename: string }>(
+  files: readonly T[],
+  compiled: readonly RegExp[]
+): { included: T[]; excluded: T[] } {
+  const included: T[] = [];
+  const excluded: T[] = [];
+  for (const file of files) {
+    if (isReviewExcluded(file.filename, compiled)) excluded.push(file);
+    else included.push(file);
+  }
+  return { included, excluded };
 }

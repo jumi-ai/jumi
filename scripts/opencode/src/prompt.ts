@@ -28,28 +28,45 @@ function escapeCdata(str: string): string {
   return str.replace(/]]>/g, "]]]]><![CDATA[>");
 }
 
-function formatPRFiles(files: PullFile[], opts: { indent?: string; patches?: boolean } = {}): string {
+function formatPRFiles(
+  files: PullFile[],
+  opts: { indent?: string; patches?: boolean; excluded?: ReadonlySet<string> } = {}
+): string {
   const indent = opts.indent ?? "    ";
   return files
     .map((f) => {
+      const isExcluded = opts.excluded?.has(f.filename) ?? false;
       const attrs =
         `${indent}<file name="${escapeXml(f.filename)}" status="${f.status}" ` +
-        `additions="${f.additions}" deletions="${f.deletions}"`;
-      if (opts.patches === false) return `${attrs} />`;
+        `additions="${f.additions}" deletions="${f.deletions}"${isExcluded ? ' excluded="true"' : ""}`;
+      if (opts.patches === false || isExcluded) return `${attrs} />`;
       const patch = f.patch ? `\n${indent}  <patch><![CDATA[${escapeCdata(f.patch)}]]></patch>` : "";
       return `${attrs}>${patch}\n${indent}</file>`;
     })
     .join("\n");
 }
 
-function formatDeltaXml(delta: ReviewDelta): string {
+function formatExcludedFilesBlock(excludedFiles: readonly string[]): string {
+  if (excludedFiles.length === 0) return "";
+  const files = excludedFiles.map((name) => `  <file name="${escapeXml(name)}" />`).join("\n");
+  const lead =
+    excludedFiles.length === 1
+      ? "This file is left out of this review"
+      : `These ${excludedFiles.length} files are left out of this review`;
+  return `<excluded_files count="${excludedFiles.length}">
+${files}
+  ${lead} per the repository's \`.jumi.yml\` \`review_exclude\` setting (gitignore-style globs matched against repository-relative paths). Their patches are omitted and they are marked \`excluded="true"\` in \`<pull_request_changed_files>\`. Do not review them, do not fetch their contents, and do not report findings on them. They can merge without review. When every changed file is left out, no patches were read: write a success review stating that nothing was read.
+</excluded_files>`;
+}
+
+function formatDeltaXml(delta: ReviewDelta, excluded?: ReadonlySet<string>): string {
   const sha = escapeXml(delta.previousSha);
   const findings = delta.findings.length
     ? delta.findings.map((line) => `    <finding>${escapeXml(line)}</finding>`).join("\n")
     : "    <none>The previous review had no findings.</none>";
   const commits = delta.commits.map((line) => `      <commit>${escapeXml(line)}</commit>`).join("\n");
   const files = delta.files.length
-    ? formatPRFiles(delta.files, { indent: "      " })
+    ? formatPRFiles(delta.files, { indent: "      ", ...(excluded ? { excluded } : {}) })
     : "      <none>These commits did not touch any file this pull changes.</none>";
   return `  <previous_review_findings reviewed_sha="${sha}">
 ${findings}
@@ -117,6 +134,8 @@ export interface PROpenedPromptOptions {
   recentHistory?: { text: string; truncated: boolean };
   /** When true, open `❓` questions block the status for this PR author. */
   blockingQuestions?: boolean;
+  /** Repository-relative paths left out of this review per `.jumi.yml` `review_exclude`. */
+  excludedFiles?: readonly string[];
 }
 
 /** Hard cap for the `<ci_results>` block: at most 50 checks and 4 KiB. */
@@ -218,6 +237,8 @@ ${escapeCdata(recentHistory.text)}
 
 export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const { repo, pr, prFiles, reviewNotes = [], thread, delta } = opts;
+  const excludedFiles = opts.excludedFiles ?? [];
+  const excludedSet = new Set(excludedFiles);
   const formattedNotes = reviewNotes.length
     ? `\n  <review_notes>\n${reviewNotes.map((note) => `    <note>${escapeXml(note)}</note>`).join("\n")}\n  </review_notes>`
     : "";
@@ -229,12 +250,14 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const linkedXml = formatLinkedIssuesXml(thread?.linkedIssues ?? []);
   const changedFilesXml = delta
     ? `    <pull_request_changed_files patches="omitted">
-${formatPRFiles(prFiles, { patches: false })}
+${formatPRFiles(prFiles, { patches: false, excluded: excludedSet })}
     </pull_request_changed_files>`
     : `    <pull_request_changed_files>
-${formatPRFiles(prFiles)}
+${formatPRFiles(prFiles, { excluded: excludedSet })}
     </pull_request_changed_files>`;
-  const deltaXml = delta ? `\n${formatDeltaXml(delta)}` : "";
+  const deltaXml = delta ? `\n${formatDeltaXml(delta, excludedSet)}` : "";
+  const excludedXml = formatExcludedFilesBlock(excludedFiles);
+  const formattedExcluded = excludedXml ? `\n${excludedXml}` : "";
   const scope = delta
     ? `This is a later review. The previous Jumi review covered ${escapeXml(delta.previousSha)}. Review the commits in <changes_since_last_review> and re-check each line in <previous_review_findings> on this head. <pull_request_changed_files> lists the whole pull without patches; the older files are in the checkout, so read them or run \`git diff jumi/target...HEAD -- path\` when a change needs context. If <commits> includes a merge, its patches can carry base-branch edits; check a change against \`git diff jumi/target...HEAD -- path\` before you attribute it to this pull. JUMI_REVIEW.md replaces the previous review: repeat every previous finding that still holds, and drop the ones this head fixed. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR.`
     : "Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug.";
@@ -262,7 +285,7 @@ ${formatPRFiles(prFiles)}
     <title>${escapeXml(pr.title)}</title>
     <body>${escapeXml(pr.body ?? "")}</body>
 ${commentsXml ? `${commentsXml}\n` : ""}${pullReviewsXml ? `${pullReviewsXml}\n` : ""}${reviewCommentsXml ? `${reviewCommentsXml}\n` : ""}${changedFilesXml}
-  </pull_request>${deltaXml}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}${formattedCi}
+  </pull_request>${deltaXml}${formattedExcluded}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}${formattedCi}
 </gitea_action_context>
 ${reviewMdXml}${recentHistoryXml}${blockingXml}
 
