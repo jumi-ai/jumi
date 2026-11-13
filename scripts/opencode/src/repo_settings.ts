@@ -9,10 +9,13 @@
  * never treated as "no file". A missing file is normal and silent.
  */
 
+import { globToRegExp } from "./review_md.ts";
+
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
 export interface RepoSettings {
   automerge: boolean;
+  reviewExclude: string[];
   followupOnSuggestions: boolean;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
@@ -38,6 +41,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 
 const KNOWN_KEYS = new Set([
   "automerge",
+  "review_exclude",
   "followup_on_suggestions",
   "max_followup_rounds",
   "max_conflict_rounds",
@@ -59,13 +63,14 @@ function parserErrorMessage(err: unknown): string {
 
 /**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
- * absent author lists mean empty; absent `mode` means `full`. No
- * schema-version key exists. `followup_on_suggestions` absent means on:
- * a `success` review with suggestions follows up as today; `false` turns
- * that off while failures, blocking questions, red CI, and conflicts run
- * as today. `max_followup_rounds` / `max_conflict_rounds` absent mean the
- * deployment value; `0` is valid and means no rounds of that kind.
- * Absent `blocking_question_authors` means no repo-listed authors. The error
+ * absent `review_exclude` means nothing is left out; absent author lists
+ * mean empty; absent `mode` means `full`. No schema-version key exists.
+ * `followup_on_suggestions` absent means on: a `success` review with
+ * suggestions follows up as today; `false` turns that off while failures,
+ * blocking questions, red CI, and conflicts run as today.
+ * `max_followup_rounds` / `max_conflict_rounds` absent mean the deployment
+ * value; `0` is valid and means no rounds of that kind. Absent
+ * `blocking_question_authors` means no repo-listed authors. The error
  * string is the parser's error and is surfaced verbatim in the auto-merge
  * note and the review status. Author lists match whole logins,
  * case-insensitive. Canonical keys are `takeover_authors` and
@@ -86,6 +91,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       ok: true,
       settings: {
         automerge: false,
+        reviewExclude: [],
         followupOnSuggestions: true,
         takeoverAuthors: [],
         ignoreConflictsAuthors: [],
@@ -100,8 +106,23 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!KNOWN_KEYS.has(key)) return { ok: false, error: `unknown key "${key}"` };
   }
   const record = parsed as Record<string, unknown>;
-  if (!("automerge" in record) || record.automerge === undefined) record.automerge = false as unknown as boolean;
-  if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+  let automerge = false;
+  if ("automerge" in record && record.automerge !== undefined) {
+    if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+    automerge = record.automerge;
+  }
+  let reviewExclude: string[] = [];
+  if ("review_exclude" in record && record.review_exclude !== undefined) {
+    if (!Array.isArray(record.review_exclude)) {
+      return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+    }
+    for (const entry of record.review_exclude) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        return { ok: false, error: `"review_exclude" must be a list of glob strings` };
+      }
+    }
+    reviewExclude = (record.review_exclude as string[]).map((entry) => entry.trim());
+  }
   if (
     "followup_on_suggestions" in record &&
     record.followup_on_suggestions !== undefined &&
@@ -144,7 +165,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     mode = record.mode as RepoMode;
   }
   const settings: RepoSettings = {
-    automerge: record.automerge === true,
+    automerge,
+    reviewExclude,
     followupOnSuggestions:
       "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
         ? record.followup_on_suggestions === true
@@ -190,6 +212,7 @@ export type RepoSettingsLoad =
   | {
       state: "valid";
       automerge: boolean;
+      reviewExclude: string[];
       followupOnSuggestions: boolean;
       maxFollowupRounds?: number;
       maxConflictRounds?: number;
@@ -234,6 +257,7 @@ export async function loadRepoSettings(
   return {
     state: "valid",
     automerge: parsed.settings.automerge,
+    reviewExclude: parsed.settings.reviewExclude,
     followupOnSuggestions: parsed.settings.followupOnSuggestions,
     ...(parsed.settings.maxFollowupRounds !== undefined
       ? { maxFollowupRounds: parsed.settings.maxFollowupRounds }
@@ -438,4 +462,42 @@ function normalizePath(filename: string): string {
 /** Whether any changed file is the root settings file. */
 export function prTouchesRepoSettings(files: ReadonlyArray<{ filename: string }>): boolean {
   return files.some((file) => normalizePath(file.filename) === REPO_SETTINGS_PATH);
+}
+
+/**
+ * Compile `review_exclude` patterns to matchers over repository-relative
+ * file paths. Uses the same gitignore-style glob dialect as `REVIEW.md`
+ * path sections (`globToRegExp`). An invalid glob never matches: the
+ * repository still reviews in full instead of failing the review.
+ */
+export function compileReviewExcludePatterns(patterns: readonly string[]): RegExp[] {
+  const out: RegExp[] = [];
+  for (const pattern of patterns) {
+    try {
+      out.push(globToRegExp(pattern));
+    } catch {}
+  }
+  return out;
+}
+
+/** True when this repository-relative path is left out of the review. */
+export function isReviewExcluded(filename: string, compiled: readonly RegExp[]): boolean {
+  if (compiled.length === 0) return false;
+  const normalized = normalizePath(filename);
+  if (normalized === REPO_SETTINGS_PATH) return false;
+  return compiled.some((matcher) => matcher.test(normalized));
+}
+
+/** Split changed files into reviewed and left-out sets. The settings file itself is never left out. */
+export function partitionReviewExcludedFiles<T extends { filename: string }>(
+  files: readonly T[],
+  compiled: readonly RegExp[]
+): { included: T[]; excluded: T[] } {
+  const included: T[] = [];
+  const excluded: T[] = [];
+  for (const file of files) {
+    if (isReviewExcluded(file.filename, compiled)) excluded.push(file);
+    else included.push(file);
+  }
+  return { included, excluded };
 }
