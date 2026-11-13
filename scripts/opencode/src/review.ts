@@ -1107,8 +1107,6 @@ export async function invalidHeadSettingsFailure(opts: {
   return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
 }
 
-/** Parent-authored keep marker for the left-out-files note (the setting name survives publishing). */
-export const REVIEW_EXCLUDE_KEEP = "`review_exclude`";
 /** Max left-out files named in the published note; longer lists name the count. */
 export const MAX_LISTED_EXCLUDED_FILES = 10;
 

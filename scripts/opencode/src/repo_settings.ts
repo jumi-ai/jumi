@@ -93,7 +93,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
         return { ok: false, error: `"review_exclude" must be a list of glob strings` };
       }
     }
-    reviewExclude = [...(record.review_exclude as string[])];
+    reviewExclude = (record.review_exclude as string[]).map((entry) => entry.trim());
   }
   const takeover = parseAuthorList(record, ["takeover_authors", "takeover-authors", "takeoverAuthors"]);
   if (!takeover.ok) return takeover;
