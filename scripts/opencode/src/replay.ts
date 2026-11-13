@@ -15,7 +15,7 @@ import {
   buildNoTrailerWritePrompt,
   buildPROpenedPrompt,
 } from "./prompt.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -469,7 +469,7 @@ function errorMessage(err: unknown): string {
 }
 
 function quotaSkip(reason: string): string {
-  return isQuotaText(reason) ? QUOTA_STUCK_TEXT : reason;
+  return isQuotaText(reason) ? quotaStuckReasonForText(reason) : reason;
 }
 
 export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayRecord> {
@@ -854,13 +854,14 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
       const result = await engine(runOpts);
       // Quota is a recorded skip in replay, never a wait or retry.
       if (result.status === "stuck" && isQuotaText(result.message)) {
-        throw new Error(QUOTA_STUCK_TEXT);
+        throw new Error(quotaStuckReasonForText(result.message));
       }
       if (result.status !== "ok") {
         try {
           throwIfEngineFailed(result);
         } catch (err) {
-          if (isQuotaError(err)) throw new Error(QUOTA_STUCK_TEXT);
+          if (isQuotaError(err))
+            throw new Error(quotaStuckReasonForText(err instanceof Error ? err.message : String(err)));
           throw err;
         }
       }
@@ -888,7 +889,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           findings: "",
           findingsCount: 0,
           rawMarkdown: "",
-          skipReason: QUOTA_STUCK_TEXT,
+          skipReason: quotaStuckReasonForText(message),
           quota: true,
         });
       }

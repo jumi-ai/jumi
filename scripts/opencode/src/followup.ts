@@ -94,9 +94,15 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
-import { isQuotaError, isQuotaText, QUOTA_STUCK_TEXT } from "./quota.ts";
+import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { loadEffectiveBlockingQuestionAuthors } from "./repo_settings.ts";
+import {
+  effectiveBlockingQuestionAuthors,
+  effectiveConflictRounds,
+  effectiveFollowupRounds,
+  isSuggestionFollowupEnabled,
+  loadRepoSettings,
+} from "./repo_settings.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -348,11 +354,10 @@ export function isJumiPullReviewFinding(
   inlines: readonly InlineComment[] = []
 ): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
-  if (
-    !isFindingCheck(lastCheckTrailer(pullReviewBody(review))) &&
-    !isBlockingQuestionFinding(pullReviewBody(review), opts, inlines, botUsername)
-  )
+  const body = pullReviewBody(review);
+  if (!isFindingCheck(lastCheckTrailer(body)) && !isBlockingQuestionFinding(body, opts, inlines, botUsername))
     return false;
+  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(body, opts, inlines, botUsername)) return false;
   const sha = pullReviewFindingSha(review);
   if (!sha) return false;
   if (opts.anyReviewedCommit) return true;
@@ -383,6 +388,12 @@ export interface ReviewFindingMatchOpts {
   blockingQuestionAuthors?: readonly string[];
   /** Author of the pull under review; required together with `blockingQuestionAuthors` to match. */
   prAuthor?: string | undefined | null;
+  /**
+   * Per-repository suggestion switch from `.jumi.yml`. `false` ignores a
+   * `success` review whose only findings are suggestions; failures and
+   * blocking questions still count. Unset preserves today's behavior.
+   */
+  followupOnSuggestions?: boolean;
 }
 
 /**
@@ -424,7 +435,7 @@ export function blockingOpenQuestionCountWithInlines(
   if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
   const body = reviewBody ?? "";
   const trailer = lastCheckTrailer(body);
-  if (!trailer || trailer.state !== "success") return 0;
+  if (trailer?.state !== "success") return 0;
   const bodyCount = blockingOpenQuestionCount(body, prAuthorLogin, blockingAuthors);
   let inlineCount = 0;
   for (const inline of inlines) {
@@ -442,6 +453,24 @@ function isBlockingQuestionFinding(
   return (
     blockingOpenQuestionCountWithInlines(body, inlines, opts.prAuthor, opts.blockingQuestionAuthors, botUsername) > 0
   );
+}
+
+/**
+ * A `success` trailer that carries suggestions and no open blocking
+ * questions. Failures never count here; with `followup_on_suggestions: false`
+ * these reviews stop counting as findings while everything else runs as
+ * today.
+ */
+function isSuggestionOnlyBody(
+  body: string,
+  opts: ReviewFindingMatchOpts = {},
+  inlines: readonly InlineComment[] = [],
+  botUsername?: string
+): boolean {
+  const trailer = lastCheckTrailer(body);
+  if (trailer?.state !== "success") return false;
+  if (trailerSuggestionCount(trailer.reason) === 0) return false;
+  return !isBlockingQuestionFinding(body, opts, inlines, botUsername);
 }
 
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
@@ -465,6 +494,8 @@ export function isJumiReviewFinding(
     !isFindingCheck(lastCheckTrailer(comment.body ?? "")) &&
     !isBlockingQuestionFinding(comment.body ?? "", opts, inlines, botUsername)
   )
+    return false;
+  if (opts.followupOnSuggestions === false && isSuggestionOnlyBody(comment.body ?? "", opts, inlines, botUsername))
     return false;
   const stickySha = parseReviewedCommitSha(comment.body ?? "");
   if (!stickySha) return false;
@@ -722,35 +753,53 @@ export async function needsFollowUp(opts: {
   botUsername: string;
   home: string;
   maxFollowupRounds?: number;
+  maxConflictRounds?: number;
   followupIgnoreLogins?: readonly string[];
   trustedSenderLogins?: readonly string[];
   blockingQuestionAuthors?: readonly string[];
   skipLatches?: SkipLatchStore;
+  /**
+   * Default-branch name for the per-repository `.jumi.yml` policy. When
+   * set, the file's round caps (ceiled by the deployment values) and the
+   * suggestion switch apply; when unset, today's behavior is preserved
+   * with no extra forge calls.
+   */
+  defaultBranch?: string;
 }): Promise<boolean> {
   const state = await readFollowUpLatch(skipLatchesFor(opts), {
     owner: opts.owner,
     repo: opts.repo,
     issueNumber: opts.issueNumber,
   });
-  if (state.round >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) return false;
+  let effectiveMax = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
+  let followupOnSuggestions = true;
   // Effective blocking authors: deployer plus the repository's
-  // default-branch file. Fail-open to the deployer list.
+  // default-branch file. Fail-open to the deployer list. Prefer the
+  // caller-provided default branch so no extra repo lookup is needed.
+  // The settings file is read once; the pure helpers derive both the cap
+  // and the blocking union from that load.
   let effectiveBlocking = opts.blockingQuestionAuthors;
   try {
-    const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
-    const defaultBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
-    if (defaultBranch) {
-      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        defaultBranch,
-        opts.blockingQuestionAuthors
-      );
+    let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
+    let settingsLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
+    if (settingsBranch) {
+      settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
+    } else {
+      const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
+      settingsBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+      if (settingsBranch) {
+        settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
+      }
+    }
+    if (settingsLoad) {
+      effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, settingsLoad);
+      followupOnSuggestions = isSuggestionFollowupEnabled(settingsLoad);
+      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, settingsLoad);
     }
   } catch {
-    // Fail-open: the deployer list still decides.
+    // Fail-open: deployment caps and the deployer list still decide.
   }
+  if (state.round >= effectiveMax) return false;
   const items = await collectFollowUpItems(
     opts.api,
     opts.owner,
@@ -762,6 +811,7 @@ export async function needsFollowUp(opts: {
     {
       prAuthor: opts.pr.user?.login,
       ...(effectiveBlocking ? { blockingQuestionAuthors: effectiveBlocking } : {}),
+      ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
     },
     opts.trustedSenderLogins
   );
@@ -971,7 +1021,8 @@ function reviewFindingMatchOptsForJob(
   job: IssueJob,
   headSha: string,
   prAuthor?: string | undefined | null,
-  blockingQuestionAuthors?: readonly string[] | undefined | null
+  blockingQuestionAuthors?: readonly string[] | undefined | null,
+  followupOnSuggestions?: boolean
 ): ReviewFindingMatchOpts {
   const extraHeadShas = job.headSha && job.headSha.toLowerCase() !== headSha.toLowerCase() ? [job.headSha] : undefined;
   return {
@@ -979,6 +1030,7 @@ function reviewFindingMatchOptsForJob(
     anyReviewedCommit: job.trigger?.event === "review-failure",
     ...(prAuthor ? { prAuthor } : {}),
     ...(blockingQuestionAuthors ? { blockingQuestionAuthors } : {}),
+    ...(followupOnSuggestions === false ? { followupOnSuggestions: false as const } : {}),
   };
 }
 
@@ -986,8 +1038,37 @@ export async function implementFollowUp(
   opts: ImplementOptions & { sleep?: (ms: number) => Promise<void> }
 ): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
-  const maxFollowupRounds = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
-  const maxConflictRounds = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
+  // Single default-branch file read for both the round caps/suggestion
+  // switch and the effective blocking list. Fail-open to deployment caps
+  // and the deployer list.
+  let policy = {
+    followupOnSuggestions: true,
+    maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+  };
+  let effectiveBlockingUpFront = opts.blockingQuestionAuthors;
+  try {
+    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
+    if (defaultBranch) {
+      const load = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, defaultBranch);
+      if (load.state === "invalid") {
+        log(`follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${defaultBranch}: ${load.error}`);
+      } else {
+        policy = {
+          followupOnSuggestions: isSuggestionFollowupEnabled(load),
+          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
+          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+        };
+      }
+      effectiveBlockingUpFront = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
+    }
+  } catch (err) {
+    log(
+      `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  const maxFollowupRounds = policy.maxFollowupRounds;
+  const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
@@ -1022,25 +1103,16 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  // Effective blocking authors: deployer plus the repository's
-  // default-branch file (the job's default branch). Fail-open to deployer.
-  let effectiveBlocking = opts.blockingQuestionAuthors;
-  try {
-    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
-    if (defaultBranch) {
-      effectiveBlocking = await loadEffectiveBlockingQuestionAuthors(
-        opts.api,
-        owner,
-        repo,
-        defaultBranch,
-        opts.blockingQuestionAuthors,
-        log
-      );
-    }
-  } catch {
-    // Fail-open: the deployer list still decides.
-  }
-  const findingOpts = reviewFindingMatchOptsForJob(opts.job, pr.head.sha, pr.user?.login, effectiveBlocking);
+  // Effective blocking authors were loaded once above with the policy
+  // (the job's default branch). Fail-open to deployer.
+  const effectiveBlocking = effectiveBlockingUpFront;
+  const findingOpts = reviewFindingMatchOptsForJob(
+    opts.job,
+    pr.head.sha,
+    pr.user?.login,
+    effectiveBlocking,
+    policy.followupOnSuggestions
+  );
 
   const branch = pr.head.ref;
   claim.branch = branch;
@@ -1197,9 +1269,10 @@ export async function implementFollowUp(
       : undefined;
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
-    await sticky(QUOTA_STUCK_TEXT, pr.number);
+    const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
+    await sticky(quotaReason, pr.number);
     await forgetClaim();
-    return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+    return { status: "skipped", reason: quotaReason };
   }
   const stuckReason = evaluateStuck(stuckState.fingerprints, currentFingerprint);
   if (stuckReason) {
@@ -1433,11 +1506,12 @@ export async function implementFollowUp(
               chain: jobChain,
               previousError: opts.previousError,
             });
-            await sticky(QUOTA_STUCK_TEXT, pr.number);
-            await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+            const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+            await sticky(quotaReason, pr.number);
+            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-            return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+            return { status: "skipped", reason: quotaReason };
           }
           prefixMergeThrew = true;
           throw err;
@@ -1625,11 +1699,12 @@ export async function implementFollowUp(
             chain: jobChain,
             previousError: opts.previousError,
           });
-          await sticky(QUOTA_STUCK_TEXT, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+          const quotaReason = quotaStuckReasonForText(result.message);
+          await sticky(quotaReason, pr.number);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          return { status: "skipped", reason: quotaReason };
         }
         throwIfEngineFailed(result);
         // Only a successful engine result counts as having run: an
@@ -1671,7 +1746,7 @@ export async function implementFollowUp(
               `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
               { continueSession: true }
             );
-            if (quotaContinued) throw new Error(QUOTA_STUCK_TEXT);
+            if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
           },
         });
       } catch (err) {
@@ -1683,9 +1758,10 @@ export async function implementFollowUp(
             chain: jobChain,
             previousError: opts.previousError,
           });
+          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: QUOTA_STUCK_TEXT };
+          return { status: "skipped", reason: quotaReason };
         }
         throw err;
       }
@@ -1789,8 +1865,9 @@ export async function implementFollowUp(
           chain: jobChain,
           previousError: opts.previousError,
         });
-        await sticky(QUOTA_STUCK_TEXT, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, QUOTA_STUCK_TEXT, now).catch(() => undefined);
+        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        await sticky(quotaReason, pr.number).catch(() => undefined);
+        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
           pushLanded: false,
           logger: log,

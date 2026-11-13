@@ -1,10 +1,14 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
+import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
 import {
   effectiveBlockingQuestionAuthors,
+  effectiveConflictRounds,
+  effectiveFollowupRounds,
+  isSuggestionFollowupEnabled,
   loadRepoSettings,
   type RepoSettingsLoad,
   repoMode,
@@ -119,6 +123,7 @@ export async function enqueueFollowUpFromReview(
     published: ReviewResult;
     markdown?: string | null;
     maxFollowupRounds?: number;
+    maxConflictRounds?: number;
     blockingQuestionAuthors?: readonly string[];
     logger?: (message: string) => void;
   } & PickupPolicy
@@ -130,32 +135,7 @@ export async function enqueueFollowUpFromReview(
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
 
-  // Restricted repository modes start no worker jobs: review-only and off
-  // never enqueue follow-up from a review. The worker start gate is the
-  // backstop for jobs queued before the mode changed. One default-branch
-  // read covers both the mode gate and the success-trailer blocking list
-  // below; lookup failures fail open (mode `full`, deployer blocking list).
-  let repoSettings: RepoSettingsLoad = { state: "missing" };
-  try {
-    const repoForSettings = await opts.api.getRepo(opts.row.owner, opts.row.repo);
-    const defaultBranch = repoForSettings.default_branch?.trim() ? repoForSettings.default_branch : "";
-    if (defaultBranch) {
-      repoSettings = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
-    }
-  } catch (err) {
-    opts.logger?.(
-      `repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${err instanceof Error ? err.message : String(err)}`
-    );
-    repoSettings = { state: "missing" };
-  }
-  if (repoSettings.state === "invalid") {
-    opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}: ${repoSettings.error}`);
-  }
-  if (repoMode(repoSettings) !== "full") {
-    return logSkip("repository mode is restricted");
-  }
-
-  // Cheap trailer gate first: incomplete skips without a PR fetch, and a
+  // Cheap trailer gate first: incomplete skips without any fetch, and a
   // failure or leftover-simplification success enqueues. Only a plain success
   // trailer needs the PR author plus the effective blocking list (deployer
   // plus the repository's default-branch file) to decide whether opt-in
@@ -163,11 +143,49 @@ export async function enqueueFollowUpFromReview(
   const earlySkip = persistInsertSkipReason(opts.markdown);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
 
+  // One default-branch read covers the restricted-mode gate, the follow-up
+  // policy, and the success-trailer blocking list below. Missing, invalid,
+  // or unreadable behaves as today (mode `full`, deployment caps,
+  // suggestions on, deployer blocking list). The worker start gate is the
+  // backstop for jobs queued before the mode changed.
+  const repo = await opts.api.getRepo(opts.row.owner, opts.row.repo);
+  let repoSettings: RepoSettingsLoad = { state: "missing" };
+  let effectiveBlocking: readonly string[] | undefined = opts.blockingQuestionAuthors;
+  let policy = {
+    followupOnSuggestions: true,
+    maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+  };
+  try {
+    const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
+    if (defaultBranch) {
+      const load = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
+      repoSettings = load;
+      if (load.state === "invalid") {
+        opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${load.error}`);
+      } else {
+        policy = {
+          followupOnSuggestions: isSuggestionFollowupEnabled(load),
+          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
+          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+        };
+      }
+      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
+    }
+  } catch (err) {
+    opts.logger?.(
+      `repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    repoSettings = { state: "missing" };
+  }
+  if (repoMode(repoSettings) !== "full") {
+    return logSkip("repository mode is restricted");
+  }
+
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
   if (earlySkip === "success trailer") {
-    const effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, repoSettings);
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
     if (trailerSkip) return logSkip(trailerSkip);
   }
@@ -190,16 +208,28 @@ export async function enqueueFollowUpFromReview(
   }
 
   const issueNumber = closer ?? pr.number;
-  const [issue, repo] = await Promise.all([
-    foreign ? Promise.resolve(pr) : opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber),
-    opts.api.getRepo(opts.row.owner, opts.row.repo),
-  ]);
+  const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);
   if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, opts))) {
     return logSkip("unassigned");
   }
 
+  // Policy and effective blocking were loaded once above from the same
+  // file read; the gate below sees the same list `needsFollowUp` sees.
+  // Suggestion follow-up off: a `success` review with suggestions starts no
+  // follow-up in that repository. Failures, blocking questions, red CI, and
+  // conflicts run as today; a person asking still follows via the webhook
+  // path, which never reaches this handover.
+  if (
+    isLeftoverSimplificationTrailer(opts.markdown) &&
+    !isCurrentHeadFailureTrailer(opts.markdown) &&
+    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking) &&
+    !policy.followupOnSuggestions
+  ) {
+    return logSkip("suggestions disabled");
+  }
+
   const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
-  if (followUpSucceeded >= (opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS)) {
+  if (followUpSucceeded >= policy.maxFollowupRounds) {
     await upsertStuckText(
       opts.api,
       opts.row.owner,

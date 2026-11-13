@@ -29,19 +29,39 @@ const QUOTA_PATTERNS = [
   "Insufficient balance",
 ] as const;
 
+/** Narrow credit-exhaustion signal for Anthropic API-key billing.
+ * Matches only the documented texts: `Credit balance is too low` (what
+ * Claude Code prints) and the API message behind it (`Your credit balance
+ * is too low to access the Anthropic API ...`). Bare `credit` / `billing` /
+ * `balance` alone never matches, the same care the auth-death patterns take
+ * with bare `401`. */
+export const CREDIT_BALANCE_RE = /Credit balance is too low/i;
+
+/** Engine result message for credit exhaustion. Parallel to
+ * `QUOTA_MESSAGE`, but distinct so the operator can tell a monthly credit
+ * running out apart from a plan limit. Still counted as quota (see
+ * `classifyOpenCodeExit`), never as a task or infra failure. */
+export const CREDIT_QUOTA_MESSAGE = "opencode stuck: credit balance is too low";
+
+/** Stuck-file reason for credit exhaustion. Parallel to
+ * `QUOTA_STUCK_TEXT`, distinct so the parked job names the credit, and
+ * handled by the same stuck path (no quota-wait backoff: the billing cycle
+ * can be weeks away). */
+export const CREDIT_STUCK_TEXT = "stuck: credit balance is too low";
+
 export const QUOTA_ERROR_RE =
-  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded/i;
+  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded|Credit balance is too low/i;
 
 /** Narrow live pattern for the retry poll. Drops the parent's own
  * `stuck:` dialect (which OpenCode never emits) so tool traces or echoed file
  * content containing that literal cannot kill a healthy run. Kept in
  * `QUOTA_ERROR_RE`/`isQuotaText` for thrown errors and stuck comments. */
 export const QUOTA_LIVE_RE =
-  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance/i;
+  /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|Credit balance is too low/i;
 
 export type QuotaClass = "resetting" | "hard";
 
-const HARD_QUOTA_RE = /GoUsageLimitError|Go limit reached|Insufficient balance/i;
+const HARD_QUOTA_RE = /GoUsageLimitError|Go limit reached|Insufficient balance|Credit balance is too low/i;
 const RESETTING_QUOTA_RE =
   /FreeUsageLimitError|Free usage exceeded|Free limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\./i;
 
@@ -85,6 +105,20 @@ export function isHardQuotaText(text: string | null | undefined): boolean {
   return HARD_QUOTA_RE.test(text);
 }
 
+/** Narrow credit-exhaustion check. Only the documented `Credit balance is
+ * too low` phrase matches; ordinary task output mentioning credit, billing,
+ * or balance does not. */
+export function isCreditBalanceText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return CREDIT_BALANCE_RE.test(text);
+}
+
+/** Stuck-file reason for this quota text: credit keeps its own reason so
+ * the operator sees the monthly credit ran out, plan limits keep theirs. */
+export function quotaStuckReasonForText(text: string | null | undefined): string {
+  return isCreditBalanceText(text) ? CREDIT_STUCK_TEXT : QUOTA_STUCK_TEXT;
+}
+
 export function isResettingQuotaText(text: string | null | undefined): boolean {
   if (!text) return false;
   if (HARD_QUOTA_RE.test(text)) return false;
@@ -108,6 +142,9 @@ export function engineFailureQuotaClass(err: { quota?: QuotaClass; message?: str
   const message = err.message ?? "";
   if (message === QUOTA_MESSAGE || message.startsWith(QUOTA_MESSAGE)) {
     return classifyQuotaText(QUOTA_MESSAGE) ?? "hard";
+  }
+  if (message === CREDIT_QUOTA_MESSAGE || message.startsWith(CREDIT_QUOTA_MESSAGE)) {
+    return classifyQuotaText(CREDIT_QUOTA_MESSAGE) ?? "hard";
   }
   return undefined;
 }

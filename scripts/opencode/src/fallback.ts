@@ -1,10 +1,10 @@
 import { lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { claudeApiKeyVarNames } from "./claude_credentials.ts";
+import { claudeApiKeyVarNames, RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
-import { isQuotaError, isQuotaText } from "./quota.ts";
+import { isCreditBalanceText, isQuotaError, isQuotaText } from "./quota.ts";
 import { withLedgerRunUsage } from "./run_usage.ts";
 import {
   describeAttemptOrder,
@@ -74,6 +74,42 @@ export function shouldHopInsteadOfQuotaStuck(primaryModel: string, fallbackModel
   const fallback = modelProviderPrefix(fallbackModel);
   if (primary && fallback) return primary !== fallback;
   return primaryModel !== fallbackModel;
+}
+
+/** Credit exhaustion uses the credential, not the model, to decide the hop.
+ * Two entries may share type and model and differ only in billing
+ * (subscription token vs API key in `authEnv`); the exhausted credential is
+ * the API key, so the next runner hops whenever it bills a different
+ * credential. The existing refusal stays for the case it was written for:
+ * the next runner shares the exhausted credential. */
+export function isCreditStuckResult(result: EngineResult): boolean {
+  return result.status === "stuck" && isCreditBalanceText(result.message ?? "");
+}
+
+function credentialKey(runner: { auth?: string | undefined; authEnv?: string | undefined }): string {
+  if (runner.auth === RUNNER_AUTH_API_KEY) return `api-key:${runner.authEnv ?? ""}`;
+  return "subscription";
+}
+
+export function sameExhaustedCredential(
+  current: { auth?: string | undefined; authEnv?: string | undefined },
+  next: { auth?: string | undefined; authEnv?: string | undefined }
+): boolean {
+  return credentialKey(current) === credentialKey(next);
+}
+
+export function shouldHopForCreditExhaustion(
+  current: { auth?: string | undefined; authEnv?: string | undefined },
+  next: { auth?: string | undefined; authEnv?: string | undefined }
+): boolean {
+  return !sameExhaustedCredential(current, next);
+}
+
+function isCreditQuotaError(err: unknown): boolean {
+  if (err instanceof EngineFailedError) {
+    return isCreditBalanceText(err.message ?? "");
+  }
+  return false;
 }
 
 export function isProviderUnavailableResult(result: EngineResult): boolean {
@@ -146,48 +182,62 @@ function isQuotaStuckResult(result: EngineResult): boolean {
 function shouldHopFromResult(
   result: EngineResult,
   opts: EngineRunOptions,
-  currentModel: string,
-  nextModel: string
+  current: NamedRunner,
+  next: NamedRunner
 ): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted) return false;
   if (result.auth === true) return true;
+  if (isCreditStuckResult(result)) return shouldHopForCreditExhaustion(current, next);
   if (isProviderUnavailableResult(result)) return true;
-  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
 }
 
-function shouldHopFromError(err: unknown, opts: EngineRunOptions, currentModel: string, nextModel: string): boolean {
+function shouldHopFromError(err: unknown, opts: EngineRunOptions, current: NamedRunner, next: NamedRunner): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
   if (!(err instanceof EngineFailedError) || err.infra) return false;
   if (err.auth) return true;
-  if (isQuotaError(err)) return shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+  if (isCreditQuotaError(err)) return shouldHopForCreditExhaustion(current, next);
+  if (isQuotaError(err)) return shouldHopInsteadOfQuotaStuck(current.model, next.model);
   return looksLikeProviderUnavailable(err.message);
 }
 
 function shouldHopQuotaResult(
   result: EngineResult,
   opts: EngineRunOptions,
-  currentModel: string,
-  nextModel: string
+  current: NamedRunner,
+  next: NamedRunner
 ): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted) return false;
-  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+  if (isCreditStuckResult(result)) return shouldHopForCreditExhaustion(current, next);
+  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
 }
 
-function shouldHopQuotaError(err: unknown, opts: EngineRunOptions, currentModel: string, nextModel: string): boolean {
+function shouldHopQuotaError(err: unknown, opts: EngineRunOptions, current: NamedRunner, next: NamedRunner): boolean {
   if (opts.continueSession || opts.abortSignal?.aborted || isAbortError(err)) return false;
   if (!(err instanceof EngineFailedError) || err.infra || err.auth) return false;
-  return isQuotaError(err) && shouldHopInsteadOfQuotaStuck(currentModel, nextModel);
+  if (isCreditQuotaError(err)) return shouldHopForCreditExhaustion(current, next);
+  return isQuotaError(err) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
 }
 
-function refuseQuotaHop(result: EngineResult, currentModel: string, nextModel: string | undefined): EngineResult {
-  if (!nextModel || !isQuotaStuckResult(result) || !shouldHopInsteadOfQuotaStuck(currentModel, nextModel)) {
+function wouldHopQuota(current: NamedRunner, next: NamedRunner, result: EngineResult): boolean {
+  if (isCreditStuckResult(result)) return shouldHopForCreditExhaustion(current, next);
+  return isQuotaStuckResult(result) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
+}
+
+function wouldHopQuotaError(current: NamedRunner, next: NamedRunner, err: unknown): boolean {
+  if (isCreditQuotaError(err)) return shouldHopForCreditExhaustion(current, next);
+  return isQuotaError(err) && shouldHopInsteadOfQuotaStuck(current.model, next.model);
+}
+
+function refuseQuotaHop(result: EngineResult, current: NamedRunner, next: NamedRunner | undefined): EngineResult {
+  if (!next || !wouldHopQuota(current, next, result)) {
     return result;
   }
   return { ...result, hopRefused: true };
 }
 
-function refuseQuotaHopError(err: unknown, currentModel: string, nextModel: string | undefined): void {
-  if (!nextModel || !isQuotaError(err) || !shouldHopInsteadOfQuotaStuck(currentModel, nextModel)) return;
+function refuseQuotaHopError(err: unknown, current: NamedRunner, next: NamedRunner | undefined): void {
+  if (!next || !wouldHopQuotaError(current, next, err)) return;
   if (err !== null && typeof err === "object") (err as { hopRefused?: boolean }).hopRefused = true;
 }
 
@@ -466,13 +516,13 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         );
       } catch (err) {
         attachRunner(err, runnerStamp(current), index);
-        if (!next || !shouldHopQuotaError(err, opts, current.model, next.model)) {
-          if (next) refuseQuotaHopError(err, current.model, next.model);
+        if (!next || !shouldHopQuotaError(err, opts, current, next)) {
+          if (next) refuseQuotaHopError(err, current, next);
           attachNarrowedError(err, index, runners);
           throw err;
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
-          refuseQuotaHopError(err, current.model, next.model);
+          refuseQuotaHopError(err, current, next);
           attachNarrowedError(err, index, runners);
           throw err;
         }
@@ -481,13 +531,13 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         index++;
       }
       if (result) {
-        if (!next || !shouldHopQuotaResult(result, opts, current.model, next.model)) {
+        if (!next || !shouldHopQuotaResult(result, opts, current, next)) {
           settleQuotaSigterm(opts, result, false);
-          return attachNarrowed(refuseQuotaHop(result, current.model, next?.model), index, runners);
+          return attachNarrowed(refuseQuotaHop(result, current, next), index, runners);
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
           settleQuotaSigterm(opts, result, false);
-          return attachNarrowed(refuseQuotaHop(result, current.model, next.model), index, runners);
+          return attachNarrowed(refuseQuotaHop(result, current, next), index, runners);
         }
         try {
           await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
@@ -520,13 +570,13 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       } catch (err) {
         attachRunner(err, runnerStamp(runner), index);
         const next = runners[index + 1];
-        if (!next || !shouldHopFromError(err, opts, runner.model, next.model)) {
-          if (next) refuseQuotaHopError(err, runner.model, next.model);
+        if (!next || !shouldHopFromError(err, opts, runner, next)) {
+          if (next) refuseQuotaHopError(err, runner, next);
           attachNarrowedError(err, index, runners);
           throw err;
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
-          refuseQuotaHopError(err, runner.model, next.model);
+          refuseQuotaHopError(err, runner, next);
           attachNarrowedError(err, index, runners);
           throw err;
         }
@@ -537,13 +587,13 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       }
 
       const next = runners[index + 1];
-      if (!next || !shouldHopFromResult(result, opts, runner.model, next.model)) {
+      if (!next || !shouldHopFromResult(result, opts, runner, next)) {
         settleQuotaSigterm(opts, result, false);
-        return attachNarrowed(refuseQuotaHop(result, runner.model, next?.model), index, runners);
+        return attachNarrowed(refuseQuotaHop(result, runner, next), index, runners);
       }
       if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
         settleQuotaSigterm(opts, result, false);
-        return attachNarrowed(refuseQuotaHop(result, runner.model, next.model), index, runners);
+        return attachNarrowed(refuseQuotaHop(result, runner, next), index, runners);
       }
       try {
         await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
