@@ -14,6 +14,7 @@ import {
   ignoreConflictsReason,
   isIgnoreConflictsSkipReason,
   isLeftToAuthor,
+  loadIgnoreConflictsAuthors,
   normalizeIgnoreConflictsLabel,
 } from "../src/ignore_conflicts.ts";
 import { classifyCloserWork, conflictJobIfUnmergeable } from "../src/pickup.ts";
@@ -168,6 +169,35 @@ describe("ignore-conflicts label helpers", () => {
     const withJumi = { listPullCommits: async () => [renovateCommit(), jumiCommit()] };
     expect(await isLeftToAuthor(withJumi, "o", "r", pr, { botUsername: "jumi" })).toBe(false);
     expect(await isLeftToAuthor(api, "o", "r", makePR({ number: 50 }), { botUsername: "jumi" })).toBe(false);
+  });
+
+  test("unreadable settings fail closed: deny the merge", async () => {
+    const failingFileApi = {
+      getRepoFile: async () => {
+        throw new Error("gitea GET /repos/o/r/contents/.jumi.yml → 500");
+      },
+    };
+    expect(await loadIgnoreConflictsAuthors(failingFileApi, "o", "r", "main")).toBeUndefined();
+    const pr = makePR({ number: 50, labels: [] });
+    const api = { ...failingFileApi, listPullCommits: async () => [renovateCommit()] };
+    expect(await isLeftToAuthor(api, "o", "r", pr, { botUsername: "jumi", defaultBranch: "main" })).toBe(true);
+    expect(
+      await classifyCloserWork({
+        api: api as never,
+        owner: "o",
+        repo: "r",
+        pr,
+        issueNumber: 1,
+        botUsername: "jumi",
+        home: "/tmp",
+        defaultBranch: "main",
+      })
+    ).toBeUndefined();
+    expect(
+      await conflictJobIfUnmergeable(api as never, makeIssueJob({ owner: "o", repo: "r" }), 50, undefined, {
+        botUsername: "jumi",
+      })
+    ).toBeUndefined();
   });
 });
 

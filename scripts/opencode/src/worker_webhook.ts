@@ -54,6 +54,12 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "getAppPermissions"
       | "listPullCommits"
       | "deleteGitRef"
+      | "getRepoFile"
+      | "addIssueAssignees"
+      | "addIssueLabel"
+      | "findStickyIssueComment"
+      | "createIssueComment"
+      | "updateIssueComment"
     >
   > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
@@ -345,6 +351,60 @@ export async function handleWorkerWebhookEvent(
   // Handle only assigned/unassigned. Any other pull_request action skips 202, never 400.
   if (isPullAssignWebhookEvent(event, eventType)) {
     const action = peekWebhookAction(rawBody);
+    if (action === "opened") {
+      try {
+        const payload = parsePullRequestPayload(rawBody);
+        const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+        const [owner, repo] = payload.repository.full_name.split("/");
+        if (!owner || !repo) return skipped("invalid webhook payload", logger);
+        try {
+          assertRepositoryPolicy(payload.repository, policy);
+        } catch (err) {
+          logger(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+          return skipped("repository not allowed", logger);
+        }
+        const decision = await shouldEnqueueTakeoverForOpenedPull({
+          api: (deps.api ?? {}) as never,
+          forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: payload.pull_request.number,
+          prTitle: payload.pull_request.title,
+          prDraft: payload.pull_request.draft,
+          prState: payload.pull_request.state,
+          prMerged: payload.pull_request.merged,
+          prAuthorLogin: payload.pull_request.user?.login,
+          prHeadRef: payload.pull_request.head?.ref ?? "",
+          prHeadSha: payload.pull_request.head?.sha ?? "",
+          prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+          defaultBranch: payload.repository.default_branch,
+          cloneUrl: payload.repository.clone_url,
+          htmlUrl: payload.pull_request.html_url,
+          updatedAt: payload.pull_request.updated_at,
+          prBody: payload.pull_request.body,
+          botUsername: policy.botUsername,
+          trustedSenderLogins: policy.trustedSenderLogins,
+          action,
+          log: (message) => logger(message),
+        });
+        if (decision.type === "skip") return skipped(decision.reason, logger);
+        const job = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const result = await deps.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        if (result.queued && deps.sits) {
+          const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
+          if (cleared) return cleared;
+        }
+        return json(202, result);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${(err as Error).message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        return json(400, { error: "invalid webhook payload" });
+      }
+    }
     if (action !== "assigned" && action !== "unassigned" && !isPullWaitClearAction(action)) {
       return skipped(
         action ? `unsupported action ${action}` : `unsupported event ${event ?? eventType ?? "pull_request"}`,
