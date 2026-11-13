@@ -1092,7 +1092,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
+    expect(await responseJson(response)).toEqual({ skipped: "author not listed for takeover" });
     expect(queue.jobs).toHaveLength(0);
   });
 

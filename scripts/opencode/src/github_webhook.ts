@@ -487,6 +487,53 @@ export async function handleGithubWebhookEvent(
           const cleared = await clearGithubSit(reviewSitsFor(deps), job.owner, job.repo, job.prNumber, logger);
           if (cleared) return cleared;
         }
+        if (action === "opened" && deps.worker) {
+          try {
+            const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+            const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
+            if (takeoverOwner && takeoverRepo) {
+              const decision = await shouldEnqueueTakeoverForOpenedPull({
+                api: (deps.worker.api ?? {}) as never,
+                forgeKind: "github",
+                owner: takeoverOwner,
+                repo: takeoverRepo,
+                prNumber: payload.pull_request.number,
+                prTitle: payload.pull_request.title,
+                prDraft: payload.pull_request.draft,
+                prState: payload.pull_request.state,
+                prMerged: payload.pull_request.merged,
+                prAuthorLogin: payload.pull_request.user?.login,
+                prHeadRef: payload.pull_request.head?.ref ?? "",
+                prHeadSha: payload.pull_request.head?.sha ?? job.headSha,
+                prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+                defaultBranch: payload.repository.default_branch,
+                cloneUrl: payload.repository.clone_url,
+                htmlUrl: payload.pull_request.html_url,
+                updatedAt: payload.pull_request.updated_at,
+                prBody: payload.pull_request.body,
+                botUsername: policy.botUsername,
+                trustedSenderLogins: policy.trustedSenderLogins,
+                action,
+                log: (message) => logger(message),
+              });
+              if (decision.type === "enqueue") {
+                const workerJob = {
+                  ...decision.job,
+                  delivery: `takeover-${delivery}`,
+                  receivedAt: new Date().toISOString(),
+                };
+                const enqueued = await deps.worker.queue.enqueue(workerJob);
+                logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} delivery=${workerJob.delivery}`);
+              } else {
+                logger(
+                  `takeover skipped ${takeoverOwner}/${takeoverRepo}#${payload.pull_request.number}: ${decision.reason}`
+                );
+              }
+            }
+          } catch (err) {
+            logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
         return json(202, result);
       } catch (err) {
         if (isQueueUnavailable(err)) {
@@ -495,6 +542,46 @@ export async function handleGithubWebhookEvent(
         }
         logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
         return json(400, { error: "invalid webhook payload" });
+      }
+    }
+    if (deps.worker && action === "opened") {
+      try {
+        const payload = parsePullRequestPayload(rawBody);
+        const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+        const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
+        if (!takeoverOwner || !takeoverRepo) return skipped("invalid webhook payload", logger);
+        const decision = await shouldEnqueueTakeoverForOpenedPull({
+          api: (deps.worker.api ?? {}) as never,
+          forgeKind: "github",
+          owner: takeoverOwner,
+          repo: takeoverRepo,
+          prNumber: payload.pull_request.number,
+          prTitle: payload.pull_request.title,
+          prDraft: payload.pull_request.draft,
+          prState: payload.pull_request.state,
+          prMerged: payload.pull_request.merged,
+          prAuthorLogin: payload.pull_request.user?.login,
+          prHeadRef: payload.pull_request.head?.ref ?? "",
+          prHeadSha: payload.pull_request.head?.sha ?? "",
+          prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+          defaultBranch: payload.repository.default_branch,
+          cloneUrl: payload.repository.clone_url,
+          htmlUrl: payload.pull_request.html_url,
+          updatedAt: payload.pull_request.updated_at,
+          prBody: payload.pull_request.body,
+          botUsername: policy.botUsername,
+          trustedSenderLogins: policy.trustedSenderLogins,
+          action,
+          log: (message) => logger(message),
+        });
+        if (decision.type === "skip") return skipped(decision.reason, logger);
+        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const result: EnqueueResult = await deps.worker.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        return json(202, result);
+      } catch (err) {
+        logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+        return skipped("takeover failed", logger);
       }
     }
     if (deps.worker && (action === "labeled" || action === "unlabeled")) {

@@ -66,7 +66,14 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
-import { ignoreConflictsReason, isLeftToAuthor } from "./ignore_conflicts.ts";
+import {
+  hasIgnoreConflictsLabel,
+  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
+  ignoreConflictsReason,
+  isLeftToAuthor,
+  leaveConflictsAuthorReason,
+  loadIgnoreConflictsAuthors,
+} from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -1092,14 +1099,30 @@ export async function implementFollowUp(
     }
   }
   const previousConflict = await readConflictLatch(latches, latchKey);
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  if (ignoreAuthors === undefined) {
+    await forgetClaim();
+    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  }
   const leftToAuthor = await isLeftToAuthor(
     opts.api,
     owner,
     repo,
     pr,
-    { botUsername: opts.botUsername, ignoreConflictsLabel: opts.ignoreConflictsLabel },
+    {
+      botUsername: opts.botUsername,
+      ignoreConflictsLabel: opts.ignoreConflictsLabel,
+      ignoreConflictsAuthors: ignoreAuthors,
+      prAuthor: pr.user?.login,
+      defaultBranch: opts.job.defaultBranch,
+    },
     log
   );
+  const leftViaAuthorOnly =
+    leftToAuthor && !hasIgnoreConflictsLabel(pr, opts.ignoreConflictsLabel) && ignoreAuthors.length > 0;
+  const leftReason = leftViaAuthorOnly
+    ? leaveConflictsAuthorReason(pr.user?.login)
+    : ignoreConflictsReason(opts.ignoreConflictsLabel);
   const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
   // The conflict cap gates conflict-resolution work only: a mergeable pull
   // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
@@ -1152,7 +1175,7 @@ export async function implementFollowUp(
   }
   if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
     await forgetClaim();
-    return { status: "skipped", reason: ignoreConflictsReason(opts.ignoreConflictsLabel) };
+    return { status: "skipped", reason: leftReason };
   }
 
   const feedbackPreview = buildFeedbackMarkdown({

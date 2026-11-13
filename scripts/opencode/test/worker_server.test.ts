@@ -118,7 +118,7 @@ describe("createWorkerFetchHandler", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
     const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
+    expect(await responseJson(response)).toEqual({ skipped: "author not listed for takeover" });
   });
 
   test("skips pull_request synchronize 202 never 400", async () => {
@@ -134,9 +134,9 @@ describe("createWorkerFetchHandler", () => {
 
   test("skips malformed non-assign pull_request 202 never 400", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ action: "opened" }, { event: "pull_request" }));
+    const response = await handler(await signedRequest({ action: "synchronize" }, { event: "pull_request" }));
     expect(response.status).toBe(202);
-    expect(await responseJson(response)).toEqual({ skipped: "unsupported action opened" });
+    expect(await responseJson(response)).toEqual({ skipped: "unsupported action synchronize" });
   });
 
   test("enqueues follow-up when a foreign PR is assigned to the bot", async () => {
