@@ -53,7 +53,7 @@ import {
 } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import type { ForgeKind } from "./forge.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
+import { buildBlockedByRejectedPrompt, buildImplementPrompt, buildImplementYieldPrompt } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   type HandoffStore,
@@ -1091,6 +1091,9 @@ export async function implementIssue(
 
       // Set when the chain refused an incomplete hop, so no child ran at all.
       let hopDeclined = false;
+      // Explicit worker prompts are worded for the first chain runner; a hop
+      // keeps this wording while the per-spawn tool enforcement stays exact.
+      const firstRunnerType = jobChain?.[0]?.type;
       const runEngine = async (
         label: string,
         kind: "implement" | "follow-up" = "implement",
@@ -1278,7 +1281,7 @@ export async function implementIssue(
             ? `Re-running OpenCode after incomplete implement for ${owner}/${repo}#${issueNumber}`
             : `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
           "implement",
-          queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined,
+          queue.length > 0 ? buildImplementYieldPrompt(firstRunnerType) : undefined,
           incompleteHopped ? { hopFromIncomplete: true } : undefined
         );
         if (quotaSkip) return quotaSkip;
@@ -1294,7 +1297,7 @@ export async function implementIssue(
           const quotaRetry = await runEngine(
             `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
             "implement",
-            BLOCKED_BY_REJECTED_PROMPT
+            buildBlockedByRejectedPrompt(firstRunnerType)
           );
           if (quotaRetry) return quotaRetry;
           const secondYield = await handleYield(true);
@@ -1318,7 +1321,7 @@ export async function implementIssue(
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
                 "follow-up",
-                queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
+                queue.length > 0 ? buildImplementYieldPrompt(firstRunnerType) : buildImplementPrompt(firstRunnerType),
                 { continueSession: true }
               );
               if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);

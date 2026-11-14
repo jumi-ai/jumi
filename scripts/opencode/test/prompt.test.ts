@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  buildConflictPrompt,
+  buildFollowupPrompt,
+  buildImplementPrompt,
+  buildImplementYieldPrompt,
+} from "../src/git.ts";
+import {
   buildIncompleteWritePrompt,
   buildPROpenedPrompt,
   CI_RESULTS_MAX_BYTES,
@@ -34,7 +40,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain('target_remote_ref="origin/main"');
     expect(prompt).toContain("stable refs like jumi/target and HEAD");
     expect(prompt).toContain("git log --oneline jumi/target..HEAD");
-    expect(prompt).toContain("web search/fetch");
+    expect(prompt).toContain("Use `websearch` to find a URL, then fetch that exact URL with `webfetch`");
+    expect(prompt).toContain("do not construct file or release URLs from memory");
   });
 
   test("asks for JUMI_REVIEW.md with the review rubric and no commit or push", () => {
@@ -500,4 +507,105 @@ describe("buildIncompleteWritePrompt", () => {
     expect(prompt).toContain("input to the write tool, not the sticky");
     expect(prompt).not.toContain("Review the pull request above");
   });
+});
+
+describe("web guidance names only the runner's tools", () => {
+  const originalSearxng = process.env.JUMI_SEARXNG_URL;
+  const restore = () => {
+    if (originalSearxng === undefined) delete process.env.JUMI_SEARXNG_URL;
+    else process.env.JUMI_SEARXNG_URL = originalSearxng;
+  };
+
+  interface WebCase {
+    runner: string;
+    configured: boolean;
+    present: string[];
+    absent: string[];
+  }
+
+  // For each runner, with and without the variable: the reviewer prompt, the
+  // blocking-question guidance and the worker prompts name only tools that
+  // runner has. Codex has search but no fetch tool, so its text never names
+  // a fetch tool.
+  const cases: WebCase[] = [
+    {
+      runner: "opencode",
+      configured: false,
+      present: ["`websearch`", "`webfetch`"],
+      absent: ["mcp__searxng__search", "`searxng_search`", "`WebFetch`", "read_url", "no web search", "no fetch tool"],
+    },
+    {
+      runner: "opencode",
+      configured: true,
+      present: ["`searxng_search`", "`webfetch`"],
+      absent: ["`websearch`", "mcp__searxng__search", "`WebFetch`", "no web search", "no fetch tool"],
+    },
+    {
+      runner: "claude",
+      configured: false,
+      present: ["`WebFetch`", "no web search tool"],
+      absent: ["mcp__searxng__search", "`searxng_search`", "`websearch`", "`webfetch`", "read_url"],
+    },
+    {
+      runner: "claude",
+      configured: true,
+      present: ["mcp__searxng__search", "`WebFetch`"],
+      absent: ["`searxng_search`", "`websearch`", "`webfetch`", "no web search tool"],
+    },
+    {
+      runner: "codex",
+      configured: false,
+      present: ["web search", "no fetch tool"],
+      absent: ["`WebFetch`", "`webfetch`", "`websearch`", "searxng", "read_url", "mcp__"],
+    },
+    {
+      runner: "codex",
+      configured: true,
+      present: ["searxng", "no fetch tool"],
+      absent: ["`WebFetch`", "`webfetch`", "`websearch`", "`searxng_search`", "mcp__", "read_url"],
+    },
+    {
+      runner: "agy",
+      configured: false,
+      present: ["`read_url_content`", "no web search tool"],
+      absent: ["searxng", "`WebFetch`", "`websearch`", "`webfetch`", "mcp__"],
+    },
+    {
+      runner: "agy",
+      configured: true,
+      present: ["searxng", "`call_mcp_tool`", "`read_url_content`"],
+      absent: ["mcp__searxng__search", "`searxng_search`", "`websearch`", "`WebFetch`", "`webfetch`"],
+    },
+  ];
+
+  for (const { runner, configured, present, absent } of cases) {
+    test(`${runner} ${configured ? "with" : "without"} searxng: reviewer, blocking and worker texts agree`, () => {
+      try {
+        if (configured) process.env.JUMI_SEARXNG_URL = "https://search.example/";
+        else delete process.env.JUMI_SEARXNG_URL;
+        const review = buildPROpenedPrompt({
+          repo: makeRepo(),
+          pr: makePR(),
+          prFiles: [makeFile()],
+          runnerType: runner,
+          blockingQuestions: true,
+        });
+        const texts = [
+          review,
+          buildImplementPrompt(runner),
+          buildImplementYieldPrompt(runner),
+          buildFollowupPrompt(runner),
+          buildConflictPrompt(runner),
+        ];
+        for (const text of texts) {
+          for (const token of present) expect(text).toContain(token);
+          for (const token of absent) expect(text).not.toContain(token);
+          // Every variant carries the shared evidence rule.
+          expect(text).toContain("do not construct file or release URLs from memory");
+        }
+      } finally {
+        restore();
+      }
+    });
+  }
 });

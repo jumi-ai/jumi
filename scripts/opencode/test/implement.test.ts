@@ -6,7 +6,13 @@ import { claimFilePath, readClaim, stuckStatePath } from "../src/claim.ts";
 import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/dependencies.ts";
 import { engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, runOpenCode } from "../src/git.ts";
+import {
+  BLOCKED_BY_REJECTED_PROMPT,
+  buildImplementPrompt,
+  IMPLEMENT_PROMPT,
+  IMPLEMENT_YIELD_PROMPT,
+  runOpenCode,
+} from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import {
@@ -2195,7 +2201,7 @@ describe("implementIssue", () => {
       expect(calls[1]).toMatchObject({
         model: "claude-opus-5",
         continueSession: true,
-        prompt: IMPLEMENT_PROMPT,
+        prompt: buildImplementPrompt("claude"),
       });
       expect(calls[1]?.task).toContain("Rewritten title");
       expect(calls[2]).toMatchObject({ model: "xai/grok-4.6", hopFromIncomplete: true });

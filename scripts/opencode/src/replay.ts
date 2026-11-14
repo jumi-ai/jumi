@@ -809,6 +809,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
       blockingQuestions: (opts.blockingQuestionAuthors ?? []).some(
         (entry) => entry.trim().toLowerCase() === (effectivePr.user?.login ?? "").trim().toLowerCase()
       ),
+      runnerType: runner.type,
     });
 
     const git = opts.gitRunner ?? runGit;
