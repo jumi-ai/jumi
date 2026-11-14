@@ -4,6 +4,7 @@ import { claudeApiKeyVarNames, RUNNER_AUTH_API_KEY } from "./claude_credentials.
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import { looksLikeProviderUnavailable } from "./infra.ts";
 import { isCreditBalanceText, isQuotaError, isQuotaText } from "./quota.ts";
 import { withLedgerRunUsage } from "./run_usage.ts";
 import {
@@ -26,8 +27,8 @@ export const AGY_CONVERSATION_FILE = "agy-conversation-id";
 export const CODEX_THREAD_FILE = "codex-thread-id";
 export const CODEX_THREAD_USAGE_FILE = "codex-thread-usage";
 
-const PROVIDER_UNAVAILABLE_RE =
-  /rate[\s_-]*limit|too many requests|resource[_\s-]*exhausted|out of quota|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:500|502|503|504)\b|bad gateway|gateway timeout|internal[\s_-]*server[\s_-]*error|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model|is not supported when using[^\n]{0,200}account/i;
+/** @deprecated Import from `./infra.ts` instead. Re-exported here so existing callers keep working. */
+export { looksLikeProviderUnavailable } from "./infra.ts";
 
 export interface ModelHopOptions {
   fallbackModel?: string;
@@ -56,10 +57,6 @@ export interface EngineChainOptions extends ModelHopOptions {
    * conservative and counts the failed runner.
    */
   worktreeDirty?: () => Promise<boolean | undefined>;
-}
-
-export function looksLikeProviderUnavailable(text: string): boolean {
-  return PROVIDER_UNAVAILABLE_RE.test(text);
 }
 
 export function modelProviderPrefix(model: string): string {
@@ -241,16 +238,49 @@ function refuseQuotaHopError(err: unknown, current: NamedRunner, next: NamedRunn
   if (err !== null && typeof err === "object") (err as { hopRefused?: boolean }).hopRefused = true;
 }
 
-function settleQuotaSigterm(opts: EngineRunOptions, result: EngineResult, hopped: boolean): void {
+function settleQuotaSigterm(opts: EngineRunOptions, result: EngineResult, hopped: boolean, runnerName?: string): void {
   if (!shouldDeferQuotaExit(result)) return;
-  recordOpenCodeRun(opts.trace?.kind ?? "review", { ...result, hopped });
+  recordOpenCodeRun(opts.trace?.kind ?? "review", { ...result, hopped }, runnerName);
+}
+
+/** Why a hop happened, for the `opencode_hop` line and alerts. */
+export type HopCause = "quota" | "auth" | "provider-down" | "incomplete";
+
+function hopCauseFromResult(result: EngineResult): HopCause {
+  if (result.auth === true) return "auth";
+  if (isCreditStuckResult(result) || isQuotaStuckResult(result)) return "quota";
+  if (isProviderUnavailableResult(result)) return "provider-down";
+  return "incomplete";
+}
+
+function hopCauseFromError(err: unknown): HopCause {
+  if (err instanceof EngineFailedError) {
+    if (err.auth) return "auth";
+    if (isCreditQuotaError(err) || isQuotaError(err)) return "quota";
+  }
+  return "provider-down";
+}
+
+/** Absolute reset the hop carries, unix seconds, when the result states one. */
+function hopResetFromResult(result: EngineResult): number | null {
+  const atMs = result.quotaResetAtMs;
+  return typeof atMs === "number" && Number.isFinite(atMs) ? Math.floor(atMs / 1000) : null;
+}
+
+/** Absolute reset the hop carries, unix seconds, when the thrown error states a retry delay. */
+function hopResetFromError(err: unknown): number | null {
+  const retryAfterMs = err instanceof EngineFailedError ? err.retryAfterMs : undefined;
+  if (typeof retryAfterMs !== "number" || !Number.isFinite(retryAfterMs)) return null;
+  return Math.floor((Date.now() + retryAfterMs) / 1000);
 }
 
 async function beginHop(
   hop: EngineChainOptions,
   opts: EngineRunOptions,
   from: NamedRunner,
-  to: NamedRunner
+  to: NamedRunner,
+  cause: HopCause,
+  resetAtSeconds?: number | null
 ): Promise<void> {
   const log = hop.logger ?? opts.logger;
   if (log) {
@@ -258,6 +288,10 @@ async function beginHop(
       review: opts.reviewLabel ?? null,
       from_model: from.model,
       to_model: to.model,
+      from_runner: from.name,
+      to_runner: to.name,
+      class: cause,
+      reset_at: resetAtSeconds ?? null,
       hop: true,
     });
   }
@@ -500,7 +534,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
       // The incomplete round produced nothing by definition; when the
       // worktree is verifiably clean the previous runner did not contribute.
       await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
-      await beginHop(hop, opts, runners[index]!, next);
+      await beginHop(hop, opts, runners[index]!, next, "incomplete", null);
       index++;
     }
 
@@ -527,26 +561,26 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
           throw err;
         }
         await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
-        await beginHop(hop, opts, current, next);
+        await beginHop(hop, opts, current, next, "quota", hopResetFromError(err));
         index++;
       }
       if (result) {
         if (!next || !shouldHopQuotaResult(result, opts, current, next)) {
-          settleQuotaSigterm(opts, result, false);
+          settleQuotaSigterm(opts, result, false, current.name);
           return attachNarrowed(refuseQuotaHop(result, current, next), index, runners);
         }
         if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
-          settleQuotaSigterm(opts, result, false);
+          settleQuotaSigterm(opts, result, false, current.name);
           return attachNarrowed(refuseQuotaHop(result, current, next), index, runners);
         }
         try {
           await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
-          await beginHop(hop, opts, current, next);
+          await beginHop(hop, opts, current, next, "quota", hopResetFromResult(result));
         } catch (err) {
-          settleQuotaSigterm(opts, result, false);
+          settleQuotaSigterm(opts, result, false, current.name);
           throw err;
         }
-        settleQuotaSigterm(opts, result, true);
+        settleQuotaSigterm(opts, result, true, current.name);
         index++;
       }
     }
@@ -581,28 +615,28 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
           throw err;
         }
         await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
-        await beginHop(hop, opts, runner, next);
+        await beginHop(hop, opts, runner, next, hopCauseFromError(err), hopResetFromError(err));
         index++;
         continue;
       }
 
       const next = runners[index + 1];
       if (!next || !shouldHopFromResult(result, opts, runner, next)) {
-        settleQuotaSigterm(opts, result, false);
+        settleQuotaSigterm(opts, result, false, runner.name);
         return attachNarrowed(refuseQuotaHop(result, runner, next), index, runners);
       }
       if (!(await leaseAllowsHop(hop, opts.timeoutMs))) {
-        settleQuotaSigterm(opts, result, false);
+        settleQuotaSigterm(opts, result, false, runner.name);
         return attachNarrowed(refuseQuotaHop(result, runner, next), index, runners);
       }
       try {
         await maybeExcludeCleanHop(index, runners, opts.workdir, logForHop);
-        await beginHop(hop, opts, runner, next);
+        await beginHop(hop, opts, runner, next, hopCauseFromResult(result), hopResetFromResult(result));
       } catch (err) {
-        settleQuotaSigterm(opts, result, false);
+        settleQuotaSigterm(opts, result, false, runner.name);
         throw err;
       }
-      settleQuotaSigterm(opts, result, true);
+      settleQuotaSigterm(opts, result, true, runner.name);
       index++;
     }
   };

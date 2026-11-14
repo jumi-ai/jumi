@@ -2,8 +2,9 @@
  * Durable per-run usage ledger.
  *
  * In-process Prometheus counters (`ai_tokens_total`, `jumi_jobs_completed_total`,
- * `jumi_job_duration_seconds_*`, `jumi_opencode_exits_total`) die with the pod
- * that recorded them, so a one-Job-per-ledger-row world cannot rely on them.
+ * `jumi_job_duration_seconds_*`, `jumi_opencode_exits_total`,
+ * `jumi_opencode_runner_exits_total`, `jumi_opencode_runner_quota_reset_seconds`)
+ * die with the pod that recorded them, so a one-Job-per-ledger-row world cannot rely on them.
  * This module stores one row per runner spawn in Postgres (`jumi_run_usage`):
  * runner, model, token counts, exit class, start time, end time. One job row
  * can own many run rows because a job can hop runners.
@@ -23,11 +24,15 @@
 import { agentInstance } from "./agent_instance.ts";
 import {
   classifyOpenCodeExit,
+  classifyRunnerOutcome,
+  classifyThrownRunnerOutcome,
   DURATION_BUCKETS_SECONDS,
   JOB_RESULTS,
   OPENCODE_EXIT_CLASSES,
   type OpenCodeExitClass,
   RUN_KINDS,
+  RUNNER_EXIT_OUTCOMES,
+  type RunnerExitOutcome,
 } from "./control_metrics.ts";
 import { type Engine, EngineFailedError, type EngineResult } from "./engine.ts";
 import type { JobKind, ReviewJobState } from "./review_jobs.ts";
@@ -70,6 +75,8 @@ CREATE INDEX IF NOT EXISTS jumi_run_usage_kind_exit
 
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS clone_seconds DOUBLE PRECISION NULL;
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS build_seconds DOUBLE PRECISION NULL;
+ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS runner_outcome TEXT NOT NULL DEFAULT 'incomplete';
+ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS quota_reset_at TIMESTAMPTZ NULL;
 `;
 
 /** One per-(run, model) ledger row. Multi-model runs write one row per model. */
@@ -87,6 +94,10 @@ export interface NewRunUsageRow {
   tokensReasoning: number;
   sessions: number;
   exitClass: OpenCodeExitClass;
+  /** Per-runner outcome: the exit class, with provider outages split out as `provider_down`. */
+  runnerOutcome: RunnerExitOutcome;
+  /** Last quota reset the provider stated for this run, if any. */
+  quotaResetAt: Date | null;
   startedAt: Date;
   endedAt: Date;
   durationSeconds: number;
@@ -168,6 +179,8 @@ function toRow(
   context: RunUsageContext,
   opts: { source: string; model: string; usage: ModelTokenUsage | undefined; sessions: number },
   exitClass: OpenCodeExitClass,
+  runnerOutcome: RunnerExitOutcome,
+  quotaResetAt: Date | null,
   startedAt: Date,
   endedAt: Date,
   durationSeconds: number
@@ -197,6 +210,8 @@ function toRow(
     tokensReasoning: tokens.reasoning,
     sessions: Math.max(0, Math.floor(opts.sessions)),
     exitClass,
+    runnerOutcome,
+    quotaResetAt,
     startedAt,
     endedAt,
     durationSeconds,
@@ -254,6 +269,13 @@ export function withLedgerRunUsage(engine: Engine): Engine {
           : result
             ? classifyOpenCodeExit(result)
             : classifyThrown(thrown);
+        const runnerOutcome: RunnerExitOutcome = aborted
+          ? "incomplete"
+          : result
+            ? classifyRunnerOutcome(result)
+            : classifyThrownRunnerOutcome(thrown);
+        const quotaResetAt =
+          !aborted && result?.quota != null && result?.quotaResetAtMs != null ? new Date(result.quotaResetAtMs) : null;
         const rows =
           deltas.length > 0
             ? deltas.map((delta) =>
@@ -261,6 +283,8 @@ export function withLedgerRunUsage(engine: Engine): Engine {
                   recording.context,
                   { source: runnerLabel, model: delta.model, usage: mergeUsage(deltas), sessions: delta.sessions },
                   exitClass,
+                  runnerOutcome,
+                  quotaResetAt,
                   startedAt,
                   endedAt,
                   durationSeconds
@@ -271,6 +295,8 @@ export function withLedgerRunUsage(engine: Engine): Engine {
                   recording.context,
                   { source: runnerLabel, model: fallbackModelFor(source, opts.model), usage: undefined, sessions: 0 },
                   exitClass,
+                  runnerOutcome,
+                  quotaResetAt,
                   startedAt,
                   endedAt,
                   durationSeconds
@@ -313,6 +339,20 @@ export interface ExitCountRow {
   count: number;
 }
 
+/** Ledger run counts by (kind, runner, outcome), with provider outages split out. */
+export interface RunnerExitCountRow {
+  kind: string;
+  runner: string;
+  outcome: string;
+  count: number;
+}
+
+/** Latest quota reset a runner's provider stated, unix seconds. */
+export interface RunnerQuotaResetRow {
+  runner: string;
+  resetAtSeconds: number;
+}
+
 export interface DurationRow {
   kind: string;
   exitClass: string;
@@ -325,6 +365,8 @@ export interface RunUsageLedger {
   getRunUsageTokenTotals(): Promise<TokenTotalRow[]>;
   getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
   getRunExitCounts(): Promise<ExitCountRow[]>;
+  getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]>;
+  getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]>;
   getRunDurations(): Promise<DurationRow[]>;
   getReviewSuggestionTotals(): Promise<
     Array<{ runner: string; forge: string; posted: number; dropped: number; addressed: number; reviews: number }>
@@ -350,14 +392,17 @@ function tokenSeriesLabels(agent: string, source: string, model: string, tokenTy
  * class, matching the historical in-process histogram naming).
  */
 export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string> {
-  const [counts, tokenTotals, sessionTotals, exitCounts, durations, suggestionTotals] = await Promise.all([
-    store.countByKindState(),
-    store.getRunUsageTokenTotals(),
-    store.getRunUsageSessionTotals(),
-    store.getRunExitCounts(),
-    store.getRunDurations(),
-    store.getReviewSuggestionTotals(),
-  ]);
+  const [counts, tokenTotals, sessionTotals, exitCounts, runnerExitCounts, quotaResets, durations, suggestionTotals] =
+    await Promise.all([
+      store.countByKindState(),
+      store.getRunUsageTokenTotals(),
+      store.getRunUsageSessionTotals(),
+      store.getRunExitCounts(),
+      store.getRunRunnerExitCounts(),
+      store.getRunnerQuotaResets(),
+      store.getRunDurations(),
+      store.getReviewSuggestionTotals(),
+    ]);
   const lines: string[] = [
     "# HELP ai_tokens_total Cumulative AI tokens recorded in the ledger",
     "# TYPE ai_tokens_total counter",
@@ -431,6 +476,36 @@ export async function renderLedgerMetrics(store: RunUsageLedger): Promise<string
       const value = exitByKey.get(`${kind}\0${exitClass}`) ?? 0;
       lines.push(`jumi_opencode_exits_total{kind="${kind}",class="${exitClass}"} ${value}`);
     }
+  }
+
+  const runnerExitByKey = new Map(
+    runnerExitCounts.map((row) => [`${row.kind}\0${row.runner}\0${row.outcome}`, row.count])
+  );
+  const runnerNames = [
+    ...new Set([...runnerExitCounts.map((row) => row.runner), ...quotaResets.map((row) => row.runner)]),
+  ].sort((a, b) => a.localeCompare(b));
+  const resetByRunner = new Map(quotaResets.map((row) => [row.runner, row.resetAtSeconds]));
+  lines.push("# HELP jumi_opencode_runner_exits_total Engine exits by kind, runner, and outcome (ledger)");
+  lines.push("# TYPE jumi_opencode_runner_exits_total counter");
+  for (const kind of RUN_KINDS) {
+    for (const runner of runnerNames) {
+      for (const outcome of RUNNER_EXIT_OUTCOMES) {
+        const value = runnerExitByKey.get(`${kind}\0${runner}\0${outcome}`) ?? 0;
+        lines.push(
+          `jumi_opencode_runner_exits_total{kind="${kind}",runner="${escapeLabel(runner)}",outcome="${outcome}"} ${value}`
+        );
+      }
+    }
+  }
+
+  lines.push(
+    "# HELP jumi_opencode_runner_quota_reset_seconds Last known quota reset by runner (unix timestamp, 0 when unknown) (ledger)"
+  );
+  lines.push("# TYPE jumi_opencode_runner_quota_reset_seconds gauge");
+  for (const runner of runnerNames) {
+    lines.push(
+      `jumi_opencode_runner_quota_reset_seconds{runner="${escapeLabel(runner)}"} ${resetByRunner.get(runner) ?? 0}`
+    );
   }
 
   const sortedSuggestions = [...suggestionTotals].sort((a, b) =>

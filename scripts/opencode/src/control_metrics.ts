@@ -1,4 +1,5 @@
 import type { EngineResult } from "./engine.ts";
+import { looksLikeProviderUnavailable } from "./infra.ts";
 import type { JobKind } from "./review_jobs.ts";
 import { renderTokenExporterHealth, renderTokenMetrics } from "./token_metrics.ts";
 
@@ -33,6 +34,15 @@ export type JobResult = (typeof JOB_RESULTS)[number];
 export const OPENCODE_EXIT_CLASSES = ["ok", "143", "timeout", "infra", "incomplete", "auth", "quota"] as const;
 export type OpenCodeExitClass = (typeof OPENCODE_EXIT_CLASSES)[number];
 
+/**
+ * Per-runner outcome values: the `OpenCodeExitClass` set plus
+ * `provider_down` for runs that died on a provider outage (5xx, overloaded,
+ * unknown model). The legacy `jumi_opencode_exits_total` keeps counting those
+ * as `incomplete`; only the per-runner series splits them out.
+ */
+export const RUNNER_EXIT_OUTCOMES = [...OPENCODE_EXIT_CLASSES, "provider_down"] as const;
+export type RunnerExitOutcome = (typeof RUNNER_EXIT_OUTCOMES)[number];
+
 export const RUN_KINDS: readonly JobKind[] = ["review", "implement", "follow-up", "conflict"];
 
 export const DURATION_BUCKETS_SECONDS = [15, 30, 60, 120, 300, 600, 1200, 1800, 3600] as const;
@@ -43,6 +53,10 @@ const exitCounts = new Map<string, number>();
 const durationSum = new Map<string, number>();
 const durationCount = new Map<string, number>();
 const durationBuckets = new Map<string, number>();
+/** Per-runner outcomes, keyed `kind\0runner\0outcome`. Runner is the chain entry name, not the model. */
+const runnerExitCounts = new Map<string, number>();
+/** Last known quota reset per runner, unix seconds. Absent means no message has stated one. */
+const runnerQuotaResetSeconds = new Map<string, number>();
 
 function escapeLabel(value: string): string {
   return value.replaceAll("\\", "\\\\").replaceAll("\n", "\\n").replaceAll('"', '\\"');
@@ -64,6 +78,10 @@ function bucketKey(kind: string, result: string, le: string): string {
   return `${kind}\0${result}\0${le}`;
 }
 
+function runnerOutcomeKey(kind: string, runner: string, outcome: string): string {
+  return `${kind}\0${runner}\0${outcome}`;
+}
+
 export function resetControlMetricsForTests(): void {
   webhookCounts.clear();
   jobCounts.clear();
@@ -71,6 +89,8 @@ export function resetControlMetricsForTests(): void {
   durationSum.clear();
   durationCount.clear();
   durationBuckets.clear();
+  runnerExitCounts.clear();
+  runnerQuotaResetSeconds.clear();
 }
 
 export function classifyOpenCodeExit(result: {
@@ -95,6 +115,70 @@ export function classifyOpenCodeExit(result: {
 
 export function webhookEventLabel(event: string | null | undefined): string {
   return event && WEBHOOK_EVENT_SET.has(event) ? event : "unknown";
+}
+
+/**
+ * Runner label for metrics: the chain entry name (`codex`, `claude`, ...),
+ * which survives model cutovers, falling back to the harness type for direct
+ * engine calls. Never the model id.
+ */
+export function runnerNameForMetrics(opts: { runnerName?: string; type?: string }): string {
+  const name = opts.runnerName?.trim();
+  if (name) return name;
+  const type = opts.type?.trim();
+  if (type) return type;
+  return "opencode";
+}
+
+/**
+ * Per-runner outcome for one engine run. Same precedence as
+ * `classifyOpenCodeExit`, with provider outages split out as `provider_down`
+ * instead of folding into `incomplete`. Quota/auth/infra/timeout/143/ok win
+ * over a provider-looking message, matching the hop classifier: a quota
+ * message that also mentions rate limits is still quota.
+ */
+export function classifyRunnerOutcome(result: {
+  status: string;
+  exitCode?: number | null;
+  infra?: boolean;
+  auth?: boolean;
+  quota?: string | null;
+  hopped?: boolean;
+  message?: string | null;
+}): RunnerExitOutcome {
+  if (result.status === "timeout") return "timeout";
+  if (result.infra === true) return "infra";
+  if (result.exitCode === 143) {
+    if (result.quota != null && result.hopped === true) return "quota";
+    return "143";
+  }
+  if (result.auth === true && result.quota == null) return "auth";
+  if (result.quota != null) return "quota";
+  if (result.status === "ok") return "ok";
+  if (result.status === "exit" && looksLikeProviderUnavailable(result.message ?? "")) return "provider_down";
+  return "incomplete";
+}
+
+/** Per-runner outcome for a thrown spawn error (no `EngineResult` to classify). */
+export function classifyThrownRunnerOutcome(err: unknown): RunnerExitOutcome {
+  if (err !== null && typeof err === "object") {
+    const failure = err as { quota?: unknown; auth?: unknown; infra?: unknown; message?: unknown };
+    if (failure.quota === "resetting" || failure.quota === "hard") return "quota";
+    if (failure.auth === true) return "auth";
+    if (failure.infra === true) return "infra";
+    if (typeof failure.message === "string" && looksLikeProviderUnavailable(failure.message)) return "provider_down";
+  }
+  return "incomplete";
+}
+
+/** Runners that have recorded at least one outcome this process, sorted. */
+export function runnerNamesWithOutcomes(): string[] {
+  const names = new Set<string>();
+  for (const key of runnerExitCounts.keys()) {
+    const [, runner] = key.split("\0") as [string, string];
+    if (runner) names.add(runner);
+  }
+  return [...names].sort((a, b) => a.localeCompare(b));
 }
 
 export function recordWebhook(event: string | null | undefined, result: WebhookResult): void {
@@ -145,18 +229,30 @@ export function shouldDeferQuotaExit(result: {
   return result.quota != null && classifyOpenCodeExit(result) === "143";
 }
 
-export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }): void {
+export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?: boolean }, runner?: string): void {
   const exitClass = classifyOpenCodeExit(result);
   addExit(kind, exitClass, result.durationMs);
+  const outcome = classifyRunnerOutcome(result);
+  const label = (runner ?? "").trim() || "opencode";
+  add(runnerExitCounts, runnerOutcomeKey(kind, label, outcome));
+  if (result.quota != null && result.quotaResetAtMs != null && Number.isFinite(result.quotaResetAtMs)) {
+    runnerQuotaResetSeconds.set(label, Math.floor(result.quotaResetAtMs / 1000));
+  }
 }
 
 export function observeEngineRun(
-  opts: { abortSignal?: AbortSignal; deferQuotaExit?: boolean; trace?: { kind?: string } },
+  opts: {
+    abortSignal?: AbortSignal;
+    deferQuotaExit?: boolean;
+    trace?: { kind?: string };
+    runnerName?: string;
+    type?: string;
+  },
   result: EngineResult
 ): EngineResult {
   if (opts.abortSignal?.aborted) return result;
   if (opts.deferQuotaExit && shouldDeferQuotaExit(result)) return result;
-  recordOpenCodeRun(opts.trace?.kind ?? "review", result);
+  recordOpenCodeRun(opts.trace?.kind ?? "review", result, runnerNameForMetrics(opts));
   return result;
 }
 
@@ -224,6 +320,28 @@ export function renderRunMetrics(): string {
       lines.push(`jumi_opencode_exits_total{kind="${kind}",class="${exitClass}"} ${value}`);
     }
   }
+
+  lines.push("# HELP jumi_opencode_runner_exits_total Engine exits by kind, runner, and outcome");
+  lines.push("# TYPE jumi_opencode_runner_exits_total counter");
+  for (const kind of RUN_KINDS) {
+    for (const runner of runnerNamesWithOutcomes()) {
+      for (const outcome of RUNNER_EXIT_OUTCOMES) {
+        const value = runnerExitCounts.get(runnerOutcomeKey(kind, runner, outcome)) ?? 0;
+        lines.push(
+          `jumi_opencode_runner_exits_total{kind="${kind}",runner="${escapeLabel(runner)}",outcome="${outcome}"} ${value}`
+        );
+      }
+    }
+  }
+
+  lines.push(
+    "# HELP jumi_opencode_runner_quota_reset_seconds Last known quota reset by runner (unix timestamp, 0 when unknown)"
+  );
+  lines.push("# TYPE jumi_opencode_runner_quota_reset_seconds gauge");
+  for (const runner of runnerNamesWithOutcomes()) {
+    const value = runnerQuotaResetSeconds.get(runner) ?? 0;
+    lines.push(`jumi_opencode_runner_quota_reset_seconds{runner="${escapeLabel(runner)}"} ${value}`);
+  }
   return `${lines.join("\n")}\n`;
 }
 
@@ -234,9 +352,10 @@ export function renderProcessMetrics(): string {
 /**
  * What engine/worker pods serve on `/metrics`. Exporter health gauges only:
  * the durable `ai_tokens_*` / `ai_sessions` / `jumi_jobs_completed_total` /
- * `jumi_job_duration_seconds_*` / `jumi_opencode_exits_total` series now come
- * from the router's ledger export, and serving the same names here would
- * double totals for anyone scraping every pod. Scrape the router for totals.
+ * `jumi_job_duration_seconds_*` / `jumi_opencode_exits_total` /
+ * `jumi_opencode_runner_exits_total` / `jumi_opencode_runner_quota_reset_seconds`
+ * series now come from the router's ledger export, and serving the same names
+ * here would double totals for anyone scraping every pod. Scrape the router for totals.
  */
 export function renderEphemeralMetrics(): string {
   return renderTokenExporterHealth();

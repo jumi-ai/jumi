@@ -239,6 +239,23 @@ function engineExitMessage(exitCode: number | null, detail: string): string {
   return `agy exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
 }
 
+/**
+ * Structured errors arrive in the result envelope rather than on stderr.
+ * Log them the same redacted, size-capped way as stderr, once when stderr
+ * already says the same thing.
+ */
+function logAgyEnvelopeError(
+  log: (message: string) => void,
+  opts: EngineRunOptions,
+  envelopeError: string | undefined,
+  stderr: string
+): void {
+  const raw = (envelopeError ?? "").trim();
+  if (!raw) return;
+  const capped = limitText(redactEngineText(stripAnsi(raw), opts), "agy errors", AGY_STDERR_MAX_BYTES);
+  if (capped.text && capped.text !== stderr) log(`[agy errors] ${capped.text}`);
+}
+
 /** Why a clean exit is not a completed run, or undefined when it is. */
 export function agyIncompleteReason(parser: AgyStreamParser): string | undefined {
   const result = parser.result();
@@ -392,11 +409,14 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeAgyAuthDeath(message)) {
         if (stderr) log(`[agy stderr] ${stderr}`);
+        logAgyEnvelopeError(log, opts, envelope?.error, stderr);
         const authMessage = providerAuthDeathForRun({ ...opts, type: "agy" });
         observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
       const isInfra = looksLikeInfraStderr(message);
+      if (stderr) log(`[agy stderr] ${stderr}`);
+      logAgyEnvelopeError(log, opts, envelope?.error, stderr);
       observeEngineRun(opts, { status: "exit", infra: isInfra, durationMs, message });
       throw new EngineFailedError(message, isInfra);
     }
@@ -409,6 +429,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
         status: envelope?.status ?? null,
         error: envelope?.error ?? null,
       });
+      logAgyEnvelopeError(log, opts, envelope?.error, stderr);
     }
 
     if (timedOut) {

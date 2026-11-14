@@ -612,6 +612,24 @@ exec sleep 30`
     });
   });
 
+  test("structured envelope errors log even with empty stderr", async () => {
+    const failed = resultEvent({ status: "ERROR", error: "RESOURCE_EXHAUSTED: quota per minute" });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const logs: string[] = [];
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+        logger: (message) => logs.push(message),
+      });
+      expect(result.status).toBe("stuck");
+      expect(result.quota).toBe("resetting");
+      expect(logs.some((line) => line.includes("[agy errors]") && line.includes("RESOURCE_EXHAUSTED"))).toBe(true);
+    });
+  });
+
   test("signed-out keyring token is auth death", async () => {
     // Verified against Antigravity docs/issues: headless `authentication
     // required`, `Please sign in`, and keyring failures like `You are not

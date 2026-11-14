@@ -26,7 +26,7 @@ import { codexThreadPath, codexThreadUsagePath, looksLikeProviderUnavailable } f
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
-import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { parseQuotaResetAtMs, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
 
@@ -155,6 +155,19 @@ export function looksLikeCodexUsageLimit(text: string | null | undefined): Quota
 
 function engineExitMessage(exitCode: number | null, detail: string): string {
   return `codex exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
+}
+
+/**
+ * Log what the provider said on a non-ok exit: stderr as before, plus the
+ * structured error events when they add anything. Usage limits and auth death
+ * arrive as JSON `error` / `turn.failed` events on stdout with empty stderr,
+ * so without this the provider's message (including its reset time) is lost.
+ * Both strings arrive already redacted and size-capped; identical content
+ * logs once.
+ */
+function logCodexFailure(log: (message: string) => void, stderr: string, errors: string): void {
+  if (stderr) log(`[codex stderr] ${stderr}`);
+  if (errors && errors !== stderr) log(`[codex errors] ${errors}`);
 }
 
 function redactApiKeys(text: string): string {
@@ -402,17 +415,19 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     if (runError) {
       const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
       if (auth || looksLikeCodexAuthDeath(message)) {
-        if (stderr) log(`[codex stderr] ${stderr}`);
+        logCodexFailure(log, stderr, errors);
         const authMessage = providerAuthDeathForRun({ ...opts, type: "codex" });
         observeEngineRun(opts, { status: "exit", infra: false, auth: true, durationMs, message: authMessage });
         throw new EngineFailedError(authMessage, false, { auth: true });
       }
       const isInfra = looksLikeInfraStderr(message);
+      logCodexFailure(log, stderr, errors);
       observeEngineRun(opts, { status: "exit", infra: isInfra, durationMs, message });
       throw new EngineFailedError(message, isInfra);
     }
 
     if (timedOut) {
+      logCodexFailure(log, stderr, errors);
       return observeEngineRun(opts, {
         status: "timeout",
         exitCode,
@@ -428,6 +443,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       // Fails closed like agy's empty SUCCESS: a non-ok result, so the parent
       // fails the job instead of running its write-only retry turn.
       if (opts.trace?.kind === "review" && (await reviewArtifactMissing(opts.workdir))) {
+        if (errors && errors !== stderr) log(`[codex errors] ${errors}`);
         return observeEngineRun(opts, {
           status: "exit",
           exitCode: 0,
@@ -441,7 +457,8 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (quota) {
-      if (stderr) log(`[codex stderr] ${stderr}`);
+      logCodexFailure(log, stderr, errors);
+      const quotaResetAtMs = parseQuotaResetAtMs(signal);
       return observeEngineRun(opts, {
         status: "stuck",
         exitCode,
@@ -450,11 +467,12 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         infra: false,
         durationMs,
         quota,
+        ...(quotaResetAtMs != null ? { quotaResetAtMs } : {}),
       });
     }
 
     if (auth) {
-      if (stderr) log(`[codex stderr] ${stderr}`);
+      logCodexFailure(log, stderr, errors);
       return observeEngineRun(opts, {
         status: "exit",
         exitCode,
@@ -466,7 +484,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       });
     }
 
-    if (stderr) log(`[codex stderr] ${stderr}`);
+    logCodexFailure(log, stderr, errors);
     // The message feeds the chain's hop classifier, so it is built from
     // `signal` only: agent message text stays in `stdout`.
     const message = providerDown ? signal : engineExitMessage(exitCode, signal);

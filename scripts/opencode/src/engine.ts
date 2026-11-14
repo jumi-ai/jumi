@@ -67,6 +67,13 @@ export interface EngineResult {
   durationMs?: number;
   quota?: QuotaClass;
   retryAfterMs?: number;
+  /**
+   * Absolute unix timestamp (ms) when the provider says the quota resets, if
+   * the quota message actually states one. Set by the harness on quota
+   * results only; metrics record it per runner and the hop line carries it.
+   * Absent when the message carries no reset time — never guessed.
+   */
+  quotaResetAtMs?: number;
   /** The runner that actually produced this result (after any hop). */
   runner?: RunnerStamp;
   /** Position of `runner` in the engine chain. Model text is not unique. */
