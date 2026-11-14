@@ -399,7 +399,17 @@ describe("review engine sandbox wiring", () => {
     try {
       const refuse = { available: false as const, reason: "unit-test probe says no Landlock" };
       setReviewSandboxProbeForTests(refuse);
-      const opts = { prompt: "p", model: "m", workdir, home, sanitizeEnv: true as const };
+      // Reviewer spawns always carry the forge host (repo_setup sets
+      // GIT_AUTH_HOST); without it agy's pre-gate forge-deny setup refuses
+      // first, which would grade the deny setup instead of the sandbox gate.
+      const opts = {
+        prompt: "p",
+        model: "m",
+        workdir,
+        home,
+        sanitizeEnv: true as const,
+        extraEnv: { GIT_AUTH_HOST: "forge.example" },
+      };
       const review = { kind: "review" as const, owner: "o", repo: "r" };
       for (const run of [
         () => runOpenCode({ ...opts, trace: review }),
@@ -445,7 +455,17 @@ esac
       await writeFile(join(dir, "jumi-sandbox-stub"), stub);
       await chmod(join(dir, "jumi-sandbox-stub"), 0o755);
       process.env[REVIEW_SANDBOX_WRAPPER_ENV] = join(dir, "jumi-sandbox-stub");
-      const opts = { prompt: "p", model: "m", workdir, home, sanitizeEnv: true as const };
+      // Same forge-host seeding as the refusal test: reviewer spawns always
+      // carry GIT_AUTH_HOST, and agy's forge-deny setup needs it before the
+      // sandbox gate is reached.
+      const opts = {
+        prompt: "p",
+        model: "m",
+        workdir,
+        home,
+        sanitizeEnv: true as const,
+        extraEnv: { GIT_AUTH_HOST: "forge.example" },
+      };
       const review = { kind: "review" as const, owner: "o", repo: "r" };
       // Codex refuses an empty review (no artifact); seed one so the wrapped path is what is graded.
       await writeFile(join(workdir, "JUMI_REVIEW.md"), "# findings\n");
