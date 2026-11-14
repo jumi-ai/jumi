@@ -28,7 +28,7 @@ import { childScratchDir } from "./engine_scratch.ts";
  *   `reviewShellWrapperPrefix`, so a shell that prints its env learns nothing.
  * - Per-runner wiring is Jumi-owned (never from the checkout): OpenCode via a
  *   Jumi-owned V2 plugin (`Plugin.define` with `ctx.tool.hook("execute.before")`
- *   for `bash` plus `ctx.shell.hook("create.before")`), Claude via a
+ *   for the shell tool plus `ctx.shell.hook("create.before")`), Claude via a
  *   Jumi-owned `PreToolUse` hook (`updatedInput` rewrite), Codex/Agy via
  *   their `PreToolUse` equivalents. A runner that cannot be wrapped refuses
  *   instead of running unsandboxed.
@@ -677,9 +677,21 @@ export function agyReviewHookMatcher(): string {
  * OpenCode V2 plugin (Jumi-owned, lives under the harness temp root outside
  * the checkout). Registered as a plugin *directory* under the `plugins`
  * (plural) key: V2 loads `index.js` at the directory root and ignores a
- * single-file path. Rewrites `bash` through the shell wrapper, wraps every
- * shell creation, and denies reads of the harness temp / credential files.
+ * single-file path. Denies reads of the harness temp / credential files in
+ * `execute.before`, wraps every shell creation in `create.before`, and writes
+ * a ready marker after both hook registrations (the image probe asserts it,
+ * so a plugin that loads but drops a hook fails the case instead of running
+ * half-wrapped).
+ *
+ * Wrapping lives only in `create.before` (exactly once per shell): the pinned
+ * binary (2.2.7) ships the shell tool as `shell` and every shell creation
+ * passes through this hook, so a second rewrite in `execute.before` would
+ * only double-wrap — execing the wrapper inside its own Landlock domain,
+ * where the wrapper path itself is denied unless it sits in the allow-list.
+ * Each hook's firing is distinctly observable: wrapped HOME proves the shell
+ * hook, blocked reads prove the tool hook.
  */
+export const REVIEW_SHELL_PLUGIN_READY_NAME = "review-shell-plugin.ready";
 export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
   const shellEnv = JSON.stringify(sandboxedShellEnv(input.scratchDir));
@@ -690,8 +702,10 @@ export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): stri
     input.workdir,
     reviewShellDeniedReadPrefixes(input)
   );
+  const readyPath = JSON.stringify(join(input.harnessTempDir, REVIEW_SHELL_PLUGIN_READY_NAME));
   return `// Jumi-owned review shell sandbox (jumi#550). Loaded from the harness temp root, never the checkout.
 import { Plugin } from "@opencode/plugin";
+import { writeFileSync } from "node:fs";
 export default Plugin.define({
   id: "jumi-review-shell-sandbox",
   async setup(ctx) {
@@ -703,18 +717,14 @@ ${denyPredicate
     const shellEnv = ${shellEnv};
     const scrubKeys = ${scrubKeys};
     const fileTools = ${fileTools};
+    const readyPath = ${readyPath};
     const escape = (cmd) => "'" + cmd.replace(/'/g, "'\\\\''") + "'";
+    // File reads only: shell wrapping lives in create.before below (exactly
+    // once). A rewrite here too would double-wrap.
     await ctx.tool.hook("execute.before", (event) => {
       const tool = event.tool;
-      const toolInput = event.input ?? {};
-      if (tool === "bash") {
-        const cmd = toolInput.command;
-        if (typeof cmd === "string" && cmd.length > 0) {
-          toolInput.command = prefix + " sh -c " + escape(cmd);
-        }
-        return;
-      }
       if (typeof tool === "string" && fileTools.includes(tool)) {
+        const toolInput = event.input ?? {};
         const p = toolInput.filePath ?? toolInput.path;
         if (isDenied(p)) throw new Error("Blocked: review sandbox denies reads of agent credentials");
       }
@@ -727,6 +737,9 @@ ${denyPredicate
       for (const [key, value] of Object.entries(shellEnv)) event.env[key] = value;
       for (const key of scrubKeys) delete event.env[key];
     });
+    // Both hooks registered: a load that drops one fails the image probe,
+    // which asserts this marker, instead of running half-wrapped.
+    writeFileSync(readyPath, "ready");
   },
 });
 `;

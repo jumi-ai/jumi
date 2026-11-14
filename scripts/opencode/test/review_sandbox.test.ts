@@ -26,6 +26,7 @@ import {
   openCodeReviewShellPluginCode,
   REVIEW_SANDBOX_MIN_ABI,
   REVIEW_SANDBOX_WRAPPER_ENV,
+  REVIEW_SHELL_PLUGIN_READY_NAME,
   resolveAgentBin,
   resolveReviewSpawnSandbox,
   resolveWorktreeGitDirsSync,
@@ -368,11 +369,18 @@ describe("resolveReviewSpawnSandbox", () => {
           homeDir: "/data",
           wrapperPath: "/w/review_sandbox.py",
         };
-        // OpenCode V2 plugin rewrites bash and denies harness-temp reads.
+        // OpenCode V2 plugin: file reads denied in execute.before, every
+        // shell wrapped exactly once in create.before (a rewrite in both
+        // would double-wrap and fail where the wrapper sits outside the
+        // shell allow-list).
         const plugin = openCodeReviewShellPluginCode(input);
         expect(plugin).toContain("Plugin.define");
         expect(plugin).toContain('ctx.tool.hook("execute.before"');
         expect(plugin).toContain('ctx.shell.hook("create.before"');
+        expect(plugin).not.toContain("toolInput.command");
+        // Setup writes a ready marker after both registrations so the image
+        // probe can prove the load (a dropped hook fails instead of passing).
+        expect(plugin).toContain(REVIEW_SHELL_PLUGIN_READY_NAME);
         expect(plugin).toContain("jumi-review-shell-sandbox");
         expect(plugin).toContain("/w/review_sandbox.py");
         expect(plugin).toContain(harnessTemp);

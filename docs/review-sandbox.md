@@ -76,10 +76,14 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
   in a job pod yet — the image job owns that confirmation.
 - `src/webfetch_probe.ts` (review section) registers the production OpenCode
   review plugin dir in a scratch global config and drives the installed
-  `opencode` binary through it: `bash` must come back wrapped (HOME is the
-  sandbox home), `read`/`list` of the harness token must come back blocked.
-  A binary that never loads the plugin or drops either hook fails the case
-  instead of running unwrapped.
+  `opencode` binary through it: `shell` (the real 2.2.7 shell-tool name; a
+  `bash` call aliases to it before hooks run) must come back wrapped (HOME is
+  the sandbox home), `read`/`list` of the harness token must come back
+  blocked. The stub retries the shell call (bounded) until HOME comes back
+  wrapped — the plugin loads asynchronously with the first run, so the first
+  calls can race registration — and the plugin's setup writes a ready marker
+  the probe asserts, so a binary that never loads the plugin or drops either
+  hook fails the case instead of running unwrapped.
 
 ## Per-runner wiring
 
@@ -87,18 +91,22 @@ All wiring is Jumi-owned (never from the checkout). The agent spawns
 unsandboxed; its shells are wrapped separately:
 
 - OpenCode: Jumi-owned V2 plugin (`Plugin.define` with
-  `ctx.tool.hook("execute.before")` for `bash` plus `ctx.shell.hook("create.before")`,
+  `ctx.tool.hook("execute.before")` denying reads plus
+  `ctx.shell.hook("create.before")` wrapping every shell creation,
   generated per spawn as `<outside-temp>/xdg-config/opencode/plugin/jumi-review-shell-sandbox/index.js`
   and registered as a directory under the V2 `plugins` key of the Jumi-owned
-  global `opencode.json`). The tool hook rewrites `bash` input through the shell
-  wrapper prefix and denies reads of the harness temp / credential files
+  global `opencode.json`). The tool hook denies reads of the harness temp /
+  credential files
   (`read`/`edit`/`write`/`grep`/`glob`/`list` — reads, writes, search, and
   listing, so `list /tmp` cannot reveal the harness temp either). Candidates
   are normalized (relative paths resolve against the checkout, `..`/`.`/extra
   slashes collapse) and denied bidirectionally: a path inside a denied prefix
   *or* an ancestor of one is denied. The shell hook rewraps every shell
-  creation and pins
-  HOME/XDG/TMPDIR at scratch while scrubbing provider keys.
+  creation (exactly once — the tool hook never rewrites shell commands, since
+  a second wrap would exec the wrapper inside its own Landlock domain) and pins
+  HOME/XDG/TMPDIR at scratch while scrubbing provider keys. The plugin's
+  setup writes a ready marker after both registrations so the image probe can
+  prove the load instead of running half-wrapped.
 - Claude: Jumi-owned `PreToolUse` hook (`updatedInput` rewrite) in a
   `--plugin-dir` plugin under the outside harness temp. Same rewrite, and the
   deny covers `Read`/`Edit`/`Write`/`Grep`/`Glob` so the token is not reachable

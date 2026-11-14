@@ -898,7 +898,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     }
     const args = buildOpenCodeArgs(opts);
     // Part-2 (jumi#550): the agent runs unsandboxed so it keeps its login and
-    // MCP token; every `bash` tool call is wrapped separately by this
+    // MCP token; every shell-tool call is wrapped separately by this
     // Jumi-owned plugin (outside the checkout). The gate fails closed when
     // Landlock is unavailable, so pull code never runs unsandboxed.
     if (isReview) {
@@ -931,7 +931,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           false
         );
       }
-      log(`opencode review shell sandbox: bash wrapped via ${pluginDir}/index.js`);
+      log(`opencode review shell sandbox: shells wrapped via ${pluginDir}/index.js`);
     }
     const spawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
     const spawnedAt = Date.now();
