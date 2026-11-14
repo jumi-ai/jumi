@@ -573,6 +573,9 @@ export async function handleGithubWebhookEvent(
           ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
             ? { baseBranch: payload.pull_request.base.ref }
             : {}),
+          ...(typeof payload.repository?.default_branch === "string" && payload.repository.default_branch
+            ? { defaultBranch: payload.repository.default_branch }
+            : {}),
         });
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         if (result.queued) {

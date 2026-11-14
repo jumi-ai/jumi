@@ -29,6 +29,7 @@ import {
   latestStatuses,
   needsCiFollowUp,
   recordCiHandled,
+  resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
   summarizeCiChecks,
@@ -1267,5 +1268,44 @@ describe("required-context pending", () => {
     } finally {
       await rm(home, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ci gate wait resolution", () => {
+  test("no default ref never reads the base branch file", async () => {
+    let reads = 0;
+    const api = {
+      ...emptyCiMethods(),
+      getRepo: async () => Promise.reject(new Error("boom")),
+      getRepoFile: async () => {
+        reads += 1;
+        return { found: true, content: "ci_gate:\n  wait: none\n" };
+      },
+    };
+    const gate = await resolveCiGate(api, { owner: "o", repo: "r", prNumber: 7, baseBranch: "main" });
+    expect(gate.wait).toBe("required");
+    expect(reads).toBe(0);
+  });
+
+  test("default branch file decides the mode", async () => {
+    const api = {
+      ...emptyCiMethods(),
+      getRepoFile: async (_o: string, _r: string, _p: string, ref: string) => ({
+        found: true,
+        content: `ci_gate:\n  wait: none\n# ref ${ref}\n`,
+      }),
+    };
+    const gate = await resolveCiGate(api, { owner: "o", repo: "r", prNumber: 7, defaultBranch: "main" });
+    expect(gate.wait).toBe("none");
+  });
+
+  test("getRepo resolves the default ref when none is given", async () => {
+    const api = {
+      ...emptyCiMethods(),
+      getRepo: async () => ({ default_branch: "main" }),
+      getRepoFile: async () => ({ found: true, content: "ci_gate:\n  wait: all\n" }),
+    };
+    const gate = await resolveCiGate(api, { owner: "o", repo: "r", prNumber: 7 });
+    expect(gate.wait).toBe("all");
   });
 });

@@ -103,6 +103,7 @@ export async function classifyCloserWork(opts: {
     issueNumber: opts.issueNumber,
     skipLatches: opts.skipLatches,
     baseBranch: opts.pr.base.ref,
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
   });
   const authorListed = isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
   let hasJumiCommit: boolean | undefined;

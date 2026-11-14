@@ -100,6 +100,7 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
   effectiveBlockingQuestionAuthors,
+  effectiveCiGateWait,
   effectiveConflictRounds,
   effectiveFollowupIgnoreLogins,
   effectiveFollowupRounds,
@@ -1059,6 +1060,7 @@ export async function implementFollowUp(
   let effectiveFollowupIgnoreUpFront = opts.followupIgnoreLogins;
   let effectiveTrustedUpFront = opts.trustedSenderLogins;
   let effectiveIgnoreLabelUpFront = opts.ignoreConflictsLabel;
+  let ciGateWaitUpFront: import("./repo_settings.ts").CiGateWait = "required";
   try {
     const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
     if (defaultBranch) {
@@ -1072,6 +1074,7 @@ export async function implementFollowUp(
           maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
         };
       }
+      ciGateWaitUpFront = effectiveCiGateWait(load);
       effectiveBlockingUpFront = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
       effectiveFollowupIgnoreUpFront = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, load);
       effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, load);
@@ -1151,13 +1154,16 @@ export async function implementFollowUp(
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
   let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
-  const requiredContexts = await resolveRequiredCiContexts(opts.api, {
-    owner,
-    repo,
-    issueNumber,
-    baseBranch: pr.base.ref,
-    log,
-  });
+  let requiredContexts: readonly string[] | undefined;
+  if (ciGateWaitUpFront !== "all" && ciGateWaitUpFront !== "none") {
+    requiredContexts = await resolveRequiredCiContexts(opts.api, {
+      owner,
+      repo,
+      issueNumber,
+      baseBranch: pr.base.ref,
+      log,
+    });
+  }
   const inspectOpts = {
     api: opts.api,
     owner,
@@ -1168,6 +1174,7 @@ export async function implementFollowUp(
     skipLatches: latches,
     log,
     ...(requiredContexts ? { requiredContexts } : {}),
+    ...(ciGateWaitUpFront !== "required" ? { wait: ciGateWaitUpFront } : {}),
   };
   let ci: CiInspection = {
     sha: pr.head.sha,

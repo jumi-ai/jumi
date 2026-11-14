@@ -46,6 +46,8 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `ignore_conflicts_label` | non-blank string | the deployment value (`IGNORE_CONFLICTS_LABEL`, default `ignore-conflicts`) | Overrides `IGNORE_CONFLICTS_LABEL` for this repository. Behaviour of the label is unchanged. A blank or non-string value makes the whole file invalid | Override: the file value wins when present; the deployment value stays the default when the key is absent |
 | `pickup_label` | non-blank string | `jumi` | The GitHub label that hands an issue or pull to Jumi. Covers every place the `jumi` label is used on GitHub: issue pickup, handing over a pull, and the marker Jumi leaves on taken-over pulls (removing it still cancels). Gitea keeps using assignment and ignores this key. Because the label webhook reads the repository's default-branch settings for the name, a missing, unreadable, or invalid file falls back to `jumi`. A blank or non-string value makes the whole file invalid. Logins are not involved; label matching stays case-insensitive | No deployer setting (the deployment default is `jumi`) |
 | `mode` | `"full"` \| `"review-only"` \| `"off"` | `"full"` | `review-only` keeps reviews and the review status working as today but starts no implement, follow-up, or conflict job (handing work to Jumi leaves one note saying worker jobs are turned off). `off` starts no job of any kind, posts no status, and comments nothing. The mode is checked before a runner starts so a restricted repository costs no model time; it is read when a job starts, so a running job finishes while a queued job follows the new mode. Auto-merge is never scheduled in a restricted mode | No deployer setting |
+| `ci_gate` | mapping (may be empty) | `{}` (waits for required checks) | Chooses which CI checks gate reviews (see the `ci_gate.wait` row). Read from the default branch like every other key; a non-mapping value makes the whole file invalid | No deployer setting |
+| `ci_gate.wait` | `"all"` \| `"required"` \| `"none"` | `"required"` | `required` waits only for the base branch's required checks, falling back to every check when protection can't be read or names no required check besides `jumi/opencode-review`; `all` waits for every non-Jumi check whatever branch protection says (the pre-#502 behaviour, never resolves the required set); `none` never waits for pending or absent CI — the router gate dispatches at once and the review job runs, listing pending checks as still running so the reviewer never reads them as green. A red check fails the review and runs the CI follow-up in every mode. `ci_gate` must be a mapping, `wait` one of the three strings; unknown sub-keys and dash/camel spellings (`ci-gate`, `ciGate`) are rejected with the usual "did you mean" error, and any invalid value makes the whole file invalid | No deployer setting |
 | `timeouts` | mapping (may be empty) | `{}` (no overrides) | Per-kind run timeouts in whole minutes (see the four rows below). Read once when the job starts; a change never affects an already running job. Everything derived from the timeout follows the effective value for that job: the queue lease length and the credential-refresh budget at job start | Each present key is a ceiling against its deployer maximum (below); a smaller, non-integer, or non-numeric value makes the whole file invalid |
 | `timeouts.review` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` | How long reviews may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout, so a repository can only shorten out of the box); a value above the maximum runs with the maximum |
 | `timeouts.implement` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` (worker default is 4h) | How long first implementations may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS`, same rule as `review`. Each kind has its own deployer maximum |
@@ -96,6 +98,9 @@ pickup_label: jumi # override for the GitHub pickup label; Gitea ignores it
 
 mode: full # full (default) | review-only | off
 
+ci_gate: # absent (or wait absent) means required: wait for required checks, falling back to every check
+  wait: required # all waits for every check regardless of branch protection; none reviews without waiting
+
 timeouts: # whole minutes per kind; absent keys run with the deployment timeout
   review: 10 # ceiling: OPENCODE_TIMEOUT_MAX_MS
   implement: 120 # ceiling: OPENCODE_TIMEOUT_MAX_MS
@@ -118,6 +123,23 @@ Review-only repository (reviews keep working; no implement, follow-up, or confli
 mode: review-only
 ```
 
+Review before slow CI finishes (the review does not wait for pending or absent CI; pending
+checks are still listed as still running, and red checks still fail the review as today).
+Note that it spends review time on pull requests whose tests may still fail:
+
+```yaml
+ci_gate:
+  wait: none
+```
+
+Wait for every check regardless of branch protection (the pre-#502 behaviour; the required
+set is never resolved):
+
+```yaml
+ci_gate:
+  wait: all
+```
+
 ## What happens when the file is missing, invalid, or unreadable
 
 "Unreadable" is a failed read (for example a forge error); the parent logs it. Missing
@@ -136,6 +158,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Ignore-conflicts label (`ignore_conflicts_label`) | Deployment value (`IGNORE_CONFLICTS_LABEL`) | Deployment value still applies | Deployment value (fail-open, logged) |
 | Pickup label (`pickup_label`, GitHub only; Gitea ignores it) | `jumi` | `jumi`: a custom label in an invalid file changes nothing, and `jumi` no longer starts work in a repo whose valid file names another label | `jumi` (fail-open, logged) |
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |
+| CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 
 Two related guards: a pull request that changes `.jumi.yml` never auto-merges through

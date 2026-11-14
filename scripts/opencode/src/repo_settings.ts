@@ -60,6 +60,13 @@ export interface RepoSettings {
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
   /**
+   * CI gate wait mode. `undefined` (key absent) means `required`: wait only
+   * for the base branch's required checks, falling back to every check when
+   * protection can't be read. `all` waits for every non-Jumi check whatever
+   * branch protection says. `none` never waits for pending or absent CI.
+   */
+  ciGate?: { wait: CiGateWait };
+  /**
    * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
    * behavior (first allowed method on GitHub, default style on Gitea).
    * A present value must be one the repository allows; otherwise nothing is
@@ -71,6 +78,16 @@ export interface RepoSettings {
 export type RepoMode = "full" | "review-only" | "off";
 
 export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+/** CI gate wait mode: `required` waits only for required checks, `all` waits for every check, `none` never waits. */
+export type CiGateWait = "all" | "required" | "none";
+
+export const CI_GATE_WAITS: readonly CiGateWait[] = ["all", "required", "none"];
+
+export const DEFAULT_CI_GATE_WAIT: CiGateWait = "required";
+
+/** Known sub-keys of the `ci_gate` mapping. */
+export const CI_GATE_KEYS = ["wait"] as const;
 
 export const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
 export type RepoAutomergeMethod = (typeof AUTOMERGE_METHODS)[number];
@@ -102,6 +119,7 @@ export const KNOWN_KEYS = new Set([
   "ignore_conflicts_label",
   "pickup_label",
   "mode",
+  "ci_gate",
 ]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
@@ -188,6 +206,27 @@ function parseTimeoutsValue(value: unknown): TimeoutsParse {
     (timeouts as Record<string, number>)[key] = minutes;
   }
   return { ok: true, timeouts };
+}
+
+type CiGateParse = { ok: true; ciGate?: { wait: CiGateWait } } | { ok: false; error: string };
+
+function parseCiGateValue(value: unknown): CiGateParse {
+  if (value === undefined) return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"ci_gate" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!(CI_GATE_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, CI_GATE_KEYS, "ci_gate") };
+    }
+  }
+  if (!("wait" in record) || record.wait === undefined) return { ok: true, ciGate: { wait: "required" } };
+  const wait = record.wait;
+  if (typeof wait !== "string" || !(CI_GATE_WAITS as readonly string[]).includes(wait)) {
+    return { ok: false, error: `"ci_gate.wait" must be one of "all", "required", "none"` };
+  }
+  return { ok: true, ciGate: { wait: wait as CiGateWait } };
 }
 
 function parserErrorMessage(err: unknown): string {
@@ -368,6 +407,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     mode = record.mode as RepoMode;
   }
+  let ciGate: { wait: CiGateWait } | undefined;
+  if ("ci_gate" in record && record.ci_gate !== undefined) {
+    const parsed = parseCiGateValue(record.ci_gate);
+    if (!parsed.ok) return parsed;
+    ciGate = parsed.ciGate;
+  }
   let automergeMethod: RepoAutomergeMethod | undefined;
   if ("automerge_method" in record && record.automerge_method !== undefined) {
     if (
@@ -400,6 +445,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
+    ...(ciGate !== undefined ? { ciGate } : {}),
     ...(automergeMethod !== undefined ? { automergeMethod } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
@@ -464,6 +510,7 @@ export type RepoSettingsLoad =
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
       mode: RepoMode;
+      ciGate?: { wait: CiGateWait };
       automergeMethod?: RepoAutomergeMethod;
     }
   | { state: "invalid"; error: string };
@@ -559,6 +606,7 @@ export async function loadRepoSettings(
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
+    ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
     ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
   };
 }
@@ -611,6 +659,18 @@ export async function loadDefaultBranchSettings(
 export function repoMode(settings: RepoSettingsLoad): RepoMode {
   if (settings.state !== "valid") return "full";
   return settings.mode;
+}
+
+/**
+ * Effective CI gate wait mode from a loaded settings file. Missing, invalid,
+ * or absent `ci_gate`/`wait` is today's `#502` behaviour (`required`):
+ * nothing ever falls back to `none`.
+ */
+export function effectiveCiGateWait(load: RepoSettingsLoad): CiGateWait {
+  if (load.state !== "valid") return DEFAULT_CI_GATE_WAIT;
+  const wait = load.ciGate?.wait;
+  if (wait === "all" || wait === "none" || wait === "required") return wait;
+  return DEFAULT_CI_GATE_WAIT;
 }
 
 /**
