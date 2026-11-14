@@ -27,6 +27,7 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
 
 /** stream-json keeps per-step usage even when the child is killed before `result`. */
@@ -329,9 +330,12 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,
     // cleaned up afterwards so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
+    // Review spawns run confined: the wrapper argv fails closed when
+    // Landlock is unavailable, so pull code never runs unsandboxed.
+    const agySpawnArgv = resolveReviewSpawnSandbox(opts, args, env, log).argv;
     const proc = (() => {
       try {
-        return Bun.spawn(args, {
+        return Bun.spawn(agySpawnArgv, {
           cwd: opts.workdir,
           stdin: "ignore",
           stdout: "pipe",

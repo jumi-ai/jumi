@@ -27,6 +27,7 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { parseQuotaResetAtMs, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
 
@@ -334,14 +335,18 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         throw new EngineFailedError("codex spawn refused: git token present but no credential proxy available", true);
       }
     }
+    const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url);
+    // Review spawns run confined: the wrapper argv fails closed when
+    // Landlock is unavailable, so pull code never runs unsandboxed.
+    const codexSpawnArgv = resolveReviewSpawnSandbox(opts, args, codexEnv, log).argv;
     const proc = (() => {
       try {
-        return Bun.spawn(args, {
+        return Bun.spawn(codexSpawnArgv, {
           cwd: opts.workdir,
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
           stderr: "pipe",
-          env: buildCodexEnv(opts, tempRoot, gitProxy?.url),
+          env: codexEnv,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

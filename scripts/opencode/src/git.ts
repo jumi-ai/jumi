@@ -48,6 +48,7 @@ import {
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
 } from "./quota.ts";
+import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import { recordOpenCodeDb } from "./token_metrics.ts";
 import { childAuthFile, ensureXaiCredentialForJob, isXaiModel, type XaiChildCredential } from "./xai_auth.ts";
 
@@ -699,10 +700,13 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbBefore = await pathSizeBytes(dbPath);
     }
     const args = buildOpenCodeArgs(opts);
+    // Review spawns run confined: the wrapper argv fails closed when
+    // Landlock is unavailable, so pull code never runs unsandboxed.
+    const spawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
     const spawnedAt = Date.now();
     const proc = (() => {
       try {
-        return Bun.spawn(args, {
+        return Bun.spawn(spawnArgv, {
           cwd: opts.workdir,
           stdin: Bun.file(tmpPath),
           stdout: "pipe",
