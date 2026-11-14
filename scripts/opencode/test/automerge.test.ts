@@ -1229,3 +1229,28 @@ describe("router mailbox automerge label path", () => {
     expect(api2.notes[0]).toContain("turned off");
   });
 });
+
+describe("suggestion hold does not change scheduling", () => {
+  test("suggestions_hold_merge: false still schedules", async () => {
+    const api = makeApi({
+      getRepoFile: async () => ({ found: true, content: "automerge: true\nsuggestions_hold_merge: false\n" }),
+    });
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+      api.scheduled.push({});
+    };
+    const result = await scheduleAutomergeForPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: true });
+    expect(api.scheduled).toHaveLength(1);
+  });
+});

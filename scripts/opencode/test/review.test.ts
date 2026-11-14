@@ -36,6 +36,7 @@ import {
   makeRepo,
   makeUser,
 } from "./fixtures.ts";
+import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -4233,5 +4234,130 @@ describe("publishReviewResult", () => {
       },
     ]);
     expect((reviews[0] as { body: string }).body).not.toContain("jumi-findings-list");
+  });
+});
+
+describe("suggestion hold", () => {
+  const holdOpts = {
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 7,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+  };
+  const suggestionMarkdown = "src/foo.ts:12: 💡 simpler: extract a helper\n<!-- jumi-check: success; 1 suggestion -->";
+
+  function holdApi(
+    statuses: Array<{ state: string; description?: string; context?: string }>,
+    settingsContent: string | undefined,
+    headSha = "headsha"
+  ) {
+    return makeApi({
+      getPR: async () => makePR({ head: makeBranch({ sha: headSha }) }),
+      getPRFiles: async () => [makeFile()],
+      getRepoFile: async () =>
+        settingsContent === undefined ? { found: false } : { found: true, content: settingsContent },
+      createPullReview: async () => ({ id: 1 }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+  }
+
+  test("an automerge repo holds a suggestion-only review as pending, then succeeds after the follow-up head", async () => {
+    const firstStatuses: Array<{ state: string; description?: string }> = [];
+    const latches = new MemorySkipLatchStore();
+    await publishReviewResult({
+      ...holdOpts,
+      expectedHeadSha: "headsha",
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(firstStatuses, "automerge: true\n"),
+      skipLatches: latches,
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(firstStatuses.at(-1)).toMatchObject({
+      state: "pending",
+      description: "1 suggestion waiting for follow-up",
+    });
+
+    const secondStatuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      expectedHeadSha: "newhead",
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(secondStatuses, "automerge: true\n", "newhead"),
+      skipLatches: latches,
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(secondStatuses.at(-1)).toMatchObject({ state: "success" });
+    expect(secondStatuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("a non-automerge repo keeps today's success", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(statuses, undefined),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("suggestions_hold_merge: false opts out of the hold", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(statuses, "automerge: true\nsuggestions_hold_merge: false\n"),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("followup_on_suggestions: false resolves to success with a note", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(statuses, "automerge: true\nfollowup_on_suggestions: false\n"),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).toContain("suggestions disabled");
+  });
+
+  test("a restricted mode resolves to success with a note", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: holdApi(statuses, "automerge: true\nmode: review-only\n"),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).toContain("mode restricted");
+  });
+
+  test("blocking questions take precedence over the hold", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      blockingQuestionAuthors: ["alice"],
+      resultMarkdown:
+        "src/foo.ts:12: 💡 simpler: extract a helper\nsrc/foo.ts:13: ❓ q: is this the right default?\n<!-- jumi-check: success; 1 suggestion -->",
+      api: holdApi(statuses, "automerge: true\n"),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
   });
 });

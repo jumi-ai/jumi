@@ -4915,3 +4915,68 @@ describe("needsFollowUp", () => {
     expect(items.comments.map((comment) => comment.id)).toEqual([38022]);
   });
 });
+
+describe("suggestion hold latch", () => {
+  test("parseFollowUpState preserves the one-hold flag", async () => {
+    const { parseFollowUpState } = await import("../src/followup.ts");
+    const parsed = parseFollowUpState({
+      prNumber: 127,
+      round: 0,
+      lastHeadSha: "headsha",
+      handledCommentIds: [],
+      handledReviewIds: [],
+      handledReviewFindings: [],
+      updatedAt: "2026-01-01T00:00:00Z",
+      suggestionHold: { consumed: true, headSha: "HEADsha", count: 2 },
+    });
+    expect(parsed.suggestionHold).toMatchObject({ consumed: true, headSha: "HEADsha", count: 2 });
+    expect(parseFollowUpState({}).suggestionHold).toBeUndefined();
+  });
+
+  test("a no-changes round resolves a held pending to success", async () => {
+    const { markSuggestionHoldConsumed } = await import("../src/suggestion_hold.ts");
+    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
+    await withDirs(async (home, workdir) => {
+      const { memorySkipLatchesFor: forHome } = await import("../src/skip_latches.ts");
+      await markSuggestionHoldConsumed(forHome(home), { owner: "kirmanak", repo: "demo", issueNumber: 12 }, "headsha", 2);
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        listIssueComments: async () => [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+        ],
+        // deno-lint-ignore no-explicit-any
+        ...( {
+          createCommitStatus: async (_owner: string, _repo: string, _sha: string, status: { state: string; description?: string }) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("follow-up completed");
+    });
+  });
+});
