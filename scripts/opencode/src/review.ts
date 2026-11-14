@@ -273,6 +273,8 @@ export interface ReviewOptions {
   runnerCooldownConfig?: RunnerCooldownConfig;
   /** Injectable clock for cooldown tests. */
   cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
 }
 
 export type PersistReviewResult =
@@ -1875,6 +1877,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         cooldowns: opts.runnerCooldowns,
         nowMs: opts.cooldownNowMs?.() ?? Date.now(),
         logger: log,
+        ...(opts.authFingerprints ? { fingerprints: opts.authFingerprints } : {}),
       }
     : undefined;
   if (effectiveChain && effectiveChain.length > 1) {
@@ -1921,6 +1924,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
     ...(opts.runnerCooldownConfig ? { runnerCooldownConfig: opts.runnerCooldownConfig } : {}),
     ...(opts.cooldownNowMs ? { cooldownNowMs: opts.cooldownNowMs } : {}),
+    ...(opts.authFingerprints ? { authFingerprints: opts.authFingerprints } : {}),
   });
 
   await postReviewStatus(
@@ -2319,6 +2323,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           previousError: opts.previousError,
           ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
           ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(engineResult.message);
         if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
@@ -2544,9 +2549,17 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         previousError: opts.previousError,
         ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
         ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+        ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
       });
       if (opts.runnerCooldowns && effectiveChain?.length) {
-        if (hasHealthyRunnerForQuota(effectiveChain, opts.runnerCooldowns, opts.cooldownNowMs?.() ?? Date.now())) {
+        if (
+          hasHealthyRunnerForQuota(
+            effectiveChain,
+            opts.runnerCooldowns,
+            opts.cooldownNowMs?.() ?? Date.now(),
+            opts.authFingerprints
+          )
+        ) {
           throw err;
         }
       }

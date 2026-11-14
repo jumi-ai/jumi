@@ -1581,6 +1581,7 @@ export async function implementFollowUp(
               previousError: opts.previousError,
               ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
               ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
             const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
             await sticky(quotaReason, pr.number);
@@ -1780,6 +1781,7 @@ export async function implementFollowUp(
             previousError: opts.previousError,
             ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
             ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(result.message);
           if (
@@ -1787,7 +1789,8 @@ export async function implementFollowUp(
             hasHealthyRunnerForQuota(
               jobChain,
               (opts as { runnerCooldowns: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns,
-              (opts as { cooldownNowMs?: () => number }).cooldownNowMs?.() ?? Date.now()
+              (opts as { cooldownNowMs?: () => number }).cooldownNowMs?.() ?? Date.now(),
+              (opts as { authFingerprints?: Record<string, string | undefined> }).authFingerprints
             )
           ) {
             throw new Error(quotaReason);
@@ -1851,6 +1854,7 @@ export async function implementFollowUp(
             previousError: opts.previousError,
             ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
             ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1963,6 +1967,7 @@ export async function implementFollowUp(
           previousError: opts.previousError,
           ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
           ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
         await sticky(quotaReason, pr.number).catch(() => undefined);

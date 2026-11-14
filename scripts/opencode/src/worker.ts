@@ -43,6 +43,7 @@ import {
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
+import { runnerAuthFingerprints } from "./runner_cooldown.ts";
 import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown } from "./shutdown.ts";
@@ -70,6 +71,8 @@ export interface RunWorkerJobExtras {
   runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore;
   runnerCooldownConfig?: import("./runner_cooldown.ts").RunnerCooldownConfig;
   cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
   now?: () => number;
   /** One-shot jobs inject a full-clone runtime (no shared cache). Long-running keeps the standing pod. */
   runtime?: StandingPodRuntime;
@@ -491,11 +494,12 @@ export async function processWorkerTick(
           await store.clearRunnerCooldown?.("worker", entry.runner).catch(() => undefined);
           continue;
         }
-        if (!extras.runnerCooldowns.isCooled(entry.runner, nowMs)) {
+        if (extras.runnerCooldowns.cooldownUntil(entry.runner) < entry.untilMs) {
           extras.runnerCooldowns.restore(entry.runner, {
             untilMs: entry.untilMs,
             reason: (entry.reason as "quota" | "credit" | "auth") ?? "quota",
-            source: "default",
+            source: (entry.source as "parsed" | "default" | "credential") ?? "default",
+            ...(entry.fingerprint != null ? { fingerprint: entry.fingerprint } : {}),
           });
         }
       }
@@ -787,6 +791,9 @@ export async function processWorkerTick(
         extras.runnerCooldownConfig ??
         (effectiveConfig as { runnerCooldown?: RunWorkerJobExtras["runnerCooldownConfig"] }).runnerCooldown,
       ...((extras.cooldownNowMs ?? extras.now) ? { cooldownNowMs: extras.cooldownNowMs ?? extras.now } : {}),
+      authFingerprints:
+        extras.authFingerprints ??
+        runnerAuthFingerprints(orderedRunners(effectiveConfig), { home: effectiveConfig.home }),
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
@@ -953,28 +960,16 @@ export async function processWorkerTick(
         const until = extras.runnerCooldowns.cooldownUntil(failedRunner);
         const entry = extras.runnerCooldowns.entry(failedRunner);
         if (until > Date.now()) {
-          await store.recordRunnerCooldown("worker", failedRunner, until, entry?.reason).catch(() => undefined);
+          await store
+            .recordRunnerCooldown("worker", failedRunner, until, entry?.reason, entry?.source, entry?.fingerprint)
+            .catch(() => undefined);
         }
       }
-      if (extras.runnerCooldowns) {
-        try {
-          const chain = orderedRunners(config);
-          const now = Date.now();
-          const healthy = chain.filter((r) => !extras.runnerCooldowns!.isCooled(r.name, now));
-          if (healthy.length > 0) {
-            try {
-              await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
-            } catch (expireErr) {
-              logger(
-                `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-              );
-            }
-            return "processed";
-          }
-        } catch {
-          // Fail-open to the role-wide wait below.
-        }
-      }
+      // QuotaWaitError already encodes the job's effective-chain decision in
+      // throwIfQuotaWait: it only throws when every entry is cooled, with the
+      // earliest cooldown end as the backoff. Rechecking the full configured
+      // chain here (which can include runners excluded from this job) would
+      // defeat that decision with an immediate retry that loops every tick.
       try {
         const now = Date.now();
         await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);

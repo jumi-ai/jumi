@@ -91,6 +91,8 @@ export interface BeginClaimedWorktreeOpts {
   runnerCooldowns?: RunnerCooldownStore;
   runnerCooldownConfig?: RunnerCooldownConfig;
   cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
 }
 
 export function isClaimedEarlyResult(value: object): value is ClaimedEarlyResult {
@@ -127,6 +129,7 @@ export async function beginClaimedWorktree(
         cooldowns: opts.runnerCooldowns,
         nowMs: opts.cooldownNowMs?.() ?? Date.now(),
         logger: opts.logger,
+        ...(opts.authFingerprints ? { fingerprints: opts.authFingerprints } : {}),
       }
     : undefined;
   const effectiveChain =
@@ -163,6 +166,7 @@ export async function beginClaimedWorktree(
     ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
     ...(opts.runnerCooldownConfig ? { runnerCooldownConfig: opts.runnerCooldownConfig } : {}),
     ...(opts.cooldownNowMs ? { cooldownNowMs: opts.cooldownNowMs } : {}),
+    ...(opts.authFingerprints ? { authFingerprints: opts.authFingerprints } : {}),
   });
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");
