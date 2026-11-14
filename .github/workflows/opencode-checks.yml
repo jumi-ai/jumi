@@ -129,6 +129,13 @@ jobs:
             exit 1
           fi
           docker run --rm jumi-reviewer:ci python3 --version
+          docker run --rm jumi-reviewer:ci python --version
+          docker run --rm jumi-reviewer:ci python3.13 --version
+          docker run --rm jumi-reviewer:ci python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm jumi-reviewer:ci python -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm jumi-reviewer:ci python3 -m pytest --version
+          docker run --rm jumi-reviewer:ci python3 -c 'import yaml, pytest'
+          docker run --rm jumi-reviewer:ci python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'
           docker run --rm jumi-reviewer:ci helm version --short
           docker run --rm jumi-reviewer:ci claude --version
           docker run --rm jumi-reviewer:ci agy --version
@@ -139,9 +146,9 @@ jobs:
           docker run --rm jumi-reviewer:ci ps --version
           docker run --rm jumi-reviewer:ci unzip -v
           docker run --rm jumi-reviewer:ci shellcheck --version
-          docker run --rm jumi-reviewer:ci python --version
-          docker run --rm jumi-reviewer:ci python3 -c 'import yaml'
           docker run --rm jumi-reviewer:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          # Tracing hooks POST through python3 stdlib only; exercise the POST path under the new interpreter.
+          docker run --rm jumi-reviewer:ci sh -c 'HOME=$(mktemp -d) sh -c ". /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true"'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
@@ -305,9 +312,17 @@ jobs:
           docker run --rm jumi-worker:ci ps --version
           docker run --rm jumi-worker:ci unzip -v
           docker run --rm jumi-worker:ci shellcheck --version
+          docker run --rm jumi-worker:ci python3 --version
           docker run --rm jumi-worker:ci python --version
-          docker run --rm jumi-worker:ci python3 -c 'import yaml'
+          docker run --rm jumi-worker:ci python3.13 --version
+          docker run --rm jumi-worker:ci python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm jumi-worker:ci python -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm jumi-worker:ci python3 -m pytest --version
+          docker run --rm jumi-worker:ci python3 -c 'import yaml, pytest'
+          docker run --rm jumi-worker:ci python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'
           docker run --rm jumi-worker:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          # Tracing hooks POST through python3 stdlib only; exercise the POST path under the new interpreter.
+          docker run --rm jumi-worker:ci sh -c 'HOME=$(mktemp -d) sh -c ". /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true"'
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"

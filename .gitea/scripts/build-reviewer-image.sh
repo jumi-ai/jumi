@@ -101,9 +101,29 @@ verify_reviewer_runtime() {
     echo "reviewer image must not ship a JVM" >&2
     exit 1
   fi
-  if ! buildah run "${ctr}" -- python3 --version; then
+  if ! buildah run "${ctr}" -- python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
-    echo "python3 missing in reviewer image" >&2
+    echo "python3 is not CPython 3.13 in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python -c 'import sys; assert sys.version_info[:2] == (3, 13)'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "python is not CPython 3.13 in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python3 -m pytest --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "pytest missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python3 -c 'import yaml, pytest'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "python3-yaml or pytest not importable in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "tarfile filter=data missing in reviewer image python" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- helm version --short; then
@@ -141,19 +161,20 @@ verify_reviewer_runtime() {
     echo "shellcheck missing in reviewer image" >&2
     exit 1
   fi
-  if ! buildah run "${ctr}" -- python --version; then
+  if ! buildah run "${ctr}" -- python3.13 --version; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
-    echo "python (python-is-python3) missing in reviewer image" >&2
-    exit 1
-  fi
-  if ! buildah run "${ctr}" -- python3 -c 'import yaml'; then
-    buildah rm "${ctr}" >/dev/null 2>&1 || true
-    echo "python3-yaml missing in reviewer image" >&2
+    echo "python3.13 missing in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "pre-installed CPython 3.13 not usable offline via uv in reviewer image" >&2
+    exit 1
+  fi
+  # Tracing hooks POST through python3 stdlib only; exercise the POST path under the new interpreter.
+  if ! buildah run "${ctr}" -- sh -c 'HOME=$(mktemp -d) sh -c ". /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "tracing hook POST path failed under python3 in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- test -f /app/review-skills/review-proof/SKILL.md; then
@@ -288,7 +309,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3.13 (python3/python), pytest, yaml, tarfile filter, helm, curl/yq/uv/ps/unzip/shellcheck/offline-3.13, tracing POST path, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
