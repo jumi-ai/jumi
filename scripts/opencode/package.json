@@ -13,6 +13,10 @@
     "typecheck": "tsc --noEmit",
     "ci": "bun run lint && bun run typecheck && bun test"
   },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "3.25.76"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
     "@types/bun": "1.4.4",
