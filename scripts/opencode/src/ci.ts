@@ -964,9 +964,6 @@ export async function resolveCiGate(
       );
     }
   }
-  if (!settingsRef && (opts.baseBranch ?? "").trim()) {
-    settingsRef = (opts.baseBranch as string).trim();
-  }
   if (settingsRef && typeof api.getRepoFile === "function") {
     try {
       const load = await loadRepoSettings(api, opts.owner, opts.repo, settingsRef);
