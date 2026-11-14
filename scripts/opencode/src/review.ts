@@ -2372,9 +2372,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // and the verdict through MCP tools; the parent publishes from this
     // in-memory state, never from a file. The token rides only in the harness
     // MCP config under the spawn temp root, never in the prompt or the child
-    // env. When the store holds anything at exit it wins and any
-    // JUMI_REVIEW.md in the worktree is ignored (transition fallback for
-    // runners without tool support).
+    // env. Single-domain sandbox limit: that temp root is under the RW
+    // checkout (`.jumi-tmp`), so sandboxed pull code can still read the token
+    // file and call the server (see docs/review-sandbox.md). When the store
+    // holds anything at exit it wins and any JUMI_REVIEW.md in the worktree
+    // is ignored (transition fallback for runners without tool support).
     const verdictStore = new ReviewVerdictStore({
       changedFiles: prFiles,
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),

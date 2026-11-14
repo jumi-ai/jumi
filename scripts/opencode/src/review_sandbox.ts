@@ -14,6 +14,13 @@ import { childScratchDir } from "./engine_scratch.ts";
  * never the harness through /proc, signals, or abstract sockets, and never
  * files outside the allow-list.
  *
+ * Single-domain limit (see docs/review-sandbox.md): the spawn temp root
+ * (`.jumi-tmp` with the MCP bearer-token configs) lives under the RW
+ * checkout and Landlock has no deny rules, so sandboxed pull code can still
+ * read the token files and reach the loopback MCP server. This module does
+ * not claim the verdict boundary — only /proc, signal/abstract-socket, and
+ * outside-write confinement.
+ *
  * Filesystem allow-lists live here; environment scrubbing stays in the
  * per-runner builders (`buildEnv`, `buildClaudeEnv`, `buildCodexEnv`,
  * `agyEnv`), and this module audits the built env before spawn so a token

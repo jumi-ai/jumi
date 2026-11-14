@@ -356,10 +356,21 @@ describe("review sandbox red-team (real wrapper)", () => {
         // Signalling the harness: denied by the scope rules.
         const signal = run(`kill -0 ${process.pid} 2>&1; echo rc=$?`);
         expect(signal.out).toMatch(/Operation not permitted/);
-        // The review artifact inside the checkout stays writable (closes with #530, not here).
+        // The review artifact inside the checkout stays writable: the
+        // single-domain wrapper shares one Landlock domain between the agent
+        // and its shells, and Landlock has no deny rules, so RW on the
+        // checkout keeps `.jumi-tmp` readable too. Known-open verdict channel
+        // (see docs/review-sandbox.md): a token file under `.jumi-tmp` is
+        // readable from inside the domain, and so is the fallback artifact.
+        // This pins the open state so a future per-tool sandbox must update
+        // this test when it closes the channel.
         const artifact = run(`echo '# findings' > JUMI_REVIEW.md && cat JUMI_REVIEW.md`);
         expect(artifact.exitCode).toBe(0);
         expect(artifact.out.trim()).toBe("# findings");
+        const tokenFile = join(checkout, ".jumi-tmp", "review-mcp.json");
+        await writeFile(tokenFile, `{"token": "parent-secret-token"}`, { mode: 0o600 });
+        const tokenRead = run(`cat ${tokenFile} 2>&1; echo rc=$?`);
+        expect(tokenRead.out).toContain("parent-secret-token");
         // A benign test run and scratch writes still work.
         const benign = run(`echo ok > ${scratch}/out && node -e 'console.log("ran")'`);
         expect(benign.exitCode).toBe(0);

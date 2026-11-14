@@ -11,6 +11,10 @@
  *   - a sandboxed shell cannot write outside the checkout;
  *   - a sandboxed shell can still write the scratch dir, run `git`, and run `node`.
  *
+ * Non-goal, pinned open (see docs/review-sandbox.md): the verdict channel.
+ * A token file under `<checkout>/.jumi-tmp` stays readable from inside the
+ * single-domain sandbox, so this probe does not assert it is denied.
+ *
  * Exit 0 when every case matches its expectation, 1 otherwise. Run in the
  * reviewer image job (needs the job-pod kernel, not just userspace).
  */

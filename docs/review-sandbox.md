@@ -17,12 +17,11 @@ inherits the domain.
 - Read-only: `/usr /bin /sbin /lib /lib64 /opt /etc /proc /sys /tmp /app`,
   plus `/dev` with `/dev/null`-style writes (creation still denied, so no
   new device nodes appear).
-- Denied: everything else — the spawn's temp root outside the checkout is
-  not a thing (it lives under `.jumi-tmp` inside the checkout, see below),
-  other checkouts, `/tmp` writes, the retained auth volume outside HOME,
-  and the harness itself: with ABI ≥ 6 the `SIGNAL` and
-  `ABSTRACT_UNIX_SOCKET` scopes close signals/ptrace and abstract-socket
-  connects outside the domain, so `/proc/<harness>/environ`,
+- Denied: everything else — except the spawn's temp root, which is the
+  known-open verdict channel (see below). Other checkouts, `/tmp` writes,
+  the retained auth volume outside HOME, and the harness itself: with ABI ≥ 6
+  the `SIGNAL` and `ABSTRACT_UNIX_SOCKET` scopes close signals/ptrace and
+  abstract-socket connects outside the domain, so `/proc/<harness>/environ`,
   `/proc/<harness>/fd`, and `kill` of harness pids are denied.
 - Environment: explicit allow-list. The per-runner builders already start
   from a minimal base; `findReviewEnvViolations` additionally fails a review
@@ -68,24 +67,52 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
 
 One launcher prefix for all four runners (OpenCode, Claude, Codex,
 Antigravity), applied at the agent spawn: Landlock is inherited, so it
-covers every shell command the model runs without needing each runner's own
-hook (Claude's `CLAUDE_CODE_SHELL_PREFIX`, an OpenCode
-`tool.execute.before` plugin, or Codex/Agy equivalents that do not exist).
-No runner needed refusing: all four spawn through the wrapped path.
+covers every shell command the model runs with a single mechanism and no
+per-runner hook. No runner needed refusing: all four spawn through the
+wrapped path. This is the single-domain shape: the agent and every shell it
+runs share one domain, which is why the verdict channel below stays open —
+per-runner shell hooks (Claude's shell prefix / `PreToolUse` from Jumi's own
+plugin, OpenCode's `tool.execute.before` plugin, Codex/Agy equivalents) are
+the follow-up that would let the agent keep the token while its shells
+cannot.
 
-Two deliberate exceptions, both logged at spawn and both follow-up work:
+Two deliberate exceptions, both logged at spawn and both follow-up work,
+plus one known-open channel documented here (not an exception that closes):
 
 1. **HOME stays visible.** Review agents authenticate from HOME
    (`~/.codex`, `~/.gemini`, `~/.claude`, opencode auth seeding). Denying
    it today breaks logins, so the spawn's HOME is read-write for now.
    Narrowing it (per-runner auth seeding into a sandbox HOME, verified
    against each pinned binary) is the next hardening step after this lands.
-2. **The review artifact channel stays open by design** until #530 lands:
-   the verdict still travels through `JUMI_REVIEW.md`. This change closes
-   the harness/token reads around it; #530 moves the verdict to the
-   parent-owned review MCP, whose token must never be placed in a
-   sandbox-visible file — env delivery plus the `*MCP*TOKEN` audit here is
-   the constraint on that design.
+2. **The review verdict channel stays open — #531's Done condition is
+   unmet by this single-domain wrapper.** The per-spawn MCP bearer token
+   lives in files under the spawn temp root (`<workdir>/.jumi-tmp/...`:
+   Claude's `review-mcp.json`, OpenCode's `xdg-config/opencode/opencode.json`
+   which also names the server URL), and the fallback artifact
+   `JUMI_REVIEW.md` lives in the RW checkout. `reviewSandboxRules` grants
+   read-write on the whole checkout, and Landlock `path_beneath` has no deny
+   rules: any RW ancestor keeps every descendant readable, so RW on the
+   checkout keeps `.jumi-tmp` and its token files readable to sandboxed pull
+   code (`cat .jumi-tmp/*/review-mcp.json` yields both URL halves). The loopback
+   MCP server (`http://127.0.0.1:<port>/mcp`) stays reachable from inside the
+   domain (the wrapper requests no TCP handling), and the env gate audits
+   names in the child env, never file contents — so a file-resident token
+   passes it by construction. Concretely: pull code that reads the token from
+   a file under `.jumi-tmp` and calls the review MCP can forge the posted
+   status, and pull code that writes `JUMI_REVIEW.md` can forge the fallback
+   for runners without MCP support. The parent's MCP-store-wins-over-file rule
+   (`review.ts`: store holdings ignore the file) narrows but does not close
+   this: a forged MCP call with the stolen token lands in the store itself.
+   A finer RW list cannot fix it for the same reason (no deny of a
+   subdirectory of an allowed ancestor). Closing it needs a different domain
+   shape — wrap each model-executed shell command (not the whole agent), keep
+   the agent unsandboxed so only it can read the token, and deny the temp
+   root to the sandboxed shells (outside-checkout temp root, or traverse-only
+   parents) — e.g. Claude's shell prefix / `PreToolUse` hook from Jumi's own
+   plugin and OpenCode's `tool.execute.before` plugin, plus the Codex/Agy
+   equivalents, or a per-tool proxy with credential injection. That is the
+   follow-up; this change confines /proc, signals/abstract sockets, and
+   outside-checkout writes only.
 
 Fail-closed: if Landlock is unavailable or below ABI 6, review jobs fail
 with one clear status (`review spawn refused: Landlock sandbox
