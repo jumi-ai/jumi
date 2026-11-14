@@ -16,12 +16,24 @@ import {
   publishedAuthFailureReason,
 } from "../src/codex_auth.ts";
 import { EngineFailedError } from "../src/engine.ts";
+import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 
 const originalEnv = process.env[CODEX_AUTH_FILE_ENV];
+const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+
+/** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
+const SANDBOX_STUB = `#!/bin/sh
+if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+`;
 
 afterEach(() => {
   if (originalEnv === undefined) delete process.env[CODEX_AUTH_FILE_ENV];
   else process.env[CODEX_AUTH_FILE_ENV] = originalEnv;
+  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
 });
 
 function b64url(value: unknown): string {
@@ -373,6 +385,12 @@ describe("published auth failures hop as auth", () => {
       const claudeBin = join(binDir, "claude");
       await writeFile(claudeBin, `#!/bin/sh\nprintf 'claude ran\\n'\n`);
       await chmod(claudeBin, 0o755);
+      // Review spawns exec through the sandbox wrapper; the stub keeps the
+      // wrapped path under test without applying real Landlock rules.
+      const stub = join(binDir, "jumi-sandbox-stub");
+      await writeFile(stub, SANDBOX_STUB);
+      await chmod(stub, 0o755);
+      process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
       process.env.PATH = `${binDir}:${originalPath ?? ""}`;
       const engine = withEngineChain(registeredEngine, {
         chain: [
