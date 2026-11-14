@@ -2347,40 +2347,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       if (parsed.verdict.state === "failure" && !hasPublishedFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }
-      await persistOutcome({ kind: "markdown", markdown: gated, ...(runner ? { runner } : {}) });
-      if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
-        const stuckRef = {
-          home: opts.home,
-          owner: opts.owner,
-          repo: opts.repo,
-          prNumber: opts.prNumber,
-          ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
-        };
-        await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
-        const actionHash = fingerprintReviewArtifact(gated);
-        if (actionHash) {
-          await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
-        }
-      }
-      return await publishReviewResult({
-        api: forgeApi,
-        forge: forgeApi,
-        owner: opts.owner,
-        repo: opts.repo,
-        prNumber: opts.prNumber,
-        expectedHeadSha: reviewedHeadSha,
-        botUsername: opts.botUsername,
-        blockingQuestionAuthors: effectiveBlockingAuthors,
-        automergeRepos: opts.automergeRepos,
-        resultMarkdown: gated,
-        resultRunner: runner,
-        logger: log,
-        forgeKind: opts.forgeKind,
-        previousFindings: previousReview?.findings,
-        recordSuggestions: opts.recordSuggestions,
-        changedFiles: prFiles,
-        ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
-      });
+      return await publishMarkdownVerdict(gated);
     };
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     // A stale JUMI_REVIEW.md planted before this run must not count as this
@@ -2403,6 +2370,45 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       const { state, description } = statusForResult(result);
       await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, state, description, htmlUrl);
       return result;
+    };
+    // Shared publish tail for the MCP-verdict and file-artifact branches:
+    // gated markdown in, quota-state bookkeeping and forge publish out.
+    const publishMarkdownVerdict = async (gatedMarkdown: string): Promise<ReviewResult> => {
+      await persistOutcome({ kind: "markdown", markdown: gatedMarkdown, ...(runner ? { runner } : {}) });
+      if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+        const stuckRef = {
+          home: opts.home,
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: opts.prNumber,
+          ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+        };
+        // A successful run clears any stale (TTL-expired) quota flag.
+        await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
+        const actionHash = fingerprintReviewArtifact(gatedMarkdown);
+        if (actionHash) {
+          await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
+        }
+      }
+      return await publishReviewResult({
+        api: forgeApi,
+        forge: forgeApi,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        expectedHeadSha: reviewedHeadSha,
+        botUsername: opts.botUsername,
+        blockingQuestionAuthors: effectiveBlockingAuthors,
+        automergeRepos: opts.automergeRepos,
+        resultMarkdown: gatedMarkdown,
+        resultRunner: runner,
+        logger: log,
+        forgeKind: opts.forgeKind,
+        previousFindings: previousReview?.findings,
+        recordSuggestions: opts.recordSuggestions,
+        changedFiles: prFiles,
+        ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
+      });
     };
     try {
       const extraCap = opts.maxIncompleteRetries ?? MAX_INCOMPLETE_RETRIES;
@@ -2527,44 +2533,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             }
           }
           if (!blankFailure) {
-            await persistOutcome({ kind: "markdown", markdown, ...(runner ? { runner } : {}) });
-            if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
-              const stuckRef = {
-                home: opts.home,
-                owner: opts.owner,
-                repo: opts.repo,
-                prNumber: opts.prNumber,
-                ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
-              };
-              // A successful run clears any stale (TTL-expired) quota flag.
-              await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
-              const actionHash = fingerprintReviewArtifact(markdown);
-              if (actionHash) {
-                await appendReviewStuckState(stuckRef, {
-                  kind: "action",
-                  hash: actionHash,
-                });
-              }
-            }
-            return await publishReviewResult({
-              api: forgeApi,
-              forge: forgeApi,
-              owner: opts.owner,
-              repo: opts.repo,
-              prNumber: opts.prNumber,
-              expectedHeadSha: reviewedHeadSha,
-              botUsername: opts.botUsername,
-              blockingQuestionAuthors: effectiveBlockingAuthors,
-              automergeRepos: opts.automergeRepos,
-              resultMarkdown: markdown,
-              resultRunner: runner,
-              logger: log,
-              forgeKind: opts.forgeKind,
-              previousFindings: previousReview?.findings,
-              recordSuggestions: opts.recordSuggestions,
-              changedFiles: prFiles,
-              ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
-            });
+            return await publishMarkdownVerdict(markdown);
           }
 
           if (extrasUsed >= extraCap) {
