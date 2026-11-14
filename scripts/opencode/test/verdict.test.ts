@@ -3,8 +3,12 @@ import {
   blockingOpenQuestionCount,
   buildFindingsList,
   countBlockingFindings,
+  countBugFindings,
   countMaintainerQuestionFindings,
   countQuestionFindings,
+  countRiskFindings,
+  describeBlockingReason,
+  describeSuggestionsReason,
   findingFingerprint,
   findingListLine,
   hasBlockingFindings,
@@ -12,9 +16,11 @@ import {
   hasPublishedFindings,
   isBlockingFindingFirstLine,
   isBlockingQuestionAuthor,
+  isBugFindingFirstLine,
   isMaintainerOnlyQuestionText,
   isMaintainerQuestionInline,
   isQuestionInline,
+  isRiskFindingFirstLine,
   keepReviewFindingLines,
   parseReviewFindings,
   parseReviewOutput,
@@ -332,6 +338,34 @@ describe("keepReviewFindingLines", () => {
     expect(countBlockingFindings("src/a.ts:1: 💡 simpler: one.\nsrc/b.ts:2: ❓ q: two?")).toBe(0);
     expect(isBlockingFindingFirstLine("src/a.ts:1: 🔴 bug: null deref.")).toBe(true);
     expect(isBlockingFindingFirstLine("src/a.ts:1: 💡 simpler: drop it.")).toBe(false);
+  });
+
+  test("blocking findings split into bugs and risks with canonical reasons", () => {
+    expect(countBugFindings("src/a.ts:1: 🔴 bug: one.\nsrc/b.ts:2: 🟡 risk: two.")).toBe(1);
+    expect(countRiskFindings("src/a.ts:1: 🔴 bug: one.\nsrc/b.ts:2: 🟡 risk: two.")).toBe(1);
+    expect(countBugFindings("src/a.ts:1: bug: words without emoji count.")).toBe(1);
+    expect(countRiskFindings("src/a.ts:1: 🟡 risk: swallowed error.")).toBe(1);
+    expect(countRiskFindings("src/a.ts:1: 🔴 bug: not a risk.")).toBe(0);
+    expect(isBugFindingFirstLine("src/a.ts:1: 🔴 bug: null deref.")).toBe(true);
+    expect(isBugFindingFirstLine("src/a.ts:1: 🟡 risk: swallowed error.")).toBe(false);
+    expect(isRiskFindingFirstLine("src/a.ts:1: 🟡 risk: swallowed error.")).toBe(true);
+    expect(isRiskFindingFirstLine("src/a.ts:1: 🔴 bug: null deref.")).toBe(false);
+    expect(describeBlockingReason(2, 0)).toBe("2 blocking");
+    expect(describeBlockingReason(1, 0)).toBe("1 blocking");
+    expect(describeBlockingReason(0, 1)).toBe("1 risk");
+    expect(describeBlockingReason(1, 1)).toBe("1 blocking, 1 risk");
+    expect(describeBlockingReason(1, 2)).toBe("1 blocking, 2 risks");
+    expect(describeBlockingReason(0, 0)).toBe("");
+    expect(describeSuggestionsReason(1)).toBe("1 suggestion");
+    expect(describeSuggestionsReason(2)).toBe("2 suggestions");
+  });
+
+  test("a marker-only line with no location or own body is not actionable", () => {
+    expect(hasBlockingFindings("🔴")).toBe(false);
+    expect(countBlockingFindings("🔴")).toBe(0);
+    expect(hasBlockingFindings("src/foo.ts:12: 🔴")).toBe(true);
+    expect(hasBlockingFindings("- 🔴\n  The earlier finding is fixed and dropped.")).toBe(false);
+    expect(hasBlockingFindings("- 🔴 Fixed and dropped.")).toBe(true);
   });
 });
 

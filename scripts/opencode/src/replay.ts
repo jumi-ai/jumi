@@ -1052,9 +1052,10 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           }
           continue;
         }
-        // A failure trailer with no published blocking finding is incomplete,
-        // mirroring the live publisher: the trailer reason is not a finding,
-        // and 💡/❓ findings never fail the check.
+        // A failure trailer with no actionable published blocking finding is
+        // incomplete, mirroring the live publisher: the trailer reason is not
+        // a finding, a marker-only line with no location or own body carries
+        // nothing actionable, and 💡/❓ findings never fail the check.
         if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
           if (extrasUsed >= maxIncompleteRetries) {
             return finish({
