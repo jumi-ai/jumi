@@ -1,5 +1,6 @@
 import type { ServiceConfig } from "../src/config.ts";
 import type { LinkedIssue } from "../src/ports.ts";
+import { DEFAULT_RUNNER_COOLDOWN_CONFIG } from "../src/runner_cooldown.ts";
 import type {
   GiteaActionJob,
   GiteaComment,
@@ -304,6 +305,7 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },
     chain: ["primary"],
     runnerSelection: "ordered",
+    runnerCooldown: { ...DEFAULT_RUNNER_COOLDOWN_CONFIG },
     opencodeWellKnownUrl: "https://kirmanak.stream",
     opencodeWellKnownKey: "OPENCODE_WELLKNOWN_TOKEN",
     opencodeWellKnownToken: "unused",
@@ -347,6 +349,7 @@ export function makeWorkerConfig(overrides: Partial<WorkerConfig> = {}): WorkerC
     runners: { primary: { type: "opencode", model: "openai/gpt-5.5" } },
     chain: ["primary"],
     runnerSelection: "ordered",
+    runnerCooldown: { ...DEFAULT_RUNNER_COOLDOWN_CONFIG },
     opencodeWellKnownUrl: "https://kirmanak.stream",
     opencodeWellKnownKey: "OPENCODE_WELLKNOWN_TOKEN",
     opencodeWellKnownToken: "unused",

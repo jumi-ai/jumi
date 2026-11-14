@@ -7,6 +7,7 @@ import {
   modelsFromCatalog,
   type RunnerConfig,
   type RunnerSelectionMode,
+  resolveRunnerCooldownConfig,
   resolveRunnerSelection,
 } from "./runners.ts";
 
@@ -42,6 +43,7 @@ export interface ServiceConfig {
   chain: string[];
   independentReview?: IndependentReviewConfig;
   runnerSelection: RunnerSelectionMode;
+  runnerCooldown: import("./runner_cooldown.ts").RunnerCooldownConfig;
   opencodeConfig?: string;
   opencodeWellKnownUrl?: string;
   opencodeWellKnownKey: string;
@@ -283,6 +285,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     chain: runnersCatalog.chain,
     ...(runnersCatalog.independentReview ? { independentReview: runnersCatalog.independentReview } : {}),
     runnerSelection: resolveRunnerSelection(runnersCatalog),
+    runnerCooldown: resolveRunnerCooldownConfig(runnersCatalog),
     opencodeConfig: optionalEnv(resolved, "OPENCODE_CONFIG"),
     opencodeWellKnownUrl: parseOpenCodeWellKnownUrl(resolved.OPENCODE_WELLKNOWN_URL),
     opencodeWellKnownKey:

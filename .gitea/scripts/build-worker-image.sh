@@ -202,13 +202,24 @@ verify_worker_skills() {
     echo "codex missing in worker image" >&2
     exit 1
   fi
-  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'promtool --version' 'kubeconform -v' 'tofu version' 'kubectl version --client' 'ps --version' 'unzip -v' 'shellcheck --version' 'python --version' "python3 -c 'import yaml'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V' 'node --version' 'npm --version' 'npx --version' 'bun --version'; do
+  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'promtool --version' 'kubeconform -v' 'tofu version' 'kubectl version --client' 'ps --version' 'unzip -v' 'shellcheck --version' 'python3 --version' 'python --version' 'python3.13 --version' "python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'" "python -c 'import sys; assert sys.version_info[:2] == (3, 13)'" 'python3 -m pytest --version' "python3 -c 'import yaml, pytest'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V' 'node --version' 'npm --version' 'npx --version' 'bun --version'; do
     if ! buildah run "${ctr}" -- sh -c "${tool_cmd}"; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "worker CLI smoke failed: ${tool_cmd}" >&2
       exit 1
     fi
   done
+  if ! buildah run "${ctr}" -- python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker CLI smoke failed: tarfile filter=data" >&2
+    exit 1
+  fi
+  # Tracing hooks are bash (set -euo pipefail, [[ ]]); exercise the POST path under the new interpreter.
+  if ! buildah run "${ctr}" -- bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker CLI smoke failed: tracing hook POST path" >&2
+    exit 1
+  fi
   node_version="$(buildah run "${ctr}" -- node --version)" || {
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "node missing in worker image" >&2
@@ -319,7 +330,7 @@ verify_worker_skills() {
     echo "installed-tools manifest lists a tool missing from PATH in worker image" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python/yaml/offline-3.13, node/npm/npx), installed-tools manifest with java, and the xAI child credential"
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python3.13/pytest/yaml/tarfile-filter/offline-3.13/tracing-POST), installed-tools manifest with java, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
