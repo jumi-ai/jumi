@@ -58,7 +58,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `WORKDIR`
 - `QUEUE_CONCURRENCY`
 - `MAX_FILES`
+- `MAX_FILES_MAX`
 - `MAX_PATCH_BYTES`
+- `MAX_PATCH_BYTES_MAX`
 - `MAX_OUTPUT_BYTES`
 - `MAX_WEBHOOK_BYTES`
 - `OPENCODE_TIMEOUT_MS`
