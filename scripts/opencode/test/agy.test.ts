@@ -22,15 +22,19 @@ import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { agyConversationPath, isProviderUnavailableResult, withEngineChain } from "../src/fallback.ts";
 import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
+import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
+const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 
 afterEach(() => {
   resetControlMetricsForTests();
   resetTokenMetricsForTests();
   process.env.PATH = originalPath;
+  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
 });
 
 interface FakeEnv {
@@ -38,6 +42,14 @@ interface FakeEnv {
   home: string;
   argsLog: string;
 }
+
+/** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
+const SANDBOX_STUB = `#!/bin/sh
+if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+`;
 
 /** Fake binaries append one line of argv per call to `$ARGS_LOG`. */
 async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) => Promise<void>) {
@@ -50,6 +62,12 @@ async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) =>
       await writeFile(bin, script);
       await chmod(bin, 0o755);
     }
+    // Review spawns exec through the sandbox wrapper; the stub keeps the
+    // wrapped path under test without applying real Landlock rules.
+    const stub = join(dir, "jumi-sandbox-stub");
+    await writeFile(stub, SANDBOX_STUB);
+    await chmod(stub, 0o755);
+    process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
     process.env.PATH = `${dir}:${originalPath ?? ""}`;
     await run({ workdir, home, argsLog: join(dir, "args.log") });
   } finally {

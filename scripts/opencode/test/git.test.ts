@@ -19,6 +19,7 @@ import {
   runOpenCode,
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
+import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
@@ -28,6 +29,7 @@ const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalApiKey = process.env.OPENCODE_API_KEY;
 const originalApiKeyFile = process.env.OPENCODE_API_KEY_FILE;
 const originalHome = process.env.HOME;
+const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 // `runOpenCode` owns the provider auth file under HOME before it spawns, so
 // every test gets a throwaway one: a real developer or CI home must never be
 // read, refreshed, or rewritten by the suite.
@@ -55,6 +57,8 @@ afterEach(async () => {
   else process.env.OPENCODE_API_KEY = originalApiKey;
   if (originalApiKeyFile === undefined) delete process.env.OPENCODE_API_KEY_FILE;
   else process.env.OPENCODE_API_KEY_FILE = originalApiKeyFile;
+  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
   resetTokenMetricsForTests();
 });
 
@@ -88,6 +92,14 @@ function inlineConfig(stdout: string | undefined): Record<string, unknown> {
 
 const FREE_QUOTA_RETRY = writeAssistantRow(retryRow("Free usage exceeded, subscribe to Go"));
 
+/** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
+const SANDBOX_STUB = `#!/bin/sh
+if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+`;
+
 async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "fake-opencode-"));
   const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-opencode-work-")));
@@ -95,6 +107,12 @@ async function withFakeOpenCode(script: string, run: (binDir: string, workdir: s
     const bin = join(dir, "opencode");
     await writeFile(bin, script);
     await chmod(bin, 0o755);
+    // Review spawns exec through the sandbox wrapper; the stub keeps the
+    // wrapped path under test without applying real Landlock rules.
+    const stub = join(dir, "jumi-sandbox-stub");
+    await writeFile(stub, SANDBOX_STUB);
+    await chmod(stub, 0o755);
+    process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
     process.env.PATH = `${dir}:${originalPath ?? ""}`;
     await run(dir, workdir);
   } finally {
