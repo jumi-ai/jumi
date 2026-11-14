@@ -1,5 +1,5 @@
 import type { CiCheckSummary } from "./ci.ts";
-import { formatInstalledToolsBlock, loadInstalledToolsManifest } from "./installed_tools.ts";
+import { installedToolsBlockForPrompt } from "./installed_tools.ts";
 import type { Pull, PullFile, Repo } from "./ports.ts";
 import {
   formatLinkedIssuesXml,
@@ -23,13 +23,6 @@ Install everything under "$TMPDIR", "$HOME", or a tool cache directory (for exam
 Never install into the checkout: no node_modules, .venv, vendor, or build output that would show in git status outside the ignored scratch dirs; when a tool wants to write there, point it elsewhere with a venv, prefix, or cache env var, or clean up before finishing. The porcelain/HEAD freeze for reviews and the clean-tree checks for workers still hold.
 Still forbidden: mutating git commands, cluster-mutating commands (helm upgrade, helm install against a cluster, kubectl apply), reading charts/*.tgz, and any access to the forge host from shell or fetch tools (the forge host stays denied); never carry a forge token. A download that needs a public upstream ref belongs under "$TMPDIR" like any other download.
 Missing proof after trying to install what is needed is a limitation, not a clean verdict.`;
-
-/** Rendered `<installed_tools>` block, or empty when the image manifest is missing. */
-export function installedToolsBlock(): string {
-  const tools = loadInstalledToolsManifest();
-  if (!tools) return "";
-  return formatInstalledToolsBlock(tools);
-}
 
 /** Escape XML special characters in text content */
 function escapeXml(str: string): string {
@@ -307,7 +300,7 @@ ${formatPRFiles(prFiles, { excluded: excludedSet })}
       ? " A previous ❓ stays open until a reply or change actually answers it; repeat or sharpen the ones this head leaves unanswered, and drop only the ones the reply or change resolves."
       : "";
   const scopeWithQuestions = `${scope}${questionScope}`;
-  const toolsBlock = installedToolsBlock();
+  const toolsBlock = installedToolsBlockForPrompt();
   const preambleWithTools = toolsBlock ? `${PREAMBLE}\n\n${toolsBlock}` : PREAMBLE;
 
   return `${preambleWithTools}
