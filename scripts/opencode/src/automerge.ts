@@ -91,6 +91,71 @@ export function githubMergeMethodForRepo(repo: {
   return "MERGE";
 }
 
+export function automergeMethodNotAllowedNote(method: string): string {
+  return (
+    `Jumi did not schedule auto-merge on this pull request: the repository does not allow \`${method}\` merges. ` +
+    `A person needs to merge once reviews and CI are green.`
+  );
+}
+
+function unrestoredMethodNotAllowedNote(method: string): string {
+  return (
+    `Jumi did not restore auto-merge on this pull request: the repository does not allow \`${method}\` merges. ` +
+    `A person needs to merge once reviews and CI are green.`
+  );
+}
+
+/**
+ * Configured GitHub merge method. A `false` allow flag refuses the method
+ * (no fallback); an unknown flag (older forge, fakes) trusts the setting.
+ * A Gitea-only value resolves `undefined` (never scheduled on GitHub).
+ */
+export function githubMergeMethodForConfiguredRepo(
+  repo: { allowMergeCommit?: boolean; allowSquashMerge?: boolean; allowRebaseMerge?: boolean },
+  method: string
+): "MERGE" | "SQUASH" | "REBASE" | undefined {
+  switch (method) {
+    case "merge":
+      return repo.allowMergeCommit === false ? undefined : "MERGE";
+    case "squash":
+      return repo.allowSquashMerge === false ? undefined : "SQUASH";
+    case "rebase":
+      return repo.allowRebaseMerge === false ? undefined : "REBASE";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Configured Gitea merge style. A `false` allow flag refuses the method
+ * (no fallback); an unknown flag (older forge, fakes) trusts the setting.
+ */
+export function giteaMergeMethodForConfiguredRepo(
+  repo: {
+    allowMergeCommits?: boolean;
+    allowSquashMerge?: boolean;
+    allowRebase?: boolean;
+    allowRebaseExplicit?: boolean;
+    allowFastForwardOnlyMerge?: boolean;
+  },
+  method: string
+): string | undefined {
+  switch (method) {
+    case "merge":
+      return repo.allowMergeCommits === false ? undefined : "merge";
+    case "squash":
+      return repo.allowSquashMerge === false ? undefined : "squash";
+    case "rebase":
+      return repo.allowRebase === false ? undefined : "rebase";
+    case "rebase-merge":
+      return repo.allowRebaseExplicit === false ? undefined : "rebase-merge";
+    case "fast-forward-only":
+      return repo.allowFastForwardOnlyMerge === false ? undefined : "fast-forward-only";
+    default:
+      return undefined;
+  }
+}
+
 async function postAutomergeNote(
   api: AutomergeApi,
   owner: string,
@@ -749,7 +814,8 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     input.prNumber,
     input.baseBranch,
     input.botUsername,
-    log
+    log,
+    settings
   );
   if (!gate.ok) {
     await postAutomergeNote(api, input.owner, input.repo, input.prNumber, input.botUsername, gate.note);
@@ -786,7 +852,8 @@ async function checkAutomergeGates(
   prNumber: number,
   baseBranch: string,
   botUsername: string,
-  log: (message: string) => void
+  log: (message: string) => void,
+  settings: RepoSettingsLoad
 ): Promise<{ ok: true; mergeMethod: string } | { ok: false; note: string }> {
   void botUsername;
   let gateOk = false;
@@ -816,6 +883,27 @@ async function checkAutomergeGates(
 
   try {
     const repoInfo = await api.getRepo(owner, repo);
+    const configured = settings.state === "valid" ? settings.automergeMethod : undefined;
+    if (configured !== undefined) {
+      if (forge === "github") {
+        if (repoInfo.allowAutoMerge === false) {
+          return {
+            ok: false,
+            note: `Jumi did not schedule auto-merge on this pull request: auto-merge is disabled on this repository. A person needs to merge once reviews and CI are green.`,
+          };
+        }
+        const method = githubMergeMethodForConfiguredRepo(repoInfo, configured);
+        if (!method) {
+          return { ok: false, note: automergeMethodNotAllowedNote(configured) };
+        }
+        return { ok: true, mergeMethod: method };
+      }
+      const method = giteaMergeMethodForConfiguredRepo(repoInfo, configured);
+      if (!method) {
+        return { ok: false, note: automergeMethodNotAllowedNote(configured) };
+      }
+      return { ok: true, mergeMethod: method };
+    }
     if (forge === "github") {
       if (repoInfo.allowAutoMerge === false) {
         return {
@@ -1238,7 +1326,27 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     return;
   }
   if (current.autoMergeEnabled === true) return;
-  const mergeMethod = githubMergeMethodForRepo(fetchedRepo) ?? "MERGE";
+  let mergeMethod: string;
+  {
+    const configured = settings.state === "valid" ? settings.automergeMethod : undefined;
+    if (configured !== undefined) {
+      const resolved = githubMergeMethodForConfiguredRepo(fetchedRepo, configured);
+      if (!resolved) {
+        await postAutomergeNote(
+          noteApi,
+          input.owner,
+          input.repo,
+          input.prNumber,
+          input.botUsername,
+          unrestoredMethodNotAllowedNote(configured)
+        );
+        return;
+      }
+      mergeMethod = resolved;
+    } else {
+      mergeMethod = githubMergeMethodForRepo(fetchedRepo) ?? "MERGE";
+    }
+  }
   try {
     const schedule = input.api.scheduleAutoMerge;
     if (typeof schedule !== "function") return;

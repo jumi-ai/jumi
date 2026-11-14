@@ -70,11 +70,38 @@ export interface RepoSettings {
   maxSuggestions?: number;
   /** Review size budget overrides. Absent keys run with the deployment value. */
   reviewBudget: RepoReviewBudget;
+  /**
+   * CI gate wait mode. `undefined` (key absent) means `required`: wait only
+   * for the base branch's required checks, falling back to every check when
+   * protection can't be read. `all` waits for every non-Jumi check whatever
+   * branch protection says. `none` never waits for pending or absent CI.
+   */
+  ciGate?: { wait: CiGateWait };
+  /**
+   * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
+   * behavior (first allowed method on GitHub, default style on Gitea).
+   * A present value must be one the repository allows; otherwise nothing is
+   * scheduled.
+   */
+  automergeMethod?: RepoAutomergeMethod;
 }
 
 export type RepoMode = "full" | "review-only" | "off";
 
 export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+/** CI gate wait mode: `required` waits only for required checks, `all` waits for every check, `none` never waits. */
+export type CiGateWait = "all" | "required" | "none";
+
+export const CI_GATE_WAITS: readonly CiGateWait[] = ["all", "required", "none"];
+
+export const DEFAULT_CI_GATE_WAIT: CiGateWait = "required";
+
+/** Known sub-keys of the `ci_gate` mapping. */
+export const CI_GATE_KEYS = ["wait"] as const;
+
+export const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
+export type RepoAutomergeMethod = (typeof AUTOMERGE_METHODS)[number];
 
 export const REPO_MODE_DISABLED_NOTE =
   "Jumi worker jobs are turned off in this repository's settings (`.jumi.yml` `mode: review-only`). Reviews still run; assigning or labelling will not start work.";
@@ -87,6 +114,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 export const KNOWN_KEYS = new Set([
   "automerge",
   "automerge_label",
+  "automerge_method",
   "no_automerge_label",
   "allowed_runners",
   "timeouts",
@@ -105,6 +133,7 @@ export const KNOWN_KEYS = new Set([
   "review_drafts",
   "max_suggestions",
   "review_budget",
+  "ci_gate",
 ]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
@@ -228,6 +257,27 @@ function parseReviewBudgetValue(value: unknown): ReviewBudgetParse {
   return { ok: true, reviewBudget };
 }
 
+type CiGateParse = { ok: true; ciGate?: { wait: CiGateWait } } | { ok: false; error: string };
+
+function parseCiGateValue(value: unknown): CiGateParse {
+  if (value === undefined) return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"ci_gate" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!(CI_GATE_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, CI_GATE_KEYS, "ci_gate") };
+    }
+  }
+  if (!("wait" in record) || record.wait === undefined) return { ok: true, ciGate: { wait: "required" } };
+  const wait = record.wait;
+  if (typeof wait !== "string" || !(CI_GATE_WAITS as readonly string[]).includes(wait)) {
+    return { ok: false, error: `"ci_gate.wait" must be one of "all", "required", "none"` };
+  }
+  return { ok: true, ciGate: { wait: wait as CiGateWait } };
+}
+
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   const single = message.replace(/\s+/g, " ").trim();
@@ -266,14 +316,16 @@ function parserErrorMessage(err: unknown): string {
  * whole file invalid. Absent `followup_ignore_logins` means no extra
  * ignores (union with the deployment list). Absent `ignore_conflicts_label`
  * means the deployment value; absent `pickup_label` means `jumi` (Gitea
- * ignores it). `mode` must be
- * `full`, `review-only`, or `off` when present. Absent `review_drafts` (or
- * `false`) means drafts and `WIP:` titles are skipped, as today; `true`
- * reviews them on every review-dispatch path. Absent `max_suggestions`
- * means the parent ceiling; `0` is valid and means no suggestion. Absent
- * `review_budget` (or an empty mapping) means no budget overrides; each
- * present key is a positive integer, and a value above the deployer maximum
- * runs with the maximum.
+ * ignores it). `mode` must be `full`, `review-only`, or `off` when present.
+ * Absent `review_drafts` (or `false`) means drafts and `WIP:` titles are
+ * skipped, as today; `true` reviews them on every review-dispatch path.
+ * Absent `max_suggestions` means the parent ceiling; `0` is valid and means
+ * no suggestion. Absent `review_budget` (or an empty mapping) means no
+ * budget overrides; each present key is a positive integer, and a value
+ * above the deployer maximum runs with the maximum. Absent
+ * `automerge_method` means today's merge method (first allowed on GitHub,
+ * default style on Gitea); a present value must be one of `merge`,
+ * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -425,6 +477,25 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!parsed.ok) return parsed;
     reviewBudget = parsed.reviewBudget;
   }
+  let ciGate: { wait: CiGateWait } | undefined;
+  if ("ci_gate" in record && record.ci_gate !== undefined) {
+    const parsed = parseCiGateValue(record.ci_gate);
+    if (!parsed.ok) return parsed;
+    ciGate = parsed.ciGate;
+  }
+  let automergeMethod: RepoAutomergeMethod | undefined;
+  if ("automerge_method" in record && record.automerge_method !== undefined) {
+    if (
+      typeof record.automerge_method !== "string" ||
+      !(AUTOMERGE_METHODS as readonly string[]).includes(record.automerge_method)
+    ) {
+      return {
+        ok: false,
+        error: `"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"`,
+      };
+    }
+    automergeMethod = record.automerge_method as RepoAutomergeMethod;
+  }
   const settings: RepoSettings = {
     automerge,
     automergeLabel,
@@ -446,6 +517,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     mode,
     reviewDrafts,
     reviewBudget,
+    ...(ciGate !== undefined ? { ciGate } : {}),
+    ...(automergeMethod !== undefined ? { automergeMethod } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
@@ -514,6 +587,8 @@ export type RepoSettingsLoad =
       reviewDrafts: boolean;
       maxSuggestions?: number;
       reviewBudget: RepoReviewBudget;
+      ciGate?: { wait: CiGateWait };
+      automergeMethod?: RepoAutomergeMethod;
     }
   | { state: "invalid"; error: string };
 
@@ -752,6 +827,8 @@ export async function loadRepoSettings(
     reviewDrafts: parsed.settings.reviewDrafts,
     ...(parsed.settings.maxSuggestions !== undefined ? { maxSuggestions: parsed.settings.maxSuggestions } : {}),
     reviewBudget: parsed.settings.reviewBudget,
+    ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
+    ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
   };
 }
 
@@ -803,6 +880,18 @@ export async function loadDefaultBranchSettings(
 export function repoMode(settings: RepoSettingsLoad): RepoMode {
   if (settings.state !== "valid") return "full";
   return settings.mode;
+}
+
+/**
+ * Effective CI gate wait mode from a loaded settings file. Missing, invalid,
+ * or absent `ci_gate`/`wait` is today's `#502` behaviour (`required`):
+ * nothing ever falls back to `none`.
+ */
+export function effectiveCiGateWait(load: RepoSettingsLoad): CiGateWait {
+  if (load.state !== "valid") return DEFAULT_CI_GATE_WAIT;
+  const wait = load.ciGate?.wait;
+  if (wait === "all" || wait === "none" || wait === "required") return wait;
+  return DEFAULT_CI_GATE_WAIT;
 }
 
 /**
