@@ -34,7 +34,7 @@ import {
   RUNNER_EXIT_OUTCOMES,
   type RunnerExitOutcome,
 } from "./control_metrics.ts";
-import { type Engine, EngineFailedError, type EngineResult } from "./engine.ts";
+import { type Engine, EngineFailedError, type EngineResult, resolveQuotaResetAtMs } from "./engine.ts";
 import type { JobKind, ReviewJobState } from "./review_jobs.ts";
 import {
   diffTokenMetrics,
@@ -77,6 +77,16 @@ ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS clone_seconds DOUBLE PRECISI
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS build_seconds DOUBLE PRECISION NULL;
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS runner_outcome TEXT NOT NULL DEFAULT 'incomplete';
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS quota_reset_at TIMESTAMPTZ NULL;
+
+-- Pre-upgrade rows were written before runner_outcome existed and defaulted to
+-- 'incomplete'. Backfill from the exit class they already carry, which holds
+-- exactly the outcome set minus provider_down (both writers use
+-- classifyOpenCodeExit / classifyThrown). Provider outages stay 'incomplete':
+-- they are unknowable for history and match the legacy series.
+UPDATE jumi_run_usage
+  SET runner_outcome = exit_class
+  WHERE runner_outcome = 'incomplete'
+    AND exit_class IN ('ok', '143', 'timeout', 'infra', 'auth', 'quota');
 `;
 
 /** One per-(run, model) ledger row. Multi-model runs write one row per model. */
@@ -168,6 +178,10 @@ function classifyThrown(err: unknown): OpenCodeExitClass {
     return "incomplete";
   }
   return "incomplete";
+}
+
+function toResetDate(atMs: number | undefined): Date | null {
+  return typeof atMs === "number" && Number.isFinite(atMs) ? new Date(atMs) : null;
 }
 
 function fallbackModelFor(source: string, model: string | undefined): string {
@@ -274,8 +288,7 @@ export function withLedgerRunUsage(engine: Engine): Engine {
           : result
             ? classifyRunnerOutcome(result)
             : classifyThrownRunnerOutcome(thrown);
-        const quotaResetAt =
-          !aborted && result?.quota != null && result?.quotaResetAtMs != null ? new Date(result.quotaResetAtMs) : null;
+        const quotaResetAt = !aborted && result?.quota != null ? toResetDate(resolveQuotaResetAtMs(result)) : null;
         const rows =
           deltas.length > 0
             ? deltas.map((delta) =>

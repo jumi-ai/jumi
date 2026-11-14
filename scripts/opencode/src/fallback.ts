@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { claudeApiKeyVarNames, RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
-import { attachRunner, type Engine, EngineFailedError, type EngineResult, type EngineRunOptions } from "./engine.ts";
+import {
+  attachRunner,
+  type Engine,
+  EngineFailedError,
+  type EngineResult,
+  type EngineRunOptions,
+  resolveQuotaResetAtMs,
+} from "./engine.ts";
 import { looksLikeProviderUnavailable } from "./infra.ts";
 import { isCreditBalanceText, isQuotaError, isQuotaText } from "./quota.ts";
 import { withLedgerRunUsage } from "./run_usage.ts";
@@ -263,7 +270,7 @@ function hopCauseFromError(err: unknown): HopCause {
 
 /** Absolute reset the hop carries, unix seconds, when the result states one. */
 function hopResetFromResult(result: EngineResult): number | null {
-  const atMs = result.quotaResetAtMs;
+  const atMs = resolveQuotaResetAtMs(result);
   return typeof atMs === "number" && Number.isFinite(atMs) ? Math.floor(atMs / 1000) : null;
 }
 

@@ -242,6 +242,21 @@ describe("per-runner outcomes", () => {
     expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="codex"} 1800000000');
     expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="claude"} 0');
   });
+
+  test("falls back to retryAfterMs when the result states no absolute reset", () => {
+    const before = Date.now();
+    recordOpenCodeRun(
+      "review",
+      { status: "stuck", exitCode: 1, quota: "resetting", retryAfterMs: 3_600_000 },
+      "opencode"
+    );
+    const text = renderRunMetrics();
+    const match = /jumi_opencode_runner_quota_reset_seconds\{runner="opencode"\} (\d+)/.exec(text);
+    expect(match).not.toBeNull();
+    const resetAt = Number(match![1]);
+    expect(resetAt).toBeGreaterThanOrEqual(Math.floor((before + 3_600_000) / 1000) - 5);
+    expect(resetAt).toBeLessThanOrEqual(Math.floor((Date.now() + 3_600_000) / 1000) + 5);
+  });
 });
 
 describe("renderQueueMetrics", () => {

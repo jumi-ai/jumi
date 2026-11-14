@@ -1,4 +1,5 @@
 import type { EngineResult } from "./engine.ts";
+import { resolveQuotaResetAtMs } from "./engine.ts";
 import { looksLikeProviderUnavailable } from "./infra.ts";
 import type { JobKind } from "./review_jobs.ts";
 import { renderTokenExporterHealth, renderTokenMetrics } from "./token_metrics.ts";
@@ -235,8 +236,9 @@ export function recordOpenCodeRun(kind: string, result: EngineResult & { hopped?
   const outcome = classifyRunnerOutcome(result);
   const label = (runner ?? "").trim() || "opencode";
   add(runnerExitCounts, runnerOutcomeKey(kind, label, outcome));
-  if (result.quota != null && result.quotaResetAtMs != null && Number.isFinite(result.quotaResetAtMs)) {
-    runnerQuotaResetSeconds.set(label, Math.floor(result.quotaResetAtMs / 1000));
+  const resetAtMs = resolveQuotaResetAtMs(result);
+  if (resetAtMs != null && Number.isFinite(resetAtMs)) {
+    runnerQuotaResetSeconds.set(label, Math.floor(resetAtMs / 1000));
   }
 }
 

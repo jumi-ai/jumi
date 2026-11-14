@@ -1419,6 +1419,17 @@ describe("opencode_hop cause fields", () => {
     expect(resetAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 3610);
   });
 
+  test("quota result with only a retry delay hops with class=quota and a reset", async () => {
+    const logs: string[] = [];
+    const before = Date.now();
+    await hopWith({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting", retryAfterMs: 3_600_000 }, logs);
+    const line = hopLine(logs);
+    expect(line).toContain("class=quota");
+    const resetAt = Number(/reset_at=(\d+)/.exec(line)?.[1]);
+    expect(resetAt).toBeGreaterThan(Math.floor(before / 1000) + 3590);
+    expect(resetAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 3610);
+  });
+
   test("hopFromIncomplete hops with class=incomplete", async () => {
     const logs: string[] = [];
     let n = 0;

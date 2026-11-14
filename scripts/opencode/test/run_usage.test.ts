@@ -4,6 +4,7 @@ import { type Engine, EngineFailedError } from "../src/engine.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import {
   type NewRunUsageRow,
+  RUN_USAGE_SCHEMA_SQL,
   renderLedgerMetrics,
   resetActiveRunUsageRecordingForTests,
   setActiveRunUsageRecording,
@@ -217,6 +218,31 @@ describe("per-runner outcomes in the ledger", () => {
     });
   });
 
+  test("withLedgerRunUsage falls back to retryAfterMs when the result states no absolute reset", async () => {
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "review:o/r#1", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+      },
+    });
+    const before = Date.now();
+    const engine = withLedgerRunUsage(async () => ({
+      status: "stuck",
+      exitCode: 1,
+      quota: "resetting",
+      retryAfterMs: 3_600_000,
+      durationMs: 1_400,
+    }));
+    await engine({ type: "codex", runnerName: "codex", model: "gpt-6-sol", workdir: "/work/x" });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ runner: "codex", exitClass: "quota", runnerOutcome: "quota" });
+    const at = recorded[0]!.quotaResetAt;
+    expect(at).toBeInstanceOf(Date);
+    expect(at!.getTime()).toBeGreaterThanOrEqual(before + 3_600_000 - 5_000);
+    expect(at!.getTime()).toBeLessThanOrEqual(Date.now() + 3_600_000 + 5_000);
+  });
+
   test("ledger export counts ok, quota, auth, timeout, and provider-down by runner with reset gauge", async () => {
     const store = new MemoryReviewJobStore();
     const base = {
@@ -283,6 +309,14 @@ describe("per-runner outcomes in the ledger", () => {
     expect(text).toContain('jumi_opencode_exits_total{kind="review",class="incomplete"} 1');
     expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="codex"} 1800000000');
     expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="claude"} 0');
+  });
+});
+
+describe("run usage migration", () => {
+  test("backfills pre-upgrade rows from the exit class they already carry", () => {
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("SET runner_outcome = exit_class");
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("exit_class IN ('ok', '143', 'timeout', 'infra', 'auth', 'quota')");
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("WHERE runner_outcome = 'incomplete'");
   });
 });
 

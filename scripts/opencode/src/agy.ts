@@ -25,7 +25,7 @@ import { agyConversationPath } from "./fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
-import { looksLikeInfraStderr } from "./infra.ts";
+import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
 
@@ -481,12 +481,19 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       });
     }
 
+    // The provider check sees the envelope the way quota/auth already do:
+    // an upstream 5xx can arrive envelope-only with empty stderr/stdout, and
+    // without it the run classifies as `incomplete` with no hop. The message
+    // feeds the chain hop classifier, so a provider outage carries the signal
+    // raw the way the codex harness does; agent text stays in `stdout`.
+    const providerText = [combined, envelope?.error].filter(Boolean).join("\n");
+    const providerDown = looksLikeProviderUnavailable(providerText);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,
       stdout,
-      message: engineExitMessage(exitCode, combined),
-      infra: looksLikeInfraStderr(combined),
+      message: providerDown ? providerText : engineExitMessage(exitCode, combined),
+      infra: providerDown ? false : looksLikeInfraStderr(combined),
       durationMs,
     });
   } catch (err) {
