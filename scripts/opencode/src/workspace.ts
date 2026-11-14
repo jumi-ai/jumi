@@ -2,7 +2,7 @@ import { accessSync, constants as fsConstants, mkdirSync, statSync } from "node:
 import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
-import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
 
@@ -158,11 +158,11 @@ export function gitAuthResolverFor(
 }
 
 function gitAuthorName(auth: GitAuth): string {
-  return auth.authorName ?? FORGE_COMMITTER_NAME;
+  return auth.authorName ?? forgeCommitterName();
 }
 
 function gitAuthorEmail(auth: GitAuth): string {
-  return auth.authorEmail ?? FORGE_COMMITTER_EMAIL;
+  return auth.authorEmail ?? forgeCommitterEmail();
 }
 
 function gitCredentialHelper(): string {

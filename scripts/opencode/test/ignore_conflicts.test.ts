@@ -6,7 +6,7 @@ import { hasLabel } from "../src/assignee.ts";
 import { sitMessage } from "../src/board.ts";
 import { loadConfig } from "../src/config.ts";
 import { needsConflict } from "../src/conflict.ts";
-import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "../src/forge.ts";
+import { DEFAULT_FORGE_COMMITTER_EMAIL, DEFAULT_FORGE_COMMITTER_NAME } from "../src/forge.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import {
   hasIgnoreConflictsLabel,
@@ -41,8 +41,8 @@ function renovateCommit() {
 function jumiCommit() {
   return {
     sha: "def",
-    author: { name: FORGE_COMMITTER_NAME, email: FORGE_COMMITTER_EMAIL, login: "jumi" },
-    committer: { name: FORGE_COMMITTER_NAME, email: FORGE_COMMITTER_EMAIL, login: "jumi" },
+    author: { name: DEFAULT_FORGE_COMMITTER_NAME, email: DEFAULT_FORGE_COMMITTER_EMAIL, login: "jumi" },
+    committer: { name: DEFAULT_FORGE_COMMITTER_NAME, email: DEFAULT_FORGE_COMMITTER_EMAIL, login: "jumi" },
   };
 }
 
@@ -160,6 +160,36 @@ describe("ignore-conflicts label helpers", () => {
     expect(
       hasJumiCommit([{ sha: "x", author: { login: "JUMI" }, committer: { login: "other" } }], { botUsername: "jumi" })
     ).toBe(true);
+  });
+
+  test("hasJumiCommit recognises the configured JUMI_GIT_EMAIL, unset uses the neutral default", () => {
+    const neutralOnly = {
+      sha: "neutral",
+      author: { email: "jumi@localhost" },
+      committer: { email: "jumi@localhost" },
+    };
+    const customOnly = {
+      sha: "custom",
+      author: { email: "custom@example.test" },
+      committer: { email: "custom@example.test" },
+    };
+    const prevEmail = process.env.JUMI_GIT_EMAIL;
+    const prevName = process.env.JUMI_GIT_NAME;
+    try {
+      delete process.env.JUMI_GIT_EMAIL;
+      delete process.env.JUMI_GIT_NAME;
+      expect(hasJumiCommit([neutralOnly], { botUsername: "someone-else" })).toBe(true);
+      expect(hasJumiCommit([customOnly], { botUsername: "someone-else" })).toBe(false);
+      process.env.JUMI_GIT_EMAIL = "custom@example.test";
+      process.env.JUMI_GIT_NAME = "custom-bot";
+      expect(hasJumiCommit([customOnly], { botUsername: "someone-else" })).toBe(true);
+      expect(hasJumiCommit([neutralOnly], { botUsername: "someone-else" })).toBe(false);
+    } finally {
+      if (prevEmail === undefined) delete process.env.JUMI_GIT_EMAIL;
+      else process.env.JUMI_GIT_EMAIL = prevEmail;
+      if (prevName === undefined) delete process.env.JUMI_GIT_NAME;
+      else process.env.JUMI_GIT_NAME = prevName;
+    }
   });
 
   test("isLeftToAuthor needs the label and no Jumi commit", async () => {

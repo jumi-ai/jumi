@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  FORGE_DENY_DOMAIN,
+  forgeDenyHost,
+  forgeHostFromUrl,
   forgeOpenCodeConfigContent,
   forgeOpenCodeGlobalConfig,
   forgePermissions,
@@ -88,19 +89,21 @@ describe("opencode review config", () => {
   });
 
   test("denies webfetch to homelab Gitea and GitHub search after star allow (last-match)", () => {
-    const rules = forgePermissions(FORGE_DENY_DOMAIN);
-    expect(JSON.parse(forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN))).toEqual({ permissions: rules });
+    const host = "gitea.example.test";
+    const rules = forgePermissions(host);
+    expect(JSON.parse(forgeOpenCodeConfigContent(host))).toEqual({ permissions: rules });
     expect(rules).toEqual([
       { action: "webfetch", resource: "*", effect: "allow" },
-      { action: "webfetch", resource: "*kirmanak.stream*", effect: "deny" },
+      { action: "webfetch", resource: `*${host}*`, effect: "deny" },
       { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
     ]);
   });
 
   test("the forge policy outranks a repository by living in the global config", () => {
-    expect(JSON.parse(forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN))).toEqual({
+    const host = "gitea.example.test";
+    expect(JSON.parse(forgeOpenCodeGlobalConfig(host))).toEqual({
       policies: [
-        { action: "tool.use", resource: `webfetch:*${FORGE_DENY_DOMAIN}*`, effect: "deny" },
+        { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
         { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
       ],
     });
@@ -109,8 +112,8 @@ describe("opencode review config", () => {
   test("the binary probe drives the shipped map rather than a copy of it", () => {
     const probe = readFileSync(join(process.cwd(), "src/webfetch_probe.ts"), "utf8");
     expect(probe).toContain('from "./forge_webfetch.ts"');
-    expect(probe).toContain("forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN)");
-    expect(probe).toContain("forgePermissions(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgeOpenCodeConfigContent(PROBE_DENY_DOMAIN)");
+    expect(probe).toContain("forgePermissions(PROBE_DENY_DOMAIN)");
     // Deny of the forge host and allow of an unrelated host, both on the binary.
     expect(probe).toContain('expect: "allow"');
     expect(probe).toContain('expect: "deny"');
@@ -122,7 +125,7 @@ describe("opencode review config", () => {
     // PWD over cwd, so without this the relative skill roots miss the workspace.
     expect(probe).toContain("PWD: workdir");
     // The deny has to hold against a repository trying to lift it.
-    expect(probe).toContain("forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN)");
+    expect(probe).toContain("forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN)");
     expect(probe).toContain("agents: { build: { permissions: allow } }");
   });
 

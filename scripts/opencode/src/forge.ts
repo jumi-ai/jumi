@@ -7,8 +7,16 @@ export type { Forge, Tracker } from "./ports.ts";
 
 export type ForgeKind = "gitea" | "github";
 
-export const FORGE_COMMITTER_NAME = "jumi";
-export const FORGE_COMMITTER_EMAIL = "jumi@kirmanak.stream";
+export const DEFAULT_FORGE_COMMITTER_NAME = "jumi";
+export const DEFAULT_FORGE_COMMITTER_EMAIL = "jumi@localhost";
+
+export function forgeCommitterName(env: Record<string, string | undefined> = process.env): string {
+  return env.JUMI_GIT_NAME?.trim() || DEFAULT_FORGE_COMMITTER_NAME;
+}
+
+export function forgeCommitterEmail(env: Record<string, string | undefined> = process.env): string {
+  return env.JUMI_GIT_EMAIL?.trim() || DEFAULT_FORGE_COMMITTER_EMAIL;
+}
 
 export function parseForge(value: string | undefined): ForgeKind {
   if (!value || value === "gitea") return "gitea";

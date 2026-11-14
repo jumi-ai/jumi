@@ -166,8 +166,13 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
-  // Deployer-only SearXNG endpoint; read here so the contract gate sees the
-  // optional key. Unset or blank means "not configured".
+  // Deployment-owned identity and tracing knobs, plus the deployer-only
+  // Searxng endpoint; read here so the contract gate sees the optional keys.
+  // Runtime reads them via process.env. Unset or blank searxng means
+  // "not configured".
+  void optionalEnv(resolved, "JUMI_GIT_NAME");
+  void optionalEnv(resolved, "JUMI_GIT_EMAIL");
+  void optionalEnv(resolved, "PHOENIX_PUBLIC_HOST");
   void optionalEnv(resolved, "JUMI_SEARXNG_URL");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);

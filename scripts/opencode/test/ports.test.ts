@@ -10,8 +10,10 @@ import {
   createForge,
   createGiteaForge,
   createGithubForge,
-  FORGE_COMMITTER_EMAIL,
-  FORGE_COMMITTER_NAME,
+  DEFAULT_FORGE_COMMITTER_EMAIL,
+  DEFAULT_FORGE_COMMITTER_NAME,
+  forgeCommitterEmail,
+  forgeCommitterName,
 } from "../src/forge.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
@@ -133,8 +135,10 @@ describe("Engine, Tracker, and Forge ports", () => {
     expect(createForge({ forge: "github", giteaUrl: "https://github.com", giteaToken: "token-1" })).toBeInstanceOf(
       GithubAPI
     );
-    expect(FORGE_COMMITTER_NAME).toBe("jumi");
-    expect(FORGE_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
+    expect(DEFAULT_FORGE_COMMITTER_NAME).toBe("jumi");
+    expect(DEFAULT_FORGE_COMMITTER_EMAIL).toBe("jumi@localhost");
+    expect(forgeCommitterName()).toBe("jumi");
+    expect(forgeCommitterEmail()).toBe("jumi@localhost");
   });
 
   test("Tracker and Forge are separate method bags", () => {
@@ -308,7 +312,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect("configPath" in (engineOpts ?? {})).toBe(false);
       expect(engineOpts?.extraEnv?.GITEA_BOT_TOKEN).toBeUndefined();
       expect(engineOpts?.extraEnv?.GIT_AUTH_TOKEN).toBe("bot-token");
-      expect(engineOpts?.extraEnv?.GIT_COMMITTER_EMAIL).toBe(FORGE_COMMITTER_EMAIL);
+      expect(engineOpts?.extraEnv?.GIT_COMMITTER_EMAIL).toBe("jumi@localhost");
     });
   });
 

@@ -170,10 +170,10 @@ describe("OpenCode well-known auth seeding", () => {
 });
 
 describe("parseOpenCodeWellKnownUrl", () => {
-  test("unset or empty defaults to kirmanak.stream", () => {
-    expect(parseOpenCodeWellKnownUrl(undefined)).toBe("https://kirmanak.stream");
-    expect(parseOpenCodeWellKnownUrl("")).toBe("https://kirmanak.stream");
-    expect(parseOpenCodeWellKnownUrl("  ")).toBe("https://kirmanak.stream");
+  test("unset or empty disables well-known", () => {
+    expect(parseOpenCodeWellKnownUrl(undefined)).toBeUndefined();
+    expect(parseOpenCodeWellKnownUrl("")).toBeUndefined();
+    expect(parseOpenCodeWellKnownUrl("  ")).toBeUndefined();
   });
 
   test("disabled turns well-known off", () => {

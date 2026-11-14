@@ -386,9 +386,9 @@ describe("implementConflict", () => {
       expect(mergeEnv?.GIT_CONFIG_GLOBAL).toBe("/dev/null");
       expect(mergeEnv?.GIT_CONFIG_NOSYSTEM).toBe("1");
       expect(mergeEnv?.GIT_COMMITTER_NAME).toBe("jumi");
-      expect(mergeEnv?.GIT_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
+      expect(mergeEnv?.GIT_COMMITTER_EMAIL).toBe("jumi@localhost");
       expect(mergeEnv?.GIT_AUTHOR_NAME).toBe("jumi");
-      expect(mergeEnv?.GIT_AUTHOR_EMAIL).toBe("jumi@kirmanak.stream");
+      expect(mergeEnv?.GIT_AUTHOR_EMAIL).toBe("jumi@localhost");
     });
   });
 

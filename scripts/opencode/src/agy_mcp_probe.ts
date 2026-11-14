@@ -22,7 +22,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGY_MCP_CONFIG_DIR, AGY_MCP_CONFIG_FILE, ensureAgyMcpServer, pruneAgyMcpServer } from "./agy.ts";
-import { FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
 import {
   SEARXNG_SERVER_FORGE_HOST_ENV,
   SEARXNG_SERVER_NAME,
@@ -31,6 +30,9 @@ import {
   searxngServerPath,
   searxngUrlFromEnv,
 } from "./searxng.ts";
+
+/** Example homelab host for manual probing only; production derives the deny host from config. */
+const PROBE_DENY_DOMAIN = "kirmanak.stream";
 
 const RUN_TIMEOUT_MS = 45_000;
 
@@ -95,7 +97,7 @@ async function handshakeSearxngServer(): Promise<CaseResult> {
     stderr: "pipe",
     env: {
       [SEARXNG_SERVER_URL_ENV]: "http://127.0.0.1:9",
-      [SEARXNG_SERVER_FORGE_HOST_ENV]: FORGE_DENY_DOMAIN,
+      [SEARXNG_SERVER_FORGE_HOST_ENV]: PROBE_DENY_DOMAIN,
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     },
   });
@@ -153,7 +155,7 @@ async function main(): Promise<number> {
     const configuredHome = join(dir, "home-configured");
     const configured = searxngUrlFromEnv({ JUMI_SEARXNG_URL: "http://127.0.0.1:9" });
     if (!configured) throw new Error("probe cannot parse its own stub URL");
-    await ensureAgyMcpServer(configuredHome, configured, FORGE_DENY_DOMAIN);
+    await ensureAgyMcpServer(configuredHome, configured, PROBE_DENY_DOMAIN);
     const listed = await mcpList(configuredHome, workdir);
     results.push({
       name: "configured: the pinned agy lists the spawn's searxng server as enabled",

@@ -25,7 +25,7 @@ import { classifyRunnerOutcome, resetControlMetricsForTests } from "../src/contr
 import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { agyConversationPath, isProviderUnavailableResult, withEngineChain } from "../src/fallback.ts";
-import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
+import { agyReadUrlDeny, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
 import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { SEARXNG_SERVER_NAME } from "../src/searxng.ts";
@@ -145,7 +145,7 @@ describe("mergeAgyForgeDeny", () => {
       const dir = join(home, AGY_SETTINGS_DIR);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "settings.json"), JSON.stringify({ permissions: { deny: "read_url(*)" } }));
-      await expect(ensureAgyForgeDeny(home, FORGE_DENY_DOMAIN)).rejects.toBeInstanceOf(EngineFailedError);
+      await expect(ensureAgyForgeDeny(home, "gitea.example.test")).rejects.toBeInstanceOf(EngineFailedError);
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -355,6 +355,7 @@ describe("runAgy", () => {
           workdir,
           home,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           trace: { kind: "implement", owner: "kirmanak", repo: "jumi" },
           extraEnv: { ARGS_LOG: argsLog, GITEA_BOT_TOKEN: "should-not-pass" },
         });
@@ -366,7 +367,7 @@ describe("runAgy", () => {
         const settings = JSON.parse(await readFile(join(home, AGY_SETTINGS_DIR, "settings.json"), "utf8"));
         expect(settings).toEqual({
           ...AGY_SEED_SETTINGS,
-          permissions: { deny: [agyReadUrlDeny(FORGE_DENY_DOMAIN)] },
+          permissions: { deny: [agyReadUrlDeny("gitea.example.test")] },
         });
       }
     );
@@ -391,6 +392,7 @@ describe("runAgy", () => {
           workdir,
           home,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog, GIT_AUTH_HOST: "github.com" },
         });
         const settings = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
@@ -410,7 +412,15 @@ describe("runAgy", () => {
         await mkdir(dir, { recursive: true });
         await writeFile(join(dir, "settings.json"), "{not json");
         await expect(
-          runAgy({ prompt: "p", model: "m", workdir, home, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } })
+          runAgy({
+            prompt: "p",
+            model: "m",
+            workdir,
+            home,
+            sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
+            extraEnv: { ARGS_LOG: argsLog },
+          })
         ).rejects.toBeInstanceOf(EngineFailedError);
         expect(await argLines(argsLog)).toEqual([]);
       }
@@ -424,6 +434,7 @@ describe("runAgy", () => {
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
         trace: { kind: "review", owner: "o", repo: "r" },
       });
@@ -449,6 +460,7 @@ done`;
           model: "m",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
           trace: { kind: "review", owner: "o", repo: "r" },
         });
@@ -474,6 +486,7 @@ done`;
           model: "m",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
           trace: { kind: "implement", owner: "o", repo: "r" },
         });
@@ -506,6 +519,7 @@ done`;
         model: "gemini-3-pro",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("ok");
@@ -526,6 +540,7 @@ done`;
           model: "gemini-3-pro",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("ok");
@@ -558,6 +573,7 @@ exec sleep 30`
           model: "gemini-3-pro",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           timeoutMs: 500,
           extraEnv: { ARGS_LOG: argsLog },
         });
@@ -577,6 +593,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -594,6 +611,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -610,6 +628,7 @@ exec sleep 30`
           model: "m",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("exit");
@@ -627,6 +646,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -644,6 +664,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
         logger: (message) => logs.push(message),
       });
@@ -661,6 +682,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -684,6 +706,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -707,6 +730,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -731,6 +755,7 @@ exec sleep 30`
           model: "m",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("exit");
@@ -752,6 +777,7 @@ exec sleep 30`
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("exit");
@@ -849,7 +875,15 @@ describe("agySearxngMcp", () => {
             join(dir, AGY_MCP_CONFIG_FILE),
             JSON.stringify({ mcpServers: { [SEARXNG_SERVER_NAME]: { command: "bun" } } })
           );
-          await runAgy({ prompt: "p", model: "m", workdir, home, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } });
+          await runAgy({
+            prompt: "p",
+            model: "m",
+            workdir,
+            home,
+            sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
+            extraEnv: { ARGS_LOG: argsLog },
+          });
           const parsed = JSON.parse(await readFile(join(dir, AGY_MCP_CONFIG_FILE), "utf8")) as {
             mcpServers: Record<string, unknown>;
           };
@@ -876,6 +910,7 @@ describe("agy dispatch and chain", () => {
         model: "gemini-3-pro",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
       });
       expect(result.status).toBe("ok");
@@ -896,6 +931,7 @@ describe("agy dispatch and chain", () => {
           model: agy.model,
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
           trace: { kind: "review", owner: "o", repo: "r" },
         });
@@ -915,7 +951,14 @@ describe("agy dispatch and chain", () => {
       },
       async ({ workdir, argsLog }) => {
         const engine = withEngineChain(registeredEngine, { chain: [agy, claude] });
-        const base = { prompt: "p", model: agy.model, workdir, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } };
+        const base = {
+          prompt: "p",
+          model: agy.model,
+          workdir,
+          sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
+          extraEnv: { ARGS_LOG: argsLog },
+        };
         const first = await engine(base);
         expect(first.status).toBe("ok");
         expect(first.runner).toEqual(runnerStamp(claude));
@@ -947,6 +990,7 @@ describe("agy dispatch and chain", () => {
           model: agy.model,
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("ok");
@@ -971,6 +1015,7 @@ describe("agy dispatch and chain", () => {
           model: agy.model,
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { ARGS_LOG: argsLog },
         });
         expect(result.status).toBe("ok");
@@ -986,6 +1031,7 @@ describe("agy dispatch and chain", () => {
         model: "m",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { ARGS_LOG: argsLog },
         continueSession: true,
       });
@@ -1003,7 +1049,14 @@ describe("agy dispatch and chain", () => {
       },
       async ({ workdir, argsLog }) => {
         const engine = withEngineChain(registeredEngine, { chain: [agy, claude] });
-        const base = { prompt: "p", model: agy.model, workdir, sanitizeEnv: true, extraEnv: { ARGS_LOG: argsLog } };
+        const base = {
+          prompt: "p",
+          model: agy.model,
+          workdir,
+          sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
+          extraEnv: { ARGS_LOG: argsLog },
+        };
         const first = await engine(base);
         expect(first.runner).toEqual(runnerStamp(agy));
         expect(formatRunnerStamp(first.runner!)).toBe("_Jumi · agy · gemini-3-pro (high)_");
