@@ -142,6 +142,8 @@ jobs:
           docker run --rm jumi-reviewer:ci python --version
           docker run --rm jumi-reviewer:ci python3 -c 'import yaml'
           docker run --rm jumi-reviewer:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          docker run --rm jumi-reviewer:ci test -f /app/installed-tools.txt
+          docker run --rm jumi-reviewer:ci sh -c 'set -eu; while IFS= read -r line; do [ -n "$line" ] || continue; tool=${line%% *}; command -v "$tool" >/dev/null 2>&1 || { echo "manifest tool missing from PATH: $tool ($line)" >&2; exit 1; }; done < /app/installed-tools.txt'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
@@ -308,6 +310,9 @@ jobs:
           docker run --rm jumi-worker:ci python --version
           docker run --rm jumi-worker:ci python3 -c 'import yaml'
           docker run --rm jumi-worker:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          docker run --rm jumi-worker:ci test -f /app/installed-tools.txt
+          docker run --rm jumi-worker:ci sh -c 'grep -E "^java " /app/installed-tools.txt >/dev/null'
+          docker run --rm jumi-worker:ci sh -c 'set -eu; while IFS= read -r line; do [ -n "$line" ] || continue; tool=${line%% *}; command -v "$tool" >/dev/null 2>&1 || { echo "manifest tool missing from PATH: $tool ($line)" >&2; exit 1; }; done < /app/installed-tools.txt'
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"

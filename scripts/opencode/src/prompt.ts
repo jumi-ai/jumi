@@ -1,4 +1,5 @@
 import type { CiCheckSummary } from "./ci.ts";
+import { formatInstalledToolsBlock, loadInstalledToolsManifest } from "./installed_tools.ts";
 import type { Pull, PullFile, Repo } from "./ports.ts";
 import {
   formatLinkedIssuesXml,
@@ -8,6 +9,27 @@ import {
   type ReviewThread,
 } from "./review_context.ts";
 import type { ReviewDelta } from "./review_delta.ts";
+
+/** One sentence shared verbatim with the review-proof and worker-proof skills. */
+export const TOOL_INSTALL_RULE_SENTENCE =
+  "You may download and install any tool, runtime, package, or dependency you need to prove or verify a change.";
+
+/**
+ * One install rule for every harness. Reviewer and worker prompts embed this
+ * constant; the image skills carry the same sentence verbatim.
+ */
+export const TOOL_INSTALL_RULE = `${TOOL_INSTALL_RULE_SENTENCE}
+Install everything under "$TMPDIR", "$HOME", or a tool cache directory (for example UV_CACHE_DIR, pip, npm, gradle, or go caches); prefer "$TMPDIR" for downloaded binaries and venvs.
+Never install into the checkout: no node_modules, .venv, vendor, or build output that would show in git status outside the ignored scratch dirs; when a tool wants to write there, point it elsewhere with a venv, prefix, or cache env var, or clean up before finishing. The porcelain/HEAD freeze for reviews and the clean-tree checks for workers still hold.
+Still forbidden: mutating git commands, cluster-mutating commands (helm upgrade, helm install against a cluster, kubectl apply), reading charts/*.tgz, and any access to the forge host from shell or fetch tools (the forge host stays denied); never carry a forge token. A download that needs a public upstream ref belongs under "$TMPDIR" like any other download.
+Missing proof after trying to install what is needed is a limitation, not a clean verdict.`;
+
+/** Rendered `<installed_tools>` block, or empty when the image manifest is missing. */
+export function installedToolsBlock(): string {
+  const tools = loadInstalledToolsManifest();
+  if (!tools) return "";
+  return formatInstalledToolsBlock(tools);
+}
 
 /** Escape XML special characters in text content */
 function escapeXml(str: string): string {
@@ -94,7 +116,7 @@ const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this 
   <rule><ci_results> lists the checks that ran on this head and their conclusions. A check with required="false" is still running but not required by branch protection: read it as still-running, never as green. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking.</rule>
   <rule>The only file you should write is JUMI_REVIEW.md at the repository root. Stdout is logs, not the sticky.</rule>
   <rule>Do not git add source, git commit, git push, or force-push.</rule>
-  <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands. The only network-shell exception is a read-only shallow clone of a public upstream repository at the tags/refs named in the diff into "$TMPDIR" scratch outside the porcelain (for example \`git clone --depth 1 --branch <tag> <public-url> "$TMPDIR/upstream-<tag>"\`) and diffing those two refs there, then removing the clone (for example \`rm -rf "$TMPDIR/upstream-<tag>"\`); the clone must stay under "$TMPDIR" so the porcelain/HEAD freeze still holds, must never carry a forge token, and the forge host stays denied.</rule>
+  <rule>${TOOL_INSTALL_RULE}</rule>
   <rule>Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
 </rules>`;
 
@@ -194,10 +216,9 @@ function formatBlockingQuestions(blocking: boolean | undefined): string {
 <blocking_questions>
   Open ❓ questions block merge for this pull author: the service posts a failing
   check while any ❓ is open, so required-check automerge waits. Gather upstream
-  evidence yourself before asking: use web search/fetch, or a read-only shallow
-  clone of the public upstream repository at the tags/refs named in the diff into
-  "$TMPDIR" scratch outside the porcelain and diff those refs there, removing the
-  clone when done. Ask a ❓ only
+  evidence yourself before asking: use web search/fetch, or download the public
+  upstream refs named in the diff into "$TMPDIR" scratch outside the porcelain and
+  diff those refs there, removing the download when done. Ask a ❓ only
   for decisions or facts only the author or operator has (intent, deployment
   context, acceptable risk) or that a worker change can resolve (tests, config),
   such as a rendered chart or a command run in the checkout. When upstream
@@ -285,8 +306,10 @@ ${formatPRFiles(prFiles, { excluded: excludedSet })}
       ? " A previous ❓ stays open until a reply or change actually answers it; repeat or sharpen the ones this head leaves unanswered, and drop only the ones the reply or change resolves."
       : "";
   const scopeWithQuestions = `${scope}${questionScope}`;
+  const toolsBlock = installedToolsBlock();
+  const preambleWithTools = toolsBlock ? `${PREAMBLE}\n\n${toolsBlock}` : PREAMBLE;
 
-  return `${PREAMBLE}
+  return `${preambleWithTools}
 
 <gitea_action_context>
   <repository full_name="${escapeXml(repo.full_name)}" default_branch="${escapeXml(repo.default_branch)}" />
@@ -310,7 +333,7 @@ ${startFrom}
 - Prefer \`git show HEAD:path/to/file\` or built-in read for a single file. Do not \`git show\` multi-megabyte or generated blobs.
 Safe examples: \`git diff --stat jumi/target...HEAD\`, \`git grep -n 'foo\\|bar' -- path\`, \`git log --oneline jumi/target..HEAD\`, \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. Use web search/fetch to check upstream docs when correctness depends on external behavior.
 
-Never \`git show\` or read \`charts/*.tgz\`. Never \`helm upgrade\`, \`kubectl apply\`, package installs, or mutating git.
+Never \`git show\` or read \`charts/*.tgz\`. Never \`helm upgrade\`, \`helm install\`, \`kubectl apply\`, or mutating git.
 
 <review-rubric>
 ${REVIEW_RUBRIC}

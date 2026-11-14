@@ -254,7 +254,22 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13), and the xAI child credential"
+  if ! buildah run "${ctr}" -- test -f /app/installed-tools.txt; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "installed-tools manifest missing in worker image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'grep -E "^java " /app/installed-tools.txt >/dev/null'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker installed-tools manifest must include java" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'set -eu; while IFS= read -r line; do [ -n "$line" ] || continue; tool=${line%% *}; command -v "$tool" >/dev/null 2>&1 || { echo "manifest tool missing from PATH: $tool ($line)" >&2; exit 1; }; done < /app/installed-tools.txt'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "installed-tools manifest lists a tool missing from PATH in worker image" >&2
+    exit 1
+  fi
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13), installed-tools manifest with java, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 

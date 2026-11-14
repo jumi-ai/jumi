@@ -1548,7 +1548,7 @@ describe("worker prompts", () => {
       expect(prompt).toContain("JUMI_PR.md");
       expect(prompt).toContain("Verify once at the end");
       expect(prompt).toContain("Do not ask questions");
-      expect(prompt).not.toContain("denied");
+      expect(prompt).toContain("forge host stays denied");
       expect(prompt).not.toContain("Do not run git");
     }
   });
