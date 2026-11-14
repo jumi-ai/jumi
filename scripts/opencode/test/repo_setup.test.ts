@@ -159,6 +159,67 @@ describe("runRepoSetupForJob clean-tree check", () => {
     expect(result.failureReason).toContain("cannot restore worktree");
   });
 
+  test("failed setup that dirties the tree is restored and reported dirty", async () => {
+    const load = await validLoad("setup:\n  run: echo hi\n");
+    const { git, calls } = stubGit([" M src/a.ts\n", ""]);
+    const result = await runRepoSetupForJob({
+      workdir: "/tmp/repo-setup-test",
+      kind: "review",
+      load,
+      auth: AUTH,
+      owner: "owner",
+      repo: "repo",
+      git,
+      gitEnv: GIT_ENV,
+      runScript: stubScript({ status: "failed", exitCode: 1, output: "boom", durationMs: 3 }),
+    });
+    expect(result.ran).toBe(true);
+    if (!result.ran) return;
+    expect(result.state).toBe("dirty");
+    expect(commands(calls)).toEqual(["status", "reset", "clean", "status"]);
+    expect(result.promptBlock).toContain('state="dirty"');
+  });
+
+  test("timed-out setup that dirties the tree is restored and reported dirty", async () => {
+    const load = await validLoad("setup:\n  run: echo hi\n");
+    const { git, calls } = stubGit([" M src/a.ts\n", ""]);
+    const result = await runRepoSetupForJob({
+      workdir: "/tmp/repo-setup-test",
+      kind: "review",
+      load,
+      auth: AUTH,
+      owner: "owner",
+      repo: "repo",
+      git,
+      gitEnv: GIT_ENV,
+      runScript: stubScript({ status: "timeout", exitCode: null, output: "hung", durationMs: 5 }),
+    });
+    expect(result.ran).toBe(true);
+    if (!result.ran) return;
+    expect(result.state).toBe("dirty");
+    expect(commands(calls)).toEqual(["status", "reset", "clean", "status"]);
+  });
+
+  test("failed setup with a failed restore is failed, not dirty", async () => {
+    const load = await validLoad("setup:\n  run: echo hi\n");
+    const { git } = stubGit([" M src/a.ts\n", " M src/a.ts\n"], ["reset"]);
+    const result = await runRepoSetupForJob({
+      workdir: "/tmp/repo-setup-test",
+      kind: "review",
+      load,
+      auth: AUTH,
+      owner: "owner",
+      repo: "repo",
+      git,
+      gitEnv: GIT_ENV,
+      runScript: stubScript({ status: "failed", exitCode: 1, output: "boom", durationMs: 3 }),
+    });
+    expect(result.ran).toBe(true);
+    if (!result.ran) return;
+    expect(result.state).toBe("failed");
+    expect(result.failureReason).toContain("cannot restore worktree");
+  });
+
   test("git errors in the restore reason are redacted before reaching the forge", async () => {
     const load = await validLoad("setup:\n  run: echo hi\n  on_failure: fail\n");
     const rawToken = `ghp_${"a".repeat(24)}`;

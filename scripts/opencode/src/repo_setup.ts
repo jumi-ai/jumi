@@ -444,7 +444,9 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
     };
     if (result.status === "ok") {
       // Clean-tree check: gitignored output is allowed; any tracked change or
-      // unignored untracked file makes the run dirty.
+      // unignored untracked file makes the run dirty. The same check runs on
+      // the failed/timeout path below, so `continue` never starts the engine
+      // on a tree the setup dirtied.
       const check = await checkPorcelain();
       if (check.error !== undefined || check.porcelain) {
         // Restore on the status-error path too: the engine must never start
@@ -496,6 +498,40 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         tail,
         promptBlock: formatRepoSetupPromptBlock("ok"),
       };
+    }
+    // Failed or timed-out setup still checks the tree: a script that dirties a
+    // tracked file then exits non-zero must not leave the edit in place for
+    // `commitIfDirty`. Restore on any dirty (or unknown) tree and report
+    // `dirty` when the restore lands, or `failed` naming the restore failure
+    // when restore or re-check fails.
+    const check = await checkPorcelain();
+    if (check.error !== undefined || check.porcelain) {
+      const restoreError = await restoreWorktree();
+      const recheck = await checkPorcelain();
+      if (restoreError !== undefined || recheck.error !== undefined || recheck.porcelain) {
+        const detail = restoreError ?? recheck.error ?? "worktree still dirty after restore";
+        return reportFailed(`repository setup failed: cannot restore worktree (${detail})`);
+      }
+      if (check.porcelain) {
+        const failureReason = setupFailureReason("dirty");
+        logDiagnostic(log, "repo_setup", {
+          kind: opts.kind,
+          state: "dirty",
+          exit_code: result.exitCode ?? null,
+          duration_ms: result.durationMs,
+        });
+        for (const line of tail.split("\n")) log(`[repo setup] ${line}`);
+        return {
+          ran: true,
+          state: "dirty",
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          tail,
+          promptBlock: formatRepoSetupPromptBlock("dirty", { exitCode: result.exitCode, tail }),
+          failureReason,
+        };
+      }
+      log(`[repo setup] worktree check failed (${check.error}), restored and re-checked clean`);
     }
     const state: RepoSetupState = result.status === "timeout" ? "timeout" : "failed";
     const failureReason = setupFailureReason(state, { exitCode: result.exitCode, timeoutMs });
