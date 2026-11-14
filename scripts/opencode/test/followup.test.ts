@@ -4593,6 +4593,104 @@ describe("collectFollowUpItems", () => {
     });
   });
 
+  test("needsFollowUp still runs when a risk shares the review with a maintainer ❓", async () => {
+    const mixedFailure = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: 🟡 risk: race on shutdown",
+      "src/bar.ts:1: ❓ maintainer: please file a follow-up issue for the leftover scope?",
+      "<!-- jumi-check: failure; 1 risk -->",
+    ].join("\n");
+    const api = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 91,
+          body: mixedFailure,
+          state: "REQUEST_CHANGES",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
+  test("needsFollowUp still runs when suggestions share the review with a maintainer ❓", async () => {
+    const mixedSuggestion = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: 💡 suggestion: rename the helper",
+      "src/bar.ts:1: ❓ maintainer: please file a follow-up issue for the leftover scope?",
+      "<!-- jumi-check: success; 1 suggestion -->",
+    ].join("\n");
+    const pullApi = makeApi({
+      listIssueComments: async () => [],
+      listPullReviews: async () => [
+        makeReview({
+          id: 92,
+          body: mixedSuggestion,
+          state: "APPROVED",
+          commit_id: HEAD_SHA,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api: pullApi,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+    const stickyApi = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38024,
+          body: mixedSuggestion,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api: stickyApi,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: prWithHead(),
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+        })
+      ).toBe(true);
+    });
+  });
+
   test("needsFollowUp is false when the same jumi pull review id and SHA are already handled", async () => {
     const api = makeApi({
       listIssueComments: async () => [],

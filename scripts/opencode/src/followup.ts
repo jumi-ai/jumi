@@ -133,8 +133,8 @@ import {
   blockingOpenQuestionCount,
   countMaintainerQuestionFindings,
   countQuestionFindings,
-  hasOnlyMaintainerQuestions,
   isBlockingQuestionAuthor,
+  isMaintainerOnlyTrailerText,
   isMaintainerQuestionInline,
   isQuestionInline,
   parseCheckLine,
@@ -750,9 +750,10 @@ function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
 
 /**
  * A Jumi pull review whose only open questions are maintainer-only:
- * a complete success trailer, every body `❓` marked `❓ maintainer:`, and
- * every open question inline for that review marked `❓ maintainer:`. At
- * least one question (body or inline) must remain; failures never count.
+ * a complete success trailer with zero suggestions, every body `❓` marked
+ * `❓ maintainer:`, and every open question inline for that review marked
+ * `❓ maintainer:`. At least one question (body or inline) must remain;
+ * failures and suggestion trailers never count.
  */
 function isMaintainerOnlyPullReview(
   review: PullReview,
@@ -760,6 +761,9 @@ function isMaintainerOnlyPullReview(
   botUsername?: string
 ): boolean {
   const body = review.body ?? review.content ?? "";
+  const trailer = lastCheckTrailer(body);
+  if (trailer?.state !== "success") return false;
+  if (trailerSuggestionCount(trailer.reason) !== 0) return false;
   const bodyQuestions = countQuestionFindings(body);
   const bodyMaintainers = countMaintainerQuestionFindings(body);
   if (bodyQuestions !== bodyMaintainers) return false;
@@ -803,7 +807,7 @@ function onlyMaintainerQuestionsPending(
       continue;
     }
     if (handledFindings.has(reviewFindingKey(finding.id, finding.sha))) continue;
-    if (!hasOnlyMaintainerQuestions(comment.body)) return false;
+    if (!isMaintainerOnlyTrailerText(comment.body)) return false;
     foundMaintainer = true;
   }
   for (const review of items.jumiFindingReviews ?? []) {
