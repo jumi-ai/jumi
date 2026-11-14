@@ -1473,7 +1473,12 @@ cat
 
   test("unconfigured: the inline config still allows websearch and registers no MCP server", async () => {
     delete process.env.JUMI_SEARXNG_URL;
-    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+    const printBoth = `#!/bin/sh
+printf 'CONTENT=%s\\n' "$OPENCODE_CONFIG_CONTENT"
+printf 'XDG=%s\\n' "$XDG_CONFIG_HOME"
+cat "$XDG_CONFIG_HOME/opencode/opencode.json"
+`;
+    await withFakeOpenCode(printBoth, async (_binDir, workdir) => {
       const result = await runOpenCode({
         prompt: "prompt",
         model: "model",
@@ -1486,17 +1491,32 @@ cat
       const config = inlineConfig(result.stdout);
       expect(config.permissions).toEqual(forgePermissions("github.com"));
       expect(config.mcp).toBeUndefined();
-      const global = JSON.parse(
-        await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
-      ) as { policies: unknown[] };
-      expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com")));
+      const xdg = /^XDG=(.*)$/m.exec(result.stdout ?? "")?.[1]?.trim() ?? "";
+      expect(xdg).not.toContain(workdir);
+      expect(xdg.startsWith("/tmp/jumi-review-")).toBe(true);
+      const global = JSON.parse((result.stdout ?? "").slice((result.stdout ?? "").indexOf("\n{"))) as {
+        policies: unknown[];
+        plugins?: unknown[];
+      };
+      expect(global.policies).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com")).policies);
+      // Jumi-owned shell plugin directory is registered under the V2 `plugins`
+      // (plural) key in the outside global config. V2 ignores the V1 singular
+      // `plugin` key and skips single-file paths.
+      expect(Array.isArray(global.plugins)).toBe(true);
+      expect((global.plugins as string[]).length).toBeGreaterThan(0);
+      expect((global.plugins as string[])[0]?.startsWith("/tmp/jumi-review-")).toBe(true);
     });
   });
 
   test("configured: the inline config registers searxng and denies native websearch", async () => {
     process.env.JUMI_SEARXNG_URL = "https://search.example/";
     try {
-      await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const printBoth = `#!/bin/sh
+printf 'CONTENT=%s\\n' "$OPENCODE_CONFIG_CONTENT"
+printf 'XDG=%s\\n' "$XDG_CONFIG_HOME"
+cat "$XDG_CONFIG_HOME/opencode/opencode.json"
+`;
+      await withFakeOpenCode(printBoth, async (_binDir, workdir) => {
         const result = await runOpenCode({
           prompt: "prompt",
           model: "model",
@@ -1524,10 +1544,14 @@ cat
         });
         // The global policy holds the deny against a repository agent's own
         // allow rules, which evaluate after inline permissions.
-        const global = JSON.parse(
-          await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
-        ) as { policies: unknown[] };
-        expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com", true)));
+        const xdg = /^XDG=(.*)$/m.exec(result.stdout ?? "")?.[1]?.trim() ?? "";
+        expect(xdg.startsWith("/tmp/jumi-review-")).toBe(true);
+        const global = JSON.parse((result.stdout ?? "").slice((result.stdout ?? "").indexOf("\n{"))) as {
+          policies: unknown[];
+          plugins?: unknown[];
+        };
+        expect(global.policies).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com", true)).policies);
+        expect(Array.isArray(global.plugins)).toBe(true);
       });
     } finally {
       delete process.env.JUMI_SEARXNG_URL;

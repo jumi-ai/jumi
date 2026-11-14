@@ -1,39 +1,48 @@
-# Review sandbox: Landlock spike decision (jumi#531)
+# Review sandbox: per-shell Landlock (jumi#531, part 2 jumi#550)
 
 ## Decision
 
-Confine every command a **review** spawn's model executes with an **in-repo
-Landlock wrapper** (`scripts/opencode/src/review_sandbox.py`, policy in
-`src/review_sandbox.ts`). The harness spawns the agent binary through the
-wrapper; the wrapper builds the Landlock ruleset, restricts itself, and execs
-the agent. Everything the model then runs (tests, scripts, package installs)
-inherits the domain.
+The **agent stays outside the sandbox**. Every shell or command a **review**
+spawn's model executes runs in its own **Landlock domain** that cannot see
+the agent's secrets. Same in-repo wrapper (`scripts/opencode/src/review_sandbox.py`,
+policy in `src/review_sandbox.ts`), same fail-closed gate — only the policy
+and the wiring changed from part 1.
 
-- Read-write: the checkout, the per-spawn scratch dir (`TMPDIR`), the
-  spawn's HOME, and the worktree's git dirs when they live outside the
-  checkout (linked worktrees keep objects in a bare repo elsewhere: both the
-  worktree gitdir and the common dir are allow-listed, since git needs HEAD
-  from one and objects from the other).
-- Read-only: `/usr /bin /sbin /lib /lib64 /opt /etc /proc /sys /tmp /app`,
-  plus `/dev` with `/dev/null`-style writes (creation still denied, so no
-  new device nodes appear).
-- Denied: everything else — except the spawn's temp root, which is the
-  known-open verdict channel (see below). Other checkouts, `/tmp` writes,
-  the retained auth volume outside HOME, and the harness itself: with ABI ≥ 6
-  the `SIGNAL` and `ABSTRACT_UNIX_SOCKET` scopes close signals/ptrace and
-  abstract-socket connects outside the domain, so `/proc/<harness>/environ`,
-  `/proc/<harness>/fd`, and `kill` of harness pids are denied.
-- Environment: explicit allow-list. The per-runner builders already start
-  from a minimal base; `findReviewEnvViolations` additionally fails a review
-  spawn closed when the child env carries anything from the harness
-  namespace (`JUMI_*`, except the six Phoenix tracing labels
-  `JUMI_TRACE_KIND`/`JUMI_OWNER`/`JUMI_REPO`/`JUMI_SHA`/`JUMI_JOB_ID`/
-  `JUMI_AGENT_INSTANCE`, which carry only job identity the model already
-  knows), any forge/git credential, or anything matching
-  `*MCP*TOKEN/KEY/SECRET`. Provider keys the child legitimately needs are
-  allowlisted by exact name.
+- Harness temp root (prompt file, MCP token configs, XDG dirs, session DB)
+  lives **outside the checkout** (`/tmp/jumi-review-*`, created per spawn by
+  `makeReviewHarnessTempRoot`). Simpler than traverse-only parents: the shell
+  policy just omits it, so it is denied. Only the agent (unsandboxed) reads it.
+- Shell RW: the checkout, the per-spawn scratch dir (`TMPDIR`, still
+  `<checkout>/.jumi-tmp/scratch`), and the worktree's git dirs when they live
+  outside the checkout. Shell RO: `/usr /bin /sbin /lib /lib64 /opt /etc
+  /proc /sys /app` plus `/dev` with `/dev/null`-style writes — **without
+  `/tmp`**, so the outside harness temp under the shared tmpdir stays
+  unreachable. No HOME: shells get their own HOME/XDG dirs under scratch
+  (`sandbox-home`), so tools needing a writable HOME still work.
+- Denied: everything else, including the harness temp, the agent's HOME
+  configs (`~/.codex/auth.json`, `~/.claude/.credentials.json`,
+  `~/.local/share/opencode/auth.json`, `~/.gemini`), other checkouts, and the
+  harness itself. With ABI ≥ 6 the `SIGNAL` and `ABSTRACT_UNIX_SOCKET` scopes
+  close signals/ptrace and abstract-socket connects, so
+  `/proc/<harness>/environ`, `/proc/<harness>/fd`, and `kill` of harness pids
+  are denied.
+- Environment: the agent env keeps its allow-list (`findReviewEnvViolations`
+  fails a review spawn closed on harness/forge/MCP-token shapes; provider keys
+  the agent needs stay). Shells additionally scrub provider keys
+  (`OPENCODE_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `CODEX_API_KEY`, `XAI_API_KEY`) via the `env -u` prefix in
+  `reviewShellWrapperPrefix`, so a `printenv` in pull code learns nothing.
+- Verdict channel: closed. The MCP token lives only in the outside harness
+  temp, which shells cannot read; without the token the loopback MCP
+  (`http://127.0.0.1:<port>/mcp`, still reachable — the wrapper requests no
+  TCP handling) rejects every call. `JUMI_REVIEW.md` stays RW in the checkout
+  (diffs must be readable, tests must run), but the parent's
+  MCP-store-wins-over-file rule (`review.ts`) means a shell that writes the
+  file without the token cannot change the posted status. Codex and Agy are
+  wired to the same review MCP, so the file fallback is ignored whenever the
+  store holds anything there too.
 - Network: inherited from the pod. Reviewers may still shallow-clone public
-  upstream tags under the scratch dir; the NetworkPolicy keeps doing hosts.
+  upstream tags into scratch; the NetworkPolicy keeps doing hosts.
 
 ## Why not the other candidates
 
@@ -43,7 +52,7 @@ inherits the domain.
 | `landrun` (Landlock CLI) | Runner-up. Minimal and unprivileged, but a new third-party binary to pin (version + per-arch SHA in `.gitea/tool-versions.env` + `Dockerfile`), and its exact CLI flags could not be verified from here. The in-repo wrapper does the same syscall sequence with no supply chain. |
 | `anthropics/sandbox-runtime`, Claude's built-in sandbox, Codex's Linux sandbox | Rejected: need user namespaces (`unshare -U` fails with EPERM under this cluster's `RuntimeDefault` seccomp), which is exactly what we cannot use. |
 | `kubernetes-sigs/agent-sandbox` + gVisor/Kata | Strongest isolation, but every model command would cross pods. Reconsider only if Landlock cannot hold. |
-| Small in-repo wrapper (Landlock syscalls directly) | **Chosen.** Most control, most to maintain — but it is ~150 lines of stdlib-only Python against stable UAPI, `python3` is already in the reviewer image, and there is nothing to pin, license-review, or fetch. |
+| Small in-repo wrapper (Landlock syscalls directly) | **Chosen.** Most control, most to maintain — but it is ~150 lines of stdlib-only Python against stable UAPI, `python3` is already in the reviewer image, and there is nothing to pin, license-review, or fetch. Reused for shells in part 2 with a stricter policy. |
 
 License: our own code, no new license. Pinning: nothing to pin (stdlib +
 libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
@@ -55,64 +64,72 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
   the issue reports ABI 7 on the Talos 6.18 job pods too. Yama
   `ptrace_scope` is 2 here as well.
 - Prototyped enforcement in this container: `/proc/<outside>/environ`
-  denied, `kill -0 <outside>` denied (`Operation not permitted`), writes
-  outside the allow-list denied, writes inside scratch allowed, `node` and
-  `git` (with the external gitdirs rule) run.
+  denied, `kill -0 <outside>` denied (`Operation not permitted`), outside
+  harness temp and HOME secrets denied, writes outside the allow-list denied,
+  writes inside scratch allowed, `node`, `git` (with the external gitdirs
+  rule), and shallow `git clone` into scratch run.
 - `src/review_sandbox_probe.ts` repeats that red-team against the real
-  wrapper in the image job; `review_sandbox.py --check` asserts ABI ≥ 6 and
-  is the startup check. Neither has run in a job pod yet — the image job
-  owns that confirmation.
+  wrapper in the image job (outside harness temp, HOME secret, `/proc`,
+  signals, plus benign `node`/`git`/`clone`); `review_sandbox.py --check`
+  asserts ABI ≥ 6 and is the startup check. Unit tests repeat the same shape
+  with a fake runner (`test/review_sandbox.test.ts`). Neither probe has run
+  in a job pod yet — the image job owns that confirmation.
+- `src/webfetch_probe.ts` (review section) registers the production OpenCode
+  review plugin dir in a scratch global config and drives the installed
+  `opencode` binary through it: `shell` (the real 2.2.7 shell-tool name; a
+  `bash` call aliases to it before hooks run) must come back wrapped (HOME is
+  the sandbox home), `read`/`list` of the harness token must come back
+  blocked. The stub retries the shell call (bounded) until HOME comes back
+  wrapped — the plugin loads asynchronously with the first run, so the first
+  calls can race registration — and the plugin's setup writes a ready marker
+  the probe asserts, so a binary that never loads the plugin or drops either
+  hook fails the case instead of running unwrapped.
 
 ## Per-runner wiring
 
-One launcher prefix for all four runners (OpenCode, Claude, Codex,
-Antigravity), applied at the agent spawn: Landlock is inherited, so it
-covers every shell command the model runs with a single mechanism and no
-per-runner hook. No runner needed refusing: all four spawn through the
-wrapped path. This is the single-domain shape: the agent and every shell it
-runs share one domain, which is why the verdict channel below stays open —
-per-runner shell hooks (Claude's shell prefix / `PreToolUse` from Jumi's own
-plugin, OpenCode's `tool.execute.before` plugin, Codex/Agy equivalents) are
-the follow-up that would let the agent keep the token while its shells
-cannot.
+All wiring is Jumi-owned (never from the checkout). The agent spawns
+unsandboxed; its shells are wrapped separately:
 
-Two deliberate exceptions, both logged at spawn and both follow-up work,
-plus one known-open channel documented here (not an exception that closes):
+- OpenCode: Jumi-owned V2 plugin (`Plugin.define` with
+  `ctx.tool.hook("execute.before")` denying reads plus
+  `ctx.shell.hook("create.before")` wrapping every shell creation,
+  generated per spawn as `<outside-temp>/xdg-config/opencode/plugin/jumi-review-shell-sandbox/index.js`
+  and registered as a directory under the V2 `plugins` key of the Jumi-owned
+  global `opencode.json`). The tool hook denies reads of the harness temp /
+  credential files
+  (`read`/`edit`/`write`/`grep`/`glob`/`list` — reads, writes, search, and
+  listing, so `list /tmp` cannot reveal the harness temp either). Candidates
+  are normalized (relative paths resolve against the checkout, `..`/`.`/extra
+  slashes collapse) and denied bidirectionally: a path inside a denied prefix
+  *or* an ancestor of one is denied. The shell hook rewraps every shell
+  creation (exactly once — the tool hook never rewrites shell commands, since
+  a second wrap would exec the wrapper inside its own Landlock domain) and pins
+  HOME/XDG/TMPDIR at scratch while scrubbing provider keys. The plugin's
+  setup writes a ready marker after both registrations so the image probe can
+  prove the load instead of running half-wrapped.
+- Claude: Jumi-owned `PreToolUse` hook (`updatedInput` rewrite) in a
+  `--plugin-dir` plugin under the outside harness temp. Same rewrite, and the
+  deny covers `Read`/`Edit`/`Write`/`Grep`/`Glob` so the token is not reachable
+  through file-search tools.
+- Codex: `PreToolUse` hook in `hooks.json` under the review-only `CODEX_HOME`
+  (outside harness temp), plus the review MCP server in the same
+  `CODEX_HOME/config.toml`. Same rewrite shape. Review spawns keep
+  `--dangerously-bypass-hook-trust`: the hook file is fresh every spawn so its
+  hash is never pre-trusted, and non-interactive `codex exec` would otherwise
+  skip it silently; the review home marks the workdir untrusted so the head's
+  project hooks never load either way.
+- Agy: `PreToolUse` hook in the global `~/.gemini/config/hooks.json`
+  (Jumi-owned `jumi-review-shell-sandbox` key, restored after the spawn) with
+  `overwrite.CommandLine`, plus the review MCP server in the global
+  `mcp_config.json` (same restore). The matcher covers `run_command` plus the
+  file/dir tools (`view_file`, `list_dir`, `find_by_name`, `grep_search` and
+  the write tools), so the token-bearing `mcp_config.json` is not readable
+  through `view_file`. Same rewrite shape.
 
-1. **HOME stays visible.** Review agents authenticate from HOME
-   (`~/.codex`, `~/.gemini`, `~/.claude`, opencode auth seeding). Denying
-   it today breaks logins, so the spawn's HOME is read-write for now.
-   Narrowing it (per-runner auth seeding into a sandbox HOME, verified
-   against each pinned binary) is the next hardening step after this lands.
-2. **The review verdict channel stays open — #531's Done condition is
-   unmet by this single-domain wrapper.** The per-spawn MCP bearer token
-   lives in files under the spawn temp root (`<workdir>/.jumi-tmp/...`:
-   Claude's `review-mcp.json`, OpenCode's `xdg-config/opencode/opencode.json`
-   which also names the server URL), and the fallback artifact
-   `JUMI_REVIEW.md` lives in the RW checkout. `reviewSandboxRules` grants
-   read-write on the whole checkout, and Landlock `path_beneath` has no deny
-   rules: any RW ancestor keeps every descendant readable, so RW on the
-   checkout keeps `.jumi-tmp` and its token files readable to sandboxed pull
-   code (`cat .jumi-tmp/*/review-mcp.json` yields both URL halves). The loopback
-   MCP server (`http://127.0.0.1:<port>/mcp`) stays reachable from inside the
-   domain (the wrapper requests no TCP handling), and the env gate audits
-   names in the child env, never file contents — so a file-resident token
-   passes it by construction. Concretely: pull code that reads the token from
-   a file under `.jumi-tmp` and calls the review MCP can forge the posted
-   status, and pull code that writes `JUMI_REVIEW.md` can forge the fallback
-   for runners without MCP support. The parent's MCP-store-wins-over-file rule
-   (`review.ts`: store holdings ignore the file) narrows but does not close
-   this: a forged MCP call with the stolen token lands in the store itself.
-   A finer RW list cannot fix it for the same reason (no deny of a
-   subdirectory of an allowed ancestor). Closing it needs a different domain
-   shape — wrap each model-executed shell command (not the whole agent), keep
-   the agent unsandboxed so only it can read the token, and deny the temp
-   root to the sandboxed shells (outside-checkout temp root, or traverse-only
-   parents) — e.g. Claude's shell prefix / `PreToolUse` hook from Jumi's own
-   plugin and OpenCode's `tool.execute.before` plugin, plus the Codex/Agy
-   equivalents, or a per-tool proxy with credential injection. That is the
-   follow-up; this change confines /proc, signals/abstract sockets, and
-   outside-checkout writes only.
+A runner with no Jumi-owned hook refuses instead of running unsandboxed
+(`assertReviewRunnerSandboxable`: one clear line, `review spawn refused:
+<runner> runner cannot be sandboxed ...`). All four pinned runners have hooks;
+unknown types refuse.
 
 Fail-closed: if Landlock is unavailable or below ABI 6, review jobs fail
 with one clear status (`review spawn refused: Landlock sandbox
@@ -120,9 +137,21 @@ unavailable ...`) instead of running unsandboxed. `JUMI_ALLOW_UNSANDBOXED_REVIEW
 is the deployer escape hatch for rollout: off by default, logged loudly on
 every bypassed spawn.
 
+## What stays open
+
+- The checkout stays RW for shells (diffs must be readable, `bun test` must
+  run), so a shell *can* write `JUMI_REVIEW.md`. It cannot change the posted
+  status: without the MCP token it cannot touch the verdict store, and the
+  store wins over the file.
+- The loopback MCP stays reachable (no TCP handling in the wrapper), but every
+  call without the bearer token is rejected.
+- The agent itself is unsandboxed by design (it holds the login and the
+  token); its `Read`/`Edit` of sensitive paths is denied by the same
+  Jumi-owned hooks, not by Landlock.
+
 ## For workers
 
-Reusing the launcher for worker spawns is a separate change: workers need
+Reusing the shell hooks for worker spawns is a separate change: workers need
 write access to caches (`JUMI_CACHE_DIR`, Gradle/Maven/npm caches) and the
 git token proxy already covers their forge writes, so the rule set differs
 and the rollout risk (broken builds across every repository) is higher.

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgy } from "../src/agy.ts";
 import { runClaude } from "../src/claude.ts";
@@ -11,19 +12,38 @@ import { EngineFailedError } from "../src/engine.ts";
 import { runOpenCode } from "../src/git.ts";
 import {
   ALLOW_UNSANDBOXED_REVIEWS_ENV,
+  agyReviewHookScriptCode,
+  agyReviewHooksJson,
   allowUnsandboxedReviews,
+  assertReviewRunnerSandboxable,
   checkReviewSandbox,
+  claudeReviewHookScriptCode,
+  claudeReviewHooksJson,
+  codexReviewHooksJson,
   findOnPath,
   findReviewEnvViolations,
+  makeReviewHarnessTempRoot,
+  OPENCODE_REVIEW_FILE_TOOLS,
+  openCodeReviewShellPluginCode,
   REVIEW_SANDBOX_MIN_ABI,
   REVIEW_SANDBOX_WRAPPER_ENV,
+  REVIEW_SHELL_PLUGIN_READY_NAME,
   resolveAgentBin,
   resolveReviewSpawnSandbox,
   resolveWorktreeGitDirsSync,
   reviewSandboxArgv,
   reviewSandboxRules,
   reviewSandboxWrapperPath,
+  reviewShellDeniedReadPrefixes,
+  reviewShellDenyPredicateSnippet,
+  reviewShellSandboxRules,
+  sandboxedShellEnv,
   setReviewSandboxProbeForTests,
+  wrapShellCommand,
+  writeAgyReviewShellHook,
+  writeClaudeReviewShellPlugin,
+  writeCodexReviewShellHooks,
+  writeOpenCodeReviewShellPlugin,
 } from "../src/review_sandbox.ts";
 
 const originalWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
@@ -294,7 +314,7 @@ describe("resolveReviewSpawnSandbox", () => {
     ).toThrow(/review spawn refused: Landlock sandbox unavailable.*JUMI_ALLOW_UNSANDBOXED_REVIEWS/s);
   });
 
-  test("an available sandbox wraps every runner argv the same way", () => {
+  test("an available sandbox leaves the agent unsandboxed: shells are wrapped via hooks", () => {
     setReviewSandboxProbeForTests({ available: true, abi: 7 });
     for (const agent of [
       ["opencode", "run", "-m", "m"],
@@ -303,11 +323,248 @@ describe("resolveReviewSpawnSandbox", () => {
       ["agy", "-p"],
     ]) {
       const decided = resolveReviewSpawnSandbox(reviewOpts("/w", "/data"), agent, { PATH: "x" });
-      expect(decided.sandboxed).toBe(true);
-      expect(decided.argv[0]).toBe(reviewSandboxWrapperPath());
-      const sep = decided.argv.indexOf("--");
-      expect(sep).toBeGreaterThan(0);
-      expect(decided.argv.slice(sep + 1)).toEqual(resolveAgentBin(agent));
+      // Part-2 (jumi#550): the agent keeps its HOME login and MCP token, so
+      // its argv is never wrapped. Per-shell Landlock comes from Jumi-owned
+      // hooks built from `reviewShellSandboxRules` + `wrapShellCommand`.
+      expect(decided.sandboxed).toBe(false);
+      expect(decided.argv).toEqual(agent);
+    }
+  });
+
+  test("shell rules hide the harness temp and HOME: RW checkout+scratch, RO without /tmp", () => {
+    const rules = reviewShellSandboxRules({ workdir: "/work/repo", scratchDir: "/work/repo/.jumi-tmp/scratch" });
+    expect(rules.readWrite).toEqual(["/work/repo", "/work/repo/.jumi-tmp/scratch"]);
+    expect(rules.readOnly).not.toContain("/tmp");
+    expect(rules.readOnly).toContain("/usr");
+    // The harness temp root (/tmp/jumi-review-*) is never in the shell
+    // allow-list, and HOME is never granted to shells.
+    expect(rules.readWrite.join("\n")).not.toContain("jumi-review-");
+    expect(rules.readWrite.join("\n")).not.toContain("/data");
+  });
+
+  test("wrapShellCommand scrubs provider keys and points HOME at scratch", () => {
+    const rules = reviewShellSandboxRules({ workdir: "/work/repo", scratchDir: "/work/repo/.jumi-tmp/scratch" });
+    const wrapped = wrapShellCommand("bun test", rules, {
+      wrapperPath: "/w/review_sandbox.py",
+      scratchDir: "/work/repo/.jumi-tmp/scratch",
+    });
+    expect(wrapped).toContain("-u OPENCODE_API_KEY");
+    expect(wrapped).toContain("-u CLAUDE_CODE_OAUTH_TOKEN");
+    expect(wrapped).toContain("HOME=/work/repo/.jumi-tmp/scratch/sandbox-home");
+    expect(wrapped).toContain("/w/review_sandbox.py");
+    expect(wrapped).toContain("sh -c");
+  });
+
+  test("per-runner hooks are Jumi-owned code that wrap shells and deny credential reads", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "sandbox-hook-"));
+    try {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        // OpenCode V2 plugin: file reads denied in execute.before, every
+        // shell wrapped exactly once in create.before (a rewrite in both
+        // would double-wrap and fail where the wrapper sits outside the
+        // shell allow-list).
+        const plugin = openCodeReviewShellPluginCode(input);
+        expect(plugin).toContain("Plugin.define");
+        expect(plugin).toContain('ctx.tool.hook("execute.before"');
+        expect(plugin).toContain('ctx.shell.hook("create.before"');
+        expect(plugin).not.toContain("toolInput.command");
+        // Symlink resolution lives in the shipped plugin: the deny predicate
+        // must see through `docs/x -> /tmp` links the pull can commit.
+        expect(plugin).toContain("realpathSync");
+        // Setup writes a ready marker after both registrations so the image
+        // probe can prove the load (a dropped hook fails instead of passing).
+        expect(plugin).toContain(REVIEW_SHELL_PLUGIN_READY_NAME);
+        expect(plugin).toContain("jumi-review-shell-sandbox");
+        expect(plugin).toContain("/w/review_sandbox.py");
+        expect(plugin).toContain(harnessTemp);
+        // File tools cover reads, writes, search, and listing: an
+        // unsandboxed agent must not reach credentials through `list /tmp`
+        // or an edit/write path either.
+        expect(OPENCODE_REVIEW_FILE_TOOLS).toEqual(["read", "edit", "write", "grep", "glob", "list"]);
+        expect(plugin).toContain('"list"');
+        expect(plugin).toContain('"edit"');
+        expect(plugin).toContain('"write"');
+        // Claude/Codex hooks rewrite Bash via updatedInput.
+        const claudeDir = await writeClaudeReviewShellPlugin(harnessTemp, input);
+        const claudeHook = await readFile(join(claudeDir, "hooks", "sandbox-bash.py"), "utf8");
+        expect(claudeHook).toContain("updatedInput");
+        expect(claudeHook).toContain("/w/review_sandbox.py");
+        // File-search tools are denied too: the agent is unsandboxed, so the
+        // token must not be reachable through Grep/Glob.
+        expect(claudeHook).toContain("Grep");
+        expect(claudeHook).toContain("Glob");
+        expect(claudeReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("PreToolUse");
+        expect(claudeReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("Grep");
+        expect(codexReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("PreToolUse");
+        // Agy hook handles the run_command envelope with overwrite.
+        const agyHookPath = await writeAgyReviewShellHook(harnessTemp, input);
+        const agyHook = await readFile(agyHookPath, "utf8");
+        expect(agyHook).toContain("overwrite");
+        expect(agyHook).toContain("/w/review_sandbox.py");
+        // Agy file/dir tools are denied too: view_file would otherwise read
+        // the global mcp_config.json holding the Bearer token.
+        expect(agyHook).toContain("view_file");
+        expect(agyReviewHooksJson(agyHookPath)).toContain("run_command");
+        expect(agyReviewHooksJson(agyHookPath)).toContain("view_file");
+        // OpenCode plugin is a directory with index.js at its root (V2 skips
+        // single-file paths), outside the checkout.
+        const pluginPath = await writeOpenCodeReviewShellPlugin(harnessTemp, input);
+        expect(pluginPath.startsWith(harnessTemp)).toBe(true);
+        expect(pluginPath.startsWith(workdir)).toBe(false);
+        const { existsSync: existsSyncPlugin } = await import("node:fs");
+        expect(existsSyncPlugin(join(pluginPath, "index.js"))).toBe(true);
+        // Codex hooks live under its review-only CODEX_HOME (also outside).
+        const reviewHome = join(harnessTemp, "codex-home");
+        const { hooksPath } = await writeCodexReviewShellHooks(reviewHome, input);
+        expect(hooksPath.startsWith(harnessTemp)).toBe(true);
+        // Unknown runners refuse instead of running unsandboxed.
+        expect(() => assertReviewRunnerSandboxable("no-such-runner")).toThrow(
+          /review spawn refused.*cannot be sandboxed/
+        );
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("hook deny predicates block ancestors, exact paths, and relative traversal", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "sandbox-deny-"));
+    try {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        const denied = reviewShellDeniedReadPrefixes(input);
+        const tokenFile = join(harnessTemp, "review-mcp.json");
+        await writeFile(tokenFile, `{"token": "t"}`, { mode: 0o600 });
+        // Relative traversal from the checkout into the outside harness temp.
+        const traversal = relative(workdir, tokenFile);
+        expect(traversal.startsWith("..")).toBe(true);
+        const sibling = `${harnessTemp}-evil`;
+        // Symlink bypass (jumi#550 review): the pull controls the checkout and
+        // can commit `docs/x -> /tmp` to reveal the random suffix, then read
+        // through it. A link to a sibling inside the checkout must stay allowed.
+        const docsDir = join(workdir, "docs");
+        await mkdir(docsDir, { recursive: true });
+        const linkToParent = join(docsDir, "x");
+        await symlink(dirname(harnessTemp), linkToParent);
+        const linkToToken = join(docsDir, "t");
+        await symlink(tokenFile, linkToToken);
+        const linkViaParent = join(linkToParent, `${harnessTemp.split("/").pop()}/review-mcp.json`);
+        const siblingDir = join(workdir, "sibling");
+        await mkdir(siblingDir, { recursive: true });
+        await writeFile(join(siblingDir, "ok.txt"), "ok\n");
+        const linkOk = join(docsDir, "ok");
+        await symlink(siblingDir, linkOk);
+
+        // The JS predicate in the shipped OpenCode plugin, graded live.
+        const jsSnippet = reviewShellDenyPredicateSnippet("javascript", workdir, denied);
+        const jsPredicate = new Function(
+          "realpathSync",
+          `${jsSnippet}\nreturn { token: isDenied(${JSON.stringify(
+            tokenFile
+          )}), ancestor: isDenied("/tmp"), root: isDenied("/"), traversal: isDenied(${JSON.stringify(
+            traversal
+          )}), checkout: isDenied(${JSON.stringify(workdir)}), sibling: isDenied(${JSON.stringify(
+            sibling
+          )}), empty: isDenied(""), linkDir: isDenied(${JSON.stringify(
+            linkToParent
+          )}), linkVia: isDenied(${JSON.stringify(linkViaParent)}), linkFile: isDenied(${JSON.stringify(
+            linkToToken
+          )}), linkOk: isDenied(${JSON.stringify(linkOk)}) };`
+        ) as (realpath: typeof realpathSync) => Record<string, boolean>;
+        expect(jsPredicate(realpathSync)).toEqual({
+          token: true,
+          ancestor: true,
+          root: true,
+          traversal: true,
+          checkout: false,
+          sibling: false,
+          empty: false,
+          linkDir: true,
+          linkVia: true,
+          linkFile: true,
+          linkOk: false,
+        });
+
+        // The Python predicates in the shipped hook scripts, graded live
+        // through both envelopes (Claude exit-2 deny, Agy decision deny).
+        const runPythonHook = (script: string, event: unknown) => {
+          const eventPath = join(scratch, `deny-event-${Math.random().toString(36).slice(2)}.json`);
+          return (async () => {
+            await writeFile(eventPath, JSON.stringify(event));
+            try {
+              return Bun.spawnSync(["python3", script], {
+                stdin: Bun.file(eventPath),
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+            } finally {
+              await rm(eventPath, { force: true });
+            }
+          })();
+        };
+        const claudeHook = join(scratch, "deny-claude-hook.py");
+        await writeFile(claudeHook, claudeReviewHookScriptCode(input), { mode: 0o700 });
+        const claudeEvent = (tool: string, path: string) => ({
+          tool_name: tool,
+          tool_input: { path },
+        });
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", tokenFile))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", "/tmp"))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", "/"))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", traversal))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", workdir))).exitCode).toBe(0);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", sibling))).exitCode).toBe(0);
+        // Symlink bypass: a link inside the checkout pointing at the denied
+        // temp root or the token file must deny through read and Glob, while a
+        // link to a sibling inside the checkout stays allowed.
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", linkToToken))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", linkToParent))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", linkViaParent))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", linkOk))).exitCode).toBe(0);
+
+        const agyHook = join(scratch, "deny-agy-hook.py");
+        await writeFile(agyHook, agyReviewHookScriptCode(input), { mode: 0o700 });
+        const agyEvent = (name: string, args: Record<string, string>) => ({ toolCall: { name, args } });
+        const denyOutcome = async (name: string, args: Record<string, string>) => {
+          const proc = await runPythonHook(agyHook, agyEvent(name, args));
+          expect(proc.exitCode).toBe(0);
+          return String(proc.stdout ?? "");
+        };
+        expect(await denyOutcome("view_file", { FilePath: tokenFile })).toContain('"decision": "deny"');
+        expect(await denyOutcome("list_dir", { directory: "/tmp" })).toContain('"decision": "deny"');
+        expect(await denyOutcome("grep_search", { directory: traversal })).toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: workdir })).not.toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: linkToToken })).toContain('"decision": "deny"');
+        expect(await denyOutcome("list_dir", { directory: linkToParent })).toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: linkOk })).not.toContain('"decision": "deny"');
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
     }
   });
 
@@ -331,15 +588,22 @@ describe("review sandbox red-team (real wrapper)", () => {
       const scratch = join(checkout, ".jumi-tmp", "scratch");
       const { mkdir } = await import("node:fs/promises");
       await mkdir(scratch, { recursive: true });
-      // The secret must live outside every allowed path: `/tmp` is a
-      // read-only sandbox path, so a secret sibling under tmpdir() stays
-      // readable wherever tmpdir() is /tmp (e.g. GitHub Actions). HOME is
-      // never in this test's rules (homeDir is undefined), so it is denied.
+      Bun.spawnSync(["git", "init", "-q", checkout], { stdout: "pipe", stderr: "pipe" });
+      // Harness temp lives outside the checkout (/tmp/jumi-review-*): the
+      // shell policy omits /tmp, so it stays unreachable even though /tmp
+      // itself is world-readable. HOME is never granted to shells.
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      const tokenFile = join(harnessTemp, "review-mcp.json");
+      await writeFile(tokenFile, `{"token": "parent-secret-token"}`, { mode: 0o600 });
       const secretDir = await mkdtemp(join(homedir(), "sandbox-secret-"));
       const secret = join(secretDir, "secret");
       await writeFile(secret, "parent-secret-value", { mode: 0o600 });
       try {
-        const rules = reviewSandboxRules({ workdir: checkout, scratchDir: scratch });
+        const rules = reviewShellSandboxRules({ workdir: checkout, scratchDir: scratch });
+        // Shells see no /tmp and no HOME: the outside temp and the agent
+        // credential file are both denied by absence from the allow-list.
+        expect(rules.readOnly).not.toContain("/tmp");
+        expect(rules.readWrite.join("\n")).not.toContain(harnessTemp);
         const run = (script: string, envExtra: Record<string, string> = {}) => {
           const proc = Bun.spawnSync(reviewSandboxArgv(rules, ["sh", "-c", script]), {
             cwd: checkout,
@@ -349,6 +613,9 @@ describe("review sandbox red-team (real wrapper)", () => {
           });
           return { exitCode: proc.exitCode, out: String(proc.stdout ?? ""), err: String(proc.stderr ?? "") };
         };
+        // The harness MCP token outside the checkout: denied.
+        const tokenRead = run(`cat ${tokenFile} 2>&1; echo rc=$?`);
+        expect(tokenRead.out).toMatch(/Permission denied/);
         // The model credential file and the harness environ: both denied.
         const readSecret = run(`cat ${secret} 2>&1; echo rc=$?`);
         expect(readSecret.out).toMatch(/Permission denied/);
@@ -357,33 +624,50 @@ describe("review sandbox red-team (real wrapper)", () => {
         // Signalling the harness: denied by the scope rules.
         const signal = run(`kill -0 ${process.pid} 2>&1; echo rc=$?`);
         expect(signal.out).toMatch(/Operation not permitted/);
-        // The review artifact inside the checkout stays writable: the
-        // single-domain wrapper shares one Landlock domain between the agent
-        // and its shells, and Landlock has no deny rules, so RW on the
-        // checkout keeps `.jumi-tmp` readable too. Known-open verdict channel
-        // (see docs/review-sandbox.md): a token file under `.jumi-tmp` is
-        // readable from inside the domain, and so is the fallback artifact.
-        // This pins the open state so a future per-tool sandbox must update
-        // this test when it closes the channel.
+        // Writing into the harness's /proc fd: denied (non-zero exit; the
+        // exact message varies by shell, so grade the failure, not the text).
+        const fdWrite = run(`echo evil > /proc/${process.pid}/fd/1 2>&1; echo rc=$?`);
+        expect(fdWrite.out).toMatch(/rc=(1|2)/);
+        // The checkout itself stays RW (diffs must be readable, tests must
+        // run); the verdict is protected by the MCP store winning over the
+        // file (see review.ts), not by denying this write. A shell *can*
+        // write JUMI_REVIEW.md, but without the token it cannot change the
+        // store, so the posted status does not change.
         const artifact = run(`echo '# findings' > JUMI_REVIEW.md && cat JUMI_REVIEW.md`);
         expect(artifact.exitCode).toBe(0);
         expect(artifact.out.trim()).toBe("# findings");
-        const tokenFile = join(checkout, ".jumi-tmp", "review-mcp.json");
-        await writeFile(tokenFile, `{"token": "parent-secret-token"}`, { mode: 0o600 });
-        const tokenRead = run(`cat ${tokenFile} 2>&1; echo rc=$?`);
-        expect(tokenRead.out).toContain("parent-secret-token");
-        // A benign test run and scratch writes still work.
+        await rm(join(checkout, "JUMI_REVIEW.md"), { force: true });
+        // Shell env scrubbing: the hook prefix removes provider keys so a
+        // `printenv` in pull code learns nothing. The prefix is what the
+        // hooks embed; grade the string here and the FS denial above.
+        const wrapped = wrapShellCommand("printenv | sort", rules, {
+          wrapperPath: reviewSandboxWrapperPath(),
+          scratchDir: scratch,
+        });
+        expect(wrapped).toContain("env -u OPENCODE_API_KEY");
+        expect(wrapped).toContain(`HOME=${sandboxedShellEnv(scratch).HOME}`);
+        // A benign test run, scratch writes, and git still work.
         const benign = run(`echo ok > ${scratch}/out && node -e 'console.log("ran")'`);
         expect(benign.exitCode).toBe(0);
         expect(benign.out.trim()).toBe("ran");
-        // Env the harness puts in: only the child's own provider key. The
-        // gate (`findReviewEnvViolations`, unit-tested above) is what stops
-        // harness-namespace keys from ever reaching this env.
-        const leaked = run(`printenv | sort`, { OPENCODE_API_KEY: "child-key" });
-        expect(leaked.out).toContain("OPENCODE_API_KEY=child-key");
-        expect(leaked.out).not.toContain("JUMI_");
-        expect(leaked.out).not.toContain("MCP");
+        const gitOk = run(`git rev-parse --show-toplevel && git status --porcelain`);
+        // Initialized below: the checkout is a git repo for this case.
+        expect(gitOk.exitCode).toBe(0);
+        // Shallow clone of a local repo into scratch still works (stands in
+        // for the public-repo clone: no network in unit tests).
+        const src = join(checkout, "clone-src");
+        await mkdir(src, { recursive: true });
+        Bun.spawnSync(["git", "init", "-q", src], { stdout: "pipe", stderr: "pipe" });
+        await writeFile(join(src, "file.txt"), "hi\n");
+        Bun.spawnSync(["git", "-C", src, "add", "file.txt"], { stdout: "pipe", stderr: "pipe" });
+        Bun.spawnSync(["git", "-C", src, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const clone = run(`git clone --depth 1 file://${src} ${scratch}/cloned 2>&1; echo rc=$?`);
+        expect(clone.out).toMatch(/rc=0/);
       } finally {
+        await rm(harnessTemp, { recursive: true, force: true }).catch(() => undefined);
         await rm(secretDir, { recursive: true, force: true });
       }
     } finally {
@@ -432,10 +716,27 @@ describe("review engine sandbox wiring", () => {
     }
   });
 
-  test("every engine spawns through the wrapper when the sandbox is available", async () => {
+  test("every engine sets up per-shell hooks and leaves the agent unsandboxed", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sandbox-wire-bins-"));
     const workdir = await mkdtemp(join(tmpdir(), "sandbox-wire-work-"));
     const home = await mkdtemp(join(tmpdir(), "sandbox-wire-home-"));
+    // Fake agent binaries (Jumi-owned PATH dir, never the checkout): each
+    // prints what its runner parses as success. The agent itself is never
+    // wrapped; the per-shell hooks are what the test grades.
+    const fakeBin = join(dir, "bin");
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(fakeBin, { recursive: true });
+    const fake = {
+      opencode: `#!/bin/sh\nprintf 'ok\\n'`,
+      claude: `#!/bin/sh\nprintf 'ok\\n'`,
+      codex: `#!/bin/sh\nprintf '{"type":"thread.started","thread_id":"t"}\\n{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"done"}}\\n'`,
+      agy: `#!/bin/sh\nprintf '{"event":"result","status":"SUCCESS","response":"done"}\\n'`,
+    };
+    for (const [name, body] of Object.entries(fake)) {
+      await writeFile(join(fakeBin, name), `${body}\n`);
+      await chmod(join(fakeBin, name), 0o755);
+    }
+    // Fake wrapper for the --check probe only; the agent argv never uses it.
     const seen = join(dir, "seen.log");
     const stub = `#!/bin/sh
 if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
@@ -443,18 +744,14 @@ printf 'WRAPPED %s\\n' "$*" >> "${seen}"
 while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
 [ "$1" = "--" ] && shift
 printf 'AGENT %s\\n' "$*" >> "${seen}"
-bin="$1"; shift
-case "$bin" in
-  *opencode) printf 'ok\\n';;
-  *claude) printf 'ok\\n';;
-  *codex) printf '{"type":"thread.started","thread_id":"t"}\\n{"type":"item.completed","item":{"id":"m","type":"agent_message","text":"done"}}\\n';;
-  *agy) printf '{"event":"result","status":"SUCCESS","response":"done"}\\n';;
-esac
+exec "$@"
 `;
+    const originalPath = process.env.PATH;
     try {
       await writeFile(join(dir, "jumi-sandbox-stub"), stub);
       await chmod(join(dir, "jumi-sandbox-stub"), 0o755);
       process.env[REVIEW_SANDBOX_WRAPPER_ENV] = join(dir, "jumi-sandbox-stub");
+      process.env.PATH = `${fakeBin}:${originalPath ?? "/usr/bin:/bin"}`;
       // Same forge-host seeding as the refusal test: reviewer spawns always
       // carry GIT_AUTH_HOST, and agy's forge-deny setup needs it before the
       // sandbox gate is reached.
@@ -467,24 +764,29 @@ esac
         extraEnv: { GIT_AUTH_HOST: "forge.example" },
       };
       const review = { kind: "review" as const, owner: "o", repo: "r" };
-      // Codex refuses an empty review (no artifact); seed one so the wrapped path is what is graded.
+      // Codex refuses an empty review (no artifact); seed one so the hook path is what is graded.
       await writeFile(join(workdir, "JUMI_REVIEW.md"), "# findings\n");
       await expect(runOpenCode({ ...opts, trace: review })).resolves.toMatchObject({ status: "ok" });
       await expect(runClaude({ ...opts, trace: review })).resolves.toMatchObject({ status: "ok" });
       await expect(runCodex({ ...opts, type: "codex", trace: review })).resolves.toMatchObject({ status: "ok" });
       await expect(runAgy({ ...opts, trace: review })).resolves.toMatchObject({ status: "ok" });
-      const lines = (await readFile(seen, "utf8")).trim().split("\n");
-      expect(lines.filter((line) => line.startsWith("WRAPPED")).length).toBe(4);
-      expect(lines.filter((line) => line.startsWith("AGENT")).length).toBe(4);
-      // The parent resolves the agent binary to an absolute path before
-      // wrapping, so match on the basename after `AGENT `.
-      const basenames = lines
-        .filter((line) => line.startsWith("AGENT "))
-        .map((line) => line.split(" ")[1]?.split("/").pop());
-      for (const name of ["opencode", "claude", "codex", "agy"]) {
-        expect(basenames).toContain(name);
+      // The agent was never wrapped: the stub saw no WRAPPED lines. The
+      // per-shell hooks are Jumi-owned files outside the checkout (the
+      // harness temp root is /tmp/jumi-review-*, never workdir/.jumi-tmp).
+      let wrapped = 0;
+      try {
+        const lines = (await readFile(seen, "utf8")).trim().split("\n").filter(Boolean);
+        wrapped = lines.filter((line) => line.startsWith("WRAPPED")).length;
+      } catch {
+        wrapped = 0;
       }
+      expect(wrapped).toBe(0);
+      // Scratch sandbox HOME was created for the shells.
+      const { existsSync } = await import("node:fs");
+      expect(existsSync(join(workdir, ".jumi-tmp", "scratch", "sandbox-home"))).toBe(true);
     } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
       await rm(dir, { recursive: true, force: true });
       await rm(workdir, { recursive: true, force: true });
       await rm(home, { recursive: true, force: true });

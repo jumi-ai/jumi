@@ -32,7 +32,12 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import {
+  CHILD_SCRATCH_DIR,
+  childScratchDir,
+  ensureChildScratchDir,
+  ensureEngineScratchIgnored,
+} from "./engine_scratch.ts";
 import { claudeDisallowedTools, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
@@ -40,7 +45,15 @@ import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsForClaude } from "./review_base.ts";
 import { claudeMcpArgs } from "./review_mcp.ts";
-import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import {
+  assertReviewRunnerSandboxable,
+  ensureSandboxedShellHome,
+  makeReviewHarnessTempRoot,
+  resolveReviewSpawnSandbox,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  writeClaudeReviewShellPlugin,
+} from "./review_sandbox.ts";
 import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
@@ -288,7 +301,10 @@ export function applyClaudeCredentialRule(
 
 export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
   const tracing = claudeTracingEnv(opts.trace);
-  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
+  // Part-2 (jumi#550): review TMPDIR stays under the checkout
+  // (`childScratchDir`), never under the outside harness temp that holds the
+  // MCP token. Workers keep the old layout (identical when tempRoot is inside).
+  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   const apiKeyMode = isClaudeApiKeyRunner(opts);
   // Every parent variable that holds an API key across the chain. No child
   // — subscription or API-key — receives one under its own name.
@@ -450,9 +466,12 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
-  const tempRoot = join(opts.workdir, ".jumi-tmp");
+  const isReview = opts.trace?.kind === "review";
+  // Review harness files live outside the checkout (jumi#550) so sandboxed
+  // shells cannot reach the MCP token; workers keep the old layout.
+  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
-  await ensureChildScratchDir(opts.workdir);
+  const scratchDir = await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "claude-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");
@@ -463,6 +482,8 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   if (opts.abortSignal?.aborted) {
     const err = new Error("cancelled");
     err.name = "AbortError";
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
 
@@ -491,6 +512,24 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       basePrompt = await claudeReviewBasePrompt(opts.baseInstructionsDir);
     }
     const args = claudeArgv(opts, imageSkills, baseSkills, basePrompt, reviewMcpConfigPath);
+    // Part-2 (jumi#550): Jumi-owned PreToolUse hook wraps every Bash through
+    // the shell Landlock domain. The agent itself stays unsandboxed.
+    let reviewShellPlugin: string | undefined;
+    if (isReview) {
+      assertReviewRunnerSandboxable("claude");
+      await ensureSandboxedShellHome(scratchDir);
+      reviewShellPlugin = await writeClaudeReviewShellPlugin(tempRoot, {
+        workdir: opts.workdir,
+        scratchDir,
+        harnessTempDir: tempRoot,
+        ...(opts.home ? { homeDir: opts.home } : {}),
+        gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+        wrapperPath: reviewSandboxWrapperPath(),
+      });
+      log(`claude review shell sandbox: Bash wrapped via ${reviewShellPlugin}`);
+    }
+    const effectiveArgs =
+      reviewShellPlugin && !args.includes(reviewShellPlugin) ? [...args, "--plugin-dir", reviewShellPlugin] : args;
     if (opts.sanitizeEnv) {
       const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
       if (request) {
@@ -526,11 +565,11 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         }
         throw err;
       }
-      // Review spawns run confined: the wrapper argv fails closed when
-      // Landlock is unavailable, so pull code never runs unsandboxed.
+      // Review spawns run with per-shell confinement: the gate fails closed
+      // when Landlock is unavailable, so pull code never runs unsandboxed.
       // Outside the spawn try: a refusal must keep its identity, not be
       // re-wrapped as infra.
-      const claudeSpawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
+      const claudeSpawnArgv = resolveReviewSpawnSandbox(opts, effectiveArgs, childEnv, log).argv;
       try {
         return Bun.spawn(claudeSpawnArgv, {
           cwd: opts.workdir,
@@ -735,6 +774,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

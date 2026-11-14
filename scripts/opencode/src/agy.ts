@@ -20,7 +20,12 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import {
+  CHILD_SCRATCH_DIR,
+  childScratchDir,
+  ensureChildScratchDir,
+  ensureEngineScratchIgnored,
+} from "./engine_scratch.ts";
 import { agyConversationPath } from "./fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost } from "./forge_webfetch.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
@@ -28,7 +33,16 @@ import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsIntoWorkdir } from "./review_base.ts";
-import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import {
+  agyReviewHooksJson,
+  assertReviewRunnerSandboxable,
+  ensureSandboxedShellHome,
+  makeReviewHarnessTempRoot,
+  resolveReviewSpawnSandbox,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  writeAgyReviewShellHook,
+} from "./review_sandbox.ts";
 import {
   SEARXNG_SERVER_FORGE_HOST_ENV,
   SEARXNG_SERVER_NAME,
@@ -80,7 +94,7 @@ function isEnoent(err: unknown): boolean {
 }
 
 export function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
-  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
+  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: scratchDir } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
@@ -285,6 +299,98 @@ export function agyPromptArg(prompt: string): string {
   return prompt.trimStart().startsWith("/") ? `Task:\n${prompt}` : prompt;
 }
 
+/**
+ * Install Jumi-owned review hooks + review MCP server for one Agy review
+ * spawn (jumi#550). Hooks live in the global `~/.gemini/config/hooks.json`
+ * (never the checkout); the review MCP server lives in the global
+ * `mcp_config.json`. Existing entries are preserved; our keys are removed on
+ * restore. Fail-closed: a spawn that cannot install its hooks refuses.
+ */
+export async function installAgyReviewHooks(
+  home: string | undefined,
+  hookPath: string,
+  reviewMcp: { url: string; token: string } | undefined,
+  log: (message: string) => void = () => undefined
+): Promise<() => Promise<void>> {
+  if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the review shell hooks", false);
+  const { mkdir, readFile, writeFile, rm } = await import("node:fs/promises");
+  const hooksPath = join(home, ".gemini", "config", "hooks.json");
+  const mcpPath = join(home, AGY_MCP_CONFIG_DIR, AGY_MCP_CONFIG_FILE);
+  let hooksBackup: string | undefined;
+  let mcpBackup: string | undefined;
+  let hooksExisted = false;
+  let mcpExisted = false;
+  try {
+    await mkdir(join(home, ".gemini", "config"), { recursive: true, mode: 0o700 });
+    try {
+      hooksBackup = await readFile(hooksPath, "utf8");
+      hooksExisted = true;
+    } catch {
+      hooksExisted = false;
+    }
+    let hooksParsed: Record<string, unknown> = {};
+    if (hooksBackup !== undefined) {
+      const parsed: unknown = JSON.parse(hooksBackup);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("hooks.json is not an object");
+      hooksParsed = parsed as Record<string, unknown>;
+    }
+    const hookEntry = JSON.parse(agyReviewHooksJson(hookPath)) as Record<string, unknown>;
+    const nextHooks = { ...hooksParsed, ...hookEntry };
+    await writeFile(hooksPath, `${JSON.stringify(nextHooks, null, 2)}\n`, { mode: 0o600 });
+    if (reviewMcp) {
+      try {
+        mcpBackup = await readFile(mcpPath, "utf8");
+        mcpExisted = true;
+      } catch {
+        mcpExisted = false;
+      }
+      let mcpParsed: Record<string, unknown> = {};
+      if (mcpBackup !== undefined) {
+        const parsed: unknown = JSON.parse(mcpBackup);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+          throw new Error("mcp_config.json is not an object");
+        mcpParsed = parsed as Record<string, unknown>;
+      }
+      const rawServers = mcpParsed.mcpServers;
+      const servers = { ...((rawServers as Record<string, unknown> | undefined) ?? {}) };
+      servers["jumi-review"] = { serverUrl: reviewMcp.url, headers: { Authorization: `Bearer ${reviewMcp.token}` } };
+      await writeFile(mcpPath, `${JSON.stringify({ ...mcpParsed, mcpServers: servers }, null, 2)}\n`, {
+        mode: 0o600,
+      });
+    }
+    log(`agy review hooks installed: ${hooksPath}`);
+  } catch (err) {
+    if (err instanceof EngineFailedError) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new EngineFailedError(`agy review spawn refused: cannot install review shell hooks: ${reason}`, false);
+  }
+  return async () => {
+    try {
+      if (hooksExisted && hooksBackup !== undefined) await writeFile(hooksPath, hooksBackup);
+      else await rm(hooksPath, { force: true }).catch(() => undefined);
+    } catch {}
+    // Only restore the MCP file when we touched it for the review server.
+    if (reviewMcp) {
+      try {
+        if (mcpExisted && mcpBackup !== undefined) await writeFile(mcpPath, mcpBackup);
+        else {
+          // Best-effort: remove only our key when we created the file.
+          try {
+            const raw = await readFile(mcpPath, "utf8");
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            const servers = { ...((parsed.mcpServers as Record<string, unknown> | undefined) ?? {}) };
+            delete servers["jumi-review"];
+            await writeFile(mcpPath, `${JSON.stringify({ ...parsed, mcpServers: servers }, null, 2)}\n`);
+          } catch {
+            await rm(mcpPath, { force: true }).catch(() => undefined);
+          }
+        }
+      } catch {}
+    }
+  };
+}
+
 export function agyPrintTimeout(timeoutMs: number | undefined): string | undefined {
   if (!timeoutMs || timeoutMs <= 0) return undefined;
   const ms = timeoutMs > AGY_PRINT_TIMEOUT_MARGIN_MS * 2 ? timeoutMs - AGY_PRINT_TIMEOUT_MARGIN_MS : timeoutMs;
@@ -370,25 +476,25 @@ function cancelled(): Error {
 export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
-  if (opts.reviewMcp && opts.trace?.kind === "review") {
-    log(
-      "agy runner: review MCP server not wired in this release; using JUMI_REVIEW.md fallback (transition, not silent)"
-    );
-  }
+  const isReview = opts.trace?.kind === "review";
   const prompt = await resolveOpenCodePrompt(opts);
-  const tempRoot = join(opts.workdir, ".jumi-tmp");
+  // Review harness files live outside the checkout (jumi#550) so sandboxed
+  // shells cannot reach them; workers keep the old layout.
+  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
-  await ensureChildScratchDir(opts.workdir);
+  const scratchDir = await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "agy-prompt-"));
   const startedAtMs = Date.now();
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
   let baseStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
+  let agyHooksRestore: (() => Promise<void>) | undefined;
 
   if (opts.abortSignal?.aborted) {
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw cancelled();
   }
 
@@ -443,9 +549,27 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,
     // cleaned up afterwards so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
+    // Part-2 (jumi#550): Jumi-owned PreToolUse hook wraps every run_command
+    // through the shell Landlock domain, and the review MCP server is wired
+    // so the verdict store wins over JUMI_REVIEW.md. The agent itself stays
+    // unsandboxed.
+    if (isReview) {
+      assertReviewRunnerSandboxable("agy");
+      await ensureSandboxedShellHome(scratchDir);
+      const hookInput = {
+        workdir: opts.workdir,
+        scratchDir,
+        harnessTempDir: tempRoot,
+        ...(home ? { homeDir: home } : {}),
+        gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+        wrapperPath: reviewSandboxWrapperPath(),
+      };
+      const hookPath = await writeAgyReviewShellHook(tempRoot, hookInput);
+      agyHooksRestore = await installAgyReviewHooks(home, hookPath, opts.reviewMcp, log);
+      log(`agy review shell sandbox: run_command wrapped via ${hookPath}`);
+    }
     const args = agyArgv(opts, promptArg, conversationId);
-    // Review spawns run confined: the wrapper argv fails closed when
-    // Landlock is unavailable, so pull code never runs unsandboxed.
+    // The gate fails closed on missing Landlock, so pull code never runs unsandboxed.
     const agySpawnArgv = resolveReviewSpawnSandbox(opts, args, env, log).argv;
     const proc = (() => {
       try {
@@ -630,8 +754,10 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await imageStaging?.cleanup().catch(() => undefined);
     await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
+    await agyHooksRestore?.().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
