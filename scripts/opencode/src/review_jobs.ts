@@ -1,7 +1,13 @@
 import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
-import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalReasonOf } from "./kick.ts";
+import {
+  disabledKickWhy,
+  isFailingVerdictRow,
+  isKickableTerminalState,
+  kickReasonOf,
+  STUCK_KICK_ALIASES,
+} from "./kick.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
@@ -1755,7 +1761,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      const currentReason = terminalReasonOf(terminal);
+      const currentReason = kickReasonOf(terminal);
       if (input.kick !== currentReason) {
         const entry = record(terminal.id, null, "stale-kick");
         return {
@@ -1767,12 +1773,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      if (!isKickableTerminalState(terminal.state)) {
+      if (!isKickableTerminalState(terminal.state) && !isFailingVerdictRow(terminal)) {
         const entry = record(terminal.id, null, "not-kickable");
         return {
           status: "rejected",
           code: "not-kickable",
-          why: `No kick: review is ${terminal.state}, only a failed or skipped review can be requeued.`,
+          why: `No kick: review is ${terminal.state}, only a failed, skipped, or failing-verdict review can be requeued.`,
           terminalId: terminal.id,
           newJobId: null,
           kickLogId: entry.id,
@@ -4094,7 +4100,7 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as RequeueKickOutcome;
         }
-        const currentReason = terminalReasonOf(terminal);
+        const currentReason = kickReasonOf(terminal);
         if (input.kick !== currentReason) {
           const logged = await this.insertKickLog(tx, input, "stale-kick", terminal.id, null);
           return {
@@ -4106,12 +4112,12 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as RequeueKickOutcome;
         }
-        if (!isKickableTerminalState(terminal.state)) {
+        if (!isKickableTerminalState(terminal.state) && !isFailingVerdictRow(terminal)) {
           const logged = await this.insertKickLog(tx, input, "not-kickable", terminal.id, null);
           return {
             status: "rejected",
             code: "not-kickable",
-            why: `No kick: review is ${terminal.state}, only a failed or skipped review can be requeued.`,
+            why: `No kick: review is ${terminal.state}, only a failed, skipped, or failing-verdict review can be requeued.`,
             terminalId: terminal.id,
             newJobId: null,
             kickLogId: logged.id,
