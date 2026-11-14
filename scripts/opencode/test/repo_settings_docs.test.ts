@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { KNOWN_KEYS, parseRepoSettingsText, TIMEOUT_KEYS } from "../src/repo_settings.ts";
+import { KNOWN_KEYS, parseRepoSettingsText, REVIEW_BUDGET_KEYS, TIMEOUT_KEYS } from "../src/repo_settings.ts";
 
 const page = readFileSync(join(process.cwd(), "..", "..", "docs", "repo-settings.md"), "utf8");
 
@@ -41,6 +41,10 @@ describe("repo-settings docs", () => {
     expect(parsed.settings.blockingQuestionAuthors.length).toBeGreaterThan(0);
     expect(parsed.settings.maxFollowupRounds).toBeDefined();
     expect(parsed.settings.maxConflictRounds).toBeDefined();
+    expect(parsed.settings.reviewDrafts).toBe(true);
+    expect(parsed.settings.maxSuggestions).toBe(2);
+    expect(parsed.settings.reviewBudget.maxFiles).toBeDefined();
+    expect(parsed.settings.reviewBudget.maxPatchBytes).toBeDefined();
     for (const key of TIMEOUT_KEYS) {
       expect(parsed.settings.timeouts[key]).toBeDefined();
     }
@@ -57,6 +61,13 @@ describe("repo-settings docs", () => {
     const table = keyTableSection(page);
     for (const key of TIMEOUT_KEYS) {
       expect(table).toContain(`\`timeouts.${key}\``);
+    }
+  });
+
+  test("every review budget key appears as its own review_budget.* row", () => {
+    const table = keyTableSection(page);
+    for (const key of REVIEW_BUDGET_KEYS) {
+      expect(table).toContain(`\`review_budget.${key}\``);
     }
   });
 });

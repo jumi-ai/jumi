@@ -87,6 +87,9 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
+            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
@@ -141,6 +144,16 @@ jobs:
 
           docker run --rm "${TEST_TAG}" claude --version
           docker run --rm "${TEST_TAG}" codex --version
+          docker run --rm "${TEST_TAG}" bun --version
+          test "$(docker run --rm "${TEST_TAG}" node --version)" = "v${NODE_VERSION}"
+          test "$(docker run --rm "${TEST_TAG}" sh -c 'node -p "process.versions.bun === undefined"')" = "true"
+          docker run --rm "${TEST_TAG}" npm --version
+          docker run --rm "${TEST_TAG}" npx --version
+          test "$(docker run --rm "${TEST_TAG}" sh -c 'command -v node')" = "/usr/local/bin/node"
+          if docker run --rm "${TEST_TAG}" sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+            echo "node resolves to the Bun shim in worker image" >&2
+            exit 1
+          fi
           docker run --rm "${TEST_TAG}" curl --version
           docker run --rm "${TEST_TAG}" yq --version
           docker run --rm "${TEST_TAG}" uv --version
@@ -257,6 +270,9 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
+            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}

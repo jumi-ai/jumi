@@ -23,6 +23,9 @@ fi
 : "${UV_VERSION:?UV_VERSION is required}"
 : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
+: "${NODE_VERSION:?NODE_VERSION is required}"
+: "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 is required}"
+: "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 is required}"
 : "${TEMURIN_TAG:?TEMURIN_TAG is required}"
 
 primary_tag="$1"
@@ -67,6 +70,9 @@ buildah bud \
       --build-arg "UV_VERSION=${UV_VERSION}" \
       --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
       --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
+      --build-arg "NODE_VERSION=${NODE_VERSION}" \
+      --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
+      --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
       --build-arg "TEMURIN_TAG=${TEMURIN_TAG}" \
       --build-arg "VERSION=${VERSION}" \
       --build-arg "REVISION=${REVISION}" \
@@ -172,7 +178,7 @@ verify_worker_skills() {
     echo "codex missing in worker image" >&2
     exit 1
   fi
-  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'ps --version' 'unzip -v' 'shellcheck --version' 'python3 --version' 'python --version' 'python3.13 --version' "python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'" "python -c 'import sys; assert sys.version_info[:2] == (3, 13)'" 'python3 -m pytest --version' "python3 -c 'import yaml, pytest'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'; do
+  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'ps --version' 'unzip -v' 'shellcheck --version' 'python3 --version' 'python --version' 'python3.13 --version' "python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'" "python -c 'import sys; assert sys.version_info[:2] == (3, 13)'" 'python3 -m pytest --version' "python3 -c 'import yaml, pytest'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V' 'node --version' 'npm --version' 'npx --version' 'bun --version'; do
     if ! buildah run "${ctr}" -- sh -c "${tool_cmd}"; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "worker CLI smoke failed: ${tool_cmd}" >&2
@@ -188,6 +194,26 @@ verify_worker_skills() {
   if ! buildah run "${ctr}" -- sh -c 'HOME=$(mktemp -d) sh -c ". /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true"'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "worker CLI smoke failed: tracing hook POST path" >&2
+    exit 1
+  fi
+  node_version="$(buildah run "${ctr}" -- node --version)" || {
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node missing in worker image" >&2
+    exit 1
+  }
+  if [ "${node_version}" != "v${NODE_VERSION}" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node version ${node_version} does not match pinned v${NODE_VERSION}" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'test "$(node -p "process.versions.bun === undefined")" = "true"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node is the Bun shim, not real Node, in worker image" >&2
+    exit 1
+  fi
+  if buildah run "${ctr}" -- sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node resolves to the Bun shim in worker image" >&2
     exit 1
   fi
   # `--version` proves the binary is there, not that it still accepts the argv

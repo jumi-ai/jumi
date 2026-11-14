@@ -21,6 +21,11 @@ export interface RepoTimeouts {
   conflict?: number;
 }
 
+export interface RepoReviewBudget {
+  maxFiles?: number;
+  maxPatchBytes?: number;
+}
+
 export interface RepoSettings {
   automerge: boolean;
   /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
@@ -59,6 +64,12 @@ export interface RepoSettings {
   pickupLabel?: string;
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
+  /** Review draft PRs and `WIP:`-titled PRs. Absent means false (skip drafts, as today). */
+  reviewDrafts: boolean;
+  /** Cap for 💡 findings in this repository. Absent means the deployment ceiling. */
+  maxSuggestions?: number;
+  /** Review size budget overrides. Absent keys run with the deployment value. */
+  reviewBudget: RepoReviewBudget;
   /**
    * CI gate wait mode. `undefined` (key absent) means `required`: wait only
    * for the base branch's required checks, falling back to every check when
@@ -67,6 +78,26 @@ export interface RepoSettings {
    */
   ciGate?: { wait: CiGateWait };
   /**
+   * Branch prefix for issue branches. `undefined` (key absent) means `jumi`:
+   * `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`.
+   */
+  branchPrefix?: string;
+  /**
+   * Pull-request title template for forge issues. `undefined` means `{title}`.
+   * Only `{title}` and `{issue}` placeholders are allowed.
+   */
+  prTitle?: string;
+  /**
+   * Commit message template for the parent's leftover commit. `undefined`
+   * means `Implement #{issue}: {title}`. Only `{title}` and `{issue}` allowed.
+   */
+  commitMessage?: string;
+  /**
+   * Closing keyword behavior. `undefined` (key absent) means `closes`.
+   * `refs` uses a non-closing `Refs #N` reference instead.
+   */
+  closingKeyword?: RepoClosingKeyword;
+  /**
    * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
    * behavior (first allowed method on GitHub, default style on Gitea).
    * A present value must be one the repository allows; otherwise nothing is
@@ -74,6 +105,8 @@ export interface RepoSettings {
    */
   automergeMethod?: RepoAutomergeMethod;
 }
+
+export type RepoClosingKeyword = "closes" | "refs";
 
 export type RepoMode = "full" | "review-only" | "off";
 
@@ -119,6 +152,13 @@ export const KNOWN_KEYS = new Set([
   "ignore_conflicts_label",
   "pickup_label",
   "mode",
+  "branch_prefix",
+  "pr_title",
+  "commit_message",
+  "closing_keyword",
+  "review_drafts",
+  "max_suggestions",
+  "review_budget",
   "ci_gate",
 ]);
 
@@ -131,6 +171,13 @@ export const MIN_TIMEOUT_MINUTES = 1;
 
 export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 
+/** Repository review-budget keys: `max_files` caps changed files, `max_patch_bytes` caps patch bytes. */
+export const REVIEW_BUDGET_KEYS = ["max_files", "max_patch_bytes"] as const;
+export type RepoReviewBudgetKey = (typeof REVIEW_BUDGET_KEYS)[number];
+
+/** Documented minimum for every repository review-budget value: 1. Below this the file is invalid. */
+export const MIN_REVIEW_BUDGET_VALUE = 1;
+
 /** Default per-issue auto-merge opt-in label. Repository `.jumi.yml` may rename it. */
 export const DEFAULT_AUTOMERGE_LABEL = "automerge";
 /** Default per-issue auto-merge opt-out label. Repository `.jumi.yml` may rename it. */
@@ -139,6 +186,119 @@ export const DEFAULT_NO_AUTOMERGE_LABEL = "no-automerge";
 export const DEFAULT_PICKUP_LABEL = "jumi";
 /** Default ignore-conflicts label. Repository `.jumi.yml` may rename it with `ignore_conflicts_label`. */
 export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
+
+/** Default branch prefix: `jumi/issue-<N>-<slug>`. */
+export const DEFAULT_BRANCH_PREFIX = "jumi";
+/** Default PR title template: the issue title verbatim. */
+export const DEFAULT_PR_TITLE_TEMPLATE = "{title}";
+/** Default commit message template for the parent's leftover commit. */
+export const DEFAULT_COMMIT_MESSAGE_TEMPLATE = "Implement #{issue}: {title}";
+/** Default closing behavior: closing keywords that close the issue on merge. */
+export const DEFAULT_CLOSING_KEYWORD: RepoClosingKeyword = "closes";
+
+export const REPO_CLOSING_KEYWORDS: readonly RepoClosingKeyword[] = ["closes", "refs"];
+
+/**
+ * Validate a `branch_prefix` value. One or more path segments of
+ * `[a-z0-9._-]`; no leading or trailing slash, no empty segments, no `.` or
+ * `..`, and the sample branch `<prefix>/issue-1-x` must pass `git
+ * check-ref-format` rules. Prefixes colliding with Jumi's internal refs
+ * (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are rejected.
+ */
+export function validateBranchPrefix(value: string): { ok: true; prefix: string } | { ok: false; error: string } {
+  const prefix = value.trim();
+  if (!prefix) return { ok: false, error: `"branch_prefix" must be a non-blank string` };
+  if (prefix.startsWith("/") || prefix.endsWith("/")) {
+    return { ok: false, error: `"branch_prefix" must not have a leading or trailing slash` };
+  }
+  if (prefix.includes("//")) {
+    return { ok: false, error: `"branch_prefix" must not contain empty path segments` };
+  }
+  const segments = prefix.split("/");
+  for (const segment of segments) {
+    if (!segment) return { ok: false, error: `"branch_prefix" must not contain empty path segments` };
+    if (segment === "." || segment === "..") {
+      return { ok: false, error: `"branch_prefix" must not contain "." or ".." segments` };
+    }
+    if (!/^[a-z0-9._-]+$/.test(segment)) {
+      return { ok: false, error: `"branch_prefix" segments must match [a-z0-9._-]` };
+    }
+    if (segment.startsWith(".")) {
+      return { ok: false, error: `"branch_prefix" segments must not start with "."` };
+    }
+    if (segment.endsWith(".lock")) {
+      return { ok: false, error: `"branch_prefix" segments must not end with ".lock"` };
+    }
+  }
+  if (prefix.includes("..")) {
+    return { ok: false, error: `"branch_prefix" must not contain ".."` };
+  }
+  if (prefix.includes("@{")) {
+    return { ok: false, error: `"branch_prefix" must not contain "@{"` };
+  }
+  // Collisions with Jumi's internal refs: the review checkout uses
+  // `jumi/target` and `jumi/pr-<n>` branches, and checkpoints live under
+  // `refs/jumi/wip/`. A prefix that is or sits under one of those would
+  // collide with them on the forge.
+  if (prefix === "jumi/target" || prefix.startsWith("jumi/target/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal ref "jumi/target"` };
+  }
+  if (prefix === "jumi/pr" || prefix.startsWith("jumi/pr-") || prefix.startsWith("jumi/pr/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal refs "jumi/pr-*"` };
+  }
+  if (prefix === "refs" || prefix.startsWith("refs/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal refs "refs/jumi/wip/"` };
+  }
+  // The full branch `<prefix>/issue-1-x` must pass `git check-ref-format`.
+  const sample = `${prefix}/issue-1-x`;
+  const refError = checkRefFormatError(sample);
+  if (refError) return { ok: false, error: `"branch_prefix" ${refError}` };
+  return { ok: true, prefix };
+}
+
+/** Subset of `git check-ref-format` rules relevant to constructed branches. */
+function checkRefFormatError(ref: string): string | undefined {
+  if (!ref || ref.startsWith("/") || ref.endsWith("/") || ref.endsWith(".") || ref.includes("//")) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  if (ref.includes("..") || ref.includes("@{")) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  for (const component of ref.split("/")) {
+    if (!component || component.startsWith(".") || component.endsWith(".lock")) {
+      return `makes an invalid branch name "${ref}"`;
+    }
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: git forbids control chars and these symbols.
+  if (/[\x00-\x20~^:?*[\\]/.test(ref)) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  return undefined;
+}
+
+/**
+ * Validate a `pr_title` / `commit_message` template. The only placeholders
+ * are `{title}` and `{issue}`; any other `{...}` or stray brace makes the
+ * whole file invalid.
+ */
+export function validatePrTemplate(
+  key: "pr_title" | "commit_message",
+  value: string
+): { ok: true; template: string } | { ok: false; error: string } {
+  if (!value.trim()) return { ok: false, error: `"${key}" must be a non-blank string` };
+  const withoutValid = value.replaceAll("{title}", "").replaceAll("{issue}", "");
+  if (withoutValid.includes("{") || withoutValid.includes("}")) {
+    const named = /\{[^{}]*\}/.exec(withoutValid)?.[0];
+    if (named) return { ok: false, error: `"${key}" contains unknown placeholder "${named}"` };
+    return { ok: false, error: `"${key}" contains a stray "{" or "}"` };
+  }
+  return { ok: true, template: value };
+}
+
+/** Render a validated title/commit template for one forge issue. */
+export function renderIssueTemplate(template: string, title: string, issueNumber: number): string {
+  return template.replaceAll("{title}", title).replaceAll("{issue}", String(issueNumber));
+}
 
 /** Default settings: every site that needs default values uses this. */
 function defaultRepoSettings(): RepoSettings {
@@ -158,6 +318,8 @@ function defaultRepoSettings(): RepoSettings {
     ignoreConflictsLabel: undefined,
     pickupLabel: undefined,
     mode: "full",
+    reviewDrafts: false,
+    reviewBudget: {},
   };
 }
 
@@ -206,6 +368,32 @@ function parseTimeoutsValue(value: unknown): TimeoutsParse {
     (timeouts as Record<string, number>)[key] = minutes;
   }
   return { ok: true, timeouts };
+}
+
+type ReviewBudgetParse = { ok: true; reviewBudget: RepoReviewBudget } | { ok: false; error: string };
+
+function parseReviewBudgetValue(value: unknown): ReviewBudgetParse {
+  if (value === undefined) return { ok: true, reviewBudget: {} };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"review_budget" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  const reviewBudget: RepoReviewBudget = {};
+  for (const key of Object.keys(record)) {
+    if (!(REVIEW_BUDGET_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, REVIEW_BUDGET_KEYS, "review_budget") };
+    }
+    const budget = record[key];
+    if (typeof budget !== "number" || !Number.isInteger(budget) || budget < MIN_REVIEW_BUDGET_VALUE) {
+      return {
+        ok: false,
+        error: `"review_budget.${key}" must be a positive integer`,
+      };
+    }
+    if (key === "max_files") reviewBudget.maxFiles = budget;
+    else reviewBudget.maxPatchBytes = budget;
+  }
+  return { ok: true, reviewBudget };
 }
 
 type CiGateParse = { ok: true; ciGate?: { wait: CiGateWait } } | { ok: false; error: string };
@@ -267,11 +455,16 @@ function parserErrorMessage(err: unknown): string {
  * whole file invalid. Absent `followup_ignore_logins` means no extra
  * ignores (union with the deployment list). Absent `ignore_conflicts_label`
  * means the deployment value; absent `pickup_label` means `jumi` (Gitea
- * ignores it). `mode` must be
- * `full`, `review-only`, or `off` when present. Absent `automerge_method`
- * means today's merge method (first allowed on GitHub, default style on
- * Gitea); a present value must be one of `merge`, `squash`, `rebase`,
- * `rebase-merge`, or `fast-forward-only`.
+ * ignores it). `mode` must be `full`, `review-only`, or `off` when present.
+ * Absent `review_drafts` (or `false`) means drafts and `WIP:` titles are
+ * skipped, as today; `true` reviews them on every review-dispatch path.
+ * Absent `max_suggestions` means the parent ceiling; `0` is valid and means
+ * no suggestion. Absent `review_budget` (or an empty mapping) means no
+ * budget overrides; each present key is a positive integer, and a value
+ * above the deployer maximum runs with the maximum. Absent
+ * `automerge_method` means today's merge method (first allowed on GitHub,
+ * default style on Gitea); a present value must be one of `merge`,
+ * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -407,6 +600,60 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     mode = record.mode as RepoMode;
   }
+  let branchPrefix: string | undefined;
+  if ("branch_prefix" in record && record.branch_prefix !== undefined) {
+    if (typeof record.branch_prefix !== "string" || !record.branch_prefix.trim()) {
+      return { ok: false, error: `"branch_prefix" must be a non-blank string` };
+    }
+    const validated = validateBranchPrefix(record.branch_prefix);
+    if (!validated.ok) return validated;
+    branchPrefix = validated.prefix;
+  }
+  let prTitle: string | undefined;
+  if ("pr_title" in record && record.pr_title !== undefined) {
+    if (typeof record.pr_title !== "string" || !record.pr_title.trim()) {
+      return { ok: false, error: `"pr_title" must be a non-blank string` };
+    }
+    const validated = validatePrTemplate("pr_title", record.pr_title);
+    if (!validated.ok) return validated;
+    prTitle = validated.template;
+  }
+  let commitMessage: string | undefined;
+  if ("commit_message" in record && record.commit_message !== undefined) {
+    if (typeof record.commit_message !== "string" || !record.commit_message.trim()) {
+      return { ok: false, error: `"commit_message" must be a non-blank string` };
+    }
+    const validated = validatePrTemplate("commit_message", record.commit_message);
+    if (!validated.ok) return validated;
+    commitMessage = validated.template;
+  }
+  let closingKeyword: RepoClosingKeyword | undefined;
+  if ("closing_keyword" in record && record.closing_keyword !== undefined) {
+    if (typeof record.closing_keyword !== "string" || !record.closing_keyword.trim()) {
+      return { ok: false, error: `"closing_keyword" must be a non-blank string` };
+    }
+    const trimmed = record.closing_keyword.trim();
+    if (!(REPO_CLOSING_KEYWORDS as readonly string[]).includes(trimmed)) {
+      return { ok: false, error: `"closing_keyword" must be one of "closes", "refs"` };
+    }
+    closingKeyword = trimmed as RepoClosingKeyword;
+  }
+  let reviewDrafts = false;
+  if ("review_drafts" in record && record.review_drafts !== undefined) {
+    if (typeof record.review_drafts !== "boolean") return { ok: false, error: `"review_drafts" must be a boolean` };
+    reviewDrafts = record.review_drafts;
+  }
+  if ("max_suggestions" in record && record.max_suggestions !== undefined) {
+    const value = record.max_suggestions;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+      return { ok: false, error: `"max_suggestions" must be a non-negative integer` };
+  }
+  let reviewBudget: RepoReviewBudget = {};
+  if ("review_budget" in record && record.review_budget !== undefined) {
+    const parsed = parseReviewBudgetValue(record.review_budget);
+    if (!parsed.ok) return parsed;
+    reviewBudget = parsed.reviewBudget;
+  }
   let ciGate: { wait: CiGateWait } | undefined;
   if ("ci_gate" in record && record.ci_gate !== undefined) {
     const parsed = parseCiGateValue(record.ci_gate);
@@ -445,6 +692,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
+    ...(branchPrefix !== undefined ? { branchPrefix } : {}),
+    ...(prTitle !== undefined ? { prTitle } : {}),
+    ...(commitMessage !== undefined ? { commitMessage } : {}),
+    ...(closingKeyword !== undefined ? { closingKeyword } : {}),
+    reviewDrafts,
+    reviewBudget,
     ...(ciGate !== undefined ? { ciGate } : {}),
     ...(automergeMethod !== undefined ? { automergeMethod } : {}),
   };
@@ -452,6 +705,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     settings.maxFollowupRounds = record.max_followup_rounds as number;
   if ("max_conflict_rounds" in record && record.max_conflict_rounds !== undefined)
     settings.maxConflictRounds = record.max_conflict_rounds as number;
+  if ("max_suggestions" in record && record.max_suggestions !== undefined)
+    settings.maxSuggestions = record.max_suggestions as number;
   return { ok: true, settings };
 }
 
@@ -510,6 +765,13 @@ export type RepoSettingsLoad =
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
       mode: RepoMode;
+      branchPrefix?: string;
+      prTitle?: string;
+      commitMessage?: string;
+      closingKeyword?: RepoClosingKeyword;
+      reviewDrafts: boolean;
+      maxSuggestions?: number;
+      reviewBudget: RepoReviewBudget;
       ciGate?: { wait: CiGateWait };
       automergeMethod?: RepoAutomergeMethod;
     }
@@ -547,6 +809,147 @@ export function effectiveTimeoutMsForKind(load: RepoSettingsLoad, kind: string, 
  */
 export function effectiveLeaseMs(configLeaseMs: number, effectiveTimeoutMs: number): number {
   return Math.max(configLeaseMs, effectiveTimeoutMs + TIMEOUT_LEASE_BUFFER_MS);
+}
+
+/**
+ * Whether drafts and `WIP:` titles are reviewed in this repository. Missing
+ * or invalid files behave as today (`false`): drafts are skipped.
+ */
+export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return false;
+  return load.reviewDrafts === true;
+}
+
+/**
+ * Load the default-branch settings file and report whether drafts review.
+ * Missing, invalid, or unreadable files fall back to `false` (skip drafts,
+ * as today). Never throws.
+ */
+export async function loadReviewDraftsEnabled(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<boolean> {
+  if (!defaultBranch.trim()) return false;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return false;
+    return isReviewDraftsEnabled(settings);
+  } catch (err) {
+    log?.(
+      `review drafts settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Effective budget value for one key. Missing settings, a missing key, or an
+ * invalid file runs with the deployment value (`base`). A value above the
+ * deployer maximum (`max`) applies as the maximum. Unset, the maximum is
+ * the deployment value itself, so a repository can only lower the budget.
+ */
+export function effectiveReviewBudgetValue(
+  load: RepoSettingsLoad,
+  key: "maxFiles" | "maxPatchBytes",
+  base: number,
+  max: number
+): number {
+  if (load.state !== "valid") return base;
+  const wanted = key === "maxFiles" ? load.reviewBudget.maxFiles : load.reviewBudget.maxPatchBytes;
+  if (wanted === undefined) return base;
+  const cap = max > 0 ? max : base;
+  return Math.min(wanted, cap);
+}
+
+export interface EffectiveReviewBudget {
+  maxFiles: number;
+  maxPatchBytes: number;
+}
+
+/**
+ * Effective review size budget. Missing, invalid, or unreadable files run
+ * with the deployment values; a higher file value applies as the deployer
+ * maximum (which defaults to the deployment value, so a repository can only
+ * lower the budget out of the box).
+ */
+export function effectiveReviewBudget(
+  load: RepoSettingsLoad,
+  deployment: { maxFiles: number; maxFilesMax: number; maxPatchBytes: number; maxPatchBytesMax: number }
+): EffectiveReviewBudget {
+  return {
+    maxFiles: effectiveReviewBudgetValue(load, "maxFiles", deployment.maxFiles, deployment.maxFilesMax),
+    maxPatchBytes: effectiveReviewBudgetValue(
+      load,
+      "maxPatchBytes",
+      deployment.maxPatchBytes,
+      deployment.maxPatchBytesMax
+    ),
+  };
+}
+
+/**
+ * Load the default-branch settings file and resolve the effective review
+ * budget. Missing, invalid, or unreadable files fall back to the deployment
+ * values. Never throws.
+ */
+export async function loadEffectiveReviewBudget(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployment: { maxFiles: number; maxFilesMax: number; maxPatchBytes: number; maxPatchBytesMax: number },
+  log?: (message: string) => void
+): Promise<EffectiveReviewBudget> {
+  const fallback: EffectiveReviewBudget = { maxFiles: deployment.maxFiles, maxPatchBytes: deployment.maxPatchBytes };
+  if (!defaultBranch.trim()) return fallback;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return fallback;
+    return effectiveReviewBudget(settings, deployment);
+  } catch (err) {
+    log?.(
+      `review budget settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
+  }
+}
+
+/**
+ * Effective 💡 suggestion cap for a repository. `MAX_SUGGESTION_FINDINGS` in
+ * `verdict.ts` stays the ceiling: a higher file value applies as the ceiling.
+ * Missing or invalid files run with the ceiling.
+ */
+export function effectiveSuggestionCap(load: RepoSettingsLoad, ceiling: number): number {
+  if (load.state !== "valid" || load.maxSuggestions === undefined) return ceiling;
+  return Math.min(load.maxSuggestions, ceiling);
+}
+
+/**
+ * Load the default-branch settings file and resolve the effective 💡 cap.
+ * Missing, invalid, or unreadable files fall back to the ceiling. Never throws.
+ */
+export async function loadEffectiveSuggestionCap(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  ceiling: number,
+  log?: (message: string) => void
+): Promise<number> {
+  if (!defaultBranch.trim()) return ceiling;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return ceiling;
+    return effectiveSuggestionCap(settings, ceiling);
+  } catch (err) {
+    log?.(
+      `suggestion settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return ceiling;
+  }
 }
 
 export interface RepoSettingsFileApi {
@@ -606,6 +1009,13 @@ export async function loadRepoSettings(
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
+    ...(parsed.settings.branchPrefix !== undefined ? { branchPrefix: parsed.settings.branchPrefix } : {}),
+    ...(parsed.settings.prTitle !== undefined ? { prTitle: parsed.settings.prTitle } : {}),
+    ...(parsed.settings.commitMessage !== undefined ? { commitMessage: parsed.settings.commitMessage } : {}),
+    ...(parsed.settings.closingKeyword !== undefined ? { closingKeyword: parsed.settings.closingKeyword } : {}),
+    reviewDrafts: parsed.settings.reviewDrafts,
+    ...(parsed.settings.maxSuggestions !== undefined ? { maxSuggestions: parsed.settings.maxSuggestions } : {}),
+    reviewBudget: parsed.settings.reviewBudget,
     ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
     ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
   };
@@ -1036,6 +1446,85 @@ export async function loadEffectivePickupLabel(
       `pickup label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
     );
     return DEFAULT_PICKUP_LABEL;
+  }
+}
+
+/** Effective branch prefix: the file's `branch_prefix` or `jumi`. Missing/invalid/unreadable falls back to `jumi`. */
+export function effectiveBranchPrefix(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.branchPrefix) return DEFAULT_BRANCH_PREFIX;
+  return settings.branchPrefix;
+}
+
+/** Effective PR title template: the file's `pr_title` or `{title}`. */
+export function effectivePrTitleTemplate(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.prTitle) return DEFAULT_PR_TITLE_TEMPLATE;
+  return settings.prTitle;
+}
+
+/** Effective commit message template: the file's `commit_message` or the default. */
+export function effectiveCommitMessageTemplate(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.commitMessage) return DEFAULT_COMMIT_MESSAGE_TEMPLATE;
+  return settings.commitMessage;
+}
+
+/** Effective closing keyword: the file's `closing_keyword` or `closes`. */
+export function effectiveClosingKeyword(settings: RepoSettingsLoad): RepoClosingKeyword {
+  if (settings.state !== "valid" || !settings.closingKeyword) return DEFAULT_CLOSING_KEYWORD;
+  return settings.closingKeyword;
+}
+
+export interface RepoConventions {
+  branchPrefix: string;
+  prTitle: string;
+  commitMessage: string;
+  closingKeyword: RepoClosingKeyword;
+}
+
+export function defaultRepoConventions(): RepoConventions {
+  return {
+    branchPrefix: DEFAULT_BRANCH_PREFIX,
+    prTitle: DEFAULT_PR_TITLE_TEMPLATE,
+    commitMessage: DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    closingKeyword: DEFAULT_CLOSING_KEYWORD,
+  };
+}
+
+export function conventionsFromLoad(settings: RepoSettingsLoad): RepoConventions {
+  return {
+    branchPrefix: effectiveBranchPrefix(settings),
+    prTitle: effectivePrTitleTemplate(settings),
+    commitMessage: effectiveCommitMessageTemplate(settings),
+    closingKeyword: effectiveClosingKeyword(settings),
+  };
+}
+
+/**
+ * Load PR conventions from the default branch only. Missing, invalid, or
+ * unreadable files fall back to today's formats (fail-open). Never throws.
+ */
+export async function loadRepoConventions(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<RepoConventions> {
+  const fallback = defaultRepoConventions();
+  if (!defaultBranch.trim()) return fallback;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") {
+      if (settings.state === "invalid") {
+        log?.(`pr convention settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+      }
+      return fallback;
+    }
+    return conventionsFromLoad(settings);
+  } catch (err) {
+    log?.(
+      `pr convention settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
   }
 }
 
