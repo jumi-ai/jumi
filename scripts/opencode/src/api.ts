@@ -49,6 +49,13 @@ export function toRepo(repo: GiteaRepo): Repo {
     default_branch: repo.default_branch,
     owner: actor(repo.owner),
     ...(repo.default_merge_style ? { defaultMergeStyle: repo.default_merge_style } : {}),
+    ...(repo.allow_merge_commits !== undefined ? { allowMergeCommits: repo.allow_merge_commits } : {}),
+    ...(repo.allow_squash_merge !== undefined ? { allowSquashMerge: repo.allow_squash_merge } : {}),
+    ...(repo.allow_rebase !== undefined ? { allowRebase: repo.allow_rebase } : {}),
+    ...(repo.allow_rebase_explicit !== undefined ? { allowRebaseExplicit: repo.allow_rebase_explicit } : {}),
+    ...(repo.allow_fast_forward_only_merge !== undefined
+      ? { allowFastForwardOnlyMerge: repo.allow_fast_forward_only_merge }
+      : {}),
   };
 }
 
