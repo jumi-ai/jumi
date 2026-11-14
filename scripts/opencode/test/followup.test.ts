@@ -4557,6 +4557,42 @@ describe("collectFollowUpItems", () => {
     });
   });
 
+  test("needsFollowUp is false for a maintainer-only ❓ even when the author is listed", async () => {
+    const maintainerSticky = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD_SHA}\``,
+      "",
+      "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    const api = makeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 38023,
+          body: maintainerSticky,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const listedPr = { ...prWithHead(), user: makeUser({ login: "renovate-bot" }) };
+    await withDirs(async (home) => {
+      expect(
+        await needsFollowUp({
+          api,
+          owner: "kirmanak",
+          repo: "demo",
+          pr: listedPr,
+          issueNumber: 12,
+          botUsername: "jumi",
+          home,
+          blockingQuestionAuthors: ["renovate-bot"],
+        })
+      ).toBe(false);
+    });
+  });
+
   test("needsFollowUp is false when the same jumi pull review id and SHA are already handled", async () => {
     const api = makeApi({
       listIssueComments: async () => [],

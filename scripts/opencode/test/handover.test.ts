@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { buildBoardGroups } from "../src/board.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
-import { enqueueFollowUpFromReview, shouldHandoverFollowUp, TOO_MANY_FOLLOWUP_ROUNDS } from "../src/handover.ts";
+import {
+  enqueueFollowUpFromReview,
+  isMaintainerOnlyTrailer,
+  shouldHandoverFollowUp,
+  TOO_MANY_FOLLOWUP_ROUNDS,
+  WAITING_ON_MAINTAINER_REASON,
+} from "../src/handover.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";
@@ -162,6 +169,35 @@ describe("shouldHandoverFollowUp", () => {
         published: { status: "updated" },
         markdown,
         prAuthor: "Renovate-Bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(true);
+  });
+
+  test("maintainer-only ❓ never hands over, even for a listed author", () => {
+    const maintainer =
+      "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?\n<!-- jumi-check: success -->";
+    expect(isMaintainerOnlyTrailer(maintainer)).toBe(true);
+    expect(shouldHandoverFollowUp({ published: { status: "posted" }, markdown: maintainer })).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown: maintainer,
+        prAuthor: "renovate-bot",
+        blockingQuestionAuthors: ["renovate-bot"],
+      })
+    ).toBe(false);
+    const mixed = [
+      "src/foo.ts:12: ❓ maintainer: please change the label?",
+      "src/bar.ts:7: ❓ q: is the timeout intentional?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    expect(isMaintainerOnlyTrailer(mixed)).toBe(false);
+    expect(
+      shouldHandoverFollowUp({
+        published: { status: "posted" },
+        markdown: mixed,
+        prAuthor: "renovate-bot",
         blockingQuestionAuthors: ["renovate-bot"],
       })
     ).toBe(true);
@@ -750,5 +786,41 @@ describe("enqueueFollowUpFromReview", () => {
     expect(issue.assignee?.login).toBe("jumi");
     expect(issue.assignees?.map((user) => user.login)).toEqual(["jumi"]);
     expect(api.comments.some((body) => body.includes("unassign"))).toBe(false);
+  });
+
+  test("maintainer-only ❓ queues no follow-up and sits the board as waiting on a maintainer", async () => {
+    const markdown =
+      "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?\n<!-- jumi-check: success -->";
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = makeApi();
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+      blockingQuestionAuthors: ["renovate-bot"],
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(logs).toEqual([`persist-insert skipped: ${WAITING_ON_MAINTAINER_REASON}`]);
+    expect((await store.sits.get("kirmanak", "demo", 7))?.reason).toBe("waiting-maintainer");
+
+    // The review row is still leased here, so a board built from this store
+    // hides the sit as duplicating in-progress. A fresh board store with only
+    // the remembered sit shows the waiting reason as the operator sees it
+    // after the review job settles.
+    const boardStore = new MemoryReviewJobStore();
+    await boardStore.sits.remember("kirmanak", "demo", 7, "waiting-maintainer");
+    const groups = await buildBoardGroups(boardStore);
+    expect(groups.sitting.map((item) => item.reason)).toContain("waiting-maintainer");
+    const waiting = groups.sitting.find((item) => item.reason === "waiting-maintainer");
+    expect(waiting?.message?.toLowerCase()).toContain("waiting on a maintainer");
+    expect(waiting?.kick).toBeUndefined();
   });
 });

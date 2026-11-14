@@ -19,9 +19,32 @@ import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
-import { blockingOpenQuestionCount, parseReviewOutput, trailerSuggestionCount } from "./verdict.ts";
+import {
+  blockingOpenQuestionCount,
+  hasOnlyMaintainerQuestions,
+  parseReviewOutput,
+  trailerSuggestionCount,
+} from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
+
+/** Skip reason (and sit text) when the only open item needs a maintainer. */
+export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";
+
+/**
+ * A review whose only open item is a maintainer-only `❓`: a complete
+ * success trailer, at least one question, every question marked
+ * `❓ maintainer:`, and no leftover suggestions. Failures and suggestion
+ * trailers still hand over; a mixed review (maintainer plus worker-answerable
+ * questions) also still hands over.
+ */
+export function isMaintainerOnlyTrailer(markdown: string | null | undefined): boolean {
+  if (!markdown) return false;
+  if (!hasOnlyMaintainerQuestions(markdown)) return false;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;
+  return trailerSuggestionCount(parsed.verdict.description) === 0;
+}
 
 export function isCurrentHeadFailureTrailer(markdown: string | null | undefined): boolean {
   if (!markdown) return false;
@@ -54,6 +77,10 @@ export function shouldHandoverFollowUp(opts: {
   blockingQuestionAuthors?: readonly string[] | undefined | null;
 }): boolean {
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return false;
+  // A maintainer-only ❓ never starts a worker round on its own: the worker
+  // has no way to file/close another issue, change labels or assignment, or
+  // decide scope. Mixed reviews still hand over for the worker-answerable part.
+  if (isMaintainerOnlyTrailer(opts.markdown)) return false;
   return (
     isCurrentHeadFailureTrailer(opts.markdown) ||
     isLeftoverSimplificationTrailer(opts.markdown) ||
@@ -135,6 +162,21 @@ export async function enqueueFollowUpFromReview(
   };
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
+
+  // Maintainer-only ❓: the worker cannot file/close another issue, change
+  // labels or assignment, or decide scope, so no round starts. The board
+  // keeps the PR visible as waiting on a maintainer answer instead.
+  if (isMaintainerOnlyTrailer(opts.markdown)) {
+    await rememberSitBestEffort(
+      opts.store.sits,
+      opts.row.owner,
+      opts.row.repo,
+      opts.row.prNumber,
+      WAITING_ON_MAINTAINER_REASON,
+      opts.logger
+    );
+    return logSkip(WAITING_ON_MAINTAINER_REASON);
+  }
 
   // Cheap trailer gate first: incomplete skips without any fetch, and a
   // failure or leftover-simplification success enqueues. Only a plain success

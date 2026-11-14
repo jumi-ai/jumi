@@ -641,6 +641,59 @@ export function isBlockingQuestionAuthor(
 }
 
 /**
+ * Maintainer-only questions: a `❓` finding whose only fix needs a human.
+ * The reviewer marks them `❓ maintainer:` (see the rubric): a forge action
+ * other than pushing to the branch and writing the PR description (for
+ * example filing or closing another issue, changing labels or assignment),
+ * or a product or scope decision (for example whether to ship part 1 now or
+ * keep going). Findings about the PR description itself are never
+ * maintainer-only: the worker writes it via `JUMI_PR.md`.
+ */
+const MAINTAINER_QUESTION_RE = /maintainer/i;
+
+function isMaintainerQuestionFirstLine(firstLine: string): boolean {
+  return isQuestionFindingFirstLine(firstLine) && MAINTAINER_QUESTION_RE.test(firstLine);
+}
+
+/** Count the `❓ maintainer:` findings in a review body. */
+export function countMaintainerQuestionFindings(text: string, opts?: { singleFilePath?: string }): number {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isMaintainerQuestionFirstLine(block.first)) count++;
+  }
+  return count;
+}
+
+/**
+ * Whether a published review body holds at least one `❓` and every `❓`
+ * is a `❓ maintainer:` question. Callers also check the trailer is a
+ * complete success, so a failure with a real bug never counts here.
+ */
+export function hasOnlyMaintainerQuestions(
+  text: string | null | undefined,
+  opts?: { singleFilePath?: string }
+): boolean {
+  if (!text) return false;
+  const parsed = parseReviewOutput(text);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;
+  const total = countQuestionFindings(parsed.comment, opts);
+  if (total === 0) return false;
+  return countMaintainerQuestionFindings(parsed.comment, opts) === total;
+}
+
+/**
+ * Whether a single published question block (body or inline text) is a
+ * maintainer-only question. Used by the follow-up gate so inline
+ * `❓ maintainer:` questions count the same as body ones.
+ */
+export function isMaintainerOnlyQuestionText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return countQuestionFindings(text) > 0 && countMaintainerQuestionFindings(text) === countQuestionFindings(text);
+}
+
+/**
  * Open questions that block the status: the trailer must be a complete
  * success (questions are allowed with success), the PR author must be on the
  * opt-in list, and at least one `❓` finding must remain. With the setting off

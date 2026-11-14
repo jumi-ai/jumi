@@ -220,7 +220,14 @@ export interface BoardPeerStatus {
  * Sits with no button: waits the operator cannot finish from this page
  * (draft/not-ready, CI), plus already done, nothing to ship, or already queued.
  */
-const NO_KICK_SITS = new Set<string>(["terminal-result", "no-changes", "repo-mutex", "ci-not-completed", "draft-wip"]);
+const NO_KICK_SITS = new Set<string>([
+  "terminal-result",
+  "no-changes",
+  "repo-mutex",
+  "ci-not-completed",
+  "draft-wip",
+  "waiting-maintainer",
+]);
 
 /** One sentence per sit reason, supplied by the server. The page renders this as the headline. */
 const SIT_MESSAGES: Record<string, string> = {
@@ -235,6 +242,7 @@ const SIT_MESSAGES: Record<string, string> = {
   "no-write-access": "Sender lacks write access for this pull.",
   "not-labeled": "Pull is not labeled for pickup.",
   "conflict-ignored": "conflicted, left to author (ignore label)",
+  "waiting-maintainer": "Waiting on a maintainer answer.",
 };
 
 export function sitMessage(reason: RouterSitReason): string {
