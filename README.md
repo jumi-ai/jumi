@@ -323,6 +323,16 @@ Durable usage lives in the ledger table `jumi_run_usage`, one row per runner spa
 
 Label notes: `agent_instance` is recorded at run time, so `jumi` and `jumi-worker` rows coexist; `profile` is always `default`; the `jumi_job_duration_seconds` `result` label carries the exit class (historical naming kept for dashboard compatibility).
 
+Per-runner outcomes: every spawn also counts `jumi_opencode_runner_exits_total{kind,runner,outcome}`, where `runner` is the chain entry name (`codex`, `claude`, ...) so alerts survive model cutovers, and `outcome` is the exit class with provider outages split out as `provider_down` (`ok`, `quota`, `auth`, `provider_down`, `infra`, `timeout`, `incomplete`, plus `143`). The legacy `jumi_opencode_exits_total{kind,class}` is unchanged; dashboards and alerts read either. When a runner's quota message states a reset time, the run also sets `jumi_opencode_runner_quota_reset_seconds{runner}` (unix timestamp, `0` when no message has stated one) and the `opencode_hop` log line carries `class` (`quota` / `auth` / `provider-down` / `incomplete`), `from_runner` / `to_runner`, and `reset_at` (unix seconds, `null` when unknown). Both new series are exported in-process and from the router's ledger export, so they survive one-shot Job pods; scrape the router for totals. Example alert — a runner that keeps getting attempted but never succeeds:
+
+```promql
+sum by (runner) (increase(jumi_opencode_runner_exits_total{outcome!="ok"}[6h])) > 5
+and
+sum by (runner) (increase(jumi_opencode_runner_exits_total{outcome="ok"}[6h])) == 0
+```
+
+Jumi ships no alert rules; wire the query in the deployer's monitoring.
+
 Suggestion cap and counts: the parent publishes at most 5 💡 findings per review and drops the rest, appending one body line `Jumi dropped N 💡 suggestions (cap 5).` 🔴, 🟡, and ❓ are never dropped, and the trailer and failure gate are unchanged. Durable counts live in the ledger table `jumi_review_suggestions` (one row per published review: runner, forge, posted, dropped, addressed) and render as `jumi_review_suggestions_posted_total{runner,forge}`, `jumi_review_suggestions_dropped_total{runner,forge}`, and `jumi_review_suggestions_addressed_total{runner,forge}`. `addressed` is counted on the next review of the same PR as the earlier 💡 findings not repeated there, matched by same file and similar text (normalized equality, containment, or word Jaccard >= 0.5). Labels stay bounded (`runner` is `opencode`/`claude`/`agy`/`codex`/`unknown`, `forge` is `gitea`/`github`); no PR number or repo is ever a label.
 
 After each OpenCode run Jumi reads the per-review session DB (even on non-zero exit), adds the token sums to the in-process counters and the ledger row, then deletes the workspace. In-process counters still reset on process restart; the ledger series do not. This is not a durable OpenCode DB on `HOME`.
