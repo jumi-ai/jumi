@@ -29,6 +29,7 @@ import {
   latestStatuses,
   needsCiFollowUp,
   recordCiHandled,
+  resolveRequiredCiContexts,
   reviewSkipReasonForCi,
   summarizeCiChecks,
 } from "../src/ci.ts";
@@ -1120,5 +1121,151 @@ describe("ci check summaries", () => {
     expect(
       checkDurationMs({ created_at: "2026-11-08T08:35:07.000Z", updated_at: "2026-11-08T08:15:00.000Z" })
     ).toBeUndefined();
+  });
+});
+
+describe("required-context pending", () => {
+  test("resolveRequiredCiContexts ignores jumi/opencode-review", async () => {
+    const api = {
+      getBranch: async () => ({
+        enableStatusCheck: true,
+        requiredContexts: ["jumi/opencode-review", "build"],
+      }),
+    };
+    expect(await resolveRequiredCiContexts(api, { owner: "o", repo: "r", prNumber: 7, baseBranch: "main" })).toEqual([
+      "build",
+    ]);
+  });
+
+  test("resolveRequiredCiContexts falls back when only Jumi is required", async () => {
+    const lines: string[] = [];
+    const api = {
+      getBranch: async () => ({
+        enableStatusCheck: true,
+        requiredContexts: ["jumi/opencode-review"],
+      }),
+    };
+    expect(
+      await resolveRequiredCiContexts(api, {
+        owner: "o",
+        repo: "r",
+        prNumber: 7,
+        baseBranch: "main",
+        log: (m) => lines.push(m),
+      })
+    ).toBeUndefined();
+    expect(lines).toHaveLength(1);
+  });
+
+  test("resolveRequiredCiContexts falls back when getBranch throws or checks are disabled", async () => {
+    const throwing = { getBranch: async () => Promise.reject(new Error("boom")) };
+    expect(
+      await resolveRequiredCiContexts(throwing, { owner: "o", repo: "r", prNumber: 7, baseBranch: "main" })
+    ).toBeUndefined();
+    const disabled = { getBranch: async () => ({ enableStatusCheck: false, requiredContexts: [] }) };
+    expect(
+      await resolveRequiredCiContexts(disabled, { owner: "o", repo: "r", prNumber: 7, baseBranch: "main" })
+    ).toBeUndefined();
+    const missing = {};
+    expect(await resolveRequiredCiContexts(missing, { owner: "o", repo: "r", prNumber: 7 })).toBeUndefined();
+  });
+
+  test("required success with an optional pending check is not pending", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [
+            { id: 1, context: "build", status: "success" },
+            { id: 2, context: "optional", status: "pending" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(inspection.pending).toBe(false);
+      expect(inspection.pendingOptional).toEqual(["optional"]);
+      expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a pending required context still waits", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [
+            { id: 1, context: "build", status: "pending" },
+            { id: 2, context: "optional", status: "success" },
+          ],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(inspection.pending).toBe(true);
+      expect(inspection.pendingOptional).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("a required context that never reported still waits", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
+    try {
+      const inspection = await inspectCi({
+        api: makeApi({
+          listCommitStatuses: async () => [{ id: 2, context: "optional", status: "success" }],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(inspection.pending).toBe(true);
+      expect(inspection.pendingOptional).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("no required set keeps today's any-check pending behaviour", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
+    try {
+      const statuses = [{ id: 1, context: "build", status: "success" as const }];
+      const pendingOnly = [{ id: 2, context: "optional", status: "pending" as const }];
+      const withSet = await inspectCi({
+        api: makeApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(withSet.pending).toBe(true);
+      const narrowed = await inspectCi({
+        api: makeApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(narrowed.pending).toBe(false);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
   });
 });

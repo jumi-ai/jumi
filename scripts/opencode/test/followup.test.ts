@@ -3152,6 +3152,47 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("red required check with a pending optional check runs the CI follow-up", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [
+          { id: 1, context: "build", status: "failure" },
+          { id: 2, context: "optional", status: "pending" },
+        ],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        getActionJobLogs: async () => "##[error]boom\n",
+        getBranch: async () => ({ enableStatusCheck: true, requiredContexts: ["build"] }),
+      });
+      let openCode = 0;
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(openCode).toBe(1);
+      expect(result.status).toBe("no-changes");
+    });
+  });
+
   test("pending then terminal completed wake re-lists once and runs OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let listed = 0;
