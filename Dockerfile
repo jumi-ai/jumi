@@ -9,6 +9,18 @@ ARG YQ_SHA256_ARM64
 ARG UV_VERSION
 ARG UV_SHA256_AMD64
 ARG UV_SHA256_ARM64
+ARG PROMTOOL_VERSION
+ARG PROMTOOL_SHA256_AMD64
+ARG PROMTOOL_SHA256_ARM64
+ARG TOFU_VERSION
+ARG TOFU_SHA256_AMD64
+ARG TOFU_SHA256_ARM64
+ARG KUBECONFORM_VERSION
+ARG KUBECONFORM_SHA256_AMD64
+ARG KUBECONFORM_SHA256_ARM64
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256_AMD64
+ARG KUBECTL_SHA256_ARM64
 ARG NODE_VERSION
 ARG NODE_SHA256_AMD64
 ARG NODE_SHA256_ARM64
@@ -135,6 +147,18 @@ ARG YQ_SHA256_ARM64
 ARG UV_VERSION
 ARG UV_SHA256_AMD64
 ARG UV_SHA256_ARM64
+ARG PROMTOOL_VERSION
+ARG PROMTOOL_SHA256_AMD64
+ARG PROMTOOL_SHA256_ARM64
+ARG TOFU_VERSION
+ARG TOFU_SHA256_AMD64
+ARG TOFU_SHA256_ARM64
+ARG KUBECONFORM_VERSION
+ARG KUBECONFORM_SHA256_AMD64
+ARG KUBECONFORM_SHA256_ARM64
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256_AMD64
+ARG KUBECTL_SHA256_ARM64
 ARG NODE_VERSION
 ARG NODE_SHA256_AMD64
 ARG NODE_SHA256_ARM64
@@ -184,6 +208,81 @@ RUN set -eu; \
     tar -xzf "${tmp_dir}/uv.tar.gz" -C "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uv" /usr/local/bin/uv; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uvx" /usr/local/bin/uvx; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    : "${PROMTOOL_VERSION:?PROMTOOL_VERSION build-arg is required}"; \
+    : "${PROMTOOL_SHA256_AMD64:?PROMTOOL_SHA256_AMD64 build-arg is required}"; \
+    : "${PROMTOOL_SHA256_ARM64:?PROMTOOL_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) prom_arch="amd64"; prom_sha256="${PROMTOOL_SHA256_AMD64}" ;; \
+      arm64) prom_arch="arm64"; prom_sha256="${PROMTOOL_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${prom_sha256}" in \
+      *[!0-9a-f]*|"") echo "promtool sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#prom_sha256}" -ne 64 ]; then echo "promtool sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://github.com/prometheus/prometheus/releases/download/v${PROMTOOL_VERSION}/prometheus-${PROMTOOL_VERSION}.linux-${prom_arch}.tar.gz" -o "${tmp_dir}/prometheus.tar.gz"; \
+    echo "${prom_sha256}  ${tmp_dir}/prometheus.tar.gz" | sha256sum -c -; \
+    tar -xzf "${tmp_dir}/prometheus.tar.gz" -C "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/prometheus-${PROMTOOL_VERSION}.linux-${prom_arch}/promtool" /usr/local/bin/promtool; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    : "${TOFU_VERSION:?TOFU_VERSION build-arg is required}"; \
+    : "${TOFU_SHA256_AMD64:?TOFU_SHA256_AMD64 build-arg is required}"; \
+    : "${TOFU_SHA256_ARM64:?TOFU_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) tofu_arch="amd64"; tofu_sha256="${TOFU_SHA256_AMD64}" ;; \
+      arm64) tofu_arch="arm64"; tofu_sha256="${TOFU_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${tofu_sha256}" in \
+      *[!0-9a-f]*|"") echo "tofu sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#tofu_sha256}" -ne 64 ]; then echo "tofu sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_${tofu_arch}.zip" -o "${tmp_dir}/tofu.zip"; \
+    echo "${tofu_sha256}  ${tmp_dir}/tofu.zip" | sha256sum -c -; \
+    unzip -q "${tmp_dir}/tofu.zip" -d "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/tofu" /usr/local/bin/tofu; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    : "${KUBECONFORM_VERSION:?KUBECONFORM_VERSION build-arg is required}"; \
+    : "${KUBECONFORM_SHA256_AMD64:?KUBECONFORM_SHA256_AMD64 build-arg is required}"; \
+    : "${KUBECONFORM_SHA256_ARM64:?KUBECONFORM_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) kubeconform_arch="amd64"; kubeconform_sha256="${KUBECONFORM_SHA256_AMD64}" ;; \
+      arm64) kubeconform_arch="arm64"; kubeconform_sha256="${KUBECONFORM_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${kubeconform_sha256}" in \
+      *[!0-9a-f]*|"") echo "kubeconform sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#kubeconform_sha256}" -ne 64 ]; then echo "kubeconform sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-${kubeconform_arch}.tar.gz" -o "${tmp_dir}/kubeconform.tar.gz"; \
+    echo "${kubeconform_sha256}  ${tmp_dir}/kubeconform.tar.gz" | sha256sum -c -; \
+    tar -xzf "${tmp_dir}/kubeconform.tar.gz" -C "${tmp_dir}"; \
+    install -m 755 "${tmp_dir}/kubeconform" /usr/local/bin/kubeconform; \
+    rm -rf "${tmp_dir}"
+RUN set -eu; \
+    : "${KUBECTL_VERSION:?KUBECTL_VERSION build-arg is required}"; \
+    : "${KUBECTL_SHA256_AMD64:?KUBECTL_SHA256_AMD64 build-arg is required}"; \
+    : "${KUBECTL_SHA256_ARM64:?KUBECTL_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) kubectl_arch="amd64"; kubectl_sha256="${KUBECTL_SHA256_AMD64}" ;; \
+      arm64) kubectl_arch="arm64"; kubectl_sha256="${KUBECTL_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${kubectl_sha256}" in \
+      *[!0-9a-f]*|"") echo "kubectl sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#kubectl_sha256}" -ne 64 ]; then echo "kubectl sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${kubectl_arch}/kubectl" -o "${tmp_dir}/kubectl"; \
+    echo "${kubectl_sha256}  ${tmp_dir}/kubectl" | sha256sum -c -; \
+    install -m 755 "${tmp_dir}/kubectl" /usr/local/bin/kubectl; \
     rm -rf "${tmp_dir}"
 RUN set -eu; \
     : "${NODE_VERSION:?NODE_VERSION build-arg is required}"; \
@@ -244,6 +343,10 @@ RUN git --version \
   && curl --version \
   && yq --version \
   && uv --version \
+  && promtool --version \
+  && kubeconform -v \
+  && tofu version \
+  && kubectl version --client \
   && ps --version \
   && unzip -v \
   && shellcheck --version \

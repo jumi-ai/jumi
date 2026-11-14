@@ -205,7 +205,9 @@ describe("reviewer image permissions", () => {
     expect(dockerfile).toMatch(/python3 --version/);
     expect(dockerfile).toMatch(/helm version --short/);
     expect(dockerfile).toMatch(/get\.helm\.sh\/helm-v\$\{HELM_VERSION\}/);
-    expect(dockerfile).not.toMatch(/kubectl/);
+    // kubectl ships client-side only: version-checked, with no kubeconfig or credentials baked in.
+    expect(dockerfile).toMatch(/kubectl version --client/);
+    expect(dockerfile).not.toMatch(/KUBECONFIG/);
   });
 
   test("pulls base images from Docker Hub", () => {
