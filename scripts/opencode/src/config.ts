@@ -251,6 +251,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
+  // Read by the review sandbox gate (`src/review_sandbox.ts`); referenced
+  // here so the contract gate sees the optional key.
+  void optionalEnv(resolved, "JUMI_ALLOW_UNSANDBOXED_REVIEWS");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const maxFiles = intEnv(resolved, "MAX_FILES", 100);

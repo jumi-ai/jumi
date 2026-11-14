@@ -228,6 +228,15 @@ jobs:
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
+      - name: Verify the review Landlock sandbox against the job-pod kernel
+        # The in-repo wrapper is not a pinned binary, so only a real sandboxed
+        # red-team on this kernel proves /proc reads, signals, and outside
+        # writes stay denied while scratch writes and git keep working.
+        run: |
+          set -euo pipefail
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/review_sandbox_probe.ts'
+
       - name: Verify token-only codex auth against the installed binary
         # Job pods hold no refresh token. The probe drives the installed binary
         # at loopback with a token-only auth.json and proves it runs without

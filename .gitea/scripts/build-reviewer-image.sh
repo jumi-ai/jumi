@@ -299,6 +299,16 @@ verify_reviewer_runtime() {
     echo "codex override probe failed against the installed codex binary" >&2
     exit 1
   fi
+  # The review sandbox is an in-repo wrapper, not a pinned binary: the probe
+  # runs its `--check` plus a real sandboxed red-team (denied /proc read,
+  # signal, and outside write; allowed scratch write) against the job-pod
+  # kernel, where Landlock must actually hold.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/review_sandbox_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "review sandbox probe failed in reviewer image" >&2
+    exit 1
+  fi
   # Job pods hold no refresh token: control publishes a token-only auth.json
   # with `refresh_token: ""`. Only the binary can prove it runs from that file
   # without refreshing, recovers from a rotated Secret volume after a 401, and

@@ -200,6 +200,20 @@ describe("reviewer image permissions", () => {
     }
   });
 
+  test("runs the review sandbox probe on the job-pod kernel in every image verification path", () => {
+    // The wrapper is in-repo, not a pinned binary: only a real sandboxed
+    // red-team on the image kernel proves the Landlock domain holds, so no
+    // verification path may lose it.
+    expect(existsSync(join(repoRoot, "scripts/opencode/src/review_sandbox_probe.ts"))).toBe(true);
+    for (const path of [
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ]) {
+      expect(readFileSync(join(repoRoot, path), "utf8")).toContain("bun src/review_sandbox_probe.ts");
+    }
+  });
+
   test("installs python3 and helm in the runtime image", () => {
     expect(dockerfile).toMatch(/python3/);
     expect(dockerfile).toMatch(/python3 --version/);

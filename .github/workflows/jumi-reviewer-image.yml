@@ -211,6 +211,16 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
+      - name: Verify the review Landlock sandbox against the job-pod kernel
+        if: ${{ env.VERSION != '' }}
+        # Same probe as the pull_request image job: the in-repo wrapper is not
+        # a pinned binary, so only a real sandboxed red-team on this kernel
+        # proves /proc reads, signals, and outside writes stay denied.
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${VERSION}" \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/review_sandbox_probe.ts'
+
       - name: Verify token-only codex auth against the installed binary
         if: ${{ env.VERSION != '' }}
         # Job pods hold no refresh token. The probe drives the installed binary
