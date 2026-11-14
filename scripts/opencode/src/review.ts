@@ -846,7 +846,10 @@ export const PR_AUTHOR_CANNOT_PUSH = "PR author cannot push to the base reposito
 export function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
-  if (/^\s*(wip|\[wip\])/i.test(pr.title)) {
+  // Bare `wip` / `[wip]` prefixes disable the review. A `wip:` prefix (with
+  // the colon) is owned solely by the draft gate below (`skipReasonForDraft`
+  // via `isWipOrDraft`), so `review_drafts: true` reviews `WIP:` titles.
+  if (/^\s*(wip(?!:)|\[wip\])/i.test(pr.title)) {
     return "PR title disables review";
   }
 }
@@ -855,7 +858,8 @@ export function skipReasonForPR(pr: Pull): string | undefined {
  * Draft / `WIP:` skip for reviews. Returns `"draft or WIP pull request"` when
  * the pull is a draft or has a `WIP:` title and the repository has not opted
  * in via `.jumi.yml` `review_drafts: true`. `PR title disables review`
- * (`wip` / `[wip]` prefix) is a separate mechanism and keeps working.
+ * (bare `wip` / `[wip]` prefix, no colon) is a separate mechanism and keeps
+ * working.
  */
 export function skipReasonForDraft(
   pr: { title: string; draft?: boolean },

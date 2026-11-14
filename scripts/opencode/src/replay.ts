@@ -291,7 +291,9 @@ function logDefault(message: string): void {
 function skipReasonForPrState(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
-  if (/^\s*(wip|\[wip\])/i.test(pr.title)) return "PR title disables review";
+  // Same split as `skipReasonForPR` in review.ts: bare `wip` / `[wip]`
+  // disables the review, while a `wip:` prefix belongs to the draft gate.
+  if (/^\s*(wip(?!:)|\[wip\])/i.test(pr.title)) return "PR title disables review";
   return undefined;
 }
 
