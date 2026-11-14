@@ -357,7 +357,10 @@ jobs:
           test "$(docker run --rm jumi-worker:ci printenv ANDROID_SDK_ROOT)" = "/opt/android-sdk"
           # Job pods run read-only as uid 10001: the baked SDK must be usable
           # in exactly that shape, with licenses already accepted.
-          docker run --rm --read-only --user 10001:10001 jumi-worker:ci \
+          # /tmp stays a writable tmpfs (pod /tmp is a memory emptyDir): the
+          # entrypoint writes the secrets file there while the SDK itself stays
+          # on the read-only root filesystem.
+          docker run --rm --read-only --tmpfs /tmp --user 10001:10001 jumi-worker:ci \
             sh -c 'test -d "$ANDROID_HOME/platforms/android-37.0" && test -d "$ANDROID_HOME/build-tools/37.0.0" && test -d "$ANDROID_HOME/build-tools/36.0.0" && test -n "$(ls -A "$ANDROID_HOME/licenses")" && sdkmanager --version'
           java_version="$(docker run --rm jumi-worker:ci java -version 2>&1)"
           printf '%s\n' "$java_version" | grep -E 'version "21(\.|$)'

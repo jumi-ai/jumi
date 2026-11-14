@@ -129,6 +129,10 @@ describe("android sdk wiring", () => {
       expect(text).toContain("sdkmanager --version");
       expect(text).toContain("--read-only");
       expect(text).toContain("--user 10001:10001");
+      // The read-only probe still runs the image entrypoint, which writes the
+      // secrets file to /tmp: production mounts pod /tmp as a memory emptyDir,
+      // so CI mirrors it with a tmpfs while the SDK stays on the read-only root.
+      expect(text).toContain("--tmpfs /tmp");
     }
     expect(checksWorkflow).toContain("reviewer image must not set ANDROID_HOME");
     const reviewerWorkflow = readFileSync(join(repoRoot, ".github/workflows/jumi-reviewer-image.yml"), "utf8");

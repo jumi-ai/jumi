@@ -157,7 +157,10 @@ jobs:
           echo "Verified Android SDK env: ${android_home}"
           # Job pods run read-only as uid 10001, so prove the baked SDK is
           # usable in exactly that shape: no runtime install, no license prompt.
-          docker run --rm --read-only --user 10001:10001 "${TEST_TAG}" \
+          # /tmp stays a writable tmpfs (pod /tmp is a memory emptyDir): the
+          # entrypoint writes the secrets file there while the SDK itself stays
+          # on the read-only root filesystem.
+          docker run --rm --read-only --tmpfs /tmp --user 10001:10001 "${TEST_TAG}" \
             sh -c 'test -d "$ANDROID_HOME/platforms/android-37.0" && test -d "$ANDROID_HOME/build-tools/37.0.0" && test -d "$ANDROID_HOME/build-tools/36.0.0" && test -n "$(ls -A "$ANDROID_HOME/licenses")" && sdkmanager --version'
           echo "Verified Android SDK is complete for uid 10001 on a read-only root filesystem"
 
