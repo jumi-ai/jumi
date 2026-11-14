@@ -1,14 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   classifyOpenCodeExit,
+  classifyRunnerOutcome,
+  classifyThrownRunnerOutcome,
   meterWebhook,
+  observeEngineRun,
   recordJobCompleted,
   recordOpenCodeRun,
   renderProcessMetrics,
   renderRunMetrics,
   renderWebhookMetrics,
   resetControlMetricsForTests,
+  runnerNameForMetrics,
 } from "../src/control_metrics.ts";
+import { EngineFailedError } from "../src/engine.ts";
 import { MemoryReviewJobStore, renderQueueMetrics } from "../src/review_jobs.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
 
@@ -167,6 +172,90 @@ describe("run metrics", () => {
     expect(text).toContain("jumi_jobs_completed_total");
     expect(text).not.toContain("jumi_review_jobs");
     expect(text).not.toContain("jumi_webhooks_total");
+  });
+});
+
+describe("per-runner outcomes", () => {
+  test("counts ok, quota, auth, and timeout by chain entry name", () => {
+    recordOpenCodeRun("review", { status: "ok", exitCode: 0, durationMs: 1_000 }, "codex");
+    recordOpenCodeRun(
+      "review",
+      { status: "stuck", exitCode: 1, quota: "resetting", hopped: true, durationMs: 2_000 },
+      "codex"
+    );
+    recordOpenCodeRun("implement", { status: "exit", exitCode: 1, auth: true, durationMs: 3_000 }, "claude");
+    recordOpenCodeRun("review", { status: "timeout", exitCode: null, durationMs: 4_000 }, "codex");
+
+    const text = renderRunMetrics();
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="ok"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="quota"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="timeout"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="implement",runner="claude",outcome="auth"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="auth"} 0');
+    // The legacy series is untouched.
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="ok"} 1');
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 1');
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="timeout"} 1');
+  });
+
+  test("splits provider outages out as provider_down while legacy stays incomplete", () => {
+    recordOpenCodeRun(
+      "review",
+      { status: "exit", exitCode: 1, message: "opencode exited with code 1:\n503 service unavailable" },
+      "opencode"
+    );
+    const text = renderRunMetrics();
+    expect(text).toContain(
+      'jumi_opencode_runner_exits_total{kind="review",runner="opencode",outcome="provider_down"} 1'
+    );
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="incomplete"} 1');
+    expect(classifyRunnerOutcome({ status: "timeout", message: "503 service unavailable" })).toBe("timeout");
+    expect(classifyRunnerOutcome({ status: "exit", exitCode: 143, message: "503 service unavailable" })).toBe("143");
+    expect(classifyRunnerOutcome({ status: "stuck", exitCode: 1, quota: "resetting", message: "429 rate limit" })).toBe(
+      "quota"
+    );
+    expect(classifyThrownRunnerOutcome(new EngineFailedError("nope", false, { auth: true }))).toBe("auth");
+    expect(classifyThrownRunnerOutcome(new EngineFailedError("nope", false, { quota: "hard" }))).toBe("quota");
+    expect(classifyThrownRunnerOutcome(new EngineFailedError("503 service unavailable", false))).toBe("provider_down");
+    expect(classifyThrownRunnerOutcome(new Error("boom"))).toBe("incomplete");
+  });
+
+  test("labels runs by chain entry name, falling back to the harness type", () => {
+    expect(runnerNameForMetrics({ runnerName: "codex", type: "codex" })).toBe("codex");
+    expect(runnerNameForMetrics({ type: "codex" })).toBe("codex");
+    expect(runnerNameForMetrics({})).toBe("opencode");
+    observeEngineRun({ runnerName: "codex", trace: { kind: "review" } }, { status: "ok", exitCode: 0 });
+    observeEngineRun({ type: "claude", trace: { kind: "review" } }, { status: "timeout" });
+    const text = renderRunMetrics();
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="ok"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="claude",outcome="timeout"} 1');
+  });
+
+  test("exposes the last known quota reset per runner, 0 when unknown", () => {
+    recordOpenCodeRun(
+      "review",
+      { status: "stuck", exitCode: 1, quota: "resetting", quotaResetAtMs: 1_800_000_000_000 },
+      "codex"
+    );
+    recordOpenCodeRun("review", { status: "ok", exitCode: 0 }, "claude");
+    const text = renderRunMetrics();
+    expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="codex"} 1800000000');
+    expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="claude"} 0');
+  });
+
+  test("falls back to retryAfterMs when the result states no absolute reset", () => {
+    const before = Date.now();
+    recordOpenCodeRun(
+      "review",
+      { status: "stuck", exitCode: 1, quota: "resetting", retryAfterMs: 3_600_000 },
+      "opencode"
+    );
+    const text = renderRunMetrics();
+    const match = /jumi_opencode_runner_quota_reset_seconds\{runner="opencode"\} (\d+)/.exec(text);
+    expect(match).not.toBeNull();
+    const resetAt = Number(match![1]);
+    expect(resetAt).toBeGreaterThanOrEqual(Math.floor((before + 3_600_000) / 1000) - 5);
+    expect(resetAt).toBeLessThanOrEqual(Math.floor((Date.now() + 3_600_000) / 1000) + 5);
   });
 });
 

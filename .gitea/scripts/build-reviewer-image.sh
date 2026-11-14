@@ -23,6 +23,21 @@ fi
 : "${UV_VERSION:?UV_VERSION is required}"
 : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
+: "${PROMTOOL_VERSION:?PROMTOOL_VERSION is required}"
+: "${PROMTOOL_SHA256_AMD64:?PROMTOOL_SHA256_AMD64 is required}"
+: "${PROMTOOL_SHA256_ARM64:?PROMTOOL_SHA256_ARM64 is required}"
+: "${TOFU_VERSION:?TOFU_VERSION is required}"
+: "${TOFU_SHA256_AMD64:?TOFU_SHA256_AMD64 is required}"
+: "${TOFU_SHA256_ARM64:?TOFU_SHA256_ARM64 is required}"
+: "${KUBECONFORM_VERSION:?KUBECONFORM_VERSION is required}"
+: "${KUBECONFORM_SHA256_AMD64:?KUBECONFORM_SHA256_AMD64 is required}"
+: "${KUBECONFORM_SHA256_ARM64:?KUBECONFORM_SHA256_ARM64 is required}"
+: "${KUBECTL_VERSION:?KUBECTL_VERSION is required}"
+: "${KUBECTL_SHA256_AMD64:?KUBECTL_SHA256_AMD64 is required}"
+: "${KUBECTL_SHA256_ARM64:?KUBECTL_SHA256_ARM64 is required}"
+: "${NODE_VERSION:?NODE_VERSION is required}"
+: "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 is required}"
+: "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 is required}"
 
 primary_tag="$1"
 shift
@@ -66,6 +81,21 @@ buildah bud \
   --build-arg "UV_VERSION=${UV_VERSION}" \
   --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
   --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
+  --build-arg "PROMTOOL_VERSION=${PROMTOOL_VERSION}" \
+  --build-arg "PROMTOOL_SHA256_AMD64=${PROMTOOL_SHA256_AMD64}" \
+  --build-arg "PROMTOOL_SHA256_ARM64=${PROMTOOL_SHA256_ARM64}" \
+  --build-arg "TOFU_VERSION=${TOFU_VERSION}" \
+  --build-arg "TOFU_SHA256_AMD64=${TOFU_SHA256_AMD64}" \
+  --build-arg "TOFU_SHA256_ARM64=${TOFU_SHA256_ARM64}" \
+  --build-arg "KUBECONFORM_VERSION=${KUBECONFORM_VERSION}" \
+  --build-arg "KUBECONFORM_SHA256_AMD64=${KUBECONFORM_SHA256_AMD64}" \
+  --build-arg "KUBECONFORM_SHA256_ARM64=${KUBECONFORM_SHA256_ARM64}" \
+  --build-arg "KUBECTL_VERSION=${KUBECTL_VERSION}" \
+  --build-arg "KUBECTL_SHA256_AMD64=${KUBECTL_SHA256_AMD64}" \
+  --build-arg "KUBECTL_SHA256_ARM64=${KUBECTL_SHA256_ARM64}" \
+  --build-arg "NODE_VERSION=${NODE_VERSION}" \
+  --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
+  --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
@@ -124,6 +154,61 @@ verify_reviewer_runtime() {
   if ! buildah run "${ctr}" -- uv --version; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "uv missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- promtool --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "promtool missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- kubeconform -v; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "kubeconform missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- tofu version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "tofu missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- kubectl version --client; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "kubectl missing in reviewer image" >&2
+    exit 1
+  fi
+  node_version="$(buildah run "${ctr}" -- node --version)" || {
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node missing in reviewer image" >&2
+    exit 1
+  }
+  if [ "${node_version}" != "v${NODE_VERSION}" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node version ${node_version} does not match pinned v${NODE_VERSION}" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'test "$(node -p "process.versions.bun === undefined")" = "true"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node is the Bun shim, not real Node, in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- npm --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "npm missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- npx --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "npx missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- bun --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "bun missing in reviewer image" >&2
+    exit 1
+  fi
+  if buildah run "${ctr}" -- sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node resolves to the Bun shim in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- ps --version; then
@@ -288,7 +373,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3, helm, curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
