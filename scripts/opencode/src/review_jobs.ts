@@ -1,13 +1,7 @@
 import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
-import {
-  disabledKickWhy,
-  isFailingVerdictRow,
-  isKickableTerminalState,
-  kickReasonOf,
-  STUCK_KICK_ALIASES,
-} from "./kick.ts";
+import { disabledKickWhy, isKickableReviewRow, kickReasonOf, STUCK_KICK_ALIASES } from "./kick.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
@@ -1778,7 +1772,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      if (!isKickableTerminalState(terminal.state) && !isFailingVerdictRow(terminal)) {
+      if (!isKickableReviewRow(terminal)) {
         const entry = record(terminal.id, null, "not-kickable");
         return {
           status: "rejected",
@@ -4124,7 +4118,7 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as RequeueKickOutcome;
         }
-        if (!isKickableTerminalState(terminal.state) && !isFailingVerdictRow(terminal)) {
+        if (!isKickableReviewRow(terminal)) {
           const logged = await this.insertKickLog(tx, input, "not-kickable", terminal.id, null);
           return {
             status: "rejected",

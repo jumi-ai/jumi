@@ -10,7 +10,7 @@ import {
   disabledKickWhy,
   isFailingVerdictRow,
   isImplementKickId,
-  isKickableTerminalState,
+  isKickableReviewRow,
   isKickPath,
   isReopenKickId,
   isStuckKickId,
@@ -466,13 +466,10 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     if (inflightKeys.has(key)) continue;
     if (closedKeys.has(key)) continue;
     if (inflightJobKeys.has(row.jobKey)) continue;
-    const failing = isFailingVerdictRow(row);
-    if (failing) {
-      // A review or follow-up for this pull is already queued or running.
-      if (inflightPullKeys.has(key)) continue;
-    } else if (!isKickableTerminalState(row.state)) {
-      continue;
-    }
+    if (!isKickableReviewRow(row)) continue;
+    // A failing-verdict review hides while a follow-up for the same pull is
+    // already queued or running: the follow-up is addressing the verdict.
+    if (isFailingVerdictRow(row) && inflightPullKeys.has(key)) continue;
     const reason = kickReasonOf(row);
     if (reason === "") continue;
     if (disabledKickWhy(reason)) continue;
