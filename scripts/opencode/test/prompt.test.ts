@@ -498,7 +498,8 @@ describe("buildPROpenedPrompt ci_results", () => {
 describe("buildIncompleteWritePrompt", () => {
   test("asks to write the artifact from the current session", () => {
     const prompt = buildIncompleteWritePrompt();
-    expect(prompt).toContain("Write JUMI_REVIEW.md");
+    expect(prompt).toContain("jumi-review MCP tools");
+    expect(prompt).toContain("JUMI_REVIEW.md");
     expect(prompt).toContain("write tool");
     expect(prompt).toContain("already in this session");
     expect(prompt).not.toContain("Review the pull request above");
@@ -507,7 +508,8 @@ describe("buildIncompleteWritePrompt", () => {
 
   test("injects last assistant text as write input, not a second safari", () => {
     const prompt = buildIncompleteWritePrompt("```\nfile.ts:1: 🟡 risk: missing null check.\n```");
-    expect(prompt).toContain("Write JUMI_REVIEW.md");
+    expect(prompt).toContain("jumi-review MCP tools");
+    expect(prompt).toContain("JUMI_REVIEW.md");
     expect(prompt).toContain("file.ts:1: 🟡 risk: missing null check.");
     expect(prompt).toContain("input to the write tool, not the sticky");
     expect(prompt).not.toContain("Review the pull request above");
