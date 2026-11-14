@@ -1,9 +1,17 @@
 import { readFileSync } from "node:fs";
 import { isValidEnvName, RUNNER_AUTH_API_KEY, RUNNER_AUTH_SUBSCRIPTION } from "./claude_credentials.ts";
+import { logDiagnostic } from "./diagnostics.ts";
 import type { ForgeKind } from "./forge.ts";
 import { AGY_RUNNER_TYPE, CLAUDE_RUNNER_TYPE, CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE } from "./runner_types.ts";
 
 export { AGY_RUNNER_TYPE, CLAUDE_RUNNER_TYPE, CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE };
+
+import {
+  DEFAULT_RUNNER_COOLDOWN_CONFIG,
+  parseRunnerCooldown as parseCooldownFile,
+  type RunnerCooldownConfig,
+  type RunnerCooldownStore,
+} from "./runner_cooldown.ts";
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 /** Catalog default when a `type: codex` entry omits effort. Not a synthesized-chain model. */
@@ -114,6 +122,7 @@ export interface RunnersCatalog {
   chain: string[];
   independentReview?: IndependentReviewConfig;
   selection?: RunnerSelectionMode;
+  cooldown?: import("./runner_cooldown.ts").RunnerCooldownConfig;
 }
 
 export interface SynthesizeRunnersInput {
@@ -352,9 +361,11 @@ export function parseRunnersCatalog(raw: unknown): RunnersCatalog {
   }
   const independentReview = parseIndependentReview((raw as Record<string, unknown>).independentReview);
   const selection = parseRunnerSelection((raw as Record<string, unknown>).selection);
+  const cooldown = parseCooldownFile((raw as Record<string, unknown>).cooldown);
   const catalog: RunnersCatalog = { runners, chain };
   if (independentReview) catalog.independentReview = independentReview;
   if (selection) catalog.selection = selection;
+  if (cooldown) catalog.cooldown = cooldown;
   return catalog;
 }
 
@@ -446,6 +457,60 @@ export function rotateChainForStart(chain: readonly NamedRunner[], startIndex: n
   return [...copy.slice(normalized), ...copy.slice(0, normalized)];
 }
 
+export interface CooldownOrdering {
+  cooldowns?: RunnerCooldownStore;
+  nowMs?: number;
+  logger?: (message: string) => void;
+  fingerprints?: Record<string, string | undefined>;
+}
+
+export function resolveRunnerCooldownConfig(catalog: {
+  cooldown?: RunnerCooldownConfig | undefined;
+}): RunnerCooldownConfig {
+  if (!catalog.cooldown) return { ...DEFAULT_RUNNER_COOLDOWN_CONFIG };
+  return { ...DEFAULT_RUNNER_COOLDOWN_CONFIG, ...catalog.cooldown };
+}
+
+function applyCooldownToOrder(
+  chain: readonly NamedRunner[],
+  ordering?: CooldownOrdering
+): { healthy: NamedRunner[]; ordered: NamedRunner[]; allCooled: boolean } | undefined {
+  if (!ordering?.cooldowns) return undefined;
+  const nowMs = ordering.nowMs ?? Date.now();
+  const store = ordering.cooldowns;
+  const healthy: NamedRunner[] = [];
+  const cooled: NamedRunner[] = [];
+  for (const runner of chain) {
+    if (store.isCooled(runner.name, nowMs, ordering.fingerprints?.[runner.name])) cooled.push(runner);
+    else healthy.push(runner);
+  }
+  if (ordering.logger) {
+    for (const runner of cooled) {
+      const entry = store.entry(runner.name);
+      logDiagnostic(ordering.logger, "runner_skipped_cooldown", {
+        runner: runner.name,
+        until: entry ? new Date(entry.untilMs).toISOString() : null,
+        reason: entry?.reason ?? null,
+      });
+    }
+  }
+  if (healthy.length === 0) {
+    const byExpiry = [...cooled].sort((a, b) => store.cooldownUntil(a.name) - store.cooldownUntil(b.name));
+    if (ordering.logger && byExpiry.length > 0) {
+      const first = byExpiry[0]!;
+      const entry = store.entry(first.name);
+      logDiagnostic(ordering.logger, "runner_cooldown", {
+        runner: first.name,
+        reason: entry?.reason ?? null,
+        until: entry ? new Date(entry.untilMs).toISOString() : null,
+        source: entry?.source ?? null,
+      });
+    }
+    return { healthy, ordered: byExpiry, allCooled: true };
+  }
+  return { healthy, ordered: healthy, allCooled: false };
+}
+
 /**
  * Effective attempt order for one fresh job. Ordered (the default when the
  * option is absent) returns a copy in configured order. Random-start uniformly
@@ -455,9 +520,19 @@ export function rotateChainForStart(chain: readonly NamedRunner[], startIndex: n
 export function orderChainForJob(
   chain: readonly NamedRunner[],
   selection?: RunnerSelectionMode | string | undefined,
-  random: () => number = Math.random
+  random: () => number = Math.random,
+  cooldownOrdering?: CooldownOrdering
 ): NamedRunner[] {
-  const copy = [...chain];
+  const eligible = applyCooldownToOrder(chain, cooldownOrdering);
+  if (!eligible) {
+    const copy = [...chain];
+    const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
+    if (mode !== RUNNER_SELECTION_RANDOM_START) return copy;
+    if (copy.length <= 1) return copy;
+    return rotateChainForStart(copy, chooseRandomStartIndex(copy.length, random));
+  }
+  if (eligible.allCooled) return eligible.ordered;
+  const copy = [...eligible.healthy];
   const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
   if (mode !== RUNNER_SELECTION_RANDOM_START) return copy;
   if (copy.length <= 1) return copy;
@@ -510,8 +585,30 @@ export function orderChainForRetry(
   chain: readonly NamedRunner[],
   selection?: RunnerSelectionMode | string | undefined,
   random: () => number = Math.random,
-  failedRunnerName?: string | null | undefined
+  failedRunnerName?: string | null | undefined,
+  cooldownOrdering?: CooldownOrdering
 ): NamedRunner[] {
+  if (cooldownOrdering?.cooldowns) {
+    const applied = applyCooldownToOrder(chain, cooldownOrdering);
+    if (applied) {
+      if (applied.allCooled) return applied.ordered;
+      const healthy = applied.healthy;
+      const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
+      if (mode !== RUNNER_SELECTION_RANDOM_START) return [...healthy];
+      if (healthy.length <= 1) return [...healthy];
+      // Rotate the full configured order past the failed runner, then keep
+      // only healthy entries in that rotated order. A cooled failed runner is
+      // naturally skipped, so a retry never restarts on the dead runner.
+      const copy = [...chain];
+      const failedIndex = indexOfRunnerByName(copy, failedRunnerName);
+      if (failedIndex < 0) return orderChainForJob(healthy, selection, random, cooldownOrdering);
+      const rotated = rotateChainForStart(copy, failedIndex + 1);
+      const healthySet = new Set(healthy.map((r) => r.name));
+      const filtered = rotated.filter((r) => healthySet.has(r.name));
+      if (filtered.length > 0) return filtered;
+      return [...healthy];
+    }
+  }
   const copy = [...chain];
   const mode = selection == null ? RUNNER_SELECTION_ORDERED : resolveRunnerSelection({ selection });
   if (mode !== RUNNER_SELECTION_RANDOM_START) return copy;
