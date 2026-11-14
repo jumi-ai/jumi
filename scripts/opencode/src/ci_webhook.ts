@@ -7,6 +7,7 @@ import {
   isInScopeJumiPR,
   isWipOrDraft,
 } from "./gitea_issues.ts";
+import { loadRepoSettings } from "./repo_settings.ts";
 import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
@@ -159,11 +160,55 @@ export type CiReviewWebhookDecision =
   | { type: "enqueue"; jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] }
   | { type: "skip"; reason: string };
 
+type ReviewDraftsApi = Pick<IssueApi, "listOpenPulls"> & Partial<Pick<IssueApi, "getRepo" | "getRepoFile">>;
+
+async function resolveReviewDrafts(
+  api: ReviewDraftsApi | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null,
+  opts: { reviewDrafts?: boolean } | undefined,
+  logger?: (message: string) => void
+): Promise<boolean> {
+  if (opts?.reviewDrafts !== undefined) return opts.reviewDrafts === true;
+  try {
+    const getFile = (api as { getRepoFile?: unknown } | undefined)?.getRepoFile;
+    let branch = (defaultBranch ?? "").trim();
+    if (!branch) {
+      const getRepo = (api as { getRepo?: unknown } | undefined)?.getRepo;
+      if (typeof getRepo !== "function") return false;
+      const info = await (getRepo as (o: string, r: string) => Promise<{ default_branch?: string }>).call(
+        api,
+        owner,
+        repo
+      );
+      branch = info?.default_branch?.trim() ?? "";
+    }
+    if (!branch || typeof getFile !== "function") return false;
+    const load = await loadRepoSettings(
+      api as {
+        getRepoFile(o: string, r: string, p: string, ref: string): Promise<{ found: boolean; content?: string }>;
+      },
+      owner,
+      repo,
+      branch
+    );
+    if (load.state !== "valid") return false;
+    return load.reviewDrafts === true;
+  } catch (err) {
+    logger?.(
+      `review drafts settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
 export async function shouldEnqueueWorkflowJobReview(
   payload: GiteaWorkflowJobPayload,
   policy: WebhookPolicy,
   api: Pick<IssueApi, "listOpenPulls">,
-  logger?: (message: string) => void
+  logger?: (message: string) => void,
+  opts?: { reviewDrafts?: boolean }
 ): Promise<CiReviewWebhookDecision> {
   let owner: string;
   let repo: string;
@@ -183,12 +228,13 @@ export async function shouldEnqueueWorkflowJobReview(
     return { type: "skip", reason: "no matching pull request" };
   }
 
+  const reviewDrafts = await resolveReviewDrafts(api, owner, repo, payload.repository.default_branch, opts, logger);
   const pulls = await api.listOpenPulls(owner, repo);
   const jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] = [];
   for (const pr of pulls) {
     if (!jobHeadMatches(pr.head.sha, pr.head.ref, job)) continue;
     if (pr.state !== "open" || pr.merged) continue;
-    if (isWipOrDraft(pr)) continue;
+    if (!reviewDrafts && isWipOrDraft(pr)) continue;
     if (!pr.head?.sha) continue;
     jobs.push({
       owner,
@@ -279,7 +325,8 @@ export async function shouldEnqueueSiblingCheckReview(
   event: string,
   policy: WebhookPolicy,
   api: Pick<IssueApi, "listOpenPulls">,
-  logger?: (message: string) => void
+  logger?: (message: string) => void,
+  opts?: { reviewDrafts?: boolean }
 ): Promise<CiReviewWebhookDecision> {
   let parsed: unknown;
   try {
@@ -305,12 +352,13 @@ export async function shouldEnqueueSiblingCheckReview(
     return { type: "skip", reason: "repository not allowed" };
   }
 
+  const reviewDrafts = await resolveReviewDrafts(api, owner, repo, undefined, opts, logger);
   const pulls = await api.listOpenPulls(owner, repo);
   const jobs: Omit<ReviewJob, "delivery" | "receivedAt">[] = [];
   for (const pr of pulls) {
     if (!jobHeadMatches(pr.head.sha, pr.head.ref, { head_sha: finish.sha, head_branch: finish.branch })) continue;
     if (pr.state !== "open" || pr.merged) continue;
-    if (isWipOrDraft(pr)) continue;
+    if (!reviewDrafts && isWipOrDraft(pr)) continue;
     if (!pr.head?.sha) continue;
     jobs.push({
       owner,

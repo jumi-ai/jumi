@@ -6,7 +6,9 @@ import {
   CI_LOOKUP_FAILED_REASON,
   CI_PENDING_REASON,
   type CiCheckSummary,
+  type CiGateResolverApi,
   decideCiLookupRetry,
+  resolveCiGate,
   reviewSkipReasonForCi,
 } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
@@ -35,8 +37,11 @@ import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import {
   effectiveLeaseMs,
+  effectiveReviewBudget,
   effectiveTimeoutMsForKind,
+  isReviewDraftsEnabled,
   loadDefaultBranchSettings,
+  loadReviewDraftsEnabled,
   REPO_MODE_OFF_REASON,
   resolveRepoMode,
 } from "./repo_settings.ts";
@@ -165,6 +170,32 @@ export async function runReviewJob(
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${early}`);
     return { status: "skipped", reason: early };
   }
+  // Draft / WIP review gate and size budget come from the default branch.
+  // Fail-open to today's behaviour (skip drafts, deployment budget) so an
+  // unreadable file never reviews a draft by accident.
+  let effectiveBudget = { maxFiles: config.maxFiles, maxPatchBytes: config.maxPatchBytes };
+  try {
+    const { load: budgetLoad } = await loadDefaultBranchSettings(api, job.owner, job.repo, undefined, logger);
+    const draftsEnabled = budgetLoad.state === "valid" ? isReviewDraftsEnabled(budgetLoad) : false;
+    const { skipReasonForDraft } = await import("./review.ts");
+    const draftSkip = skipReasonForDraft(pr, draftsEnabled);
+    if (draftSkip) {
+      logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${draftSkip}`);
+      return { status: "skipped", reason: draftSkip };
+    }
+    effectiveBudget = effectiveReviewBudget(budgetLoad, {
+      maxFiles: config.maxFiles,
+      maxFilesMax: config.maxFilesMax,
+      maxPatchBytes: config.maxPatchBytes,
+      maxPatchBytesMax: config.maxPatchBytesMax,
+    });
+  } catch {
+    const { isWipOrDraft } = await import("./gitea_issues.ts");
+    if (isWipOrDraft(pr)) {
+      logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: draft or WIP pull request`);
+      return { status: "skipped", reason: "draft or WIP pull request" };
+    }
+  }
   if (!(await pullAuthorCanPush(api, job.owner, job.repo, pr))) {
     logger(`${job.owner}/${job.repo}#${job.prNumber} skipped: ${PR_AUTHOR_CANNOT_PUSH}`);
     return { status: "skipped", reason: PR_AUTHOR_CANNOT_PUSH };
@@ -172,6 +203,21 @@ export async function runReviewJob(
   let noCiNote: string | undefined;
   let ciChecks: CiCheckSummary[] | undefined;
   let ciPendingOptional: readonly string[] | undefined;
+  let ciGateWait: import("./repo_settings.ts").CiGateWait = "required";
+  let ciGateRequiredContexts: readonly string[] | undefined;
+  try {
+    const gate = await resolveCiGate(api as unknown as CiGateResolverApi, {
+      owner: job.owner,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      baseBranch: pr.base.ref,
+      log: logger,
+    });
+    ciGateWait = gate.wait;
+    ciGateRequiredContexts = gate.requiredContexts;
+  } catch {
+    ciGateWait = "required";
+  }
   const inspectHeadCi = async (relist?: boolean): Promise<string | undefined> => {
     try {
       const ci = await inspectOtherChecks(
@@ -184,6 +230,8 @@ export async function runReviewJob(
           abortSignal: extras.abortSignal,
           ciRelistDelayMs: extras.ciRelistDelayMs,
           baseBranch: pr.base.ref,
+          ...(ciGateRequiredContexts ? { requiredContexts: ciGateRequiredContexts } : {}),
+          ...(ciGateWait !== "required" ? { wait: ciGateWait } : {}),
           ...(relist === false ? { relist: false as const } : {}),
         },
         job.headSha,
@@ -191,7 +239,7 @@ export async function runReviewJob(
       );
       if (ci.checks.length > 0) ciChecks = ci.checks;
       if (ci.pendingOptional.length > 0) ciPendingOptional = ci.pendingOptional;
-      return reviewSkipReasonForCi(ci);
+      return reviewSkipReasonForCi(ci, ciGateWait);
     } catch (err) {
       if (isAbortError(err) || extras.abortSignal?.aborted) throw err;
       logger(
@@ -246,8 +294,10 @@ export async function runReviewJob(
       ...(extras.skipLatches ? { skipLatches: extras.skipLatches } : {}),
       sanitizeOpenCodeEnv: true,
       timeoutMs: config.opencodeTimeoutMs,
-      maxFiles: config.maxFiles,
-      maxPatchBytes: config.maxPatchBytes,
+      maxFiles: effectiveBudget.maxFiles,
+      maxPatchBytes: effectiveBudget.maxPatchBytes,
+      maxFilesMax: config.maxFilesMax,
+      maxPatchBytesMax: config.maxPatchBytesMax,
       maxOutputBytes: config.maxOutputBytes,
       maxIncompleteRetries: config.maxIncompleteRetries,
       logger: (message) => logger(message),
@@ -401,11 +451,36 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               // Best-effort marker only; the skip below owns the response.
             }
           }
-          const validation = validateWebhookPayload(payload, {
-            giteaUrl: config.giteaUrl,
-            allowedOrgs: config.allowedOrgs,
-            allowedRepos: config.allowedRepos,
-          });
+          let reviewDrafts = false;
+          try {
+            const [draftOwner, draftRepo] = payload.repository.full_name.split("/");
+            const defaultBranch =
+              typeof payload.repository.default_branch === "string" ? payload.repository.default_branch : "";
+            const draftsApi = deps.worker?.api as
+              | {
+                  getRepoFile?: (
+                    o: string,
+                    r: string,
+                    p: string,
+                    ref: string
+                  ) => Promise<{ found: boolean; content?: string }>;
+                }
+              | undefined;
+            if (draftOwner && draftRepo && draftsApi && typeof draftsApi.getRepoFile === "function") {
+              reviewDrafts = await loadReviewDraftsEnabled(draftsApi, draftOwner, draftRepo, defaultBranch, logger);
+            }
+          } catch {
+            reviewDrafts = false;
+          }
+          const validation = validateWebhookPayload(
+            payload,
+            {
+              giteaUrl: config.giteaUrl,
+              allowedOrgs: config.allowedOrgs,
+              allowedRepos: config.allowedRepos,
+            },
+            { reviewDrafts }
+          );
           if ("skip" in validation) {
             logger(`skipped ${validation.skip}`);
             return markDurable(json(202, { skipped: validation.skip }));
@@ -430,6 +505,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             logger,
             ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
               ? { baseBranch: payload.pull_request.base.ref }
+              : {}),
+            ...(typeof payload.repository?.default_branch === "string" && payload.repository.default_branch
+              ? { defaultBranch: payload.repository.default_branch }
               : {}),
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);

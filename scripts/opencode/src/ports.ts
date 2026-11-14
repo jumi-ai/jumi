@@ -18,6 +18,14 @@ export interface Repo {
   allowMergeCommit?: boolean;
   allowSquashMerge?: boolean;
   allowRebaseMerge?: boolean;
+  /** Gitea: repository allows merge commits (style `merge`). GitHub maps differently. */
+  allowMergeCommits?: boolean;
+  /** Gitea: repository allows plain rebases (style `rebase`). */
+  allowRebase?: boolean;
+  /** Gitea: repository allows rebase-merges (style `rebase-merge`). */
+  allowRebaseExplicit?: boolean;
+  /** Gitea: repository allows fast-forward-only merges (style `fast-forward-only`). */
+  allowFastForwardOnlyMerge?: boolean;
 }
 
 export interface Task {
