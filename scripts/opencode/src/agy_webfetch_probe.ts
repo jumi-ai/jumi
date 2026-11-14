@@ -20,6 +20,8 @@ import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
 
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
 const DENY_MARK = "Matches user-configured deny rule";
+/** Head `AGENTS.md` marker for the review case: it must never reach a model request. */
+const REVIEW_HEAD_AGENTS = "JUMI-AGY-HEAD-AGENTS-MD-PROBE-REACHED-should-never-load";
 const RUN_TIMEOUT_MS = 45_000;
 const PRINT_TIMEOUT = "20s";
 
@@ -70,6 +72,8 @@ function probeCases(origin: string): readonly ProbeCase[] {
 interface RunState {
   url: string;
   hits: string[];
+  /** Raw model-request bodies, so the review case can prove head instructions never arrive. */
+  bodies: string[];
 }
 
 function startProbeServer(state: RunState) {
@@ -82,7 +86,9 @@ function startProbeServer(state: RunState) {
         state.hits.push(url.pathname);
         return new Response(FETCH_MARKER, { headers: { "content-type": "text/plain" } });
       }
-      const body = (await req.json()) as {
+      const raw = await req.text();
+      state.bodies.push(raw);
+      const body = JSON.parse(raw) as {
         contents?: { parts?: { functionResponse?: { name?: string } }[] }[];
         systemInstruction?: { parts?: { text?: string }[] };
       };
@@ -291,11 +297,12 @@ function judge(probe: ProbeCase, outcome: ToolOutcome, hits: readonly string[]):
 }
 
 async function main(): Promise<number> {
-  const state: RunState = { url: "", hits: [] };
+  const state: RunState = { url: "", hits: [], bodies: [] };
   const server = startProbeServer(state);
   const origin = `http://127.0.0.1:${server.port}`;
   const dir = await mkdtemp(join(tmpdir(), "jumi-agy-webfetch-probe-"));
   const results: CaseResult[] = [];
+  const reviewChecks: { ok: boolean; line: string }[] = [];
   try {
     const workdir = join(dir, "workspace");
     await mkdir(workdir, { recursive: true });
@@ -332,6 +339,74 @@ async function main(): Promise<number> {
       }
       results.push(judge(probe, outcome, state.hits));
     }
+
+    // Review case: Antigravity has no project-config switch, so the parent
+    // hides the head's `.agents/skills` and stages the base skill with the
+    // shared helper for the duration of the spawn. The forge deny still
+    // comes from HOME, so a head settings file cannot lift it. Head
+    // instructions (`AGENTS.md`) stay on disk as diff content; the pinned
+    // binary runs print-mode turns with no active workspace, so they must
+    // never reach a model request — asserted on the captured bodies below.
+    const reviewWorkdir = join(dir, "review-workspace");
+    await mkdir(reviewWorkdir, { recursive: true });
+    await Bun.$`git init -q`.cwd(reviewWorkdir).quiet();
+    await seedRepository(reviewWorkdir);
+    await Bun.write(join(reviewWorkdir, "AGENTS.md"), `${REVIEW_HEAD_AGENTS}\n`);
+    const headSkillDir = join(reviewWorkdir, ".agents", "skills", "jumi-review-head-skill");
+    await mkdir(headSkillDir, { recursive: true });
+    await Bun.write(
+      join(headSkillDir, "SKILL.md"),
+      `---\nname: jumi-review-head-skill\ndescription: "head skill"\n---\nhead\n`
+    );
+    const reviewBase = join(dir, "review-base");
+    await mkdir(join(reviewBase, "skills", "jumi-review-base-skill"), { recursive: true });
+    await Bun.write(
+      join(reviewBase, "skills", "jumi-review-base-skill", "SKILL.md"),
+      `---\nname: jumi-review-base-skill\ndescription: "base skill"\n---\nbase\n`
+    );
+    const { stageBaseSkillsIntoWorkdir } = await import("./review_base.ts");
+    const { existsSync } = await import("node:fs");
+    const staging = await stageBaseSkillsIntoWorkdir(reviewWorkdir, reviewBase);
+    reviewChecks.push({
+      ok: !existsSync(headSkillDir),
+      line: `review: head skill hidden during the spawn (${existsSync(headSkillDir) ? "LEAKED" : "hidden"})`,
+    });
+    reviewChecks.push({
+      ok: existsSync(join(reviewWorkdir, ".agents", "skills", "jumi-review-base-skill", "SKILL.md")),
+      line: "review: base skill staged during the spawn",
+    });
+    state.url = `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/pulls/1`;
+    state.hits = [];
+    state.bodies = [];
+    {
+      const home = homes.get(FORGE_DENY_DOMAIN);
+      const { output, timedOut } = await runAgy(reviewWorkdir, home ?? "", origin, model);
+      const outcome = toolOutcome(output);
+      const denyProbe = probeCases(origin).find((probe) => probe.expect === "deny" && probe.host === FORGE_DENY_DOMAIN);
+      if (timedOut || !outcome.seen || !denyProbe) {
+        reviewChecks.push({ ok: false, line: "review: deny run produced no tool result" });
+      } else {
+        const judged = judge(denyProbe, outcome, state.hits);
+        reviewChecks.push({
+          ok: judged.ok,
+          line: `review: forge deny holds with head settings present (${judged.observed})`,
+        });
+      }
+    }
+    {
+      const leaked = state.bodies.some((body) => body.includes(REVIEW_HEAD_AGENTS));
+      reviewChecks.push({
+        ok: state.bodies.length > 0 && !leaked,
+        line: `review: head AGENTS.md does not reach the model (${leaked ? "LEAKED" : "absent"})`,
+      });
+    }
+    await staging.cleanup();
+    reviewChecks.push({
+      ok: existsSync(join(headSkillDir, "SKILL.md")),
+      line: "review: head skill restored after the spawn",
+    });
+    for (const { ok, line } of reviewChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
+    if (reviewChecks.some((check) => !check.ok)) return 1;
   } finally {
     server.stop(true);
     await rm(dir, { recursive: true, force: true });

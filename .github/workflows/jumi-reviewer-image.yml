@@ -149,6 +149,13 @@ jobs:
             exit 1
           fi
           docker run --rm "${IMAGE}:${VERSION}" python3 --version
+          docker run --rm "${IMAGE}:${VERSION}" python --version
+          docker run --rm "${IMAGE}:${VERSION}" python3.13 --version
+          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm "${IMAGE}:${VERSION}" python -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm "${IMAGE}:${VERSION}" python3 -m pytest --version
+          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import yaml, pytest'
+          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'
           docker run --rm "${IMAGE}:${VERSION}" helm version --short
           docker run --rm "${IMAGE}:${VERSION}" claude --version
           docker run --rm "${IMAGE}:${VERSION}" agy --version
@@ -173,9 +180,9 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" ps --version
           docker run --rm "${IMAGE}:${VERSION}" unzip -v
           docker run --rm "${IMAGE}:${VERSION}" shellcheck --version
-          docker run --rm "${IMAGE}:${VERSION}" python --version
-          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import yaml'
           docker run --rm "${IMAGE}:${VERSION}" sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          # Tracing hooks are bash (set -euo pipefail, [[ ]]); exercise the POST path under the new interpreter.
+          docker run --rm "${IMAGE}:${VERSION}" bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
@@ -193,7 +200,7 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/review-proof/SKILL.md
           config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
           printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null
-          echo "Verified python3, helm, review-proof skill, and opencode debug config"
+          echo "Verified python3.13 (python3/python), pytest, yaml, tarfile filter, helm, review-proof skill, and opencode debug config"
 
       - name: Verify reviewer webfetch denies against the opencode binary
         if: ${{ env.VERSION != '' }}
