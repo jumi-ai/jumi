@@ -57,7 +57,9 @@ describe("python 3.13 default with pytest and PyYAML", () => {
       expect(text).toContain("import yaml, pytest");
       expect(text).toContain('filter="data"');
       // The tracing hooks POST through python3 stdlib; the POST path runs once under the new interpreter.
+      // common.sh is bash-only (set -euo pipefail, [[ ]]), so the exercise must source it with bash, not sh.
       expect(text).toContain("_http_post_json http://127.0.0.1:9 /tmp/jumi-post.json");
+      expect(text).toContain("bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh;");
     }
   });
 

@@ -256,8 +256,8 @@ verify_reviewer_runtime() {
     echo "pre-installed CPython 3.13 not usable offline via uv in reviewer image" >&2
     exit 1
   fi
-  # Tracing hooks POST through python3 stdlib only; exercise the POST path under the new interpreter.
-  if ! buildah run "${ctr}" -- sh -c 'HOME=$(mktemp -d) sh -c ". /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true"'; then
+  # Tracing hooks are bash (set -euo pipefail, [[ ]]); exercise the POST path under the new interpreter.
+  if ! buildah run "${ctr}" -- bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "tracing hook POST path failed under python3 in reviewer image" >&2
     exit 1
