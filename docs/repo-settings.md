@@ -53,6 +53,10 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `timeouts.implement` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` (worker default is 4h) | How long first implementations may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS`, same rule as `review`. Each kind has its own deployer maximum |
 | `timeouts.followup` | integer minutes, at least 1 | `FOLLOWUP_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long follow-up rounds (`follow-up` jobs) may run | Ceiling: `FOLLOWUP_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
 | `timeouts.conflict` | integer minutes, at least 1 | `CONFLICT_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long conflict resolution may run | Ceiling: `CONFLICT_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
+| `branch_prefix` | non-blank string | `jumi` | Branch prefix for issue branches: `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`; no leading or trailing slash, no `..`. The full branch must pass `git check-ref-format`, and prefixes colliding with Jumi's internal refs (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are invalid. Branch recognition accepts the configured prefix and keeps accepting `jumi/issue-<N>-`, so PRs opened before a prefix change keep working. A branch name alone never makes a PR count as Jumi's: the existing author and identity checks still apply. Exactly one spelling: `branch-prefix` or `branchPrefix` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker branches keep today's format) |
+| `pr_title` | non-blank string template | `{title}` | Pull-request title template for forge issues. The only placeholders are `{title}` (the issue title) and `{issue}` (the issue number). Any other `{...}` or stray brace makes the whole file invalid. Exactly one spelling: `pr-title` or `prTitle` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker titles keep today's format) |
+| `commit_message` | non-blank string template | `Implement #{issue}: {title}` | Commit message template for the commit Jumi's parent creates. The only placeholders are `{title}` and `{issue}`; any other `{...}` or stray brace makes the whole file invalid. When set, the worker prompt also names the template as the repository's commit message convention. Exactly one spelling: `commit-message` or `commitMessage` is an unknown key rejected with the usual "did you mean" error | No deployer setting. Read from the default branch only; forge issues only |
+| `closing_keyword` | `"closes"` \| `"refs"` | `"closes"` | `closes` keeps today's `Fixes #N` fallback body; `refs` uses a non-closing `Refs #N` fallback and asks the worker for a non-closing reference. When set to `refs`, a model body that uses a closing keyword for the worked issue is rewritten to `Refs #N`, and the issue stays open after merge. A blocker issue then stays unresolved until someone closes it. Exactly one spelling: `closing-keyword` or `closingKeyword` is an unknown key rejected with the usual "did you mean" error. A blank, non-string, or other value makes the whole file invalid | No deployer setting. Read from the default branch only |
 | `review_drafts` | boolean | `false` (skip drafts, as today) | `true` reviews draft PRs and `WIP:`-titled PRs on every review-dispatch path, on both forges. Worker eligibility stays draft-excluded: no follow-up, takeover, or auto-merge on a draft. `PR title disables review` (`wip` / `[wip]` prefix) keeps working, and marking the PR ready still triggers a review, as today | No deployer setting. Missing, invalid, or unreadable files skip drafts, as today |
 | `max_suggestions` | non-negative integer (`0` is valid and means no suggestions) | the parent ceiling (`5`) | Caps 💡 findings for this repository. 🔴, 🟡 and ❓ findings are never capped. The `Jumi dropped N suggestions (cap X)` note shows the effective cap | Ceiling: `MAX_SUGGESTION_FINDINGS` (`5`); a higher file value applies as `5`, like the `max_followup_rounds` ceiling rule |
 | `review_budget` | mapping (may be empty) | `{}` (no overrides) | Size budget overrides for reviews in this repository (see the two rows below). Read once when the job starts; applied wherever `maxFiles` and `maxPatchBytes` are read for a review (including replay) | Each present key is a ceiling against its deployer maximum (below); a non-mapping value, an unknown sub-key, or a non-positive-integer value makes the whole file invalid |
@@ -101,6 +105,11 @@ followup_ignore_logins: # union with FOLLOWUP_IGNORE_LOGINS; cannot remove deplo
 ignore_conflicts_label: ignore-conflicts # override for IGNORE_CONFLICTS_LABEL
 pickup_label: jumi # override for the GitHub pickup label; Gitea ignores it
 
+branch_prefix: bot/jumi # issue branches are bot/jumi/issue-<N>-<slug> (default jumi)
+pr_title: "feat: {title}" # PR title template (default "{title}")
+commit_message: "chore: {title} (#{issue})" # parent commit template (default "Implement #{issue}: {title}")
+closing_keyword: closes # closes (default) | refs (non-closing Refs #N)
+
 mode: full # full (default) | review-only | off
 
 review_drafts: true # false (the default) skips draft PRs and WIP:-titled PRs, as today
@@ -133,6 +142,16 @@ Review-only repository (reviews keep working; no implement, follow-up, or confli
 
 ```yaml
 mode: review-only
+```
+
+Conventional-commits repository (commitlint / title checks pass: prefixed
+branches, `feat:` PR titles, `chore:` parent commits, no closing keyword):
+
+```yaml
+branch_prefix: bot/jumi
+pr_title: "feat: {title}"
+commit_message: "chore: {title} (#{issue})"
+closing_keyword: refs
 ```
 
 Review before slow CI finishes (the review does not wait for pending or absent CI; pending
@@ -169,6 +188,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Follow-up ignores (`followup_ignore_logins`) | Deployer list (`FOLLOWUP_IGNORE_LOGINS`) | Deployer list still applies; the repository list contributes nothing | Deployer list (fail-open, logged) |
 | Ignore-conflicts label (`ignore_conflicts_label`) | Deployment value (`IGNORE_CONFLICTS_LABEL`) | Deployment value still applies | Deployment value (fail-open, logged) |
 | Pickup label (`pickup_label`, GitHub only; Gitea ignores it) | `jumi` | `jumi`: a custom label in an invalid file changes nothing, and `jumi` no longer starts work in a repo whose valid file names another label | `jumi` (fail-open, logged) |
+| PR conventions (`branch_prefix`, `pr_title`, `commit_message`, `closing_keyword`) | Today's formats: `jumi/issue-<N>-<slug>` branches, the issue title as PR title, `Implement #N: <title>` commits, `Fixes #N` bodies | Whole file invalid, so today's formats apply but — like any other runner job — no runner job starts while the default-branch file is invalid (see Runners row). A reserved or malformed prefix (`jumi/target`, `a//b`, `../x`, `/x`), an unknown `{...}` placeholder or stray brace, or a blank/non-string value invalidates the file | Today's formats (fail-open, logged) |
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |
 | Review drafts (`review_drafts`) | Drafts skipped, as today | Drafts skipped (invalid never reviews a draft by accident) | Drafts skipped (fail-open, logged) |
 | Suggestion cap (`max_suggestions`) | Parent ceiling (`5`) | Parent ceiling still applies — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Parent ceiling (fail-open, logged) |
