@@ -55,6 +55,16 @@ describe("parseSearxngUrl", () => {
     expect(() => searxngUrlFromEnv({ JUMI_SEARXNG_URL: "ftp://x" })).toThrow("JUMI_SEARXNG_URL");
   });
 
+  test("rejects credentials in the URL naming the variable", () => {
+    for (const bad of [
+      "https://user:pass@search.example/",
+      "https://user@search.example/",
+      "http://user:pass@127.0.0.1:8080/search",
+    ]) {
+      expect(() => parseSearxngUrl(bad)).toThrow("JUMI_SEARXNG_URL");
+    }
+  });
+
   test("the timeout is fifteen seconds", () => {
     expect(SEARXNG_TIMEOUT_MS).toBe(15_000);
   });

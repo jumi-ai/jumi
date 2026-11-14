@@ -52,6 +52,12 @@ export function parseSearxngUrl(raw: string | undefined): string | undefined {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`Invalid ${SEARXNG_URL_ENV}: not an http(s) URL: ${trimmed}`);
   }
+  // No credentials in the variable (the issue): userinfo would flow into
+  // every runner's MCP registration and into tool-error text. Fail closed
+  // naming the variable, the same way a non-http(s) value does.
+  if (url.username || url.password) {
+    throw new Error(`Invalid ${SEARXNG_URL_ENV}: no credentials in the URL`);
+  }
   return trimmed.replace(/\/+$/, "");
 }
 
@@ -193,6 +199,15 @@ export function claudeSearxngMcpConfig(baseUrl: string, forgeHost: string): stri
         command: "bun",
         args: [searxngServerPath()],
         env: { [SEARXNG_SERVER_URL_ENV]: baseUrl, [SEARXNG_SERVER_FORGE_HOST_ENV]: forgeHost },
+        // Upfront loading without a `ToolSearch` call rests on two independent
+        // mechanisms: `ENABLE_TOOL_SEARCH=false` on the spawn env (proved by
+        // the probe's no-preload control) and this per-server opt-out of
+        // deferral ("Exempt a server from deferral",
+        // https://code.claude.com/docs/en/mcp: every tool from an
+        // `alwaysLoad: true` server loads at session start on all server
+        // types, requires Claude Code >= 2.1.121; the pinned binary is 2.1.322
+        // per .gitea/tool-versions.env). The probe isolates this key with a
+        // tool-search-on run that still expects the search tool preloaded.
         alwaysLoad: true,
       },
     },
