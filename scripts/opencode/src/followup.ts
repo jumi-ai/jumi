@@ -1112,7 +1112,21 @@ export async function implementFollowUp(
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
 
-  const pr = await resolveWorkerPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername, opts.job.prNumber);
+  const { loadRepoConventions: loadFollowupConventions, defaultRepoConventions: defaultFollowupConventions } =
+    await import("./repo_settings.ts");
+  const followupConventions = await loadFollowupConventions(opts.api, owner, repo, opts.job.defaultBranch, log).catch(
+    () => defaultFollowupConventions()
+  );
+  const followupPrefix = followupConventions.branchPrefix ?? "jumi";
+  const pr = await resolveWorkerPullRequest(
+    opts.api,
+    owner,
+    repo,
+    issueNumber,
+    opts.botUsername,
+    opts.job.prNumber,
+    followupPrefix
+  );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
@@ -1448,7 +1462,13 @@ export async function implementFollowUp(
       const live = await opts.api.getPR(owner, repo, pr.number);
       const body = replaceJumiPrBodyRegion(
         live.body,
-        buildPullRequestBody(issueNumber, description, runner, workerPublishSecrets(loop.auth.token, jobChain))
+        buildPullRequestBody(
+          issueNumber,
+          description,
+          runner,
+          workerPublishSecrets(loop.auth.token, jobChain),
+          followupConventions.closingKeyword
+        )
       );
       if (body == null || body === live.body) return;
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
