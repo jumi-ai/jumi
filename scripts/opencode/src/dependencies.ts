@@ -1,5 +1,5 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
-import { pullRequestClosesIssue } from "./gitea_issues.ts";
+import { pullRequestWorkingOnIssue } from "./gitea_issues.ts";
 import type { LinkedIssue, Pull } from "./ports.ts";
 
 export const DEPENDENCY_GRAPH_CAP = 32;
@@ -61,11 +61,16 @@ async function cachedOpenPulls(
 export async function isBlockerUnresolved(
   issue: LinkedIssue,
   api: OpenPullsApi,
-  cache: Map<string, Pull[]> = new Map()
+  cache: Map<string, Pull[]> = new Map(),
+  opts?: { branchPrefix?: string }
 ): Promise<boolean> {
   if (issue.state === "open") return true;
   const pulls = await cachedOpenPulls(api, cache, issue.owner, issue.repo);
-  return pulls.some((pr) => pullRequestClosesIssue(pr, issue.number));
+  // A blocker stays unresolved until someone closes it: with
+  // `closing_keyword: refs` the working PR uses `Refs #N`, which never
+  // closes, so the branch number and the non-closing reference count here
+  // alongside closing keywords.
+  return pulls.some((pr) => pullRequestWorkingOnIssue(pr, issue.number, opts?.branchPrefix));
 }
 
 export async function checkIssueBlockers(
@@ -75,7 +80,8 @@ export async function checkIssueBlockers(
   },
   owner: string,
   repo: string,
-  issueNumber: number
+  issueNumber: number,
+  opts?: { branchPrefix?: string }
 ): Promise<BlockerCheck> {
   const seen = new Set<string>();
   const stack = new Set<string>();
@@ -96,7 +102,7 @@ export async function checkIssueBlockers(
         stack.delete(key);
         return child;
       }
-      if (await isBlockerUnresolved(dep, api, pullsCache)) {
+      if (await isBlockerUnresolved(dep, api, pullsCache, { branchPrefix: opts?.branchPrefix })) {
         unresolved.set(issueKey(dep.owner, dep.repo, dep.number), dep);
       }
     }
@@ -255,6 +261,8 @@ export async function collectCandidateQueue(opts: {
   botUsername: string;
   body: string;
   pulls: readonly Pull[];
+  /** Branch prefix for issue-branch matching. Defaults to `jumi`. */
+  branchPrefix?: string;
 }): Promise<QueueCandidate[]> {
   const out: QueueCandidate[] = [];
   const seen = new Set<string>();
@@ -281,7 +289,7 @@ export async function collectCandidateQueue(opts: {
   }
   for (const issue of assignedIssues) {
     for (const pr of opts.pulls) {
-      if (!pullRequestClosesIssue(pr, issue.number)) continue;
+      if (!pullRequestWorkingOnIssue(pr, issue.number, opts.branchPrefix)) continue;
       pushCandidate(out, seen, {
         owner: opts.owner,
         repo: opts.repo,

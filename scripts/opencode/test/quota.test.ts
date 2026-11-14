@@ -18,6 +18,7 @@ import {
   isQuotaText,
   isQuotaWaitMarker,
   isResettingQuotaText,
+  parseQuotaResetAtMs,
   parseRetryAfterMs,
   QUOTA_MESSAGE,
   QUOTA_STUCK_TEXT,
@@ -506,6 +507,19 @@ describe("quota wait delay", () => {
     expect(parseRetryAfterMs("retryAfter=3600000")).toBe(3_600_000);
     expect(parseRetryAfterMs("retry in 2 hours")).toBe(7_200_000);
     expect(parseRetryAfterMs("no hint")).toBeUndefined();
+  });
+
+  test("resolves stated reset times to unix ms and guesses nothing", () => {
+    const now = 1_786_000_000_000;
+    expect(parseQuotaResetAtMs("You have hit your usage limit. Retry in 45 minutes.", now)).toBe(now + 45 * 60_000);
+    expect(parseQuotaResetAtMs("usage limit, retry-after: 7200", now)).toBe(now + 7_200_000);
+    expect(parseQuotaResetAtMs("usage limit, retry-after: 2026-07-14T12:00:00Z", now)).toBe(
+      Date.parse("2026-07-14T12:00:00Z")
+    );
+    expect(parseQuotaResetAtMs("You have hit your usage limit.", now)).toBeUndefined();
+    // A bare clock time without a date would be a day/timezone guess.
+    expect(parseQuotaResetAtMs("You have hit your limit, resets 5pm.", now)).toBeUndefined();
+    expect(parseQuotaResetAtMs(null, now)).toBeUndefined();
   });
 
   test("clamps parsed waits to 1h-24h", () => {
