@@ -649,10 +649,11 @@ export function isBlockingQuestionAuthor(
  * keep going). Findings about the PR description itself are never
  * maintainer-only: the worker writes it via `JUMI_PR.md`.
  */
-const MAINTAINER_QUESTION_RE = /maintainer/i;
+const MAINTAINER_MARKER_RE = /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*❓\s*maintainer\s*:/iu;
 
-function isMaintainerQuestionFirstLine(firstLine: string): boolean {
-  return isQuestionFindingFirstLine(firstLine) && MAINTAINER_QUESTION_RE.test(firstLine);
+/** Whether a finding first line carries the prescribed `❓ maintainer:` marker. */
+export function isMaintainerQuestionFirstLine(original: string): boolean {
+  return MAINTAINER_MARKER_RE.test(stripFindingPrefix(original));
 }
 
 /** Count the `❓ maintainer:` findings in a review body. */
@@ -691,6 +692,36 @@ export function hasOnlyMaintainerQuestions(
 export function isMaintainerOnlyQuestionText(text: string | null | undefined): boolean {
   if (!text) return false;
   return countQuestionFindings(text) > 0 && countMaintainerQuestionFindings(text) === countQuestionFindings(text);
+}
+
+/**
+ * Whether a published Jumi inline holds a maintainer-only `❓`: the marker
+ * is in the inline `path` (e.g. `❓ maintainer: <file>` when the publisher
+ * could not map a `file:line:` location) or the inline `body` is a
+ * maintainer-only question. A file path that merely mentions "maintainer"
+ * (e.g. `src/maintainer.ts`) with a plain `❓ q:` body never counts: only
+ * the prescribed `❓ maintainer:` marker counts.
+ */
+export function isMaintainerQuestionInline(path: string | undefined | null, body: string | undefined | null): boolean {
+  if (typeof path === "string" && path.trim() && isMaintainerQuestionFirstLine(path)) return true;
+  if (typeof body === "string" && body.trim() && isMaintainerOnlyQuestionText(body)) return true;
+  return false;
+}
+
+/**
+ * A review whose only open item is a maintainer-only `❓`: a complete
+ * success trailer, at least one question, every question marked
+ * `❓ maintainer:`, and no leftover suggestions. Single parse of the
+ * trailer; handover and follow-up gates call this instead of re-parsing.
+ */
+export function isMaintainerOnlyTrailerText(markdown: string | null | undefined): boolean {
+  if (!markdown) return false;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;
+  if (trailerSuggestionCount(parsed.verdict.description) !== 0) return false;
+  const total = countQuestionFindings(parsed.comment);
+  if (total === 0) return false;
+  return countMaintainerQuestionFindings(parsed.comment) === total;
 }
 
 /**

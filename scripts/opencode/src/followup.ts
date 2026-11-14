@@ -134,6 +134,7 @@ import {
   countQuestionFindings,
   hasOnlyMaintainerQuestions,
   isBlockingQuestionAuthor,
+  isMaintainerQuestionInline,
   isQuestionInline,
   parseCheckLine,
   trailerSuggestionCount,
@@ -706,16 +707,10 @@ function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
   return items.jumiInlines.filter(isUnresolvedInline);
 }
 
-/** Whether an open Jumi question inline is addressed to the maintainer. */
-function isMaintainerQuestionInlineText(path: string | undefined | null, body: string | undefined | null): boolean {
-  if (!isQuestionInline(path, body)) return false;
-  return /maintainer/i.test(`${path ?? ""} ${body ?? ""}`);
-}
-
 /**
  * A Jumi pull review whose only open questions are maintainer-only:
- * a complete success trailer, every body `❓` marked `maintainer`, and
- * every open question inline for that review marked `maintainer`. At
+ * a complete success trailer, every body `❓` marked `❓ maintainer:`, and
+ * every open question inline for that review marked `❓ maintainer:`. At
  * least one question (body or inline) must remain; failures never count.
  */
 function isMaintainerOnlyPullReview(
@@ -734,7 +729,7 @@ function isMaintainerOnlyPullReview(
   for (const inline of inlines) {
     if (!isBlockingQuestionInline(inline, botUsername)) continue;
     inlineQuestions++;
-    if (!isMaintainerQuestionInlineText(inline.path, inline.body)) return false;
+    if (!isMaintainerQuestionInline(inline.path, inline.body)) return false;
   }
   if (bodyQuestions + inlineQuestions === 0) return false;
   return true;

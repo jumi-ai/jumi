@@ -21,7 +21,7 @@ import { upsertStuckText } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
-  hasOnlyMaintainerQuestions,
+  isMaintainerOnlyTrailerText,
   parseReviewOutput,
   trailerSuggestionCount,
 } from "./verdict.ts";
@@ -39,11 +39,7 @@ export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";
  * questions) also still hands over.
  */
 export function isMaintainerOnlyTrailer(markdown: string | null | undefined): boolean {
-  if (!markdown) return false;
-  if (!hasOnlyMaintainerQuestions(markdown)) return false;
-  const parsed = parseReviewOutput(markdown);
-  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;
-  return trailerSuggestionCount(parsed.verdict.description) === 0;
+  return isMaintainerOnlyTrailerText(markdown);
 }
 
 export function isCurrentHeadFailureTrailer(markdown: string | null | undefined): boolean {

@@ -10,6 +10,7 @@ import {
   hasPublishedFindings,
   isBlockingQuestionAuthor,
   isMaintainerOnlyQuestionText,
+  isMaintainerQuestionInline,
   isQuestionInline,
   keepReviewFindingLines,
   parseReviewFindings,
@@ -402,6 +403,20 @@ describe("blocking questions", () => {
 
     const failure = "src/foo.ts:12: ❓ maintainer: please decide the scope?\n<!-- jumi-check: failure; 1 blocking -->";
     expect(hasOnlyMaintainerQuestions(failure)).toBe(false);
+  });
+
+  test("a path or wording that merely mentions maintainer is not maintainer-only", () => {
+    const pathMention = "src/maintainer.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(pathMention)).toBe(0);
+    expect(hasOnlyMaintainerQuestions(pathMention)).toBe(false);
+    expect(isMaintainerOnlyQuestionText("src/maintainer.ts:12: ❓ q: is the timeout intentional?")).toBe(false);
+
+    const bodyMention = "src/foo.ts:12: ❓ q: the maintainer script is confusing?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(bodyMention)).toBe(0);
+    expect(hasOnlyMaintainerQuestions(bodyMention)).toBe(false);
+
+    expect(isMaintainerQuestionInline("src/maintainer.ts", "❓ q: is the timeout intentional?")).toBe(false);
+    expect(isMaintainerQuestionInline("src/foo.ts", "❓ maintainer: please file the follow-up issue?")).toBe(true);
   });
 });
 
