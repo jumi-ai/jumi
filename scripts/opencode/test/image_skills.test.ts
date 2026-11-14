@@ -162,7 +162,7 @@ describe("shared pack contents", () => {
     expect(skill).toContain("before the expensive allocation");
     expect(skill).toContain("old promise");
     expect(skill).toContain("Empty");
-    expect(skill).toContain("Write only the review artifact");
+    expect(skill).toContain("Record findings and the verdict with the review tools");
     expect(skill).toContain("Do not edit the tree");
     expect(skill).toContain("Missing proof is a limitation");
     expect(skill).toContain("not a clean verdict");

@@ -324,7 +324,7 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
  * skill for implement/follow-up/conflict. Workers never see the reviewer
  * skill, and reviews never see the worker skill.
  */
-export function claudeArgv(opts: EngineRunOptions, imageSkillsPlugin?: string): string[] {
+export function claudeArgv(opts: EngineRunOptions, imageSkillsPlugin?: string, reviewMcpConfigPath?: string): string[] {
   const args = [
     "claude",
     "-p",
@@ -353,6 +353,9 @@ export function claudeArgv(opts: EngineRunOptions, imageSkillsPlugin?: string): 
   // Shared image skills ride the same way: staged per spawn outside the
   // checkout, so the tree stays clean and the kind stays separated.
   if (imageSkillsPlugin) args.push("--plugin-dir", imageSkillsPlugin);
+  // Parent-owned review verdict server: strict config so a repository
+  // `.mcp.json` cannot shadow the parent's server.
+  if (reviewMcpConfigPath) args.push("--mcp-config", reviewMcpConfigPath, "--strict-mcp-config");
   if (opts.continueSession) args.push("--continue");
   return args;
 }
@@ -390,7 +393,18 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     // Image skills are per-kind: review gets the reviewer skill, workers get the
     // worker skill.
     const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
-    const args = claudeArgv(opts, imageSkills);
+    // Parent-owned review verdict server: config lives under the spawn temp
+    // root (never the worktree, never the prompt, never the child env) and
+    // `--strict-mcp-config` keeps a repository `.mcp.json` from shadowing it.
+    let reviewMcpConfigPath: string | undefined;
+    if (opts.reviewMcp && opts.trace?.kind === "review") {
+      const { claudeReviewMcpConfig } = await import("./review_mcp.ts");
+      reviewMcpConfigPath = join(tmpDir, "review-mcp.json");
+      await writeFile(reviewMcpConfigPath, claudeReviewMcpConfig(opts.reviewMcp.url, opts.reviewMcp.token), {
+        mode: 0o600,
+      });
+    }
+    const args = claudeArgv(opts, imageSkills, reviewMcpConfigPath);
     if (opts.sanitizeEnv) {
       const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
       if (request) {

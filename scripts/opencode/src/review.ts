@@ -45,6 +45,9 @@ import type {
 } from "./ports.ts";
 import {
   buildIncompleteWritePrompt,
+  buildMcpIncompletePrompt,
+  buildMcpNoFindingsPrompt,
+  buildMcpNoVerdictPrompt,
   buildNoFindingsWritePrompt,
   buildNoTrailerWritePrompt,
   buildPROpenedPrompt,
@@ -76,6 +79,7 @@ import {
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
+import { randomReviewMcpToken, startReviewMcpServer } from "./review_mcp.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import {
   countAddressedSuggestions,
@@ -84,6 +88,7 @@ import {
   type ReviewSuggestionCounts,
   runnerLabelForStamp,
 } from "./review_suggestions.ts";
+import { ReviewVerdictStore } from "./review_verdict_store.ts";
 import {
   appendRunnerStamp,
   describeAttemptOrder,
@@ -2244,8 +2249,25 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       }
     };
 
-    // Stamp for the spawn that wrote the artifact; after a hop, the runner that ran.
+    // Stamp for the spawn that produced the verdict; after a hop, the runner that ran.
     let runner: string | undefined;
+    // Parent-owned per-spawn review verdict server. The model records findings
+    // and the verdict through MCP tools; the parent publishes from this
+    // in-memory state, never from a file. The token rides only in the harness
+    // MCP config under the spawn temp root, never in the prompt or the child
+    // env. When the store holds anything at exit it wins and any
+    // JUMI_REVIEW.md in the worktree is ignored (transition fallback for
+    // runners without tool support).
+    const verdictStore = new ReviewVerdictStore({
+      changedFiles: prFiles,
+      ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      ...((delta?.findings ?? previousReview?.findings)?.length
+        ? { previousFindings: (delta?.findings ?? previousReview?.findings) as string[] }
+        : {}),
+    });
+    const reviewMcpToken = randomReviewMcpToken();
+    const reviewMcpServer = await startReviewMcpServer({ store: verdictStore, token: reviewMcpToken });
+    const reviewMcpRef = { url: reviewMcpServer.url, token: reviewMcpToken };
     const runOpenCode = async (extra?: { prompt: string; continueSession: boolean }) => {
       throwIfAborted(opts.abortSignal);
       await writeFile(join(opts.workspace, "JUMI_TASK.md"), extra?.prompt ?? prompt);
@@ -2270,6 +2292,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           sha: reviewedHeadSha,
           jobId: opts.jobId,
         },
+        reviewMcp: reviewMcpRef,
       };
       const engineResult = await engine(runOpts);
       runner = formatRunnerStamp(resultRunner(engineResult, runOpts));
@@ -2313,13 +2336,60 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       return engineResult;
     };
 
+    const publishMcpVerdict = async (htmlUrl?: string): Promise<ReviewResult> => {
+      const markdown = verdictStore.toMarkdown();
+      let gated = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, markdown);
+      gated = redactGitSecrets(gated, claudeApiKeySecrets(effectiveChain));
+      if (opts.noCiNote && !gated.includes(opts.noCiNote)) {
+        gated = `${opts.noCiNote}\n\n${gated}`;
+      }
+      const parsed = parseReviewOutput(gated);
+      if (parsed.verdict.state === "failure" && !hasPublishedFindings(parsed.comment)) {
+        return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
+      }
+      await persistOutcome({ kind: "markdown", markdown: gated, ...(runner ? { runner } : {}) });
+      if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
+        const stuckRef = {
+          home: opts.home,
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: opts.prNumber,
+          ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+        };
+        await clearReviewQuotaStuckState(stuckRef).catch(() => undefined);
+        const actionHash = fingerprintReviewArtifact(gated);
+        if (actionHash) {
+          await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
+        }
+      }
+      return await publishReviewResult({
+        api: forgeApi,
+        forge: forgeApi,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        expectedHeadSha: reviewedHeadSha,
+        botUsername: opts.botUsername,
+        blockingQuestionAuthors: effectiveBlockingAuthors,
+        automergeRepos: opts.automergeRepos,
+        resultMarkdown: gated,
+        resultRunner: runner,
+        logger: log,
+        forgeKind: opts.forgeKind,
+        previousFindings: previousReview?.findings,
+        recordSuggestions: opts.recordSuggestions,
+        changedFiles: prFiles,
+        ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
+      });
+    };
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     // A stale JUMI_REVIEW.md planted before this run must not count as this
     // run's output. Porcelain cannot distinguish stale from fresh (and an
     // ignored artifact is absent from porcelain entirely), so clear any
     // pre-existing artifact and read the filesystem directly afterwards.
+    // The MCP store wins over the file below: when it holds anything, the
+    // file (e.g. planted by a fake child) is ignored.
     await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
-    let lastStdout = (await runOpenCode()).stdout;
     const persistSkipAndStatus = async (
       reason: string,
       htmlUrl?: string,
@@ -2337,6 +2407,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     try {
       const extraCap = opts.maxIncompleteRetries ?? MAX_INCOMPLETE_RETRIES;
       let extrasUsed = 0;
+      let lastStdout = (await runOpenCode()).stdout;
       while (true) {
         await logParentDiag(log, "post_fetch_pr", { review: reviewLabel });
         const currentPR = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
@@ -2351,6 +2422,51 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
         if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
           return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
+        }
+
+        // Parent-owned MCP verdict wins over the file. When the model recorded
+        // anything through the review tools, a JUMI_REVIEW.md in the worktree
+        // (e.g. planted by pull code) is ignored.
+        if (verdictStore.hasAnything()) {
+          if (!verdictStore.hasVerdict()) {
+            if (extrasUsed >= extraCap) {
+              verdictStore.close();
+              return await persistSkipAndStatus(
+                "Incomplete review: no check verdict",
+                currentPR.html_url,
+                INCOMPLETE_REVIEW_STUCK
+              );
+            }
+            extrasUsed++;
+            log(`Incomplete review: no verdict recorded; tool retry (${extrasUsed}/${extraCap})`);
+            const continueMcp = await hasResumableSession(opts.workspace);
+            lastStdout = (
+              await runOpenCode({
+                prompt: verdictStore.hasFindings() ? buildMcpNoVerdictPrompt() : buildMcpIncompletePrompt(),
+                continueSession: continueMcp,
+              })
+            ).stdout;
+            continue;
+          }
+          if (verdictStore.getVerdict()?.state === "failure" && !verdictStore.hasFindings()) {
+            if (extrasUsed >= extraCap) {
+              verdictStore.close();
+              return await persistSkipAndStatus(
+                INCOMPLETE_NO_FINDINGS_REASON,
+                currentPR.html_url,
+                INCOMPLETE_REVIEW_STUCK
+              );
+            }
+            extrasUsed++;
+            log(`Incomplete review: failure verdict with no findings; tool retry (${extrasUsed}/${extraCap})`);
+            const continueMcpFindings = await hasResumableSession(opts.workspace);
+            lastStdout = (
+              await runOpenCode({ prompt: buildMcpNoFindingsPrompt(), continueSession: continueMcpFindings })
+            ).stdout;
+            continue;
+          }
+          verdictStore.close();
+          return await publishMcpVerdict(currentPR.html_url);
         }
 
         // Read the artifact directly from the filesystem. An ignored
@@ -2486,6 +2602,12 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         lastStdout = (await runOpenCode({ prompt: writePrompt, continueSession })).stdout;
       }
     } finally {
+      verdictStore.close();
+      try {
+        reviewMcpServer.close();
+      } catch {
+        // Best-effort: never replace the review result.
+      }
       await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
       await rm(join(opts.workspace, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
     }

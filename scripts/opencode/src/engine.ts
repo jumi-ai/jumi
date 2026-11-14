@@ -51,6 +51,14 @@ export interface EngineRunOptions {
   hop?: boolean;
   hopFromIncomplete?: boolean;
   deferQuotaExit?: boolean;
+  /**
+   * Parent-owned per-spawn review MCP server. The harness registers it for
+   * review-kind spawns so the model records findings and the verdict through
+   * tools instead of a file in the checkout. The token never enters the child
+   * environment; it rides only in the harness MCP config under the spawn temp
+   * root. Undefined for non-review spawns.
+   */
+  reviewMcp?: { url: string; token: string };
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
