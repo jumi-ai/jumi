@@ -296,6 +296,7 @@ async function main(): Promise<number> {
   const origin = `http://127.0.0.1:${server.port}`;
   const dir = await mkdtemp(join(tmpdir(), "jumi-agy-webfetch-probe-"));
   const results: CaseResult[] = [];
+  const reviewChecks: { ok: boolean; line: string }[] = [];
   try {
     const workdir = join(dir, "workspace");
     await mkdir(workdir, { recursive: true });
@@ -332,6 +333,62 @@ async function main(): Promise<number> {
       }
       results.push(judge(probe, outcome, state.hits));
     }
+
+    // Review case: Antigravity has no project-config switch, so the parent
+    // hides the head's `.agents/skills` and stages the base skill with the
+    // shared helper for the duration of the spawn. The forge deny still
+    // comes from HOME, so a head settings file cannot lift it.
+    const reviewWorkdir = join(dir, "review-workspace");
+    await mkdir(reviewWorkdir, { recursive: true });
+    await Bun.$`git init -q`.cwd(reviewWorkdir).quiet();
+    await seedRepository(reviewWorkdir);
+    const headSkillDir = join(reviewWorkdir, ".agents", "skills", "jumi-review-head-skill");
+    await mkdir(headSkillDir, { recursive: true });
+    await Bun.write(
+      join(headSkillDir, "SKILL.md"),
+      `---\nname: jumi-review-head-skill\ndescription: "head skill"\n---\nhead\n`
+    );
+    const reviewBase = join(dir, "review-base");
+    await mkdir(join(reviewBase, "skills", "jumi-review-base-skill"), { recursive: true });
+    await Bun.write(
+      join(reviewBase, "skills", "jumi-review-base-skill", "SKILL.md"),
+      `---\nname: jumi-review-base-skill\ndescription: "base skill"\n---\nbase\n`
+    );
+    const { stageBaseSkillsIntoWorkdir } = await import("./review_base.ts");
+    const { existsSync } = await import("node:fs");
+    const staging = await stageBaseSkillsIntoWorkdir(reviewWorkdir, reviewBase);
+    reviewChecks.push({
+      ok: !existsSync(headSkillDir),
+      line: `review: head skill hidden during the spawn (${existsSync(headSkillDir) ? "LEAKED" : "hidden"})`,
+    });
+    reviewChecks.push({
+      ok: existsSync(join(reviewWorkdir, ".agents", "skills", "jumi-review-base-skill", "SKILL.md")),
+      line: "review: base skill staged during the spawn",
+    });
+    state.url = `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/pulls/1`;
+    state.hits = [];
+    {
+      const home = homes.get(FORGE_DENY_DOMAIN);
+      const { output, timedOut } = await runAgy(reviewWorkdir, home ?? "", origin, model);
+      const outcome = toolOutcome(output);
+      const denyProbe = probeCases(origin).find((probe) => probe.expect === "deny" && probe.host === FORGE_DENY_DOMAIN);
+      if (timedOut || !outcome.seen || !denyProbe) {
+        reviewChecks.push({ ok: false, line: "review: deny run produced no tool result" });
+      } else {
+        const judged = judge(denyProbe, outcome, state.hits);
+        reviewChecks.push({
+          ok: judged.ok,
+          line: `review: forge deny holds with head settings present (${judged.observed})`,
+        });
+      }
+    }
+    await staging.cleanup();
+    reviewChecks.push({
+      ok: existsSync(join(headSkillDir, "SKILL.md")),
+      line: "review: head skill restored after the spawn",
+    });
+    for (const { ok, line } of reviewChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
+    if (reviewChecks.some((check) => !check.ok)) return 1;
   } finally {
     server.stop(true);
     await rm(dir, { recursive: true, force: true });
