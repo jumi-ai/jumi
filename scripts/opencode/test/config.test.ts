@@ -514,6 +514,19 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...githubRequired, GITHUB_APP_PRIVATE_KEY: "not-a-key" })).toThrow("Invalid PEM");
   });
 
+  test("JUMI_SEARXNG_URL unset is unconfigured, http(s) parses, anything else fails naming the variable", () => {
+    expect(loadConfig(required).searxngUrl).toBeUndefined();
+    expect(loadConfig({ ...required, JUMI_SEARXNG_URL: "" }).searxngUrl).toBeUndefined();
+    expect(loadConfig({ ...required, JUMI_SEARXNG_URL: "https://search.example/" }).searxngUrl).toBe(
+      "https://search.example"
+    );
+    expect(loadConfig({ ...required, JUMI_SEARXNG_URL: "http://127.0.0.1:8080" }).searxngUrl).toBe(
+      "http://127.0.0.1:8080"
+    );
+    expect(() => loadConfig({ ...required, JUMI_SEARXNG_URL: "ftp://search.example" })).toThrow("JUMI_SEARXNG_URL");
+    expect(() => loadConfig({ ...required, JUMI_SEARXNG_URL: "not a url" })).toThrow("JUMI_SEARXNG_URL");
+  });
+
   test("loadConfig reads GitHub secrets from JUMI_SECRETS_FILE and unlinks it", () => {
     const dir = mkdtempSync(join(tmpdir(), "jumi-gh-secrets-"));
     const file = join(dir, "secrets.json");

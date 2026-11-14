@@ -1,12 +1,11 @@
 import { readFileSync } from "node:fs";
 import { isValidEnvName, RUNNER_AUTH_API_KEY, RUNNER_AUTH_SUBSCRIPTION } from "./claude_credentials.ts";
 import type { ForgeKind } from "./forge.ts";
+import { AGY_RUNNER_TYPE, CLAUDE_RUNNER_TYPE, CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE } from "./runner_types.ts";
+
+export { AGY_RUNNER_TYPE, CLAUDE_RUNNER_TYPE, CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE };
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
-export const OPENCODE_RUNNER_TYPE = "opencode";
-export const CLAUDE_RUNNER_TYPE = "claude";
-export const AGY_RUNNER_TYPE = "agy";
-export const CODEX_RUNNER_TYPE = "codex";
 /** Catalog default when a `type: codex` entry omits effort. Not a synthesized-chain model. */
 export const CODEX_DEFAULT_EFFORT = "high";
 /**

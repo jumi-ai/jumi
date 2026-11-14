@@ -7,7 +7,7 @@ import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { FORGE_DENY_DOMAIN, forgePermissions } from "../src/forge_webfetch.ts";
+import { FORGE_DENY_DOMAIN, forgeOpenCodeGlobalConfig, forgePermissions } from "../src/forge_webfetch.ts";
 import {
   BLOCKED_BY_REJECTED_PROMPT,
   buildOpenCodeArgs,
@@ -19,6 +19,7 @@ import {
   runOpenCode,
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
+import { SEARXNG_OPENCODE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
@@ -1412,6 +1413,69 @@ cat
     });
   });
 
+  test("unconfigured: the inline config still allows websearch and registers no MCP server", async () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+        extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+      });
+      expect(result.status).toBe("ok");
+      const config = inlineConfig(result.stdout);
+      expect(config.permissions).toEqual(forgePermissions("github.com"));
+      expect(config.mcp).toBeUndefined();
+      const global = JSON.parse(
+        await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
+      ) as { policies: unknown[] };
+      expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com")));
+    });
+  });
+
+  test("configured: the inline config registers searxng and denies native websearch", async () => {
+    process.env.JUMI_SEARXNG_URL = "https://search.example/";
+    try {
+      await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+          extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+        });
+        expect(result.status).toBe("ok");
+        const config = inlineConfig(result.stdout);
+        const permissions = config.permissions as { action: string; resource: string; effect: string }[];
+        // Last-match: the forge deny first, then the native-search deny.
+        expect(permissions).toEqual([
+          ...forgePermissions("github.com"),
+          { action: "websearch", resource: "*", effect: "deny" },
+          { action: SEARXNG_OPENCODE_TOOL, resource: "*", effect: "allow" },
+        ]);
+        const mcp = config.mcp as { servers: Record<string, Record<string, unknown>> };
+        expect(Object.keys(mcp.servers)).toEqual([SEARXNG_SERVER_NAME]);
+        expect(mcp.servers.searxng?.type).toBe("local");
+        expect(mcp.servers.searxng?.command).toEqual(["bun", expect.any(String)]);
+        expect(mcp.servers.searxng?.environment).toEqual({
+          SEARXNG_URL: "https://search.example",
+          SEARXNG_FORGE_HOST: "github.com",
+        });
+        // The global policy holds the deny against a repository agent's own
+        // allow rules, which evaluate after inline permissions.
+        const global = JSON.parse(
+          await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
+        ) as { policies: unknown[] };
+        expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com", true)));
+      });
+    } finally {
+      delete process.env.JUMI_SEARXNG_URL;
+    }
+  });
+
   test("keeps the forge webfetch deny when the parent env is inherited", async () => {
     const previous = process.env.OPENCODE_CONFIG_CONTENT;
     const loosen = { action: "webfetch", resource: "*", effect: "allow" };
@@ -1541,7 +1605,9 @@ describe("worker prompts", () => {
       expect(prompt).toContain("do not glob **/*");
       expect(prompt).toContain("Do not webfetch this Gitea host");
       expect(prompt).toContain("Do not call tea or the forge API");
-      expect(prompt).toContain("Public upstream docs are fine");
+      expect(prompt).toContain(
+        "Public upstream docs are in reach: Use `websearch` to find a URL, then fetch that exact URL with `webfetch`"
+      );
       expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
       expect(prompt).toContain("JUMI_QUEUE.md");

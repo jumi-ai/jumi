@@ -71,12 +71,17 @@ export function forgeOpenCodeConfigContent(host: string): string {
  * outrank `permissions` from any source. `policies` apply after agent rules, but
  * a repo policy can lift an inline one, so these go in the global config file,
  * which outranks project files. Written per spawn, as `XDG_CONFIG_HOME` is.
+ *
+ * With `searxng`, native web search is denied for every provider as well: the
+ * permission deny in the inline config is last-match, but a repository agent's
+ * own rules append after it, so the global policy is what holds the deny.
  */
-export function forgeOpenCodeGlobalConfig(host: string): string {
+export function forgeOpenCodeGlobalConfig(host: string, searxng = false): string {
   return JSON.stringify({
     policies: [
       { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
       { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
+      ...(searxng ? [{ action: "websearch.use", resource: "*", effect: "deny" }] : []),
     ],
   });
 }
