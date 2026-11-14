@@ -362,9 +362,15 @@ function sitItem(
   forge?: string,
   stuckReason?: string | null
 ): { item: BoardItem; kickable: boolean } {
+  const baseMessage = sitMessage(sit.reason);
+  const trimmedStuck = (stuckReason ?? "").trim();
+  // An implement-latch sit names its stuck latch (including the repeated
+  // finding display) so a human sees why follow-up stopped. Other sits keep
+  // their generic sentence. Truncated by the board sanitizer.
+  const message = sit.reason === "implement-latch" && trimmedStuck ? `${baseMessage} ${trimmedStuck}` : baseMessage;
   const item: BoardItem = {
     reason: sit.reason,
-    message: sitMessage(sit.reason),
+    message,
     owner: sit.owner,
     repo: sit.repo,
     number: sit.number,

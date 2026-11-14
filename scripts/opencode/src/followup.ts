@@ -122,10 +122,15 @@ import {
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
+  fingerprintFindingIdentityFromParts,
   fingerprintFollowUpText,
+  fingerprintPrDiffFromFiles,
+  fingerprintSameFinding,
   isQuotaStuck,
   markQuotaStuckLatch,
   readStuckLatch,
+  sameFindingDisplayFromParts,
+  sameFindingLatchReasonFromParts,
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
@@ -1359,6 +1364,56 @@ export async function implementFollowUp(
     : ciHash
       ? { kind: "ci" as const, hash: ciHash }
       : undefined;
+  // Same-finding stuck: the same blocking finding identity repeats while the
+  // PR's own diff has not moved. Base merges change the head SHA but not the
+  // three-dot diff, so the diff hash stays stable across them. A real change
+  // to the PR diff (or a different finding) changes the combined hash and
+  // resets the consecutive count. Fail-open when the diff is unreadable.
+  // The identity covers both the latest review body and unresolved Jumi
+  // inlines: an inline-only repeat has an empty top-level body, so gate on
+  // `hasFeedback` alone and let the helper return undefined when both inputs
+  // are empty.
+  const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
+  const jumiInlinesForIdentity = unresolvedJumiInlines(pendingItems);
+  const findingIdentityHash = hasFeedback
+    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
+    : undefined;
+  let prDiffHash: string | undefined;
+  if (findingIdentityHash) {
+    try {
+      const getFiles = (
+        opts.api as unknown as {
+          getPRFiles?: (
+            owner: string,
+            repo: string,
+            index: number
+          ) => Promise<
+            ReadonlyArray<{
+              filename: string;
+              patch?: string | null | undefined;
+              status?: string | null | undefined;
+              additions?: number | null | undefined;
+              deletions?: number | null | undefined;
+              changes?: number | null | undefined;
+            }>
+          >;
+        }
+      ).getPRFiles;
+      if (typeof getFiles === "function") {
+        const files = await getFiles.call(opts.api, owner, repo, pr.number);
+        prDiffHash = fingerprintPrDiffFromFiles(files);
+      }
+    } catch (err) {
+      log(
+        `same-finding diff unavailable for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      prDiffHash = undefined;
+    }
+  }
+  const sameFindingCurrent =
+    findingIdentityHash && prDiffHash
+      ? { kind: "finding" as const, hash: fingerprintSameFinding(findingIdentityHash, prDiffHash) }
+      : undefined;
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
     const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
@@ -1371,6 +1426,22 @@ export async function implementFollowUp(
     await sticky(stuckComment(stuckReason), pr.number);
     await forgetClaim();
     return { status: "skipped", reason: stuckComment(stuckReason) };
+  }
+  if (sameFindingCurrent) {
+    const sameFindingStuck = evaluateStuck(stuckState.fingerprints, sameFindingCurrent);
+    if (sameFindingStuck === "same-finding") {
+      const latchReason = sameFindingLatchReasonFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
+      const display = sameFindingDisplayFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
+      log(`same finding repeated${display ? ` (${display})` : ""} on unchanged diff for ${owner}/${repo}#${pr.number}`);
+      await sticky(latchReason, pr.number);
+      await forgetClaim();
+      return { status: "skipped", reason: latchReason };
+    }
+    if (sameFindingStuck) {
+      await sticky(stuckComment(sameFindingStuck), pr.number);
+      await forgetClaim();
+      return { status: "skipped", reason: stuckComment(sameFindingStuck) };
+    }
   }
 
   const loop = openClaimedLoop(claimed, opts);
@@ -1489,6 +1560,9 @@ export async function implementFollowUp(
     });
     if (currentFingerprint) {
       await appendStuckLatchFingerprint(latches, latchKey, currentFingerprint, now);
+    }
+    if (sameFindingCurrent) {
+      await appendStuckLatchFingerprint(latches, latchKey, sameFindingCurrent, now);
     }
     await persistCi();
   };
