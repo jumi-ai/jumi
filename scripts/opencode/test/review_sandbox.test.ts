@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { runAgy } from "../src/agy.ts";
 import { runClaude } from "../src/claude.ts";
+import { claudeTracingEnv, setClaudeTracingPluginDirForTests } from "../src/claude_tracing.ts";
 import { runCodex } from "../src/codex.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { runOpenCode } from "../src/git.ts";
@@ -17,7 +19,7 @@ import {
   REVIEW_SANDBOX_WRAPPER_ENV,
   resolveAgentBin,
   resolveReviewSpawnSandbox,
-  resolveWorktreeGitDirSync,
+  resolveWorktreeGitDirsSync,
   reviewSandboxArgv,
   reviewSandboxRules,
   reviewSandboxWrapperPath,
@@ -26,13 +28,20 @@ import {
 
 const originalWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 const originalAllow = process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV];
+const originalEndpoint = process.env.PHOENIX_OTLP_ENDPOINT;
+const originalAgent = process.env.AGENT_INSTANCE;
 
 afterEach(() => {
   setReviewSandboxProbeForTests(undefined);
+  setClaudeTracingPluginDirForTests(undefined);
   if (originalWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
   else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalWrapper;
   if (originalAllow === undefined) delete process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV];
   else process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV] = originalAllow;
+  if (originalEndpoint === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
+  else process.env.PHOENIX_OTLP_ENDPOINT = originalEndpoint;
+  if (originalAgent === undefined) delete process.env.AGENT_INSTANCE;
+  else process.env.AGENT_INSTANCE = originalAgent;
 });
 
 function reviewOpts(workdir: string, home?: string) {
@@ -40,18 +49,19 @@ function reviewOpts(workdir: string, home?: string) {
 }
 
 describe("reviewSandboxRules", () => {
-  test("read-write covers checkout, scratch, home, and an external gitdir; system stays read-only", () => {
+  test("read-write covers checkout, scratch, home, and external gitdirs; system stays read-only", () => {
     const rules = reviewSandboxRules({
       workdir: "/work/repo",
       scratchDir: "/work/repo/.jumi-tmp/scratch",
       homeDir: "/data",
-      gitDir: "/work/_cache/repo.git/worktrees/1",
+      gitDirs: ["/work/_cache/repo.git/worktrees/1", "/work/_cache/repo.git"],
     });
     expect(rules.readWrite).toEqual([
       "/work/repo",
       "/work/repo/.jumi-tmp/scratch",
       "/data",
       "/work/_cache/repo.git/worktrees/1",
+      "/work/_cache/repo.git",
     ]);
     expect(rules.readOnly).toContain("/usr");
     expect(rules.readOnly).toContain("/etc");
@@ -64,8 +74,8 @@ describe("reviewSandboxRules", () => {
   });
 });
 
-describe("resolveWorktreeGitDirSync", () => {
-  test("resolves the commondir behind a .git file", async () => {
+describe("resolveWorktreeGitDirsSync", () => {
+  test("resolves both the worktree gitdir and the commondir behind a .git file", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
     try {
       const gitdir = join(dir, "wt");
@@ -75,18 +85,31 @@ describe("resolveWorktreeGitDirSync", () => {
       await mkdir(join(gitdir), { recursive: true });
       await writeFile(join(gitdir, "commondir"), "../common\n");
       await mkdir(common, { recursive: true });
-      expect(resolveWorktreeGitDirSync(dir)).toBe(common);
+      expect(resolveWorktreeGitDirsSync(dir)).toEqual([gitdir, common]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test("returns undefined for a normal .git directory", async () => {
+  test("resolves just the gitdir when there is no commondir", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
+    try {
+      const gitdir = join(dir, "wt");
+      await writeFile(join(dir, ".git"), `gitdir: ./wt\n`);
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(join(gitdir), { recursive: true });
+      expect(resolveWorktreeGitDirsSync(dir)).toEqual([gitdir]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("returns [] for a normal .git directory", async () => {
     const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
     try {
       const { mkdir } = await import("node:fs/promises");
       await mkdir(join(dir, ".git"), { recursive: true });
-      expect(resolveWorktreeGitDirSync(dir)).toBeUndefined();
+      expect(resolveWorktreeGitDirsSync(dir)).toEqual([]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -132,6 +155,46 @@ describe("findReviewEnvViolations", () => {
       "JUMI_TASK_PRESENT",
       "REVIEW_MCP_KEY",
     ]);
+  });
+
+  test("Phoenix tracing labels pass the gate: a review Claude spawn stays runnable", () => {
+    // Regression for the review refusal where `buildClaudeEnv` merges
+    // `claudeTracingEnv` (six JUMI_* labels) and `resolveReviewSpawnSandbox`
+    // then threw on the `JUMI_*` prefix. The labels are owner/repo/sha/job
+    // identity the model already knows, never secrets; anything else under
+    // JUMI_* still fails closed (covered above).
+    expect(
+      findReviewEnvViolations({
+        PATH: "x",
+        JUMI_TRACE_KIND: "review",
+        JUMI_OWNER: "o",
+        JUMI_REPO: "r",
+        JUMI_SHA: "abc",
+        JUMI_JOB_ID: "job-7",
+        JUMI_AGENT_INSTANCE: "jumi-worker",
+      })
+    ).toEqual([]);
+  });
+
+  test("the real review Claude tracing env passes the gate", () => {
+    // Review + Phoenix + Claude: `buildClaudeEnv` merges `claudeTracingEnv`
+    // into the child env and `resolveReviewSpawnSandbox` gates it. Pin the
+    // two together so a new JUMI_* tracing key fails here instead of refusing
+    // every traced review Claude spawn at runtime.
+    const pluginDir = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "..",
+      "claude-plugins",
+      "claude-code-tracing"
+    );
+    process.env.PHOENIX_OTLP_ENDPOINT = "http://phoenix.phoenix.svc:6006/v1/traces";
+    process.env.AGENT_INSTANCE = "jumi-worker";
+    setClaudeTracingPluginDirForTests(pluginDir);
+    const tracing = claudeTracingEnv({ kind: "review", owner: "o", repo: "r", sha: "abc", jobId: "job-7" });
+    expect(Object.keys(tracing).length).toBeGreaterThan(0);
+    expect(findReviewEnvViolations(tracing)).toEqual([]);
   });
 });
 

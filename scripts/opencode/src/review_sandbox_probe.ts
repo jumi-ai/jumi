@@ -9,7 +9,7 @@
  *   - a sandboxed shell cannot read the parent's `/proc/<pid>/environ`;
  *   - a sandboxed shell cannot signal the parent (`kill -0`);
  *   - a sandboxed shell cannot write outside the checkout;
- *   - a sandboxed shell can still write the scratch dir and run `git`.
+ *   - a sandboxed shell can still write the scratch dir, run `git`, and run `node`.
  *
  * Exit 0 when every case matches its expectation, 1 otherwise. Run in the
  * reviewer image job (needs the job-pod kernel, not just userspace).
@@ -63,6 +63,10 @@ const dir = await mkdtemp(join(tmpdir(), "review-sandbox-probe-"));
 try {
   const scratch = join(dir, "scratch");
   await mkdir(scratch, { recursive: true });
+  // The git case needs a repo to inspect: init it unsandboxed so the
+  // sandboxed `git rev-parse` / `git status` below grade the wrapper's
+  // gitdir allow-list, not a missing repo.
+  run(["git", "init", "-q", dir], tmpdir());
   const rules = reviewSandboxRules({ workdir: dir, scratchDir: scratch });
   const shell = (script: string) => run(reviewSandboxArgv(rules, ["sh", "-c", script]), dir);
   const parentPid = process.pid;
@@ -95,6 +99,21 @@ try {
       ...(() => {
         const r = shell(`echo hi > ${scratch}/ok && cat ${scratch}/ok`);
         return { ok: r.exitCode === 0 && r.stdout.trim() === "hi", observed: `exit=${r.exitCode}` };
+      })(),
+    },
+    {
+      name: "sandboxed shell can run git in the checkout",
+      ...(() => {
+        const r = shell(`git rev-parse --show-toplevel && git status --porcelain`);
+        const combined = [r.stdout, r.stderr].join("\n");
+        return { ok: r.exitCode === 0, observed: `exit=${r.exitCode} ${combined.trim().split("\n").join(" | ")}` };
+      })(),
+    },
+    {
+      name: "sandboxed shell can run node",
+      ...(() => {
+        const r = shell(`node -e 'console.log("probe-ok")'`);
+        return { ok: r.exitCode === 0 && r.stdout.trim() === "probe-ok", observed: `exit=${r.exitCode}` };
       })(),
     },
   ];

@@ -55,7 +55,7 @@ export interface ReviewSandboxRuleInput {
   workdir: string;
   scratchDir?: string;
   homeDir?: string;
-  gitDir?: string;
+  gitDirs?: string[];
 }
 
 function dedupeAbsolute(paths: Array<string | undefined>): string[] {
@@ -72,37 +72,37 @@ function dedupeAbsolute(paths: Array<string | undefined>): string[] {
 }
 
 /**
- * Best-effort location of the git dir behind `workdir`. Linked worktrees
+ * Best-effort locations of the git dir behind `workdir`. Linked worktrees
  * keep objects outside the checkout (`.git` file with `gitdir: ...`), and a
- * sandboxed `git` cannot open them unless the dir is in the allow-list.
- * Returns undefined when `.git` is a directory inside the checkout (already
- * covered) or unreadable (the spawn then fails loudly on first git use,
- * never silently unsandboxed).
+ * sandboxed `git` needs both the worktree dir (HEAD, index, refs/worktree
+ * state) and the common dir (objects) in the allow-list. Returns [] when
+ * `.git` is a directory inside the checkout (already covered) or unreadable
+ * (the spawn then fails loudly on first git use, never silently unsandboxed).
  */
-export function resolveWorktreeGitDirSync(workdir: string): string | undefined {
+export function resolveWorktreeGitDirsSync(workdir: string): string[] {
   let dotGit: string;
   try {
     dotGit = join(workdir, ".git");
     const text = readFileSync(dotGit, "utf8");
     const match = /^gitdir:\s*(.+?)\s*$/m.exec(text);
-    if (!match?.[1]) return undefined;
+    if (!match?.[1]) return [];
     const gitdir = resolve(workdir, match[1]);
     try {
       const commondir = readFileSync(join(gitdir, "commondir"), "utf8").trim();
-      if (commondir) return resolve(gitdir, commondir);
+      if (commondir) return [gitdir, resolve(gitdir, commondir)];
     } catch {
       // No commondir: the gitdir itself holds the objects.
     }
-    return gitdir;
+    return [gitdir];
   } catch {
-    return undefined;
+    return [];
   }
 }
 
 export function reviewSandboxRules(input: ReviewSandboxRuleInput): ReviewSandboxRules {
   const scratchDir = input.scratchDir ?? childScratchDir(input.workdir);
   return {
-    readWrite: dedupeAbsolute([input.workdir, scratchDir, input.homeDir, input.gitDir]),
+    readWrite: dedupeAbsolute([input.workdir, scratchDir, input.homeDir, ...(input.gitDirs ?? [])]),
     readOnly: [...REVIEW_SANDBOX_READ_ONLY_SYSTEM],
     devices: [...REVIEW_SANDBOX_DEVICE_PATHS],
   };
@@ -230,8 +230,11 @@ export function checkReviewSandbox(env: Record<string, string | undefined> = pro
  * Harness env namespace and credential shapes that must never reach a review
  * model. Provider keys the child legitimately needs (`OPENCODE_API_KEY`,
  * `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
- * `CODEX_API_KEY`, `XAI_API_KEY`) are allowlisted by exact name; everything
- * matching a forbidden shape is a violation even when a builder let it pass.
+ * `XAI_API_KEY`) and the six Phoenix tracing labels (`JUMI_TRACE_KIND`,
+ * `JUMI_OWNER`, `JUMI_REPO`, `JUMI_SHA`, `JUMI_JOB_ID`, `JUMI_AGENT_INSTANCE`,
+ * owner/repo/sha/job labels the model already knows) are allowlisted by exact
+ * name; everything matching a forbidden shape is a violation even when a
+ * builder let it pass.
  */
 const REVIEW_ENV_FORBIDDEN_PREFIXES = ["JUMI_", "GITEA_", "GITHUB_APP_", "GITHUB_WEBHOOK_", "GIT_"] as const;
 const REVIEW_ENV_FORBIDDEN_EXACT = new Set([
@@ -260,6 +263,20 @@ const REVIEW_ENV_ALLOWED_EXACT = new Set([
   "GIT_CONFIG_COUNT",
 ]);
 const REVIEW_ENV_ALLOWED_PREFIXES = ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"] as const;
+/**
+ * Phoenix tracing labels a review Claude child carries (`claudeTracingEnv`).
+ * They ride the child env so spans land under the same job/owner/repo as an
+ * OpenCode run; they are owner/repo/sha/job labels the model already knows,
+ * never credentials, so they are exempt from the `JUMI_` prefix ban.
+ */
+const REVIEW_ENV_ALLOWED_TRACING_EXACT = new Set([
+  "JUMI_TRACE_KIND",
+  "JUMI_OWNER",
+  "JUMI_REPO",
+  "JUMI_SHA",
+  "JUMI_JOB_ID",
+  "JUMI_AGENT_INSTANCE",
+]);
 const REVIEW_ENV_TOKEN_HINT = /(MCP.*(TOKEN|KEY|SECRET)|(TOKEN|KEY|SECRET).*MCP)/i;
 
 /** Names (never values) in `env` that must fail a review spawn closed. Empty means clean. */
@@ -267,6 +284,7 @@ export function findReviewEnvViolations(env: Record<string, string>): string[] {
   const violations: string[] = [];
   for (const key of Object.keys(env)) {
     if (REVIEW_ENV_ALLOWED_EXACT.has(key)) continue;
+    if (REVIEW_ENV_ALLOWED_TRACING_EXACT.has(key)) continue;
     if (REVIEW_ENV_ALLOWED_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
     if (REVIEW_ENV_FORBIDDEN_EXACT.has(key) || REVIEW_ENV_FORBIDDEN_PREFIXES.some((p) => key.startsWith(p))) {
       violations.push(key);
@@ -319,7 +337,7 @@ export function resolveReviewSpawnSandbox(
   const rules = reviewSandboxRules({
     workdir: opts.workdir,
     homeDir: opts.home,
-    gitDir: resolveWorktreeGitDirSync(opts.workdir),
+    gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
   });
   if (opts.home && !rules.readWrite.includes(resolve(opts.home))) {
     log(

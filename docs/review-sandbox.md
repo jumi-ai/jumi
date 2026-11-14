@@ -10,8 +10,10 @@ the agent. Everything the model then runs (tests, scripts, package installs)
 inherits the domain.
 
 - Read-write: the checkout, the per-spawn scratch dir (`TMPDIR`), the
-  spawn's HOME, and the worktree's git dir when it lives outside the
-  checkout (linked worktrees keep objects in a bare repo elsewhere).
+  spawn's HOME, and the worktree's git dirs when they live outside the
+  checkout (linked worktrees keep objects in a bare repo elsewhere: both the
+  worktree gitdir and the common dir are allow-listed, since git needs HEAD
+  from one and objects from the other).
 - Read-only: `/usr /bin /sbin /lib /lib64 /opt /etc /proc /sys /tmp /app`,
   plus `/dev` with `/dev/null`-style writes (creation still denied, so no
   new device nodes appear).
@@ -25,7 +27,10 @@ inherits the domain.
 - Environment: explicit allow-list. The per-runner builders already start
   from a minimal base; `findReviewEnvViolations` additionally fails a review
   spawn closed when the child env carries anything from the harness
-  namespace (`JUMI_*`), any forge/git credential, or anything matching
+  namespace (`JUMI_*`, except the six Phoenix tracing labels
+  `JUMI_TRACE_KIND`/`JUMI_OWNER`/`JUMI_REPO`/`JUMI_SHA`/`JUMI_JOB_ID`/
+  `JUMI_AGENT_INSTANCE`, which carry only job identity the model already
+  knows), any forge/git credential, or anything matching
   `*MCP*TOKEN/KEY/SECRET`. Provider keys the child legitimately needs are
   allowlisted by exact name.
 - Network: inherited from the pod. Reviewers may still shallow-clone public
@@ -53,7 +58,7 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
 - Prototyped enforcement in this container: `/proc/<outside>/environ`
   denied, `kill -0 <outside>` denied (`Operation not permitted`), writes
   outside the allow-list denied, writes inside scratch allowed, `node` and
-  `git` (with the external gitdir rule) run.
+  `git` (with the external gitdirs rule) run.
 - `src/review_sandbox_probe.ts` repeats that red-team against the real
   wrapper in the image job; `review_sandbox.py --check` asserts ABI ≥ 6 and
   is the startup check. Neither has run in a job pod yet — the image job
