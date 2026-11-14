@@ -10,6 +10,8 @@ import {
   judgeEffortLevel,
   judgeForgeDeny,
   judgeNegativeRun,
+  judgeToolSearchControl,
+  judgeWebPreload,
   nonsenseValue,
   PROBE_CHECKOUT_SKILL,
   PROBE_FLEET_SKILL,
@@ -263,5 +265,31 @@ describe("judgeCheckoutContext", () => {
     expect(ok(judgeCheckoutContext(run(both, []), true))[3]).toBe(false);
     const failed = { type: "user", tool_use_result: { success: false, commandName: PROBE_CHECKOUT_SKILL } };
     expect(ok(judgeCheckoutContext(run(both, [failed]), true))[3]).toBe(false);
+  });
+});
+
+describe("judgeWebPreload", () => {
+  test("passes when the first request lists the tools and the run never searches", () => {
+    expect(judgeWebPreload(["WebFetch"], { firstRequestTools: ["Bash", "WebFetch"], toolSearchCalls: 0 }).ok).toBe(
+      true
+    );
+    expect(
+      judgeWebPreload(["WebFetch", "mcp__searxng__search"], {
+        firstRequestTools: ["WebFetch", "mcp__searxng__search"],
+        toolSearchCalls: 0,
+      }).ok
+    ).toBe(true);
+  });
+
+  test("fails on a missing tool or any ToolSearch call", () => {
+    expect(judgeWebPreload(["WebFetch"], { firstRequestTools: ["Bash"], toolSearchCalls: 0 }).ok).toBe(false);
+    expect(judgeWebPreload(["WebFetch"], { firstRequestTools: ["WebFetch"], toolSearchCalls: 1 }).ok).toBe(false);
+    expect(judgeWebPreload(["WebFetch"], { firstRequestTools: undefined, toolSearchCalls: 0 }).ok).toBe(false);
+  });
+
+  test("the control needs a deferred WebFetch and an observed search", () => {
+    expect(judgeToolSearchControl({ firstRequestTools: ["Bash"], toolSearchCalls: 1 }).ok).toBe(true);
+    expect(judgeToolSearchControl({ firstRequestTools: ["WebFetch"], toolSearchCalls: 1 }).ok).toBe(false);
+    expect(judgeToolSearchControl({ firstRequestTools: ["Bash"], toolSearchCalls: 0 }).ok).toBe(false);
   });
 });
