@@ -296,6 +296,7 @@ export async function runReviewJob(
       botUsername: config.botUsername,
       blockingQuestionAuthors: config.blockingQuestionAuthors,
       automergeRepos: config.automergeRepos,
+      automergeEnabled: config.automergeEnabled,
       home: config.home,
       ...(extras.skipLatches ? { skipLatches: extras.skipLatches } : {}),
       sanitizeOpenCodeEnv: true,
@@ -635,7 +636,8 @@ export async function publishPersistedJob(
   api: ReviewApi,
   config: ServiceConfig,
   row: ReviewJobRecord,
-  logger: (message: string) => void = log
+  logger: (message: string) => void = log,
+  store?: ReviewJobStore
 ): Promise<ReviewResult> {
   const result = await publishReviewResult({
     api,
@@ -646,6 +648,8 @@ export async function publishPersistedJob(
     botUsername: config.botUsername,
     blockingQuestionAuthors: config.blockingQuestionAuthors,
     automergeRepos: config.automergeRepos,
+    ...(store ? { skipLatches: store.skipLatches } : {}),
+    automergeEnabled: config.automergeEnabled,
     resultMarkdown: row.resultMarkdown,
     resultRunner: row.resultRunner,
     resultReason: row.resultReason,
@@ -779,7 +783,7 @@ async function publishAndCompleteJob(
   row: ReviewJobRecord,
   logger: (message: string) => void
 ): Promise<ReviewResult> {
-  const result = await publishPersistedJob(api, config, row, logger);
+  const result = await publishPersistedJob(api, config, row, logger, store);
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
   const failed = Boolean(row.error) && !row.resultMarkdown;
   await store.markPublished(row.id, row.leasedBy, {

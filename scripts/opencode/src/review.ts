@@ -23,7 +23,7 @@ import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwI
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
-import { extractClosingIssueNumbers, isWipOrDraft } from "./gitea_issues.ts";
+import { extractClosingIssueNumbers, extractWorkingIssueNumber, isWipOrDraft } from "./gitea_issues.ts";
 import {
   isIndependentReviewRefusal,
   provenanceLookupFailureReason,
@@ -70,11 +70,14 @@ import {
   effectiveReviewBudget,
   effectiveSuggestionCap,
   isReviewDraftsEnabled,
+  isSuggestionFollowupEnabled,
+  isSuggestionHoldEnabled,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
+  type RepoSettingsLoad,
 } from "./repo_settings.ts";
 import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
@@ -122,6 +125,12 @@ import {
   upsertStuckComment,
   upsertStuckText,
 } from "./stuck.ts";
+import {
+  markSuggestionHoldConsumed,
+  readSuggestionHold,
+  suggestionHoldPendingDescription,
+  suggestionHoldSkippedDescription,
+} from "./suggestion_hold.ts";
 import type { ReviewJob } from "./types.ts";
 import {
   buildFindingsList,
@@ -137,6 +146,7 @@ import {
   parseReviewFindings,
   parseReviewOutput,
   stripFindingLines,
+  trailerSuggestionCount,
 } from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
@@ -221,6 +231,8 @@ export interface ReviewOptions {
    * every repository.
    */
   automergeRepos?: readonly string[];
+  /** Deployment auto-merge switch. Unset defaults to on. Drives the suggestion hold. */
+  automergeEnabled?: boolean;
   gitAuthResolver?: GitAuthResolver;
   home?: string;
   /** Postgres ledger for review stuck state. When present (production always
@@ -314,6 +326,10 @@ export interface PublishReviewOptions {
    * and runs in every repository.
    */
   automergeRepos?: readonly string[];
+  /** Skip-latch store for the one-hold flag. Absent means no hold tracking (no hold). */
+  skipLatches?: SkipLatchStore;
+  /** Deployment auto-merge switch. Unset defaults to on. Drives the suggestion hold. */
+  automergeEnabled?: boolean;
   resultMarkdown?: string | null;
   resultReason?: string | null;
   /** Formatted stamp for the runner that produced `resultMarkdown`. */
@@ -1415,6 +1431,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // contributes nothing.
   let blockingQuestionAuthors = opts.blockingQuestionAuthors;
   let suggestionCap = MAX_SUGGESTION_FINDINGS;
+  let settingsForHold: RepoSettingsLoad | undefined;
   try {
     const repoInfo = await forgeApi.getRepo(opts.owner, opts.repo);
     const defaultBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
@@ -1429,6 +1446,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       );
       try {
         const settingsLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, defaultBranch);
+        settingsForHold = settingsLoad;
         if (settingsLoad.state === "valid") {
           suggestionCap = effectiveSuggestionCap(settingsLoad, MAX_SUGGESTION_FINDINGS);
           const draftSkipEarly = skipReasonForDraft(pr, isReviewDraftsEnabled(settingsLoad));
@@ -1703,7 +1721,65 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     }
   }
 
-  const { state, description } = statusForResult(result, effectiveVerdict);
+  let { state, description } = statusForResult(result, effectiveVerdict);
+  // Suggestion hold: in an auto-merge repository, an open-suggestion-only
+  // success holds the merge for one follow-up round by posting `pending`
+  // instead of `success`. Blocking questions and failures take precedence
+  // (they already failed above), and non-auto-merge repositories keep
+  // today's behavior exactly.
+  const holdSuggestionCount =
+    !parsed.verdict.incomplete && effectiveVerdict.state === "success" && blockingQuestions === 0
+      ? trailerSuggestionCount(parsed.verdict.description)
+      : 0;
+  // One policy helper decides the hold so reviews and tests read the same
+  // rule: auto-merge on, deployment switch on, full mode, no opt-out.
+  // Follow-up off and restricted mode still post `success`, with a note
+  // naming why, so the merge never waits on a follow-up that cannot run.
+  const holdDeployOn = opts.automergeEnabled ?? true;
+  const holdEnabled =
+    holdSuggestionCount > 0 &&
+    settingsForHold != null &&
+    isSuggestionHoldEnabled(settingsForHold, holdDeployOn) &&
+    isSuggestionFollowupEnabled(settingsForHold);
+  if (holdEnabled && opts.skipLatches) {
+    try {
+      const closer = extractWorkingIssueNumber(pr) ?? pr.number;
+      const latchKey = { owner: opts.owner, repo: opts.repo, issueNumber: closer };
+      const hold = await readSuggestionHold(opts.skipLatches, latchKey);
+      if (!hold.consumed) {
+        await markSuggestionHoldConsumed(opts.skipLatches, latchKey, opts.expectedHeadSha, holdSuggestionCount);
+        state = "pending";
+        description = suggestionHoldPendingDescription(holdSuggestionCount);
+        logDiagnostic(log, "review_suggestion_hold", {
+          review: reviewLabel,
+          head: opts.expectedHeadSha,
+          suggestions: holdSuggestionCount,
+        });
+      }
+    } catch (err) {
+      log(`suggestion hold unavailable for ${reviewLabel}: ${errorMessage(err)}`);
+    }
+  } else if (
+    holdSuggestionCount > 0 &&
+    settingsForHold?.state === "valid" &&
+    settingsForHold.automerge === true &&
+    holdDeployOn &&
+    !isSuggestionFollowupEnabled(settingsForHold)
+  ) {
+    state = "success";
+    description = suggestionHoldSkippedDescription(holdSuggestionCount, "suggestions disabled");
+  } else if (
+    holdSuggestionCount > 0 &&
+    settingsForHold?.state === "valid" &&
+    settingsForHold.automerge === true &&
+    holdDeployOn &&
+    settingsForHold.mode !== "full"
+  ) {
+    state = "success";
+    description = suggestionHoldSkippedDescription(holdSuggestionCount, "mode restricted");
+  }
+  // An explicit `suggestions_hold_merge: false` opt-out and a missing latch
+  // store keep today's success silently: the follow-up still runs as today.
   await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
@@ -2585,6 +2661,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         botUsername: opts.botUsername,
         blockingQuestionAuthors: effectiveBlockingAuthors,
         automergeRepos: opts.automergeRepos,
+        ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+        ...(opts.automergeEnabled !== undefined ? { automergeEnabled: opts.automergeEnabled } : {}),
         resultMarkdown: gatedMarkdown,
         resultRunner: runner,
         logger: log,

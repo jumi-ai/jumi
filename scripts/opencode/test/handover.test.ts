@@ -11,6 +11,7 @@ import {
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";
+import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import {
   emptyCiMethods,
   makeComment,
@@ -822,5 +823,140 @@ describe("enqueueFollowUpFromReview", () => {
     const waiting = groups.sitting.find((item) => item.reason === "waiting-maintainer");
     expect(waiting?.message?.toLowerCase()).toContain("waiting on a maintainer");
     expect(waiting?.kick).toBeUndefined();
+  });
+});
+
+describe("suggestion hold fallback", () => {
+  test("round cap resolves a held pending to success with a note", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3);
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      2
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = makeApi({
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 2 suggestions -->",
+    });
+    expect(result).toBeUndefined();
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ state: "success" });
+    expect(statuses[0]?.description).toContain("round cap");
+  });
+
+  test("unassigned resolves a held pending to success with a note", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = makeApi({
+      getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 1 suggestion -->",
+    });
+    expect(result).toBeUndefined();
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ state: "success" });
+    expect(statuses[0]?.description).toContain("unassigned");
+  });
+
+  test("restricted mode resolves a held pending to success with a note", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      2
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = makeApi({
+      getRepoFile: async () => ({ found: true, content: "automerge: true\nmode: review-only\n" }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 2 suggestions -->",
+    });
+    expect(result).toBeUndefined();
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ state: "success" });
+    expect(statuses[0]?.description).toContain("mode restricted");
+  });
+
+  test("a moved head resolves the held pending on the reviewed head", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
+    const posted: Array<{ sha: string; state: string; description?: string }> = [];
+    const api = makeApi({
+      getPR: async () =>
+        makePR({
+          body: "Fixes #12",
+          user: makeUser({ login: "jumi" }),
+          head: { ...makePR().head, ref: "jumi/issue-12-fix", sha: "newhead" },
+        }),
+      createCommitStatus: async (_owner, _repo, sha, status) => {
+        posted.push({ sha, ...status });
+        return status;
+      },
+    });
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 1 suggestion -->",
+    });
+    expect(result).toBeUndefined();
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({ sha: "headsha", state: "success" });
+    expect(posted[0]?.description).toContain("head moved");
   });
 });

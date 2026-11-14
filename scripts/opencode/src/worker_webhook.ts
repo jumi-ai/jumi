@@ -34,6 +34,12 @@ import {
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
+import {
+  type HoldStatusApi,
+  postSuggestionHoldSuccess,
+  readSuggestionHold,
+  suggestionHoldSkippedDescription,
+} from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
@@ -371,8 +377,8 @@ async function wakeJobsFromPull(
 }
 
 export async function cancelLedgerWorkerJobs(opts: {
-  store: Pick<ReviewJobStore, "cancelQueuedForIssue" | "clearIssueSkipLatch">;
-  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">;
+  store: Pick<ReviewJobStore, "cancelQueuedForIssue" | "clearIssueSkipLatch" | "skipLatches">;
+  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> & Partial<HoldStatusApi>;
   owner: string;
   repo: string;
   issueNumber: number;
@@ -380,6 +386,27 @@ export async function cancelLedgerWorkerJobs(opts: {
   logger?: (message: string) => void;
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
+  // A held suggestion `pending` must resolve before the latch wipe below
+  // destroys the only record of it: the cancelled rows never run, so no
+  // follow-up job survives to clear it. Best-effort, never throws.
+  try {
+    const hold = await readSuggestionHold(opts.store.skipLatches, {
+      owner: opts.owner,
+      repo: opts.repo,
+      issueNumber: opts.issueNumber,
+    });
+    if (hold.consumed && hold.count && hold.headSha) {
+      await postSuggestionHoldSuccess(
+        opts.api as HoldStatusApi,
+        opts.owner,
+        opts.repo,
+        hold.headSha,
+        suggestionHoldSkippedDescription(hold.count, "unassigned")
+      );
+    }
+  } catch {
+    // Best-effort: never fail the cancel on a status post.
+  }
   await opts.store.clearIssueSkipLatch(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
   // Queued rows settle here, so the router posts `stopped` for them. Leased

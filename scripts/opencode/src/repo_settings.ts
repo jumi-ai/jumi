@@ -83,6 +83,13 @@ export interface RepoSettings {
   followupOnSuggestions: boolean;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
+  /**
+   * Hold the merge for one suggestion follow-up round in auto-merge
+   * repositories. `undefined` (key absent) means follow `automerge`: holding
+   * when `automerge` is `true`, never otherwise. An explicit `false` turns
+   * the hold off even when `automerge` is `true`.
+   */
+  suggestionsHoldMerge?: boolean;
   takeoverAuthors: string[];
   ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
@@ -193,6 +200,7 @@ export const KNOWN_KEYS = new Set([
   "setup",
   "review_exclude",
   "followup_on_suggestions",
+  "suggestions_hold_merge",
   "max_followup_rounds",
   "max_conflict_rounds",
   "takeover_authors",
@@ -696,6 +704,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     typeof record.followup_on_suggestions !== "boolean"
   )
     return { ok: false, error: `"followup_on_suggestions" must be a boolean` };
+  if (
+    "suggestions_hold_merge" in record &&
+    record.suggestions_hold_merge !== undefined &&
+    typeof record.suggestions_hold_merge !== "boolean"
+  )
+    return { ok: false, error: `"suggestions_hold_merge" must be a boolean` };
   for (const key of ["max_followup_rounds", "max_conflict_rounds"] as const) {
     if (key in record && record[key] !== undefined) {
       const value = record[key];
@@ -896,6 +910,8 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     settings.maxConflictRounds = record.max_conflict_rounds as number;
   if ("max_suggestions" in record && record.max_suggestions !== undefined)
     settings.maxSuggestions = record.max_suggestions as number;
+  if ("suggestions_hold_merge" in record && record.suggestions_hold_merge !== undefined)
+    settings.suggestionsHoldMerge = record.suggestions_hold_merge as boolean;
   return { ok: true, settings };
 }
 
@@ -947,6 +963,7 @@ export type RepoSettingsLoad =
       followupOnSuggestions: boolean;
       maxFollowupRounds?: number;
       maxConflictRounds?: number;
+      suggestionsHoldMerge?: boolean;
       takeoverAuthors: string[];
       ignoreConflictsAuthors: string[];
       blockingQuestionAuthors: string[];
@@ -1273,6 +1290,9 @@ export async function loadRepoSettings(
     ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
     ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
     ...(parsed.settings.setup !== undefined ? { setup: parsed.settings.setup } : {}),
+    ...(parsed.settings.suggestionsHoldMerge !== undefined
+      ? { suggestionsHoldMerge: parsed.settings.suggestionsHoldMerge }
+      : {}),
   };
 }
 
@@ -1415,6 +1435,24 @@ export function effectiveConflictRounds(deploymentMax: number, load: RepoSetting
 export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;
   return load.followupOnSuggestions !== false;
+}
+
+/**
+ * Whether open 💡 suggestions hold the merge for one follow-up round.
+ * Only in auto-merge repositories: the default-branch file must be valid,
+ * set `automerge: true`, run in `mode: full`, and not opt out with
+ * `suggestions_hold_merge: false` — and the deployment switch must be on.
+ * Missing, invalid, or unreadable files never hold; neither does
+ * `automerge: false`. An explicit `suggestions_hold_merge: true` with
+ * `automerge: false` still never holds.
+ */
+export function isSuggestionHoldEnabled(load: RepoSettingsLoad, automergeEnabled = true): boolean {
+  if (!automergeEnabled) return false;
+  if (load.state !== "valid") return false;
+  if (load.mode !== "full") return false;
+  if (load.automerge !== true) return false;
+  if (load.suggestionsHoldMerge === false) return false;
+  return true;
 }
 
 export interface RepoFollowupPolicy {
