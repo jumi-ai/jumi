@@ -89,7 +89,7 @@ describe("renovate tool-versions config", () => {
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(16);
+    expect(managers?.length).toBe(14);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
@@ -119,7 +119,10 @@ describe("renovate tool-versions config", () => {
     expect(yqManagers?.some((m) => m.matchStrings?.[0]?.includes("YQ_ARM64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_AMD64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_ARM64_TAG"))).toBe(true);
-    // promtool/tofu/kubeconform/kubectl per-arch checksum managers move with the version like yq/uv/codex.
+    // promtool/tofu/kubeconform per-arch checksum managers move with the version like yq/uv/codex.
+    // kubectl SHAs are manual: kubernetes/kubernetes releases carry no kubectl
+    // binary attachment, so no attachment manager can resolve the dl.k8s.io
+    // hash (NOTE(kubectl) in tool-versions.env) — same shape as Node.
     const promtoolManagers = managers?.filter((m) => m.depNameTemplate === "prometheus/prometheus");
     const tofuManagers = managers?.filter((m) => m.depNameTemplate === "opentofu/opentofu");
     const kubeconformManagers = managers?.filter((m) => m.depNameTemplate === "yannh/kubeconform");
@@ -127,13 +130,8 @@ describe("renovate tool-versions config", () => {
     expect(promtoolManagers?.length).toBe(2);
     expect(tofuManagers?.length).toBe(2);
     expect(kubeconformManagers?.length).toBe(2);
-    expect(kubectlManagers?.length).toBe(2);
-    for (const m of [
-      ...(promtoolManagers ?? []),
-      ...(tofuManagers ?? []),
-      ...(kubeconformManagers ?? []),
-      ...(kubectlManagers ?? []),
-    ]) {
+    expect(kubectlManagers?.length).toBe(0);
+    for (const m of [...(promtoolManagers ?? []), ...(tofuManagers ?? []), ...(kubeconformManagers ?? [])]) {
       expect(m?.datasourceTemplate).toBe("github-release-attachments");
       expect(m?.matchStrings?.length).toBe(1);
       expect(m?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
@@ -145,14 +143,14 @@ describe("renovate tool-versions config", () => {
     expect(tofuManagers?.some((m) => m.matchStrings?.[0]?.includes("TOFU_ARM64_TAG"))).toBe(true);
     expect(kubeconformManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECONFORM_AMD64_TAG"))).toBe(true);
     expect(kubeconformManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECONFORM_ARM64_TAG"))).toBe(true);
-    expect(kubectlManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECTL_AMD64_TAG"))).toBe(true);
-    expect(kubectlManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECTL_ARM64_TAG"))).toBe(true);
-    // Node per-arch tags/SHAs are manual (see NOTE(node) in tool-versions.env):
-    // no manager may claim a NODE_*_TAG line.
+    // Node and kubectl per-arch tags/SHAs are manual (see NOTE(node) and
+    // NOTE(kubectl) in tool-versions.env): no manager may claim them.
     for (const m of managers ?? []) {
       for (const s of m.matchStrings ?? []) {
         expect(s).not.toContain("NODE_AMD64_TAG");
         expect(s).not.toContain("NODE_ARM64_TAG");
+        expect(s).not.toContain("KUBECTL_AMD64_TAG");
+        expect(s).not.toContain("KUBECTL_ARM64_TAG");
       }
     }
     // Every matchStrings regex must compile (RE2-compatible subset: no lookahead).

@@ -203,7 +203,6 @@ describe("renovate tracks each infra CLI pin", () => {
       ["prometheus/prometheus", "PROMTOOL"],
       ["opentofu/opentofu", "TOFU"],
       ["yannh/kubeconform", "KUBECONFORM"],
-      ["kubernetes/kubernetes", "KUBECTL"],
     ] as const) {
       const pair = managers?.filter((m) => m.depNameTemplate === depName);
       expect(pair?.length).toBe(2);
@@ -216,5 +215,17 @@ describe("renovate tracks each infra CLI pin", () => {
         expect(() => new RegExp(m?.matchStrings?.[0] ?? "", "g")).not.toThrow();
       }
     }
+    // kubectl is version-only: kubernetes/kubernetes releases carry no kubectl
+    // binary attachment, so no attachment manager can resolve the dl.k8s.io
+    // hash. KUBECTL_VERSION stays Renovate-tracked via github-releases while
+    // the per-arch SHAs follow manually (NOTE(kubectl)), with the image-build
+    // sha256sum -c as the fail-closed backstop.
+    const kubectlManagers = managers?.filter((m) => m.depNameTemplate === "kubernetes/kubernetes");
+    expect(kubectlManagers?.length).toBe(0);
+    expect(toolVersions).toContain(
+      "# renovate: datasource=github-releases depName=kubernetes/kubernetes\nKUBECTL_VERSION="
+    );
+    expect(toolVersions).toContain("NOTE(kubectl)");
+    expect(toolVersions).not.toContain("datasource=github-release-attachments depName=kubernetes/kubernetes");
   });
 });
