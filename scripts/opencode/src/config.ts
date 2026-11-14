@@ -10,6 +10,7 @@ import {
   resolveRunnerCooldownConfig,
   resolveRunnerSelection,
 } from "./runners.ts";
+import { searxngUrlFromEnv } from "./searxng.ts";
 
 export type JumiRole = "router" | "engine";
 
@@ -49,6 +50,8 @@ export interface ServiceConfig {
   opencodeWellKnownKey: string;
   opencodeWellKnownToken: string;
   codexAuthFile?: string;
+  /** Deployer's SearXNG base URL, or undefined when search stays native/absent. */
+  searxngUrl?: string;
   home: string;
   workdir: string;
   queueConcurrency: number;
@@ -255,6 +258,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
+  // Deployer-only SearXNG endpoint; read here so the contract gate sees the
+  // optional key. Unset or blank means "not configured".
+  void optionalEnv(resolved, "JUMI_SEARXNG_URL");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const setupTimeoutMaxMs = intEnv(resolved, "SETUP_TIMEOUT_MAX_MS", 10 * 60 * 1000);
@@ -295,6 +301,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
       optionalEnv(resolved, "OPENCODE_WELLKNOWN_KEY", "OPENCODE_WELLKNOWN_TOKEN") ?? "OPENCODE_WELLKNOWN_TOKEN",
     opencodeWellKnownToken: optionalEnv(resolved, "OPENCODE_WELLKNOWN_TOKEN", "unused") ?? "unused",
     codexAuthFile: optionalEnv(resolved, "CODEX_AUTH_FILE"),
+    // Validated here so a non-`http(s)` value fails process start naming the
+    // variable; spawns read the same value from the environment.
+    searxngUrl: searxngUrlFromEnv(resolved),
     home: optionalEnv(resolved, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(resolved, "WORKDIR", "/work") ?? "/work",
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),

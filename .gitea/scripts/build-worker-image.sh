@@ -329,6 +329,16 @@ verify_worker_skills() {
     echo "agy forge read_url deny probe failed against the installed agy binary" >&2
     exit 1
   fi
+  # The pinned agy either honors per-spawn MCP servers or it does not. The
+  # probe registers the production searxng server the way runAgy does and has
+  # the installed binary read it back, so an AGY bump that drops MCP support
+  # fails here instead of silently leaving agy without search.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/agy_mcp_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy MCP probe failed against the installed agy binary" >&2
+    exit 1
+  fi
   # Jumi loads a repository's `.codex` config on purpose. What keeps web search
   # off is that `-c` outranks it, and only the binary can prove that.
   if ! buildah run "${ctr}" -- \

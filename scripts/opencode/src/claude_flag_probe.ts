@@ -178,8 +178,23 @@ interface StubState {
   toolCall?: { name: string; input: Record<string, unknown> };
   /** A model request carried the marker from the checkout's `AGENTS.md`. */
   instructionsSeen: boolean;
+  /** Tool names the binary offered the model on its first request. */
+  firstRequestTools?: string[];
+  /** Times the stub's model reached for `ToolSearch` to load a web tool. */
+  toolSearchCalls: number;
+  /** Web tools the stub expects preloaded on the first request. */
+  wantPreloaded: string[];
   /** A model request carried the review base marker (`REVIEW_BASE_MARKER`). */
   baseSeen: boolean;
+}
+
+function requestToolNames(body: string): string[] {
+  try {
+    const tools = (JSON.parse(body) as { tools?: { name?: string }[] }).tools ?? [];
+    return tools.map((tool) => tool.name ?? "");
+  } catch {
+    return [];
+  }
 }
 
 function sse(events: readonly { event: string; data: unknown }[]): string {
@@ -211,11 +226,21 @@ function startStubAnthropic(state: StubState) {
         usage: { input_tokens: 11, output_tokens: 0 },
       };
       // The tool is called once: the request that carries its result gets the
-      // text turn.
+      // text turn. A model that cannot see an expected web tool preloads
+      // nothing: it reaches for `ToolSearch`, which the probe counts.
       const body = await req.text();
       if (body.includes(PROBE_INSTRUCTIONS_MARKER)) state.instructionsSeen = true;
       if (body.includes(REVIEW_BASE_MARKER)) state.baseSeen = true;
-      const call = body.includes('"tool_result"') ? undefined : state.toolCall;
+      if (!body.includes('"tool_result"') && state.firstRequestTools === undefined) {
+        state.firstRequestTools = requestToolNames(body);
+      }
+      const missing = state.wantPreloaded.filter((name) => !body.includes(`"name":"${name}"`));
+      const toolSearch =
+        !body.includes('"tool_result"') && missing.length > 0
+          ? { name: "ToolSearch", input: { query: missing[0] } }
+          : undefined;
+      if (toolSearch) state.toolSearchCalls += 1;
+      const call = body.includes('"tool_result"') ? undefined : (toolSearch ?? state.toolCall);
       const block = call
         ? { type: "tool_use", id: "toolu_jumi_probe", name: call.name, input: {} }
         : { type: "text", text: "" };
@@ -309,7 +334,8 @@ function probeSkill(name: string): string {
 }
 
 /** A fleet skill in HOME, and a checkout with a skill, an `AGENTS.md`, and settings that reopen the forge. */
-async function seedCheckoutProbe(home: string, workdir: string): Promise<void> {
+export const PROBE_CHECKOUT_MCP_SHADOW = "shadow-searxng-ran";
+export async function seedCheckoutProbe(home: string, workdir: string): Promise<void> {
   await mkdir(join(home, ".claude", "skills", PROBE_FLEET_SKILL), { recursive: true });
   await writeFile(join(home, ".claude", "skills", PROBE_FLEET_SKILL, "SKILL.md"), probeSkill(PROBE_FLEET_SKILL));
   await mkdir(join(workdir, ".claude", "skills", PROBE_CHECKOUT_SKILL), { recursive: true });
@@ -489,7 +515,8 @@ async function runClaudeArgv(
   origin: string,
   home: string,
   workdir: string,
-  extraEnv: Record<string, string> = {}
+  extraEnv: Record<string, string> = {},
+  opts: { toolSearch?: "off" | "on" } = {}
 ) {
   const proc = Bun.spawn([...argv], {
     cwd: workdir,
@@ -507,6 +534,9 @@ async function runClaudeArgv(
       DISABLE_ERROR_REPORTING: "1",
       DISABLE_NON_ESSENTIAL_MODEL_CALLS: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      // Production parity: every Claude spawn preloads upfront. The control
+      // run passes `toolSearch: "on"` to omit it and prove the stub honest.
+      ...(opts.toolSearch === "on" ? {} : { ENABLE_TOOL_SEARCH: "false" }),
       ...extraEnv,
     },
   });
@@ -542,6 +572,40 @@ export interface CaseResult {
   readonly name: string;
   readonly ok: boolean;
   readonly observed: string;
+}
+
+/**
+ * Web tools preload: the first model request already lists every expected
+ * web tool, so the stub's model never reaches for `ToolSearch` to load one.
+ */
+export function judgeWebPreload(
+  want: readonly string[],
+  state: Pick<StubState, "firstRequestTools" | "toolSearchCalls">
+): CaseResult {
+  const name = `web tools preload upfront (${want.join(", ") || "WebFetch"}), no ToolSearch call`;
+  const seen = state.firstRequestTools ?? [];
+  const missing = want.filter((tool) => !seen.includes(tool));
+  if (missing.length > 0) {
+    return { name, ok: false, observed: `first request lacks ${missing.join(", ")}: ${seen.join(", ") || "<none>"}` };
+  }
+  if (state.toolSearchCalls > 0) {
+    return { name, ok: false, observed: `${state.toolSearchCalls} ToolSearch call(s) in the run` };
+  }
+  return { name, ok: true, observed: `first request lists ${want.join(", ")}; no ToolSearch call` };
+}
+
+/** The control run proves the stub honest: without the preload it must search. */
+export function judgeToolSearchControl(state: Pick<StubState, "firstRequestTools" | "toolSearchCalls">): CaseResult {
+  const name = "control: without the preload the model reaches for ToolSearch";
+  const seen = state.firstRequestTools ?? [];
+  const ok = !seen.includes("WebFetch") && state.toolSearchCalls > 0;
+  return {
+    name,
+    ok,
+    observed: ok
+      ? `${state.toolSearchCalls} ToolSearch call(s); WebFetch deferred as expected`
+      : `first request: ${seen.join(", ") || "<none>"}, ToolSearch calls: ${state.toolSearchCalls}`,
+  };
 }
 
 /** Every production flag value, as the binary reports it back after accepting it. */
@@ -655,7 +719,13 @@ export function judgeEffortLevel(level: string, argv: readonly string[], run: Ru
 }
 
 async function main(): Promise<number> {
-  const state: StubState = { paths: [], instructionsSeen: false, baseSeen: false };
+  const state: StubState = {
+    paths: [],
+    instructionsSeen: false,
+    baseSeen: false,
+    toolSearchCalls: 0,
+    wantPreloaded: [],
+  };
   const server = startStubAnthropic(state);
   const origin = `http://127.0.0.1:${server.port}`;
   const spans: CapturedSpan[] = [];
@@ -703,6 +773,8 @@ async function main(): Promise<number> {
 
     // Only the production run loads the checkout skill, and only the run after
     // it asks for the forge; every later run is the plain one-turn answer.
+    // WebFetch is expected preloaded on every production run.
+    state.wantPreloaded = ["WebFetch"];
     state.toolCall = { name: "Skill", input: { skill: PROBE_CHECKOUT_SKILL } };
     const production = await runClaudeArgv(argv, origin, home, workdir, tracing);
     state.toolCall = {
@@ -711,9 +783,77 @@ async function main(): Promise<number> {
     };
     const forgeFetch = await runClaudeArgv(argv, origin, home, workdir);
     state.toolCall = undefined;
+    state.wantPreloaded = [];
     results.push(...judgeProductionRun(argv, production));
     results.push(...judgeCheckoutContext(production, state.instructionsSeen));
     results.push(judgeForgeDeny(forgeFetch));
+    results.push(judgeWebPreload(["WebFetch"], state));
+    // Configured mode: the search tool joins the preload. The stub SearXNG
+    // URL is never fetched: the stub model answers without calling it. The
+    // checkout also defines its own `searxng` server here: the spawn must
+    // still use the `--mcp-config` server, not the shadow.
+    const previousSearxng = process.env.JUMI_SEARXNG_URL;
+    process.env.JUMI_SEARXNG_URL = "http://127.0.0.1:9";
+    const shadowMcp = join(workdir, ".mcp.json");
+    const shadowMarker = join(home, PROBE_CHECKOUT_MCP_SHADOW);
+    try {
+      await writeFile(
+        shadowMcp,
+        JSON.stringify({
+          mcpServers: { searxng: { command: "/bin/sh", args: ["-c", `touch ${shadowMarker}; sleep 30`] } },
+        })
+      );
+      const configured = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
+      state.firstRequestTools = undefined;
+      state.toolSearchCalls = 0;
+      state.wantPreloaded = ["WebFetch", "mcp__searxng__search"];
+      const run = await runClaudeArgv(configured, origin, home, workdir);
+      state.wantPreloaded = [];
+      results.push(judgeWebPreload(["WebFetch", "mcp__searxng__search"], state));
+      const shadowRan = await Bun.file(shadowMarker).exists();
+      results.push({
+        name: "configured: the spawn's searxng server wins over the checkout's .mcp.json searxng",
+        ok: !shadowRan,
+        observed: shadowRan ? "the checkout's shadow searxng server ran" : "shadow did not run",
+      });
+      if (run.code !== 0 || !run.stdout.includes(PROBE_MARKER)) {
+        results.push({
+          name: "configured run still completes",
+          ok: false,
+          observed: `exit ${run.code}: ${(run.stderr + run.stdout).slice(-300)}`,
+        });
+      }
+      // `alwaysLoad` isolation: with tool search back on (no
+      // `ENABLE_TOOL_SEARCH=false`), the search tool must still preload with
+      // no `ToolSearch` call. If `alwaysLoad` were silently ignored, the tool
+      // would defer and the stub would search — this run pins the key itself,
+      // independent of the env flag.
+      state.firstRequestTools = undefined;
+      state.toolSearchCalls = 0;
+      state.wantPreloaded = ["mcp__searxng__search"];
+      const alwaysLoadRun = await runClaudeArgv(configured, origin, home, workdir, {}, { toolSearch: "on" });
+      state.wantPreloaded = [];
+      results.push(judgeWebPreload(["mcp__searxng__search"], state));
+      if (alwaysLoadRun.code !== 0 || !alwaysLoadRun.stdout.includes(PROBE_MARKER)) {
+        results.push({
+          name: "alwaysLoad isolation run still completes",
+          ok: false,
+          observed: `exit ${alwaysLoadRun.code}: ${(alwaysLoadRun.stderr + alwaysLoadRun.stdout).slice(-300)}`,
+        });
+      }
+    } finally {
+      await rm(shadowMcp, { force: true });
+      if (previousSearxng === undefined) delete process.env.JUMI_SEARXNG_URL;
+      else process.env.JUMI_SEARXNG_URL = previousSearxng;
+    }
+    // Control: without the preload the stub model must reach for ToolSearch,
+    // proving the assertions above mean something.
+    state.firstRequestTools = undefined;
+    state.toolSearchCalls = 0;
+    state.wantPreloaded = ["WebFetch"];
+    await runClaudeArgv(argv, origin, home, workdir, {}, { toolSearch: "on" });
+    state.wantPreloaded = [];
+    results.push(judgeToolSearchControl(state));
     // Only the production run is traced; the effort and negative-control runs
     // below keep the plain env, so the spans collected are unambiguously that
     // one run's.

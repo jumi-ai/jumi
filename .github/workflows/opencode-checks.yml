@@ -249,6 +249,8 @@ jobs:
           set -euo pipefail
           docker run --rm jumi-reviewer:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+          docker run --rm jumi-reviewer:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/agy_mcp_probe.ts'
 
       - name: Verify codex overrides against a hostile checkout
         # Jumi loads a repository's `.codex` config on purpose. What keeps web
@@ -414,6 +416,8 @@ jobs:
           done
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
+          docker run --rm jumi-worker:ci \
+            sh -c 'cd /app/scripts/opencode && timeout 300 bun src/agy_mcp_probe.ts'
           docker run --rm jumi-worker:ci \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
           docker run --rm jumi-worker:ci \
