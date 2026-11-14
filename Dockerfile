@@ -209,6 +209,7 @@ RUN set -eu; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uv" /usr/local/bin/uv; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uvx" /usr/local/bin/uvx; \
     rm -rf "${tmp_dir}"
+COPY requirements.txt /tmp/requirements.txt
 RUN set -eu; \
     : "${PROMTOOL_VERSION:?PROMTOOL_VERSION build-arg is required}"; \
     : "${PROMTOOL_SHA256_AMD64:?PROMTOOL_SHA256_AMD64 build-arg is required}"; \
@@ -316,7 +317,13 @@ RUN set -eu; \
     if [ ! -x "${py_bin}" ]; then py_bin="$(echo /opt/cpython/cpython-3.13-*/bin/python3.13)"; fi; \
     test -x "${py_bin}"; \
     ln -sfn "${py_bin}" /usr/local/bin/python3.13; \
-    /usr/local/bin/python3.13 --version
+    ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python3; \
+    ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python; \
+    /usr/local/bin/uv pip install --system --break-system-packages --python "${py_bin}" --requirement /tmp/requirements.txt; \
+    rm -f /tmp/requirements.txt; \
+    /usr/local/bin/python3.13 --version; \
+    python3 --version; \
+    python --version
 COPY --from=tools /usr/local/bin/bun /usr/local/bin/bun
 COPY --from=tools /usr/local/bin/opencode /usr/local/bin/opencode
 COPY --from=tools /usr/local/bin/claude /usr/local/bin/claude
@@ -329,6 +336,13 @@ RUN git --version \
   && jq --version \
   && file --version \
   && python3 --version \
+  && python --version \
+  && python3.13 --version \
+  && python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)' \
+  && python -c 'import sys; assert sys.version_info[:2] == (3, 13)' \
+  && python3 -m pytest --version \
+  && python3 -c 'import yaml, pytest' \
+  && python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")' \
   && helm version --short \
   && bun --version \
   && test "$(node --version)" = "v${NODE_VERSION}" \
@@ -350,8 +364,6 @@ RUN git --version \
   && ps --version \
   && unzip -v \
   && shellcheck --version \
-  && python --version \
-  && python3 -c 'import yaml' \
   && UV_OFFLINE=1 uv run --no-project --python 3.13 python -V
 
 WORKDIR /app/scripts/opencode

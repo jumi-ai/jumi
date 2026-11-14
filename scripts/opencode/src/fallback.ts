@@ -15,6 +15,12 @@ import { looksLikeProviderUnavailable } from "./infra.ts";
 import { isCreditBalanceText, isQuotaError, isQuotaText } from "./quota.ts";
 import { withLedgerRunUsage } from "./run_usage.ts";
 import {
+  logRunnerCooldown,
+  type RunnerCooldownConfig,
+  type RunnerCooldownStore,
+  recordRunnerCooldownForFailure,
+} from "./runner_cooldown.ts";
+import {
   describeAttemptOrder,
   type NamedRunner,
   OPENCODE_RUNNER_TYPE,
@@ -64,6 +70,14 @@ export interface EngineChainOptions extends ModelHopOptions {
    * conservative and counts the failed runner.
    */
   worktreeDirty?: () => Promise<boolean | undefined>;
+  /** Per-runner cooldowns: cooled runners are skipped for fresh picks. */
+  runnerCooldowns?: RunnerCooldownStore;
+  /** Durations for per-runner cooldowns. Defaults cover quota/credit/auth. */
+  runnerCooldownConfig?: RunnerCooldownConfig;
+  /** Injectable clock for deterministic cooldown tests. Defaults to `Date.now`. */
+  cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name for auth cooldowns. */
+  authFingerprints?: Record<string, string | undefined>;
 }
 
 export function modelProviderPrefix(model: string): string {
@@ -164,15 +178,69 @@ export async function clearOpenCodeSession(workdir: string): Promise<void> {
   await rm(codexThreadUsagePath(workdir), { force: true });
 }
 
-async function remainingCoversTimeout(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {
+async function leaseAllowsHop(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {
+  if (hop.extendLease && !(await hop.extendLease())) {
+    const log = hop.logger;
+    if (log) {
+      logDiagnostic(log, "hop_refused", {
+        reason: "extend_lease",
+        timeout_ms: timeoutMs ?? null,
+      });
+    }
+    return false;
+  }
   if (!timeoutMs || timeoutMs <= 0) return true;
   if (!hop.remainingLeaseMs) return true;
-  return (await hop.remainingLeaseMs()) >= timeoutMs;
+  const remaining = await hop.remainingLeaseMs();
+  if (remaining >= timeoutMs) return true;
+  const log = hop.logger;
+  if (log) {
+    logDiagnostic(log, "hop_refused", {
+      reason: "lease",
+      remaining_ms: Math.max(0, Math.floor(remaining)),
+      timeout_ms: Math.floor(timeoutMs),
+    });
+  }
+  return false;
 }
 
-async function leaseAllowsHop(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {
-  if (hop.extendLease && !(await hop.extendLease())) return false;
-  return remainingCoversTimeout(hop, timeoutMs);
+function cooldownNowMs(hop: EngineChainOptions): number {
+  try {
+    const now = hop.cooldownNowMs?.();
+    if (typeof now === "number" && Number.isFinite(now)) return now;
+  } catch {
+    // Fall through to Date.now().
+  }
+  return Date.now();
+}
+
+function noteCooldown(
+  hop: EngineChainOptions,
+  runner: NamedRunner,
+  input: { result?: EngineResult; err?: unknown }
+): void {
+  if (!hop.runnerCooldowns) return;
+  const nowMs = cooldownNowMs(hop);
+  const entry = recordRunnerCooldownForFailure(hop.runnerCooldowns, runner.name, {
+    ...input,
+    nowMs,
+    config: hop.runnerCooldownConfig,
+    authFingerprint: hop.authFingerprints?.[runner.name],
+  });
+  if (!entry) return;
+  const log = hop.logger;
+  if (log) {
+    logRunnerCooldown(log, {
+      runner: runner.name,
+      reason: entry.reason,
+      untilMs: entry.untilMs,
+      source: entry.source,
+    });
+  }
+}
+
+function clearCooldown(hop: EngineChainOptions, runner: NamedRunner): void {
+  hop.runnerCooldowns?.clear(runner.name);
 }
 
 function isAbortError(err: unknown): boolean {
@@ -444,8 +512,14 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
     // the eligible chain and rotate around it. Continuations and
     // artifact-recovery calls reuse this order; never rerandomize mid-job.
     // `orderChainForJob` copies, so catalog/config ordering is never mutated
-    // and independent jobs never share array state.
-    effective = orderChainForJob(base, selection, hop.random ?? Math.random);
+    // and independent jobs never share array state. Cooled runners are
+    // excluded before the random pick so a dead runner is not rediscovered.
+    effective = orderChainForJob(base, selection, hop.random ?? Math.random, {
+      ...(hop.runnerCooldowns ? { cooldowns: hop.runnerCooldowns } : {}),
+      nowMs: cooldownNowMs(hop),
+      logger: hop.logger ?? opts.logger,
+      ...(hop.authFingerprints ? { fingerprints: hop.authFingerprints } : {}),
+    });
     if (!selectionLogged) {
       selectionLogged = true;
       const log = hop.logger ?? opts.logger;
@@ -557,6 +631,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         );
       } catch (err) {
         attachRunner(err, runnerStamp(current), index);
+        noteCooldown(hop, current, { err });
         if (!next || !shouldHopQuotaError(err, opts, current, next)) {
           if (next) refuseQuotaHopError(err, current, next);
           attachNarrowedError(err, index, runners);
@@ -572,6 +647,8 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         index++;
       }
       if (result) {
+        if (result.status === "ok") clearCooldown(hop, current);
+        else noteCooldown(hop, current, { result });
         if (!next || !shouldHopQuotaResult(result, opts, current, next)) {
           settleQuotaSigterm(opts, result, false, current.name);
           return attachNarrowed(refuseQuotaHop(result, current, next), index, runners);
@@ -610,6 +687,7 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         result = stampRunner(await recording(runOpts), runner, index);
       } catch (err) {
         attachRunner(err, runnerStamp(runner), index);
+        noteCooldown(hop, runner, { err });
         const next = runners[index + 1];
         if (!next || !shouldHopFromError(err, opts, runner, next)) {
           if (next) refuseQuotaHopError(err, runner, next);
@@ -627,6 +705,8 @@ export function withEngineChain(engine: Engine, hop: EngineChainOptions): Engine
         continue;
       }
 
+      if (result.status === "ok") clearCooldown(hop, runner);
+      else noteCooldown(hop, runner, { result });
       const next = runners[index + 1];
       if (!next || !shouldHopFromResult(result, opts, runner, next)) {
         settleQuotaSigterm(opts, result, false, runner.name);

@@ -73,9 +73,16 @@ describe("yq/uv build consumes one effective pin and fails closed", () => {
     expect(dockerfile).toContain('echo "${uv_sha256}  ${tmp_dir}/uv.tar.gz" | sha256sum -c -');
     expect(dockerfile).toContain("uv python install 3.13 --install-dir /opt/cpython --no-bin");
     expect(dockerfile).toContain('ln -sfn "${py_bin}" /usr/local/bin/python3.13');
+    expect(dockerfile).toContain("ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python3");
+    expect(dockerfile).toContain("ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python");
+    expect(dockerfile).toContain("--requirement /tmp/requirements.txt");
     expect(dockerfile).not.toMatch(/--default/);
     expect(dockerfile).toContain("UV_OFFLINE=1 uv run --no-project --python 3.13 python -V");
-    expect(dockerfile).toContain("python3 -c 'import yaml'");
+    expect(dockerfile).toContain("python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'");
+    expect(dockerfile).toContain("python -c 'import sys; assert sys.version_info[:2] == (3, 13)'");
+    expect(dockerfile).toContain("python3 -m pytest --version");
+    expect(dockerfile).toContain("python3 -c 'import yaml, pytest'");
+    expect(dockerfile).toContain('filter="data"');
   });
 
   test("workflows and build scripts pass the same pins without stripping them", () => {

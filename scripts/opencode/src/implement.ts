@@ -69,7 +69,7 @@ import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
-import { throwIfQuotaWait } from "./quota_wait.ts";
+import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
   DEFAULT_COMMIT_MESSAGE_TEMPLATE,
@@ -214,6 +214,11 @@ export interface ImplementOptions extends PickupPolicy {
   fallbackModel?: string;
   fallbackVariant?: string;
   chain?: NamedRunner[];
+  runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore;
+  runnerCooldownConfig?: import("./runner_cooldown.ts").RunnerCooldownConfig;
+  cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
   /**
    * Opt-in runner distribution. `ordered` (default when absent) keeps
    * configured order; `random-start` uniformly picks a start per fresh job.
@@ -1367,8 +1372,22 @@ export async function implementIssue(
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(result.message);
+          if (
+            opts.runnerCooldowns &&
+            hasHealthyRunnerForQuota(
+              jobChain,
+              opts.runnerCooldowns,
+              opts.cooldownNowMs?.() ?? Date.now(),
+              opts.authFingerprints
+            )
+          ) {
+            throw new Error(quotaReason);
+          }
           await diary(quotaReason);
           await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1562,6 +1581,9 @@ export async function implementIssue(
               fallbackModel: opts.fallbackModel,
               chain: jobChain,
               previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
             const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
             // The stuck outcome is decided; teardown noise must not replace it.
@@ -1711,6 +1733,9 @@ export async function implementIssue(
           fallbackModel: opts.fallbackModel,
           chain: jobChain,
           previousError: opts.previousError,
+          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
         await diary(quotaReason).catch(() => undefined);
