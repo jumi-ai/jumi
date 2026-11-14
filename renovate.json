@@ -16,7 +16,7 @@
         "/^\\.gitea\\/tool-versions\\.env$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>github-releases|npm) depName=(?<depName>[^\\s]+)\\n[A-Z_]+=(?<currentValue>[^\\s]+)"
+        "# renovate: datasource=(?<datasource>github-releases|npm|node-version) depName=(?<depName>[^\\s]+)\\n[A-Z_]*VERSION=(?<currentValue>[^\\s]+)"
       ]
     },
     {
@@ -201,6 +201,17 @@
       "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
       "groupName": "uv",
       "groupSlug": "uv"
+    },
+    {
+      "description": "Node LTS via node-version default versioning (node): the datasource marks only LTS lines stable from the release schedule, so no allowedVersions regex is needed; per-arch tarball SHAs in tool-versions.env are updated manually alongside NODE_VERSION.",
+      "matchDatasources": [
+        "node-version"
+      ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "groupName": "node",
+      "groupSlug": "node"
     },
     {
       "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",
