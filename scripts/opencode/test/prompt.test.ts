@@ -4,6 +4,8 @@ import {
   buildPROpenedPrompt,
   CI_RESULTS_MAX_BYTES,
   formatCiResults,
+  TOOL_INSTALL_RULE,
+  TOOL_INSTALL_RULE_SENTENCE,
 } from "../src/prompt.ts";
 import { makeFile, makePR, makeRepo } from "./fixtures.ts";
 
@@ -321,23 +323,31 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("dismissed or stale review is not a retraction");
   });
 
-  test("names the read-only upstream shallow clone exception without lifting the network ban", () => {
+  test("allows installs under scratch and bans mutating, cluster, chart, and forge-host access", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
       pr: makePR(),
       prFiles: [],
     });
 
-    expect(prompt).toContain("arbitrary network shell commands");
-    expect(prompt).toContain("read-only shallow clone");
-    expect(prompt).toContain("git clone --depth 1 --branch <tag>");
-    expect(prompt).toContain('"$TMPDIR/upstream-<tag>"');
-    expect(prompt).toContain('rm -rf "$TMPDIR/upstream-<tag>"');
-    expect(prompt).toContain('stay under "$TMPDIR"');
-    expect(prompt).not.toContain("/tmp/...");
-    expect(prompt).toContain("never carry a forge token");
+    expect(prompt).toContain(TOOL_INSTALL_RULE_SENTENCE);
+    expect(prompt).toContain(TOOL_INSTALL_RULE);
+    expect(prompt).not.toContain("package installs");
+    expect(prompt).not.toContain("arbitrary network shell commands");
+    expect(prompt).not.toContain("read-only shallow clone");
+    expect(prompt).not.toContain("git clone --depth 1");
+    expect(prompt).toContain("mutating git commands");
+    expect(prompt).toContain("helm upgrade");
+    expect(prompt).toContain("helm install");
+    expect(prompt).toContain("kubectl apply");
+    expect(prompt).toContain("charts/*.tgz");
     expect(prompt).toContain("forge host stays denied");
-    expect(prompt).toContain("package installs");
+    expect(prompt).toContain("never carry a forge token");
+    expect(prompt).toContain('belongs under "$TMPDIR"');
+    expect(prompt).not.toContain("/tmp/...");
+    expect(prompt).toContain(
+      "Missing proof after trying to install what is needed is a limitation, not a clean verdict"
+    );
   });
 
   test("blocking questions gather upstream evidence first and never ask for the changelog", () => {
@@ -350,7 +360,9 @@ describe("buildPROpenedPrompt", () => {
 
     expect(prompt).toContain("<blocking_questions>");
     expect(prompt).toContain("Gather upstream");
-    expect(prompt).toContain("shallow");
+    expect(prompt).not.toContain("shallow");
+    expect(prompt).not.toContain("git clone --depth 1");
+    expect(prompt).toContain("download the public");
     expect(prompt).toContain('"$TMPDIR"');
     expect(prompt).toContain("removing the");
     expect(prompt).toContain("non-blocking note");
