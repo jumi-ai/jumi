@@ -891,23 +891,85 @@ async function main(): Promise<number> {
       const reviewBase = await seedReviewBase(reviewDir);
       const { stageBaseSkillsForClaude } = await import("./review_base.ts");
       const { claudeReviewBasePrompt } = await import("./claude.ts");
+      const {
+        ensureSandboxedShellHome,
+        resolveWorktreeGitDirsSync,
+        reviewSandboxWrapperPath,
+        writeClaudeReviewShellPlugin,
+      } = await import("./review_sandbox.ts");
       const reviewBasePlugin = await stageBaseSkillsForClaude(join(reviewDir, "base-skills"), reviewBase);
       const reviewBasePrompt = await claudeReviewBasePrompt(reviewBase);
-      const reviewArgv = claudeArgv(
-        {
-          model: PROBE_MODEL,
-          effort: PROBE_EFFORT,
-          workdir: reviewWorkdir,
-          forgeUrl: PROBE_FORGE_URL,
-          trace: { kind: "review", owner: "kirmanak", repo: "jumi" },
-        },
-        undefined,
-        reviewBasePlugin,
-        reviewBasePrompt ?? undefined
-      );
+      // Production review path installs the real Jumi-owned PreToolUse plugin
+      // (Bash rewrite via updatedInput + file-read denies) into a harness
+      // temp outside the checkout: the binary below runs this exact argv, so
+      // a hook the binary no longer loads fails here instead of failing open.
+      // The harness lives under reviewDir so the finally below cleans it.
+      const reviewHarness = await mkdtemp(join(reviewDir, "review-harness-"));
+      const reviewScratch = join(reviewWorkdir, ".jumi-tmp", "scratch");
+      await mkdir(reviewScratch, { recursive: true });
+      await ensureSandboxedShellHome(reviewScratch);
+      const reviewShellPlugin = await writeClaudeReviewShellPlugin(reviewHarness, {
+        workdir: reviewWorkdir,
+        scratchDir: reviewScratch,
+        harnessTempDir: reviewHarness,
+        homeDir: home,
+        gitDirs: resolveWorktreeGitDirsSync(reviewWorkdir),
+        wrapperPath: reviewSandboxWrapperPath(),
+      });
+      try {
+        const probeHooksRaw = await Bun.file(join(reviewShellPlugin, "hooks", "hooks.json")).text();
+        if (
+          !probeHooksRaw.includes("PreToolUse") ||
+          !probeHooksRaw.includes("Grep") ||
+          !probeHooksRaw.includes("Glob")
+        ) {
+          results.push({
+            name: "review shell hook covers Bash plus file-search tools (Grep/Glob)",
+            ok: false,
+            observed: probeHooksRaw.slice(0, 200),
+          });
+        }
+        const probeHookCode = await Bun.file(join(reviewShellPlugin, "hooks", "sandbox-bash.py")).text();
+        if (!probeHookCode.includes("updatedInput")) {
+          results.push({
+            name: "review shell hook rewrites Bash via updatedInput",
+            ok: false,
+            observed: "hook script has no updatedInput rewrite",
+          });
+        }
+      } catch (err) {
+        results.push({
+          name: "review shell hook plugin is readable",
+          ok: false,
+          observed: err instanceof Error ? err.message : String(err),
+        });
+      }
+      const reviewArgv = [
+        ...claudeArgv(
+          {
+            model: PROBE_MODEL,
+            effort: PROBE_EFFORT,
+            workdir: reviewWorkdir,
+            forgeUrl: PROBE_FORGE_URL,
+            trace: { kind: "review", owner: "kirmanak", repo: "jumi" },
+          },
+          undefined,
+          reviewBasePlugin,
+          reviewBasePrompt ?? undefined
+        ),
+        "--plugin-dir",
+        reviewShellPlugin,
+      ];
       if (!reviewArgv.includes("--append-system-prompt") || !reviewArgv.includes("--plugin-dir")) {
         results.push({
           name: "review argv carries the base plugin and base instructions",
+          ok: false,
+          observed: reviewArgv.join(" "),
+        });
+      }
+      if (!reviewArgv.includes("--plugin-dir") || !reviewArgv.includes(reviewShellPlugin)) {
+        results.push({
+          name: "review argv carries the shell-sandbox plugin dir",
           ok: false,
           observed: reviewArgv.join(" "),
         });

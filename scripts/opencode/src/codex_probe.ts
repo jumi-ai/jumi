@@ -195,13 +195,13 @@ const REVIEW_HEAD_SKILL_BODY = "JUMI-CODEX-HEAD-SKILL-PROBE-BODY-should-never-lo
 /** Head `AGENTS.md` marker for the review case: untrusted workdirs must not supply project instructions. */
 export const REVIEW_HEAD_AGENTS = "JUMI-CODEX-HEAD-AGENTS-MD-PROBE-REACHED-should-never-load";
 
-/** The review argv must not bypass hook trust: the workdir is untrusted, so no head hook loads. */
+/** The review argv keeps the hook-trust bypass: the per-spawn hook hash is fresh, so without it `exec` silently skips it. */
 export function judgeReviewArgv(argv: readonly string[]): CaseResult {
-  const ok = !argv.includes("--dangerously-bypass-hook-trust");
+  const ok = argv.includes("--dangerously-bypass-hook-trust");
   return {
-    name: "review argv drops --dangerously-bypass-hook-trust (untrusted workdir loads no head hook)",
+    name: "review argv keeps --dangerously-bypass-hook-trust (fresh per-spawn hook hash would otherwise be skipped)",
     ok,
-    observed: ok ? "bypass flag absent on review spawns" : "review argv still bypasses hook trust",
+    observed: ok ? "bypass flag present on review spawns" : "review argv drops the bypass flag",
   };
 }
 
@@ -299,6 +299,13 @@ async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> 
   const { mkdtemp: mkTemp } = await import("node:fs/promises");
   const { tmpdir: osTmp } = await import("node:os");
   const { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } = await import("./review_base.ts");
+  const {
+    ensureSandboxedShellHome,
+    makeReviewHarnessTempRoot,
+    resolveWorktreeGitDirsSync,
+    reviewSandboxWrapperPath,
+    writeCodexReviewShellHooks,
+  } = await import("./review_sandbox.ts");
   const bodies: string[] = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -312,6 +319,22 @@ async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> 
   await mkdir(join(home, ".codex"), { recursive: true });
   const reviewHome = join(home, "review-codex-home");
   await writeCodexReviewHome(reviewHome, workdir);
+  // Production review path installs the real per-shell PreToolUse hook into
+  // the same review-only CODEX_HOME the spawn uses: the probe below runs the
+  // installed binary against this home, so a hook the binary silently skips
+  // (trust) or rejects (schema) fails here instead of failing open in prod.
+  const harnessTemp = await makeReviewHarnessTempRoot();
+  const scratchProbe = join(workdir, ".jumi-tmp", "scratch");
+  await mkdir(scratchProbe, { recursive: true });
+  await ensureSandboxedShellHome(scratchProbe);
+  const { hooksPath: probeHooksPath } = await writeCodexReviewShellHooks(reviewHome, {
+    workdir,
+    scratchDir: scratchProbe,
+    harnessTempDir: harnessTemp,
+    homeDir: home,
+    gitDirs: resolveWorktreeGitDirsSync(workdir),
+    wrapperPath: reviewSandboxWrapperPath(),
+  });
   // Head checkout for the review case: the production seed plus a head-only
   // skill and a head-only AGENTS.md. The base dir holds only the base skill.
   // The untrusted review home must keep both head markers out of requests.
@@ -331,6 +354,13 @@ async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> 
     const staging = await stageBaseSkillsIntoWorkdir(workdir, baseDir);
     await rm(join(dir, "hook-ran"), { force: true });
     await rm(join(dir, "mcp-ran"), { force: true });
+    // The production hook file the binary will load: a missing file or a
+    // matcher that no longer names Bash fails the probe before the spawn.
+    const { readFile: readProbeFile } = await import("node:fs/promises");
+    const probeHooksRaw = await readProbeFile(probeHooksPath, "utf8");
+    if (!probeHooksRaw.includes("PreToolUse") || !probeHooksRaw.includes("Bash")) {
+      throw new Error("codex probe: production review hooks.json does not register a Bash PreToolUse hook");
+    }
     const argv = codexArgv({
       prompt: "",
       model: "gpt-5.5",
@@ -358,6 +388,7 @@ async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> 
       server.stop(true);
     }
     await staging.cleanup().catch(() => undefined);
+    await rm(harnessTemp, { recursive: true, force: true }).catch(() => undefined);
     return {
       bodies,
       hookRan: await Bun.file(join(dir, "hook-ran")).exists(),

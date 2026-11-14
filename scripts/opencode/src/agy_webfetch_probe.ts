@@ -383,17 +383,60 @@ async function main(): Promise<number> {
     state.bodies = [];
     {
       const home = homes.get(PROBE_DENY_DOMAIN);
-      const { output, timedOut } = await runAgy(reviewWorkdir, home ?? "", origin, model);
-      const outcome = toolOutcome(output);
-      const denyProbe = probeCases(origin).find((probe) => probe.expect === "deny" && probe.host === PROBE_DENY_DOMAIN);
-      if (timedOut || !outcome.seen || !denyProbe) {
-        reviewChecks.push({ ok: false, line: "review: deny run produced no tool result" });
-      } else {
-        const judged = judge(denyProbe, outcome, state.hits);
-        reviewChecks.push({
-          ok: judged.ok,
-          line: `review: forge deny holds with head settings present (${judged.observed})`,
+      // Production review path installs the real Jumi-owned PreToolUse hook
+      // into the same HOME the spawn uses: the binary below loads these exact
+      // files, so a hook file the binary no longer honors fails here instead
+      // of failing open in prod.
+      const { writeAgyReviewShellHook, agyReviewHooksJson } = await import("./review_sandbox.ts");
+      const { installAgyReviewHooks } = await import("./agy.ts");
+      const { resolveWorktreeGitDirsSync, reviewSandboxWrapperPath, ensureSandboxedShellHome } = await import(
+        "./review_sandbox.ts"
+      );
+      let agyHooksRestore: (() => Promise<void>) | undefined;
+      try {
+        const agyScratch = join(reviewWorkdir, ".jumi-tmp", "scratch");
+        await mkdir(agyScratch, { recursive: true });
+        await ensureSandboxedShellHome(agyScratch);
+        const agyHookPath = await writeAgyReviewShellHook(dir, {
+          workdir: reviewWorkdir,
+          scratchDir: agyScratch,
+          harnessTempDir: dir,
+          homeDir: home,
+          gitDirs: resolveWorktreeGitDirsSync(reviewWorkdir),
+          wrapperPath: reviewSandboxWrapperPath(),
         });
+        const agyMatcher = JSON.parse(agyReviewHooksJson(agyHookPath)) as {
+          "jumi-review-shell-sandbox"?: { PreToolUse?: { matcher?: string }[] };
+        };
+        const matcher = agyMatcher["jumi-review-shell-sandbox"]?.PreToolUse?.[0]?.matcher ?? "";
+        reviewChecks.push({
+          ok: matcher.includes("run_command") && matcher.includes("view_file") && matcher.includes("grep_search"),
+          line: `review: shell hook matcher covers run_command plus file/dir tools (${matcher || "<empty>"})`,
+        });
+        agyHooksRestore = await installAgyReviewHooks(home, agyHookPath, undefined);
+      } catch (err) {
+        reviewChecks.push({
+          ok: false,
+          line: `review: shell hook install failed (${err instanceof Error ? err.message : String(err)})`,
+        });
+      }
+      try {
+        const { output, timedOut } = await runAgy(reviewWorkdir, home ?? "", origin, model);
+        const outcome = toolOutcome(output);
+        const denyProbe = probeCases(origin).find(
+          (probe) => probe.expect === "deny" && probe.host === PROBE_DENY_DOMAIN
+        );
+        if (timedOut || !outcome.seen || !denyProbe) {
+          reviewChecks.push({ ok: false, line: "review: deny run produced no tool result" });
+        } else {
+          const judged = judge(denyProbe, outcome, state.hits);
+          reviewChecks.push({
+            ok: judged.ok,
+            line: `review: forge deny holds with head settings present (${judged.observed})`,
+          });
+        }
+      } finally {
+        await agyHooksRestore?.().catch(() => undefined);
       }
     }
     {
