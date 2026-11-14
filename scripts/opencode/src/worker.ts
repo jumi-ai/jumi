@@ -323,6 +323,23 @@ export async function handleIssueCancel(
   }
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const handoffStore = handoffs ?? store?.handoffs ?? handoffsFor({ home: config.home });
+  // A held suggestion `pending` must resolve before the latch wipe below
+  // destroys the only record of it: no follow-up job survives the cancel to
+  // clear it, so the merge would wait forever. Best-effort, never throws.
+  try {
+    const hold = await readSuggestionHold(latches, { owner, repo, issueNumber });
+    if (hold.consumed && hold.count && hold.headSha) {
+      await postSuggestionHoldSuccess(
+        api as unknown as HoldStatusApi,
+        owner,
+        repo,
+        hold.headSha,
+        suggestionHoldSkippedDescription(hold.count, "unassigned")
+      );
+    }
+  } catch {
+    // Best-effort: never fail the cancel on a status post.
+  }
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
     // Worker cancel clears only worker cells; review stuck lives in
@@ -470,7 +487,8 @@ export async function reclaimExpiredWorkerJobs(
               row.issueNumber,
               row.headSha,
               "skipped",
-              "job failed"
+              "job failed",
+              row.prNumber
             );
           }
           logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
@@ -512,7 +530,8 @@ async function resolveWorkerHeld(
   issueNumber: number,
   headSha: string,
   kind: "completed" | "skipped",
-  reason?: string
+  reason?: string,
+  prNumber?: number | null
 ): Promise<void> {
   try {
     const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
@@ -526,7 +545,9 @@ async function resolveWorkerHeld(
         : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
     let targetUrl: string | undefined;
     try {
-      const pr = await api.getPR?.(owner, repo, issueNumber);
+      // The worked issue number is not the pull number on Jumi PRs, so the
+      // pull lookup must use the job's pull number, not the issue number.
+      const pr = await api.getPR?.(owner, repo, prNumber ?? issueNumber);
       if (pr?.html_url) targetUrl = pr.html_url;
     } catch {
       // Best-effort.
@@ -617,7 +638,8 @@ export async function processWorkerTick(
         row.issueNumber,
         row.headSha,
         "skipped",
-        "mode restricted"
+        "mode restricted",
+        row.prNumber
       );
     }
     recordJobCompleted(row.kind, "skipped");
@@ -952,7 +974,8 @@ export async function processWorkerTick(
           job.issueNumber,
           job.headSha ?? "",
           "skipped",
-          "job cancelled"
+          "job cancelled",
+          job.prNumber
         );
       }
       return "processed";
@@ -970,7 +993,8 @@ export async function processWorkerTick(
           job.issueNumber,
           job.headSha ?? "",
           "skipped",
-          "job cancelled"
+          "job cancelled",
+          job.prNumber
         );
       }
       logger(`${issueJobKey(job)} cancelled`);
@@ -988,7 +1012,8 @@ export async function processWorkerTick(
           job.issueNumber,
           job.headSha ?? "",
           "skipped",
-          "job cancelled"
+          "job cancelled",
+          job.prNumber
         );
       }
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
@@ -1026,7 +1051,8 @@ export async function processWorkerTick(
           job.issueNumber,
           job.headSha ?? "",
           "skipped",
-          "job cancelled"
+          "job cancelled",
+          job.prNumber
         );
       }
       try {
@@ -1092,7 +1118,8 @@ export async function processWorkerTick(
           row.issueNumber,
           row.headSha,
           "skipped",
-          "job cancelled"
+          "job cancelled",
+          row.prNumber
         );
       }
       return "processed";
@@ -1195,7 +1222,8 @@ export async function processWorkerTick(
                 row.issueNumber,
                 row.headSha,
                 "skipped",
-                "job failed"
+                "job failed",
+                row.prNumber
               );
             }
             recordJobCompleted(row.kind, "failed");

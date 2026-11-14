@@ -259,10 +259,6 @@ export async function enqueueFollowUpFromReview(
     );
     repoSettings = { state: "missing" };
   }
-  if (repoMode(repoSettings) !== "full") {
-    return logSkip("repository mode is restricted");
-  }
-
   // GitHub pickup label from the same default-branch read: Gitea keeps using
   // assignment and ignores the key. Missing, invalid, or unreadable falls back
   // to `jumi` via the loader default (`repoSettings` is `missing` there).
@@ -276,7 +272,38 @@ export async function enqueueFollowUpFromReview(
     : { botUsername: opts.botUsername };
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
-  if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
+  // The held `pending` lives on the reviewed head: when the head moved, or
+  // when restricted mode means no follow-up will run, the hold must resolve
+  // to `success` here — no follow-up job exists afterwards to clear it.
+  const holdKey = extractWorkingIssueNumber(pr) ?? pr.number;
+  if (pr.head.sha !== opts.row.headSha) {
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      holdKey,
+      opts.row.headSha,
+      opts.markdown,
+      "head moved",
+      pr.html_url
+    );
+    return logSkip("head moved");
+  }
+  if (repoMode(repoSettings) !== "full") {
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      holdKey,
+      opts.row.headSha,
+      opts.markdown,
+      "mode restricted",
+      pr.html_url
+    );
+    return logSkip("repository mode is restricted");
+  }
 
   if (earlySkip === "success trailer") {
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);

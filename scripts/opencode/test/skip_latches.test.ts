@@ -9,6 +9,7 @@ import { MemoryReviewJobStore, PgReviewJobStore, WORKER_JOB_KINDS } from "../src
 import { MemorySkipLatchStore, parseWorkerLatchPath, skipLatchesFor } from "../src/skip_latches.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { readStuckState, writeStuckState } from "../src/stuck.ts";
+import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { handleIssueCancel } from "../src/worker.ts";
 import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
 import { makeComment, makeIssueJob, makeWorkerConfig } from "./fixtures.ts";
@@ -135,6 +136,40 @@ describe("kill switch deletes skip latches", () => {
     });
     expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
       generation: 2,
+      skipReason: null,
+    });
+  });
+
+  test("cancelLedgerWorkerJobs resolves a held pending to success with an unassigned note", async () => {
+    const store = new MemoryReviewJobStore();
+    await markSuggestionHoldConsumed(store.skipLatches, key, "abc123", 2);
+    const statuses: Array<{ sha: string; state: string; description?: string }> = [];
+    await cancelLedgerWorkerJobs({
+      store,
+      api: {
+        findStickyIssueComment: async () => undefined,
+        createIssueComment: async (_o, _r, _i, body) => makeComment({ body }),
+        updateIssueComment: async (_o, _r, _id, body) => makeComment({ body }),
+        createCommitStatus: async (
+          _o: string,
+          _r: string,
+          sha: string,
+          status: { state: "success"; description?: string }
+        ) => {
+          statuses.push({ sha, state: status.state, description: status.description });
+          return status;
+        },
+      },
+      owner: key.owner,
+      repo: key.repo,
+      issueNumber: key.issueNumber,
+      botUsername: "jumi",
+    });
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ sha: "abc123", state: "success" });
+    expect(statuses[0]?.description).toContain("unassigned");
+    expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
+      generation: 1,
       skipReason: null,
     });
   });

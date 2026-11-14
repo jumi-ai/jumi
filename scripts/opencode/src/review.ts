@@ -71,6 +71,7 @@ import {
   effectiveSuggestionCap,
   isReviewDraftsEnabled,
   isSuggestionFollowupEnabled,
+  isSuggestionHoldEnabled,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
@@ -1730,40 +1731,55 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     !parsed.verdict.incomplete && effectiveVerdict.state === "success" && blockingQuestions === 0
       ? trailerSuggestionCount(parsed.verdict.description)
       : 0;
-  if (holdSuggestionCount > 0 && settingsForHold?.state === "valid" && settingsForHold.automerge === true) {
-    const deployOn = opts.automergeEnabled ?? true;
-    if (deployOn) {
-      if (!isSuggestionFollowupEnabled(settingsForHold)) {
-        state = "success";
-        description = suggestionHoldSkippedDescription(holdSuggestionCount, "suggestions disabled");
-      } else if (settingsForHold.mode !== "full") {
-        state = "success";
-        description = suggestionHoldSkippedDescription(holdSuggestionCount, "mode restricted");
-      } else if (settingsForHold.suggestionsHoldMerge === false) {
-        // Explicit opt-out: today's success, follow-up still runs.
-      } else if (!opts.skipLatches) {
-        // No latch store: cannot track the one-hold flag, keep today's success.
-      } else {
-        try {
-          const closer = extractWorkingIssueNumber(pr) ?? pr.number;
-          const latchKey = { owner: opts.owner, repo: opts.repo, issueNumber: closer };
-          const hold = await readSuggestionHold(opts.skipLatches, latchKey);
-          if (!hold.consumed) {
-            await markSuggestionHoldConsumed(opts.skipLatches, latchKey, opts.expectedHeadSha, holdSuggestionCount);
-            state = "pending";
-            description = suggestionHoldPendingDescription(holdSuggestionCount);
-            logDiagnostic(log, "review_suggestion_hold", {
-              review: reviewLabel,
-              head: opts.expectedHeadSha,
-              suggestions: holdSuggestionCount,
-            });
-          }
-        } catch (err) {
-          log(`suggestion hold unavailable for ${reviewLabel}: ${errorMessage(err)}`);
-        }
+  // One policy helper decides the hold so reviews and tests read the same
+  // rule: auto-merge on, deployment switch on, full mode, no opt-out.
+  // Follow-up off and restricted mode still post `success`, with a note
+  // naming why, so the merge never waits on a follow-up that cannot run.
+  const holdDeployOn = opts.automergeEnabled ?? true;
+  const holdEnabled =
+    holdSuggestionCount > 0 &&
+    settingsForHold != null &&
+    isSuggestionHoldEnabled(settingsForHold, holdDeployOn) &&
+    isSuggestionFollowupEnabled(settingsForHold);
+  if (holdEnabled && opts.skipLatches) {
+    try {
+      const closer = extractWorkingIssueNumber(pr) ?? pr.number;
+      const latchKey = { owner: opts.owner, repo: opts.repo, issueNumber: closer };
+      const hold = await readSuggestionHold(opts.skipLatches, latchKey);
+      if (!hold.consumed) {
+        await markSuggestionHoldConsumed(opts.skipLatches, latchKey, opts.expectedHeadSha, holdSuggestionCount);
+        state = "pending";
+        description = suggestionHoldPendingDescription(holdSuggestionCount);
+        logDiagnostic(log, "review_suggestion_hold", {
+          review: reviewLabel,
+          head: opts.expectedHeadSha,
+          suggestions: holdSuggestionCount,
+        });
       }
+    } catch (err) {
+      log(`suggestion hold unavailable for ${reviewLabel}: ${errorMessage(err)}`);
     }
+  } else if (
+    holdSuggestionCount > 0 &&
+    settingsForHold?.state === "valid" &&
+    settingsForHold.automerge === true &&
+    holdDeployOn &&
+    !isSuggestionFollowupEnabled(settingsForHold)
+  ) {
+    state = "success";
+    description = suggestionHoldSkippedDescription(holdSuggestionCount, "suggestions disabled");
+  } else if (
+    holdSuggestionCount > 0 &&
+    settingsForHold?.state === "valid" &&
+    settingsForHold.automerge === true &&
+    holdDeployOn &&
+    settingsForHold.mode !== "full"
+  ) {
+    state = "success";
+    description = suggestionHoldSkippedDescription(holdSuggestionCount, "mode restricted");
   }
+  // An explicit `suggestions_hold_merge: false` opt-out and a missing latch
+  // store keep today's success silently: the follow-up still runs as today.
   await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;

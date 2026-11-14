@@ -80,27 +80,6 @@ export interface HoldStatusApi {
   ): Promise<unknown>;
 }
 
-/** Post the held `pending` status. Never throws: a failed hold status must not fail the review. */
-export async function postSuggestionHoldPending(
-  api: HoldStatusApi,
-  owner: string,
-  repo: string,
-  headSha: string,
-  count: number,
-  targetUrl?: string
-): Promise<void> {
-  try {
-    await api.createCommitStatus(owner, repo, headSha, {
-      state: "pending",
-      context: JUMI_REVIEW_CONTEXT,
-      description: holdStatusDescription(suggestionHoldPendingDescription(count)),
-      ...(targetUrl ? { target_url: targetUrl } : {}),
-    });
-  } catch {
-    // Best-effort: the review body already landed.
-  }
-}
-
 /** Resolve a held `pending` to `success` with a note. Never throws. */
 export async function postSuggestionHoldSuccess(
   api: HoldStatusApi,
@@ -120,9 +99,4 @@ export async function postSuggestionHoldSuccess(
   } catch {
     // Best-effort: never fail the job on a status post.
   }
-}
-
-/** Context for the resolve post. Exported so callers use the same check name as reviews. */
-export function suggestionHoldContext(): string {
-  return JUMI_REVIEW_CONTEXT;
 }
