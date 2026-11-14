@@ -216,6 +216,7 @@ export class ReviewVerdictStore {
       title,
       body,
     });
+    this.clearStaleSuccess();
     return { ok: true, id };
   }
 
@@ -246,6 +247,7 @@ export class ReviewVerdictStore {
       title,
       body,
     });
+    this.clearStaleSuccess();
     return { ok: true };
   }
 
@@ -264,6 +266,23 @@ export class ReviewVerdictStore {
       if (finding.severity === "bug" || finding.severity === "risk") count++;
     }
     return count;
+  }
+
+  /** Open bug/risk findings. A recorded success verdict implies zero. */
+  openBlockingCount(): number {
+    return this.blockingOpen();
+  }
+
+  /**
+   * A finding recorded after a success verdict is newer information that
+   * invalidates it ("last wins" across tools, not just across verdict
+   * calls). Clearing keeps the store from ever holding success alongside
+   * an open bug/risk, whatever order the model calls the tools in.
+   */
+  private clearStaleSuccess(): void {
+    if (this.verdict?.state === "success" && this.blockingOpen() > 0) {
+      this.verdict = undefined;
+    }
   }
 
   setVerdict(input: { state: unknown; reason?: unknown }): { ok: true } | ReviewMcpError {

@@ -83,6 +83,34 @@ describe("ReviewVerdictStore validation", () => {
     expect(store.getVerdict()).toEqual({ state: "success" });
   });
 
+  test("a blocking finding recorded after success clears the verdict", () => {
+    const store = makeStore();
+    expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    expect(store.addFinding({ path: "src/a.ts", line: 2, severity: "bug", body: "broken" }).ok).toBe(true);
+    expect(store.getVerdict()).toBeUndefined();
+    expect(store.hasVerdict()).toBe(false);
+    expect(store.openBlockingCount()).toBe(1);
+    expect(store.toMarkdown()).toContain("Incomplete review: no verdict");
+    expect(store.setVerdict({ state: "failure", reason: "blocking" }).ok).toBe(true);
+  });
+
+  test("escalating a finding to bug after success clears the verdict", () => {
+    const store = makeStore();
+    const added = store.addFinding({ path: "src/a.ts", line: 2, severity: "question", body: "why?" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    expect(store.updateFinding({ id: added.id, severity: "risk" }).ok).toBe(true);
+    expect(store.getVerdict()).toBeUndefined();
+  });
+
+  test("a non-blocking finding recorded after success keeps the verdict", () => {
+    const store = makeStore();
+    expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    expect(store.addFinding({ path: "src/a.ts", line: 2, severity: "suggestion", body: "nit" }).ok).toBe(true);
+    expect(store.getVerdict()).toEqual({ state: "success" });
+  });
+
   test("update and remove round-trip, unknown id rejected", () => {
     const store = makeStore();
     const added = store.addFinding({ path: "src/a.ts", line: 2, severity: "question", body: "why?" });
