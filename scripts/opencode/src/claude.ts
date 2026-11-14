@@ -40,6 +40,7 @@ import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsForClaude } from "./review_base.ts";
 import { claudeMcpArgs } from "./review_mcp.ts";
+import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
@@ -525,8 +526,13 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         }
         throw err;
       }
+      // Review spawns run confined: the wrapper argv fails closed when
+      // Landlock is unavailable, so pull code never runs unsandboxed.
+      // Outside the spawn try: a refusal must keep its identity, not be
+      // re-wrapped as infra.
+      const claudeSpawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
       try {
-        return Bun.spawn(args, {
+        return Bun.spawn(claudeSpawnArgv, {
           cwd: opts.workdir,
           stdin: Bun.file(tmpPath),
           stdout: "pipe",

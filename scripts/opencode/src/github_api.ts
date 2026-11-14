@@ -995,6 +995,39 @@ export class GithubAPI {
     return pulls.map(toPull);
   }
 
+  /**
+   * Forge-authoritative closing list for the review context: GitHub's
+   * `closingIssuesReferences` for the pull. Numbers only; callers fall back
+   * to the shared parser when this throws.
+   */
+  async listClosingIssues(owner: string, repo: string, index: number): Promise<number[]> {
+    const data = await this.graphql<{
+      repository?: { pullRequest?: { closingIssuesReferences?: { nodes?: Array<{ number?: unknown }> } } };
+    }>(
+      `query ($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          pullRequest(number: $number) {
+            closingIssuesReferences(first: 100) {
+              nodes { number }
+            }
+          }
+        }
+      }`,
+      { owner, name: repo, number: index },
+      { owner, repo }
+    );
+    const nodes = data.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+    const seen = new Set<number>();
+    const result: number[] = [];
+    for (const node of nodes) {
+      const value = typeof node?.number === "number" ? node.number : Number(node?.number);
+      if (!Number.isFinite(value) || value <= 0 || seen.has(value)) continue;
+      seen.add(value);
+      result.push(value);
+    }
+    return result;
+  }
+
   async createPullRequest(
     owner: string,
     repo: string,

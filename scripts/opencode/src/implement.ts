@@ -54,7 +54,14 @@ import {
 import type { FollowUpResult } from "./followup.ts";
 import type { ForgeKind } from "./forge.ts";
 import { buildBlockedByRejectedPrompt, buildImplementPrompt, buildImplementYieldPrompt } from "./git.ts";
-import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
+import {
+  closesIssuePattern,
+  isVisibleClosingMatch,
+  pullRequestClosesIssue,
+  refsIssuePattern,
+  upsertWorkerComment,
+  visibleClosingText,
+} from "./gitea_issues.ts";
 import {
   type HandoffStore,
   handoffKeyForJob,
@@ -529,8 +536,21 @@ export function buildPullRequestBody(
 export function rewriteClosingToRefs(text: string, issueNumber: number): string {
   // Replace closing-keyword references to the worked issue with a
   // non-closing `Refs #N` reference. Other issues keep their keywords.
+  // Only visible references count: code spans, fenced blocks, and quotes
+  // never close on the forge, so they are left untouched.
   const pattern = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#${issueNumber}\b`, "gi");
-  return text.replace(pattern, `Refs #${issueNumber}`);
+  let result = "";
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const matched = match[0];
+    if (!isVisibleClosingMatch(text, start, matched.length)) continue;
+    result += text.slice(last, start);
+    result += `Refs #${issueNumber}`;
+    last = start + matched.length;
+  }
+  if (last === 0) return text;
+  return result + text.slice(last);
 }
 
 function pullRequestText(
@@ -543,12 +563,12 @@ function pullRequestText(
   if (fileContents == null) return fallback;
   let text = parentOwnedProse(fileContents);
   if (!text) return fallback;
-  if (refs && closesIssuePattern(issueNumber).test(text)) {
+  if (refs && closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
     text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
     if (!text) return fallback;
   }
-  if (closesIssuePattern(issueNumber).test(text)) return text;
-  if (refsIssuePattern(issueNumber).test(text)) return text;
+  if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
+  if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
   return `${text}\n\n${fallback}`;
 }
 

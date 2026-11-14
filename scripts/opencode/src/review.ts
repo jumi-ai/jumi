@@ -1026,6 +1026,43 @@ export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): stri
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
 }
 
+/**
+ * Forge-authoritative closing list for the review context. When the forge
+ * exposes `listClosingIssues` (GitHub's `closingIssuesReferences`) that list
+ * wins; otherwise (Gitea has no equivalent, or the call fails) fall back to
+ * the shared closing-keyword parser, which already ignores code spans,
+ * fenced blocks, and quotes. Never throws: failures log and fall back.
+ */
+export async function resolveClosingIssuesForReview(opts: {
+  forge: Pick<ReviewApi, "listClosingIssues">;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  pr: Pull;
+  log?: (message: string) => void;
+}): Promise<{ issues: number[]; source: "forge" | "fallback" }> {
+  const fallback = extractClosingIssueNumbers(opts.pr);
+  const list = opts.forge.listClosingIssues;
+  if (typeof list !== "function") return { issues: fallback, source: "fallback" };
+  try {
+    const issues = await list.call(opts.forge, opts.owner, opts.repo, opts.prNumber);
+    const seen = new Set<number>();
+    const result: number[] = [];
+    for (const value of issues ?? []) {
+      if (!Number.isFinite(value) || value <= 0 || value === opts.pr.number) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      result.push(value);
+    }
+    return { issues: result, source: "forge" };
+  } catch (err) {
+    opts.log?.(
+      `closing issues unavailable, falling back to parser: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return { issues: fallback, source: "fallback" };
+  }
+}
+
 export function isTerminalSkipReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return (
@@ -2016,7 +2053,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       excludedSet.has(file.filename) ? { ...file, patch: undefined } : file
     );
 
-    const ids = extractClosingIssueNumbers(pr);
+    const closing = await resolveClosingIssuesForReview({
+      forge: forgeApi,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: pr.number,
+      pr,
+      log,
+    });
+    const parserIds = extractClosingIssueNumbers(pr);
+    const ids = [...new Set([...closing.issues, ...parserIds])];
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
@@ -2349,6 +2395,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      closingIssues: closing.issues,
       // Written for the first runner in attempt order; `resolveOpenCodePrompt`
       // rewords the file's guidance per attempt from the actual runner.
       runnerType: effectiveChain?.[0]?.type,
@@ -2384,9 +2431,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // and the verdict through MCP tools; the parent publishes from this
     // in-memory state, never from a file. The token rides only in the harness
     // MCP config under the spawn temp root, never in the prompt or the child
-    // env. When the store holds anything at exit it wins and any
-    // JUMI_REVIEW.md in the worktree is ignored (transition fallback for
-    // runners without tool support).
+    // env. Single-domain sandbox limit: that temp root is under the RW
+    // checkout (`.jumi-tmp`), so sandboxed pull code can still read the token
+    // file and call the server (see docs/review-sandbox.md). When the store
+    // holds anything at exit it wins and any JUMI_REVIEW.md in the worktree
+    // is ignored (transition fallback for runners without tool support).
     const verdictStore = new ReviewVerdictStore({
       changedFiles: prFiles,
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
@@ -2407,7 +2456,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         variant: opts.variant,
         workdir: opts.workspace,
         home: opts.home,
-        sanitizeEnv: opts.sanitizeOpenCodeEnv,
+        sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel,
