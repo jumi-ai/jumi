@@ -19,7 +19,7 @@
 import { existsSync } from "node:fs";
 import { agentInstance } from "./agent_instance.ts";
 import type { TraceContext } from "./engine.ts";
-import { PUBLIC_PHOENIX_HOST } from "./phoenix.ts";
+import { phoenixPublicHost } from "./phoenix.ts";
 
 /** Where the Dockerfile vendors the plugin. Not an operator-facing knob. */
 export const CLAUDE_TRACING_PLUGIN_DIR = "/app/claude-plugins/claude-code-tracing";
@@ -42,6 +42,8 @@ export function setClaudeTracingPluginDirForTests(dir: string | undefined): void
  *
  * The public Phoenix hostname is refused here for the same reason the OpenCode
  * exporter refuses it: ingest is the in-cluster service, never the ingress.
+ * The hostname comes from `PHOENIX_PUBLIC_HOST`; when unset there is no
+ * public-host check.
  */
 export function phoenixPluginEndpoint(raw: string | undefined): string | undefined {
   const trimmed = raw?.trim();
@@ -53,7 +55,8 @@ export function phoenixPluginEndpoint(raw: string | undefined): string | undefin
     return undefined;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-  if (url.hostname === PUBLIC_PHOENIX_HOST) return undefined;
+  const publicHost = phoenixPublicHost();
+  if (publicHost && url.hostname.toLowerCase() === publicHost) return undefined;
   const path = url.pathname.replace(/\/+$/, "").replace(/\/v1\/traces$/, "");
   return `${url.origin}${path}`;
 }

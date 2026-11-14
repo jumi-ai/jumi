@@ -7,7 +7,7 @@ import {
   buildOpenCodeTraceRequest,
   exportOpenCodeTrace,
   PHOENIX_OTLP_TIMEOUT_MS,
-  PUBLIC_PHOENIX_HOST,
+  phoenixPublicHost,
   resetTraceExportForTests,
   setTraceFetchForTests,
   setTraceLimitsForTests,
@@ -17,12 +17,15 @@ import {
 import { renderTokenMetrics } from "../src/token_metrics.ts";
 
 const originalEndpoint = process.env.PHOENIX_OTLP_ENDPOINT;
+const originalPublicHost = process.env.PHOENIX_PUBLIC_HOST;
 const originalAgent = process.env.AGENT_INSTANCE;
 
 afterEach(() => {
   resetTraceExportForTests();
   if (originalEndpoint === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
   else process.env.PHOENIX_OTLP_ENDPOINT = originalEndpoint;
+  if (originalPublicHost === undefined) delete process.env.PHOENIX_PUBLIC_HOST;
+  else process.env.PHOENIX_PUBLIC_HOST = originalPublicHost;
   if (originalAgent === undefined) delete process.env.AGENT_INSTANCE;
   else process.env.AGENT_INSTANCE = originalAgent;
 });
@@ -551,8 +554,9 @@ describe("exportOpenCodeTrace", () => {
     expect(traceExportErrors()).toBe(0);
   });
 
-  test("rejects the public Phoenix hostname", async () => {
-    process.env.PHOENIX_OTLP_ENDPOINT = `https://${PUBLIC_PHOENIX_HOST}`;
+  test("rejects the configured public Phoenix hostname", async () => {
+    process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
+    process.env.PHOENIX_OTLP_ENDPOINT = `https://phoenix.example.test`;
     let called = false;
     setTraceFetchForTests(async () => {
       called = true;
@@ -561,6 +565,63 @@ describe("exportOpenCodeTrace", () => {
     await exportOpenCodeTrace({ dbPath: "/no/such.db" });
     expect(called).toBe(false);
     expect(traceExportErrors()).toBe(1);
+  });
+
+  test("no public-host check when PHOENIX_PUBLIC_HOST is unset", async () => {
+    delete process.env.PHOENIX_PUBLIC_HOST;
+    process.env.PHOENIX_OTLP_ENDPOINT = "https://phoenix.example.test";
+    let called = false;
+    setTraceFetchForTests(async () => {
+      called = true;
+      return new Response(null, { status: 200 });
+    });
+    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-public-"));
+    const dbPath = join(dir, "opencode-session.db");
+    try {
+      writeTraceDb(dbPath, { tools: [{ tool: "bash", status: "completed", command: "pwd" }] });
+      await exportOpenCodeTrace({ dbPath });
+      expect(called).toBe(true);
+      expect(traceExportErrors()).toBe(0);
+      expect(phoenixPublicHost()).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("PHOENIX_PUBLIC_HOST set blocks that host", async () => {
+    process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
+    expect(phoenixPublicHost()).toBe("phoenix.example.test");
+    process.env.PHOENIX_OTLP_ENDPOINT = "https://phoenix.example.test/v1/traces";
+    let called = false;
+    setTraceFetchForTests(async () => {
+      called = true;
+      return new Response(null, { status: 200 });
+    });
+    await exportOpenCodeTrace({ dbPath: "/no/such.db" });
+    expect(called).toBe(false);
+    expect(traceExportErrors()).toBe(1);
+  });
+
+  test("PHOENIX_PUBLIC_HOST normalizes URL and host:port forms to the hostname", async () => {
+    for (const value of [
+      "https://phoenix.example.test",
+      "https://phoenix.example.test/v1/traces",
+      "phoenix.example.test:6006",
+      "https://phoenix.example.test:6006/v1/traces",
+    ]) {
+      process.env.PHOENIX_PUBLIC_HOST = value;
+      expect(phoenixPublicHost()).toBe("phoenix.example.test");
+      process.env.PHOENIX_OTLP_ENDPOINT = "https://phoenix.example.test/v1/traces";
+      let called = false;
+      setTraceFetchForTests(async () => {
+        called = true;
+        return new Response(null, { status: 200 });
+      });
+      await exportOpenCodeTrace({ dbPath: "/no/such.db" });
+      expect(called).toBe(false);
+      expect(traceExportErrors()).toBe(1);
+      resetTraceExportForTests();
+    }
   });
 
   test("POSTs OTLP protobuf and records HTTP failures", async () => {

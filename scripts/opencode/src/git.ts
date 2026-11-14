@@ -338,7 +338,10 @@ export function applyOpenCodeInlineConfig(env: Record<string, string>, opts: Ope
     existing = {};
   }
   const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-  const permissions: unknown[] = [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv))];
+  const permissions: unknown[] = [
+    ...listOf(existing.permissions),
+    ...forgePermissions(forgeDenyHost(opts.extraEnv, opts.forgeUrl)),
+  ];
   const searxngBaseUrl = searxngUrlFromEnv();
   let mcp = existing.mcp;
   if (searxngBaseUrl !== undefined) {
@@ -411,7 +414,7 @@ async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Prom
   const dir = join(openCodeXdgConfigHome(tempRoot), "opencode");
   await mkdir(dir, { recursive: true });
   const base = JSON.parse(
-    forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv), searxngUrlFromEnv() !== undefined)
+    forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv, opts.forgeUrl), searxngUrlFromEnv() !== undefined)
   ) as Record<string, unknown>;
   if (opts.reviewMcp && opts.trace?.kind === "review") {
     const { openCodeReviewMcpEntry } = await import("./review_mcp.ts");

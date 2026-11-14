@@ -55,7 +55,6 @@ import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
-import { FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
 
 /** Text the stub answers with; seeing it means the session really completed. */
@@ -89,7 +88,14 @@ export const PROBE_CHECKOUT_SKILL = "jumi-probe-checkout-skill";
 /** Line in the checkout's `AGENTS.md`; a model request carrying it proves the file loaded. */
 const PROBE_INSTRUCTIONS_MARKER = "JUMI-CLAUDE-AGENTS-MD-PROBE-REACHED";
 /** A forge URL the checkout's settings try to reopen. Never fetched: the deny is the point. */
-export const PROBE_FORGE_HOST = `gitea.${FORGE_DENY_DOMAIN}`;
+export const PROBE_FORGE_HOST = `gitea.kirmanak.stream`;
+/**
+ * Configured forge URL the probe passes as `forgeUrl`, mirroring production
+ * (`review.ts` passes `config.giteaUrl`). Without it `forgeDenyHost` has no
+ * `GIT_AUTH_HOST` and no fallback, the argv carries empty `domain:` rules, and
+ * the deny check below fails against an argv production never emits.
+ */
+export const PROBE_FORGE_URL = `https://${PROBE_FORGE_HOST}`;
 
 /**
  * Production flags whose *value* the installed binary validates. Everything
@@ -742,7 +748,7 @@ async function main(): Promise<number> {
     // production run below be judged on a span that actually arrived.
     process.env.PHOENIX_OTLP_ENDPOINT = `http://127.0.0.1:${phoenix.port}`;
     await seedCheckoutProbe(home, workdir);
-    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir });
+    const argv = claudeArgv({ model: PROBE_MODEL, effort: PROBE_EFFORT, workdir, forgeUrl: PROBE_FORGE_URL });
     const pinned = pinnedFlagValues(argv);
     // The same env `runClaude` merges into a production spawn, so the plugin is
     // configured here exactly as it is in the homelab.
@@ -892,6 +898,7 @@ async function main(): Promise<number> {
           model: PROBE_MODEL,
           effort: PROBE_EFFORT,
           workdir: reviewWorkdir,
+          forgeUrl: PROBE_FORGE_URL,
           trace: { kind: "review", owner: "kirmanak", repo: "jumi" },
         },
         undefined,

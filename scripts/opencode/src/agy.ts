@@ -419,7 +419,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await seedAgySettings(home);
     // After extraEnv, so a job-supplied HOME is the file the child will load,
     // and a settings file that cannot take the deny fails the spawn closed.
-    await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv));
+    await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv, opts.forgeUrl));
     // Same HOME, same fail-closed rule: the searxng server is registered in
     // the per-spawn MCP config when an endpoint is configured, and pruned
     // otherwise, so a checkout cannot add, replace or shadow the server.

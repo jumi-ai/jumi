@@ -15,11 +15,8 @@
  *
  * The host is per-spawn, not compile-time: the forge is configured, and the
  * GitHub factory hands the child `GIT_AUTH_HOST=github.com` with a write-capable
- * token, so baking in the homelab Gitea host would leave that factory open.
+ * token, so baking in one forge host would leave the other factory open.
  */
-
-/** Fallback for spawns that carry no `GIT_AUTH_HOST` (reviewer, tests). */
-export const FORGE_DENY_DOMAIN = "kirmanak.stream";
 
 export const PERMISSION_DENY_RE = /Permission denied:\s*\w+|Blocked by configuration policy/i;
 
@@ -28,16 +25,45 @@ export function isPermissionDenyText(text: unknown): boolean {
   return PERMISSION_DENY_RE.test(text);
 }
 
+/** Hostname from a configured forge URL (`config.giteaUrl` on either forge). Empty when unparseable. */
+export function forgeHostFromUrl(url: string | undefined): string {
+  const raw = url?.trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    // A bare `host:port` parses as scheme `host:` with an empty hostname, so
+    // only trust the parse when it actually yielded a host; otherwise fall
+    // through to the bare parsing below.
+    if (parsed.hostname) return parsed.hostname.toLowerCase().replace(/:\d+$/, "");
+  } catch {
+    // Not a URL at all: parse it as a bare host below.
+  }
+  const bare =
+    raw
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .split("/")[0] ?? "";
+  const host = bare.split("@").pop() ?? "";
+  return host.replace(/:\d+$/, "");
+}
+
 /**
  * The host the child must not reach, taken from the same env the git credential
  * helper authenticates against (`gitEnv` sets it from the configured forge URL).
  * The port is dropped: Claude `domain:` rules match the hostname, and the
  * OpenCode substring rule still covers `host:port` URLs without it.
+ *
+ * The fallback is the configured forge URL (`config.giteaUrl` host on Gitea,
+ * the configured GitHub host on GitHub) for spawns that carry no
+ * `GIT_AUTH_HOST` (reviewer, tests). Empty when neither is known.
  */
-export function forgeDenyHost(extraEnv?: Record<string, string>): string {
+export function forgeDenyHost(extraEnv?: Record<string, string>, fallbackForgeUrl?: string): string {
   const host = extraEnv?.GIT_AUTH_HOST?.trim().toLowerCase();
-  if (!host) return FORGE_DENY_DOMAIN;
-  return host.replace(/:\d+$/, "");
+  if (host) return host.replace(/:\d+$/, "");
+  const urlHost = extraEnv?.GIT_AUTH_URL ? forgeHostFromUrl(extraEnv.GIT_AUTH_URL) : "";
+  if (urlHost) return urlHost;
+  if (fallbackForgeUrl) return forgeHostFromUrl(fallbackForgeUrl);
+  return "";
 }
 
 /**
@@ -54,6 +80,12 @@ export interface ForgePermissionRule {
 }
 
 export function forgePermissions(host: string): ForgePermissionRule[] {
+  if (!host) {
+    return [
+      { action: "webfetch", resource: "*", effect: "allow" },
+      { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
+    ];
+  }
   return [
     { action: "webfetch", resource: "*", effect: "allow" },
     { action: "webfetch", resource: `*${host}*`, effect: "deny" },
@@ -86,13 +118,14 @@ export function forgeOpenCodeConfigContent(host: string): string {
  * `searxng_search` stays callable.
  */
 export function forgeOpenCodeGlobalConfig(host: string, searxng = false): string {
-  return JSON.stringify({
-    policies: [
-      { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
-      { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
-      ...(searxng ? [{ action: "websearch.use", resource: "*", effect: "deny" }] : []),
-    ],
-  });
+  const policies = host
+    ? [
+        { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
+        { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
+      ]
+    : [{ action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" }];
+  if (searxng) policies.push({ action: "websearch.use", resource: "*", effect: "deny" });
+  return JSON.stringify({ policies });
 }
 
 /**

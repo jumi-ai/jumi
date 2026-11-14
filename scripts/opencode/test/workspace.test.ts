@@ -21,6 +21,7 @@ import {
   GITHUB_GIT_USERNAME,
   type GitRunner,
   gitConfigArgs,
+  gitEnv,
   prepareGradleSeed,
   redactGitSecrets,
   removeReviewWorkspace,
@@ -128,6 +129,50 @@ describe("redactGitSecrets", () => {
   });
 });
 
+describe("git author identity", () => {
+  const auth = { giteaUrl: "https://gitea.example.test", username: "jumi", token: "bot-token" };
+
+  test("JUMI_GIT_EMAIL set is used for author and committer; unset uses the neutral default", () => {
+    const prevEmail = process.env.JUMI_GIT_EMAIL;
+    const prevName = process.env.JUMI_GIT_NAME;
+    try {
+      delete process.env.JUMI_GIT_EMAIL;
+      delete process.env.JUMI_GIT_NAME;
+      const unset = gitEnv(auth);
+      expect(unset.GIT_AUTHOR_NAME).toBe("jumi");
+      expect(unset.GIT_AUTHOR_EMAIL).toBe("jumi@localhost");
+      expect(unset.GIT_COMMITTER_NAME).toBe("jumi");
+      expect(unset.GIT_COMMITTER_EMAIL).toBe("jumi@localhost");
+
+      process.env.JUMI_GIT_EMAIL = "custom@example.test";
+      process.env.JUMI_GIT_NAME = "custom-bot";
+      const set = gitEnv(auth);
+      expect(set.GIT_AUTHOR_NAME).toBe("custom-bot");
+      expect(set.GIT_AUTHOR_EMAIL).toBe("custom@example.test");
+      expect(set.GIT_COMMITTER_NAME).toBe("custom-bot");
+      expect(set.GIT_COMMITTER_EMAIL).toBe("custom@example.test");
+    } finally {
+      if (prevEmail === undefined) delete process.env.JUMI_GIT_EMAIL;
+      else process.env.JUMI_GIT_EMAIL = prevEmail;
+      if (prevName === undefined) delete process.env.JUMI_GIT_NAME;
+      else process.env.JUMI_GIT_NAME = prevName;
+    }
+  });
+
+  test("an auth.authorEmail set by the forge auth still wins", () => {
+    const prevEmail = process.env.JUMI_GIT_EMAIL;
+    try {
+      process.env.JUMI_GIT_EMAIL = "custom@example.test";
+      const env = gitEnv({ ...auth, authorName: "forge-bot", authorEmail: "forge@example.test" });
+      expect(env.GIT_AUTHOR_NAME).toBe("forge-bot");
+      expect(env.GIT_AUTHOR_EMAIL).toBe("forge@example.test");
+    } finally {
+      if (prevEmail === undefined) delete process.env.JUMI_GIT_EMAIL;
+      else process.env.JUMI_GIT_EMAIL = prevEmail;
+    }
+  });
+});
+
 describe("review workspace", () => {
   test("creates a unique empty workspace under the configured root", async () => {
     const root = await mkdtemp(join(tmpdir(), "jumi-workspace-test-"));
@@ -194,9 +239,9 @@ describe("review workspace", () => {
       expect(calls[0].env.GIT_CONFIG_GLOBAL).toBe("/dev/null");
       expect(calls[0].env.GIT_LFS_SKIP_SMUDGE).toBe("1");
       expect(calls[0].env.GIT_AUTHOR_NAME).toBe("jumi");
-      expect(calls[0].env.GIT_AUTHOR_EMAIL).toBe("jumi@kirmanak.stream");
+      expect(calls[0].env.GIT_AUTHOR_EMAIL).toBe("jumi@localhost");
       expect(calls[0].env.GIT_COMMITTER_NAME).toBe("jumi");
-      expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("jumi@kirmanak.stream");
+      expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("jumi@localhost");
       expect(calls[0].env.GIT_CONFIG_COUNT).toBeUndefined();
       expect(calls[0].env.GIT_AUTH_USERNAME).toBe("jumi");
       expect(calls[0].env.GIT_AUTH_TOKEN).toBe("bot-token");

@@ -29,7 +29,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FORGE_DENY_DOMAIN,
   forgeOpenCodeConfigContent,
   forgeOpenCodeGlobalConfig,
   forgePermissions,
@@ -37,6 +36,9 @@ import {
 } from "./forge_webfetch.ts";
 import { applyOpenCodeInlineConfig, type OpenCodeRunOptions } from "./git.ts";
 import { SEARXNG_OPENCODE_TOOL, SEARXNG_SERVER_NAME } from "./searxng.ts";
+
+/** Example homelab host for manual probing only; production derives the deny host from config. */
+const PROBE_DENY_DOMAIN = "kirmanak.stream";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
@@ -281,7 +283,7 @@ async function runOpenCode(
         // `skills` roots resolve against it. Same line as the production spawn.
         PWD: workdir,
         OPENCODE_CONFIG: configPath,
-        OPENCODE_CONFIG_CONTENT: opts.configContent ?? forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
+        OPENCODE_CONFIG_CONTENT: opts.configContent ?? forgeOpenCodeConfigContent(PROBE_DENY_DOMAIN),
         XDG_CONFIG_HOME: xdgConfigHome,
         ...extraEnv,
       },
@@ -329,7 +331,7 @@ async function runReviewOpenCode(
       { action: "edit", resource: "*", effect: "deny" },
       { action: "subagent", resource: "*", effect: "deny" },
       { action: "question", resource: "*", effect: "deny" },
-      ...forgePermissions(FORGE_DENY_DOMAIN),
+      ...forgePermissions(PROBE_DENY_DOMAIN),
     ],
     skills: [join(baseDir, "skills")],
     instructions: [join(baseDir, "AGENTS.md")],
@@ -456,10 +458,10 @@ async function main(): Promise<number> {
     const pluginMarker = join(dir, "repo-plugin-ran");
     await seedRepository(workdir, pluginMarker);
     await mkdir(join(dir, "xdg-config", "opencode"), { recursive: true });
-    await writeFile(join(dir, "xdg-config", "opencode", "opencode.json"), forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN));
+    await writeFile(join(dir, "xdg-config", "opencode", "opencode.json"), forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN));
     const configPath = await writeProbeConfig(dir, origin);
 
-    console.log(`Permission rules under test: ${JSON.stringify(forgePermissions(FORGE_DENY_DOMAIN))}`);
+    console.log(`Permission rules under test: ${JSON.stringify(forgePermissions(PROBE_DENY_DOMAIN))}`);
     for (const probe of probeCases(origin)) {
       state.url = probe.url;
       state.reached = false;
@@ -522,7 +524,7 @@ async function main(): Promise<number> {
         const inlineOpts: OpenCodeRunOptions = {
           model: "probe",
           workdir,
-          extraEnv: { GIT_AUTH_HOST: FORGE_DENY_DOMAIN },
+          extraEnv: { GIT_AUTH_HOST: PROBE_DENY_DOMAIN },
         };
         applyOpenCodeInlineConfig(inlineEnv, inlineOpts);
         inlineContent = inlineEnv.OPENCODE_CONFIG_CONTENT ?? "";
@@ -560,8 +562,8 @@ async function main(): Promise<number> {
         const baseEnv: Record<string, string> = {};
         applyOpenCodeInlineConfig(baseEnv, { model: "probe", workdir, extraEnv: {} });
         const { timedOut } = await runOpenCode(workdir, providerConfig, SEARCH_OFFLINE_ENV, {
-          configContent: baseEnv.OPENCODE_CONFIG_CONTENT ?? forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
-          globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN),
+          configContent: baseEnv.OPENCODE_CONFIG_CONTENT ?? forgeOpenCodeConfigContent(PROBE_DENY_DOMAIN),
+          globalPolicies: forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN),
         });
         const result = state.toolResult ?? "";
         const ok = !timedOut && result.includes("Unable to search the web");
@@ -579,7 +581,7 @@ async function main(): Promise<number> {
       {
         const { timedOut } = await runOpenCode(workdir, providerConfig, SEARCH_OFFLINE_ENV, {
           configContent: inlineContent,
-          globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN, true),
+          globalPolicies: forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN, true),
         });
         const result = state.toolResult ?? "";
         const judged = judgeSearchDeny("configured: native websearch denied under a hostile checkout", result);
@@ -596,7 +598,7 @@ async function main(): Promise<number> {
           {},
           {
             configContent: inlineContent,
-            globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN, true),
+            globalPolicies: forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN, true),
           }
         );
         const result = state.toolResult ?? "";

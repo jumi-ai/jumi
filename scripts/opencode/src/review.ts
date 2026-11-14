@@ -2402,6 +2402,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel,
+        forgeUrl: opts.giteaUrl,
         logger: log,
         abortSignal: opts.abortSignal,
         ...(extra?.continueSession ? { continueSession: true } : {}),

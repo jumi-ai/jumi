@@ -25,14 +25,13 @@ describe("loadWorkerConfig", () => {
     expect(config.databaseUrl).toBeUndefined();
     expect(config).not.toHaveProperty("role");
     expect(config.phoenixOtlpEndpoint).toBeUndefined();
-    expect(config.opencodeWellKnownUrl).toBe("https://kirmanak.stream");
+    expect(config.opencodeWellKnownUrl).toBeUndefined();
     expect(config.variant).toBeUndefined();
   });
 
-  test("OPENCODE_WELLKNOWN_URL empty defaults, disabled is off, garbage fails closed", () => {
-    expect(loadWorkerConfig({ ...required, OPENCODE_WELLKNOWN_URL: "" }).opencodeWellKnownUrl).toBe(
-      "https://kirmanak.stream"
-    );
+  test("OPENCODE_WELLKNOWN_URL unset disables, disabled is off, garbage fails closed", () => {
+    expect(loadWorkerConfig({ ...required, OPENCODE_WELLKNOWN_URL: "" }).opencodeWellKnownUrl).toBeUndefined();
+    expect(loadWorkerConfig({ ...required }).opencodeWellKnownUrl).toBeUndefined();
     expect(loadWorkerConfig({ ...required, OPENCODE_WELLKNOWN_URL: "disabled" }).opencodeWellKnownUrl).toBeUndefined();
     expect(
       loadWorkerConfig({ ...required, OPENCODE_WELLKNOWN_URL: "https://opencode.example/" }).opencodeWellKnownUrl

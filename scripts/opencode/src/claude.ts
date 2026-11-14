@@ -382,7 +382,7 @@ export function claudeArgv(
     // this spawn's own `GIT_AUTH_HOST`, so a GitHub-factory child denies
     // github.com rather than only the Gitea default.
     "--disallowedTools",
-    claudeDisallowedTools(forgeDenyHost(opts.extraEnv)),
+    claudeDisallowedTools(forgeDenyHost(opts.extraEnv, opts.forgeUrl)),
     "--output-format",
     CLAUDE_OUTPUT_FORMAT,
     "--verbose",

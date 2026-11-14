@@ -11,7 +11,7 @@ import {
   phoenixPluginEndpoint,
   setClaudeTracingPluginDirForTests,
 } from "../src/claude_tracing.ts";
-import { PUBLIC_PHOENIX_HOST } from "../src/phoenix.ts";
+import { phoenixPublicHost } from "../src/phoenix.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 const pluginDir = join(repoRoot, "claude-plugins/claude-code-tracing");
@@ -28,12 +28,15 @@ const hooks = join(pluginDir, "hooks");
 setDefaultTimeout(30_000);
 
 const originalEndpoint = process.env.PHOENIX_OTLP_ENDPOINT;
+const originalPublicHost = process.env.PHOENIX_PUBLIC_HOST;
 const originalAgent = process.env.AGENT_INSTANCE;
 
 afterEach(() => {
   setClaudeTracingPluginDirForTests(undefined);
   if (originalEndpoint === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
   else process.env.PHOENIX_OTLP_ENDPOINT = originalEndpoint;
+  if (originalPublicHost === undefined) delete process.env.PHOENIX_PUBLIC_HOST;
+  else process.env.PHOENIX_PUBLIC_HOST = originalPublicHost;
   if (originalAgent === undefined) delete process.env.AGENT_INSTANCE;
   else process.env.AGENT_INSTANCE = originalAgent;
 });
@@ -52,9 +55,17 @@ describe("phoenixPluginEndpoint", () => {
     );
   });
 
-  test("refuses the public hostname, junk, and non-HTTP schemes", () => {
-    expect(phoenixPluginEndpoint(`https://${PUBLIC_PHOENIX_HOST}`)).toBeUndefined();
-    expect(phoenixPluginEndpoint(`https://${PUBLIC_PHOENIX_HOST}/v1/traces`)).toBeUndefined();
+  test("refuses the configured public hostname, junk, and non-HTTP schemes", () => {
+    process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
+    expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBeUndefined();
+    expect(phoenixPluginEndpoint(`https://phoenix.example.test/v1/traces`)).toBeUndefined();
+    process.env.PHOENIX_PUBLIC_HOST = "https://phoenix.example.test/v1/traces";
+    expect(phoenixPublicHost()).toBe("phoenix.example.test");
+    expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBeUndefined();
+    process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
+    delete process.env.PHOENIX_PUBLIC_HOST;
+    expect(phoenixPublicHost()).toBeUndefined();
+    expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBe("https://phoenix.example.test");
     expect(phoenixPluginEndpoint("grpc://phoenix.phoenix.svc:4317")).toBeUndefined();
     expect(phoenixPluginEndpoint("phoenix.phoenix.svc:6006")).toBeUndefined();
     expect(phoenixPluginEndpoint("   ")).toBeUndefined();

@@ -7,7 +7,7 @@ import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { FORGE_DENY_DOMAIN, forgeOpenCodeGlobalConfig, forgePermissions } from "../src/forge_webfetch.ts";
+import { forgeOpenCodeGlobalConfig, forgePermissions } from "../src/forge_webfetch.ts";
 import {
   buildBlockedByRejectedPrompt,
   buildConflictPrompt,
@@ -119,6 +119,7 @@ printf '\\033[31mHOME=%s MODEL=%s CONFIG=%s DISABLE=%s XDG_CONFIG=%s SECRET=%s A
           configPath: "/config.json",
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
 
         expect(result.status).toBe("ok");
@@ -168,6 +169,7 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           variant: "xhigh",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5#xhigh");
@@ -188,6 +190,7 @@ printf 'ARGS=%s\\n' "$*"
           variant: "not-a-real-effort",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("openai/gpt-5.5#not-a-real-effort");
@@ -206,6 +209,7 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           model: "openai/gpt-5.5",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(unset.status).toBe("ok");
         expect(unset.stdout).toContain("run --standalone -m openai/gpt-5.5");
@@ -218,6 +222,7 @@ printf 'ARGS=%s VARIANT=%s\\n' "$*" "$OPENCODE_VARIANT"
           variant: "",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(empty.status).toBe("ok");
         expect(empty.stdout).not.toContain("gpt-5.5#");
@@ -238,6 +243,7 @@ printf 'ARGS=%s\n' "$*"
           workdir,
           continueSession: true,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("run --standalone -m openai/gpt-5.5 --continue");
@@ -288,6 +294,7 @@ printf 'JAVA_HOME=%s TMPOPT=%s GRADLE_HOME=%s DAEMON=%s SECRET=%s PEM=%s\\n' "$J
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: {
             JAVA_HOME: "/opt/java/openjdk",
             JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${workdir}/.jumi-tmp`,
@@ -321,6 +328,7 @@ printf 'MODEL=%s KEY=%s\\n' "$OPENCODE_MODEL" "$OPENCODE_API_KEY"
           model: "openai/gpt-5.5",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("MODEL=openai/gpt-5.5");
@@ -413,6 +421,7 @@ printf 'KEY=%s\\n' "$OPENCODE_API_KEY"
             model: "openai/gpt-5.5",
             workdir,
             sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
             extraEnv: {
               OPENCODE_API_KEY: "sk-from-extra-env",
               OPENCODE_API_KEY_FILE: "/tmp/jumi-spoofed-key",
@@ -478,6 +487,7 @@ printf 'should-not-run\\n'
           model: "openai/gpt-5.5",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         await expect(run).rejects.toMatchObject({ name: "EngineFailedError", auth: true, infra: false });
@@ -522,6 +532,7 @@ printf 'abcdefghijklmnopqrstuvwxyz'
           workdir,
           maxOutputBytes: 5,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
 
         expect(result.status).toBe("ok");
@@ -553,6 +564,7 @@ cat "$XDG_DATA_HOME/opencode/auth.json"
             workdir,
             home,
             sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
           });
 
           expect(result.status).toBe("ok");
@@ -599,6 +611,7 @@ cat "$XDG_DATA_HOME/opencode/auth.json"
             workdir,
             home,
             sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
             logger: (message) => logs.push(message),
           });
 
@@ -615,6 +628,7 @@ cat "$XDG_DATA_HOME/opencode/auth.json"
             workdir,
             home,
             sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
           });
           expect(other.status).toBe("ok");
           expect(JSON.parse(other.stdout ?? "{}").xai).toEqual({ type: "api", key: "stale-access" });
@@ -659,6 +673,7 @@ exit 1
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         expect(result.status).toBe("exit");
@@ -731,6 +746,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("stuck");
@@ -757,6 +773,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           timeoutMs: 100,
         });
         expect(result.status).toBe("timeout");
@@ -821,6 +838,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           abortSignal: abort.signal,
         });
         await Bun.sleep(50);
@@ -885,6 +903,7 @@ PY
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         expect(result.status).toBe("ok");
@@ -915,6 +934,7 @@ db.close();
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         expect(result.status).toBe("ok");
@@ -942,6 +962,7 @@ PY
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         expect(result.status).toBe("ok");
@@ -996,6 +1017,7 @@ PY
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           trace: { kind: "review", owner: "personal", repo: "jumi", sha: "abc", jobId: "7" },
         });
         expect(result.status).toBe("ok");
@@ -1020,6 +1042,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           timeoutMs: 100,
         });
         expect(result.status).toBe("timeout");
@@ -1051,6 +1074,7 @@ exec sleep 0.4
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           continueSession: true,
           quotaPollIntervalMs: 20,
         });
@@ -1077,6 +1101,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("stuck");
@@ -1168,6 +1193,7 @@ exec sleep 30
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           memorySampleIntervalMs: 0,
           quotaPollIntervalMs: 50,
         });
@@ -1188,6 +1214,7 @@ ${writeAssistantRow(retryRow("my-model usage limit reached, retry in 5s"))}
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
@@ -1206,6 +1233,7 @@ ${writeAssistantRow(retryRow("429 Too Many Requests"))}
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
@@ -1224,6 +1252,7 @@ ${writeAssistantRow({ content: [{ type: "text", text: "grep FreeUsageLimitError"
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
@@ -1245,6 +1274,7 @@ printf 'FreeUsageLimitError in tool output\\n' >&2
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
         });
         expect(result.status).toBe("ok");
@@ -1267,6 +1297,7 @@ wait "$pid"
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           timeoutMs: 50,
           // The timeout clock starts after onPid, so TERM can only land on a
           // child that has installed its handler, however slow the exec was.
@@ -1292,6 +1323,7 @@ cat
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
@@ -1312,6 +1344,7 @@ cat
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           trace: { kind: "review", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
@@ -1327,10 +1360,11 @@ cat
         model: "model",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         trace: { kind: "review", owner: "kirmanak", repo: "demo" },
       });
       expect(result.status).toBe("ok");
-      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("gitea.example.test"));
     });
     await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
       const result = await runOpenCode({
@@ -1338,10 +1372,11 @@ cat
         model: "model",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         configPath: "/app/.gitea/opencode-review.json",
       });
       expect(result.status).toBe("ok");
-      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("gitea.example.test"));
     });
   });
 
@@ -1353,11 +1388,12 @@ cat
           model: "model",
           workdir,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           configPath: "/app/.gitea/opencode-implement.json",
           trace: { kind, owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+        expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("gitea.example.test"));
       }
     });
   });
@@ -1370,6 +1406,7 @@ cat
         model: "model",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         configPath: "/app/.gitea/opencode-implement.json",
         trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         extraEnv: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permissions: [loosen], share: "disabled" }) },
@@ -1377,7 +1414,7 @@ cat
       expect(result.status).toBe("ok");
       const config = inlineConfig(result.stdout);
       // Last-match: the deny has to come after whatever the job supplied.
-      expect(config.permissions).toEqual([loosen, ...forgePermissions(FORGE_DENY_DOMAIN)]);
+      expect(config.permissions).toEqual([loosen, ...forgePermissions("gitea.example.test")]);
       expect(config.share).toBe("disabled");
     });
   });
@@ -1389,9 +1426,10 @@ cat
         model: "model",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         extraEnv: { OPENCODE_CONFIG_CONTENT: "{not json" },
       });
-      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions(FORGE_DENY_DOMAIN));
+      expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("gitea.example.test"));
     });
   });
 
@@ -1404,6 +1442,7 @@ cat
         model: "model",
         workdir,
         sanitizeEnv: true,
+        forgeUrl: "https://gitea.example.test",
         configPath: "/app/.gitea/opencode-implement.json",
         trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
@@ -1487,10 +1526,11 @@ cat
           prompt: "prompt",
           model: "model",
           workdir,
+          forgeUrl: "https://gitea.example.test",
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(inlineConfig(result.stdout).permissions).toEqual([loosen, ...forgePermissions(FORGE_DENY_DOMAIN)]);
+        expect(inlineConfig(result.stdout).permissions).toEqual([loosen, ...forgePermissions("gitea.example.test")]);
       });
     } finally {
       if (previous === undefined) delete process.env.OPENCODE_CONFIG_CONTENT;
@@ -1517,6 +1557,7 @@ printf 'POLICY=%s\\n' "$(cat "$XDG_CONFIG_HOME/opencode/opencode.json")"
           workdir,
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           extraEnv: { GIT_AUTH_HOST: "gitea.example.com:3000" },
         });
         const policy = JSON.parse(/^POLICY=(.*)$/m.exec(result.stdout ?? "")?.[1] ?? "{}") as {
@@ -1551,6 +1592,7 @@ printf 'CONFIG=%s\n' "$OPENCODE_CONFIG"
             model: "model",
             workdir,
             sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
           });
           expect(result.status).toBe("ok");
           expect(result.stdout).toContain("CONFIG=/from-env.json");
@@ -1798,6 +1840,7 @@ wait
           workdir,
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           timeoutMs: 200,
         });
         expect(result.status).toBe("timeout");
@@ -1855,6 +1898,7 @@ exec sleep 30
           workdir,
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           quotaPollIntervalMs: 50,
           timeoutMs: 20_000,
         });
@@ -1890,6 +1934,7 @@ cat "$XDG_DATA_HOME/opencode/auth.json"
           workdir,
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("auth export --standalone");
@@ -1924,6 +1969,7 @@ echo ran
           workdir,
           home: isolatedHome,
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
           logger: (message) => logs.push(message),
         });
         expect(result.status).toBe("ok");

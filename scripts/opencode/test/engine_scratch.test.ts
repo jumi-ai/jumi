@@ -301,6 +301,7 @@ describe("child scratch dir", () => {
               workdir,
               home,
               sanitizeEnv: true as const,
+              forgeUrl: "https://gitea.example.test",
               ...(extraEnv ? { extraEnv } : {}),
               trace: { kind, owner: "acme", repo: "demo" } as {
                 kind: "review" | "implement" | "follow-up" | "conflict";
