@@ -89,7 +89,7 @@ describe("renovate tool-versions config", () => {
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(10);
+    expect(managers?.length).toBe(8);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
@@ -101,21 +101,16 @@ describe("renovate tool-versions config", () => {
     // yq/uv per-arch checksum managers move with the version like codex.
     const yqManagers = managers?.filter((m) => m.depNameTemplate === "mikefarah/yq");
     const uvManagers = managers?.filter((m) => m.depNameTemplate === "astral-sh/uv");
+    // node-version has no getDigest, so per-arch Node SHAs stay manual:
+    // no node checksum managers exist.
     const nodeManagers = managers?.filter(
       (m) => m.depNameTemplate === "node" && m.matchStrings?.[0]?.includes("NODE_")
     );
     expect(yqManagers?.length).toBe(2);
     expect(uvManagers?.length).toBe(2);
-    expect(nodeManagers?.length).toBe(2);
+    expect(nodeManagers?.length).toBe(0);
     for (const m of [...(yqManagers ?? []), ...(uvManagers ?? [])]) {
       expect(m?.datasourceTemplate).toBe("github-release-attachments");
-      expect(m?.matchStrings?.length).toBe(1);
-      expect(m?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
-      expect(m?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
-    }
-    for (const m of nodeManagers ?? []) {
-      expect(m?.datasourceTemplate).toBe("node-version");
-      expect(m?.versioningTemplate).toBe("node");
       expect(m?.matchStrings?.length).toBe(1);
       expect(m?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
       expect(m?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
@@ -124,8 +119,14 @@ describe("renovate tool-versions config", () => {
     expect(yqManagers?.some((m) => m.matchStrings?.[0]?.includes("YQ_ARM64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_AMD64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_ARM64_TAG"))).toBe(true);
-    expect(nodeManagers?.some((m) => m.matchStrings?.[0]?.includes("NODE_AMD64_TAG"))).toBe(true);
-    expect(nodeManagers?.some((m) => m.matchStrings?.[0]?.includes("NODE_ARM64_TAG"))).toBe(true);
+    // Node per-arch tags/SHAs are manual (see NOTE(node) in tool-versions.env):
+    // no manager may claim a NODE_*_TAG line.
+    for (const m of managers ?? []) {
+      for (const s of m.matchStrings ?? []) {
+        expect(s).not.toContain("NODE_AMD64_TAG");
+        expect(s).not.toContain("NODE_ARM64_TAG");
+      }
+    }
     // Every matchStrings regex must compile (RE2-compatible subset: no lookahead).
     for (const m of managers ?? []) {
       for (const s of m.matchStrings ?? []) {
@@ -336,22 +337,26 @@ describe("node LTS pin coherence", () => {
     }
   });
 
-  test("renovate has a Node manager and rejects non-LTS", () => {
+  test("renovate tracks Node LTS via node versioning, SHAs stay manual", () => {
+    // node-version has no getDigest, so only NODE_VERSION is automated;
+    // per-arch SHAs follow manually (NOTE(node) in tool-versions.env).
     const managers = toolManager();
     const nodeManagers = managers?.filter(
       (m) => m.depNameTemplate === "node" && m.matchStrings?.[0]?.includes("NODE_")
     );
-    expect(nodeManagers?.length).toBe(2);
+    expect(nodeManagers?.length).toBe(0);
+    const nonDocker = nonDockerManager();
+    const nodeSample = "# renovate: datasource=node-version depName=node\nNODE_VERSION=24.22.3";
+    expect(extractFirst(nonDocker?.matchStrings?.[0] ?? "", nodeSample)?.groups.currentValue).toBe("24.22.3");
+    // LTS stability comes from the node versioning + node-version datasource
+    // (isStable = lts !== false; odd majors pre-27 never go stable, and from
+    // 27 every major becomes stable via the schedule), so no even-major
+    // allowedVersions regex is kept: it would block post-27 LTS majors forever.
     const rule = renovate.packageRules?.find((r) => r.matchPackageNames?.includes("node"));
     expect(rule).toBeDefined();
     expect(rule?.matchDatasources).toContain("node-version");
-    expect(rule?.allowedVersions).toBeDefined();
-    const allowed = new RegExp(rule?.allowedVersions?.slice(1, -1) ?? "$^");
-    expect(allowed.test("24.22.3")).toBe(true);
-    expect(allowed.test("22.23.5")).toBe(true);
-    expect(allowed.test("25.0.0")).toBe(false);
-    expect(allowed.test("23.11.0")).toBe(false);
-    expect(allowed.test("24.0.0-nightly20260101")).toBe(false);
+    expect(rule?.allowedVersions).toBeUndefined();
     expect(rule?.groupName).toBe("node");
+    expect(toolVersions).toContain("NOTE(node)");
   });
 });

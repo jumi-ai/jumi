@@ -115,34 +115,6 @@
       "autoReplaceStringTemplate": "UV_ARM64_TAG={{{newValue}}}\nUV_SHA256_ARM64={{{newDigest}}}"
     },
     {
-      "description": "node amd64 tarball checksum: tag plus its verified sha256 moves with the release via node-version (LTS-aware node versioning, even majors only).",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/^\\.gitea\\/tool-versions\\.env$/"
-      ],
-      "matchStrings": [
-        "NODE_AMD64_TAG=(?<currentValue>[^\\s]+)\\nNODE_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
-      ],
-      "datasourceTemplate": "node-version",
-      "depNameTemplate": "node",
-      "versioningTemplate": "node",
-      "autoReplaceStringTemplate": "NODE_AMD64_TAG={{{newValue}}}\nNODE_SHA256_AMD64={{{newDigest}}}"
-    },
-    {
-      "description": "node arm64 tarball checksum: tag plus its verified sha256 moves with the release via node-version (LTS-aware node versioning, even majors only).",
-      "customType": "regex",
-      "managerFilePatterns": [
-        "/^\\.gitea\\/tool-versions\\.env$/"
-      ],
-      "matchStrings": [
-        "NODE_ARM64_TAG=(?<currentValue>[^\\s]+)\\nNODE_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
-      ],
-      "datasourceTemplate": "node-version",
-      "depNameTemplate": "node",
-      "versioningTemplate": "node",
-      "autoReplaceStringTemplate": "NODE_ARM64_TAG={{{newValue}}}\nNODE_SHA256_ARM64={{{newDigest}}}"
-    },
-    {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -231,14 +203,13 @@
       "groupSlug": "uv"
     },
     {
-      "description": "Node LTS only via node-version: even majors, no pre-releases, grouped so version and both tarball checksums move in one update.",
+      "description": "Node LTS via node-version default versioning (node): the datasource marks only LTS lines stable from the release schedule, so no allowedVersions regex is needed; per-arch tarball SHAs in tool-versions.env are updated manually alongside NODE_VERSION.",
       "matchDatasources": [
         "node-version"
       ],
       "matchPackageNames": [
         "node"
       ],
-      "allowedVersions": "/^[0-9]*[02468]\\.[0-9]+\\.[0-9]+$/",
       "groupName": "node",
       "groupSlug": "node"
     },
