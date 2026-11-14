@@ -362,6 +362,15 @@ export function reviewJobKey(job: ReviewJob): string {
   return `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`;
 }
 
+/**
+ * Internal action for a body-only re-review: a follow-up round changed only
+ * the Jumi-owned PR body region on a head whose last review failed, so the
+ * same head is queued again without a code push. `pull_request edited` stays
+ * unhandled: human body edits never use this action and never wake the
+ * reviewer through it.
+ */
+export const BODY_ONLY_REVIEW_ACTION = "followup-body";
+
 function markerFor(owner: string, repo: string, prNumber: number): string {
   return `<!-- jumi-review:${owner}/${repo}#${prNumber} -->`;
 }
@@ -1015,6 +1024,43 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 export function skipReasonForHeadChange(pr: Pull, expectedHeadSha: string): string | undefined {
   if (pr.head.sha === expectedHeadSha) return undefined;
   return `PR head changed from ${expectedHeadSha} to ${pr.head.sha}`;
+}
+
+/**
+ * Forge-authoritative closing list for the review context. When the forge
+ * exposes `listClosingIssues` (GitHub's `closingIssuesReferences`) that list
+ * wins; otherwise (Gitea has no equivalent, or the call fails) fall back to
+ * the shared closing-keyword parser, which already ignores code spans,
+ * fenced blocks, and quotes. Never throws: failures log and fall back.
+ */
+export async function resolveClosingIssuesForReview(opts: {
+  forge: Pick<ReviewApi, "listClosingIssues">;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  pr: Pull;
+  log?: (message: string) => void;
+}): Promise<{ issues: number[]; source: "forge" | "fallback" }> {
+  const fallback = extractClosingIssueNumbers(opts.pr);
+  const list = opts.forge.listClosingIssues;
+  if (typeof list !== "function") return { issues: fallback, source: "fallback" };
+  try {
+    const issues = await list.call(opts.forge, opts.owner, opts.repo, opts.prNumber);
+    const seen = new Set<number>();
+    const result: number[] = [];
+    for (const value of issues ?? []) {
+      if (!Number.isFinite(value) || value <= 0 || value === opts.pr.number) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+      result.push(value);
+    }
+    return { issues: result, source: "forge" };
+  } catch (err) {
+    opts.log?.(
+      `closing issues unavailable, falling back to parser: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return { issues: fallback, source: "fallback" };
+  }
 }
 
 export function isTerminalSkipReason(reason: string | null | undefined): boolean {
@@ -2007,7 +2053,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       excludedSet.has(file.filename) ? { ...file, patch: undefined } : file
     );
 
-    const ids = extractClosingIssueNumbers(pr);
+    const closing = await resolveClosingIssuesForReview({
+      forge: forgeApi,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: pr.number,
+      pr,
+      log,
+    });
+    const parserIds = extractClosingIssueNumbers(pr);
+    const ids = [...new Set([...closing.issues, ...parserIds])];
     const linkedResults = await Promise.all(ids.map((id) => loadLinkedIssue(trackerApi, opts.owner, opts.repo, id)));
     const notes: string[] = [];
     if (opts.noCiNote) notes.push(`${opts.noCiNote} Mention it in the review. It is not a finding.`);
@@ -2340,6 +2395,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      closingIssues: closing.issues,
       // Written for the first runner in attempt order; `resolveOpenCodePrompt`
       // rewords the file's guidance per attempt from the actual runner.
       runnerType: effectiveChain?.[0]?.type,

@@ -110,6 +110,7 @@ import {
   loadRepoSettings,
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
+import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -127,7 +128,7 @@ import {
   readStuckLatch,
   stuckComment,
 } from "./stuck.ts";
-import type { IssueJob } from "./types.ts";
+import type { IssueJob, ReviewJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
   countMaintainerQuestionFindings,
@@ -353,6 +354,46 @@ export function isJumiPullReviewWriteup(review: PullReview, botUsername: string)
 export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
+}
+
+/** Queue a fresh review only when Jumi changed the body on a failed head. */
+export function shouldQueueReviewAfterBodyChange(bodyChanged: boolean, lastReviewFailedOnHead: boolean): boolean {
+  return bodyChanged && lastReviewFailedOnHead;
+}
+
+/**
+ * Whether the latest Jumi review on this head failed. Only reviews whose
+ * `Reviewed commit` matches the head count; an older head's failure never
+ * re-queues the current head, and a success on this head never re-queues.
+ */
+export function isLastJumiReviewFailedOnHead(
+  items: { jumiReviews: readonly PullReview[]; jumiStickies: readonly Comment[] },
+  headSha: string,
+  botUsername: string
+): boolean {
+  const candidates: { at: string; failed: boolean }[] = [];
+  for (const review of items.jumiReviews) {
+    if (!isJumiPullReviewWriteup(review, botUsername)) continue;
+    const sha = pullReviewFindingSha(review);
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    const trailer = lastCheckTrailer(pullReviewBody(review));
+    if (!trailer) continue;
+    candidates.push({
+      at: review.submitted_at ?? review.updated_at ?? review.created_at ?? "",
+      failed: trailer.state === "failure",
+    });
+  }
+  for (const comment of items.jumiStickies) {
+    if (!isJumiReviewSticky(comment, botUsername)) continue;
+    const sha = parseReviewedCommitSha(comment.body ?? "");
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    const trailer = lastCheckTrailer(comment.body ?? "");
+    if (!trailer) continue;
+    candidates.push({ at: comment.created_at ?? "", failed: trailer.state === "failure" });
+  }
+  if (candidates.length === 0) return false;
+  candidates.sort((a, b) => a.at.localeCompare(b.at));
+  return candidates[candidates.length - 1]?.failed === true;
 }
 
 export function isJumiPullReviewFinding(
@@ -1537,11 +1578,21 @@ export async function implementFollowUp(
 
   // After a pushed follow-up, rewrite only the jumi-owned region from JUMI_PR.md.
   // Missing/empty artifact or an unfenced body leaves the posted body alone, and
-  // a forge failure here must not fail a good code fix.
-  const refreshPullRequestBody = async (description: string | null) => {
-    if (description == null || !description.replaceAll("\0", "").trim()) return;
+  // a forge failure here must not fail a good code fix. Returns the live head
+  // and timestamp from the same `getPR` so a body-only requeue never enqueues
+  // the stale snapshot with no `prUpdatedAt` (which would cancel a newer
+  // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
+  const refreshPullRequestBody = async (
+    description: string | null,
+    fallbackHeadSha?: string
+  ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
+    const fallback = fallbackHeadSha || pr.head.sha;
+    if (description == null || !description.replaceAll("\0", "").trim()) return { changed: false, headSha: fallback };
     try {
       const live = await opts.api.getPR(owner, repo, pr.number);
+      const liveHeadSha = live.head?.sha ?? fallback;
+      const liveUpdatedAt = typeof live.updated_at === "string" && live.updated_at ? live.updated_at : undefined;
+      const seen = { headSha: liveHeadSha, ...(liveUpdatedAt ? { prUpdatedAt: liveUpdatedAt } : {}) };
       const body = replaceJumiPrBodyRegion(
         live.body,
         buildPullRequestBody(
@@ -1552,11 +1603,49 @@ export async function implementFollowUp(
           followupConventions.closingKeyword
         )
       );
-      if (body == null || body === live.body) return;
+      if (body == null || body === live.body) return { changed: false, ...seen };
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
+      return { changed: true, ...seen };
     } catch (err) {
       log(
         `PR body refresh failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { changed: false, headSha: fallback };
+    }
+  };
+
+  // A body-only round never pushes, so GitHub `edited` never wakes the
+  // reviewer. When this round changed the Jumi-owned region on a head whose
+  // last Jumi review failed, queue that live head again. Human edits outside
+  // the fence never reach this path, and an unchanged body never re-queues.
+  const maybeQueueBodyOnlyReview = async (
+    refreshed: { changed: boolean; headSha: string; prUpdatedAt?: string },
+    fallbackHeadSha: string
+  ): Promise<void> => {
+    if (!opts.reviewQueue) return;
+    const headSha = refreshed.headSha || fallbackHeadSha;
+    if (
+      !shouldQueueReviewAfterBodyChange(
+        refreshed.changed,
+        isLastJumiReviewFailedOnHead(pendingItems, headSha, opts.botUsername)
+      )
+    )
+      return;
+    const job: ReviewJob = {
+      delivery: `followup-body-${pr.number}-${headSha}`,
+      owner,
+      repo,
+      prNumber: pr.number,
+      action: BODY_ONLY_REVIEW_ACTION,
+      headSha,
+      receivedAt: new Date().toISOString(),
+      ...(refreshed.prUpdatedAt ? { prUpdatedAt: refreshed.prUpdatedAt } : {}),
+    };
+    try {
+      await opts.reviewQueue.enqueue(job);
+    } catch (err) {
+      log(
+        `body-only review requeue failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   };
@@ -2011,7 +2100,8 @@ export async function implementFollowUp(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-        await refreshPullRequestBody(prFileContents);
+        const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+        await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
