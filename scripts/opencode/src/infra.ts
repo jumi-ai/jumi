@@ -1,6 +1,12 @@
 import { looksLikeProviderAuthDeath } from "./auth.ts";
 import { EngineFailedError } from "./engine.ts";
-import { looksLikeProviderUnavailable } from "./fallback.ts";
+
+const PROVIDER_UNAVAILABLE_RE =
+  /rate[\s_-]*limit|too many requests|resource[_\s-]*exhausted|out of quota|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:500|502|503|504)\b|bad gateway|gateway timeout|internal[\s_-]*server[\s_-]*error|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model|is not supported when using[^\n]{0,200}account/i;
+
+export function looksLikeProviderUnavailable(text: string): boolean {
+  return PROVIDER_UNAVAILABLE_RE.test(text);
+}
 
 export const INFRA_SHORT_MS = 2_000;
 export const INFRA_MAX_RETRIES = 8;

@@ -120,6 +120,8 @@ describe("effectiveTrustedSenderLogins", () => {
       blockingQuestionAuthors: [],
       trustedSenders: ["Alice", "carol"],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
     expect(narrowed).toEqual(["Alice"]);
     const widened = effectiveTrustedSenderLogins(["alice"], {
@@ -135,6 +137,8 @@ describe("effectiveTrustedSenderLogins", () => {
       blockingQuestionAuthors: [],
       trustedSenders: ["alice", "bob"],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
     expect(widened).toEqual(["alice"]);
   });
@@ -153,6 +157,8 @@ describe("effectiveTrustedSenderLogins", () => {
       blockingQuestionAuthors: [],
       trustedSenders: ["carol"],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
     expect(effective).toEqual(["carol"]);
     // Listing is the admit: no forge lookup, case-insensitive whole login.
@@ -175,6 +181,8 @@ describe("effectiveTrustedSenderLogins", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toBeUndefined();
   });
@@ -214,6 +222,8 @@ describe("effectiveFollowupIgnoreLogins", () => {
       blockingQuestionAuthors: [],
       followupIgnoreLogins: ["DEPLOYER-bot", "repo-bot"],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
     expect(merged).toEqual(["deployer-bot", "repo-bot"]);
     const missing = repoFileApi(undefined);
@@ -249,6 +259,8 @@ describe("effectiveIgnoreConflictsLabel", () => {
         blockingQuestionAuthors: [],
         ignoreConflictsLabel: "skip-me",
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toBe("skip-me");
   });

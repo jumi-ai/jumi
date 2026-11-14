@@ -4,6 +4,7 @@ import { type Engine, EngineFailedError } from "../src/engine.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import {
   type NewRunUsageRow,
+  RUN_USAGE_SCHEMA_SQL,
   renderLedgerMetrics,
   resetActiveRunUsageRecordingForTests,
   setActiveRunUsageRecording,
@@ -191,6 +192,134 @@ describe("withLedgerRunUsage", () => {
   });
 });
 
+describe("per-runner outcomes in the ledger", () => {
+  test("withLedgerRunUsage records runner outcome and quota reset from the result", async () => {
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "review:o/r#1", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+      },
+    });
+    const engine = withLedgerRunUsage(async () => ({
+      status: "stuck",
+      exitCode: 1,
+      quota: "resetting",
+      quotaResetAtMs: 1_800_000_000_000,
+      durationMs: 1_400,
+    }));
+    await engine({ type: "codex", runnerName: "codex", model: "gpt-6-sol", workdir: "/work/x" });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      runner: "codex",
+      exitClass: "quota",
+      runnerOutcome: "quota",
+      quotaResetAt: new Date(1_800_000_000_000),
+    });
+  });
+
+  test("withLedgerRunUsage falls back to retryAfterMs when the result states no absolute reset", async () => {
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "review:o/r#1", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+      },
+    });
+    const before = Date.now();
+    const engine = withLedgerRunUsage(async () => ({
+      status: "stuck",
+      exitCode: 1,
+      quota: "resetting",
+      retryAfterMs: 3_600_000,
+      durationMs: 1_400,
+    }));
+    await engine({ type: "codex", runnerName: "codex", model: "gpt-6-sol", workdir: "/work/x" });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ runner: "codex", exitClass: "quota", runnerOutcome: "quota" });
+    const at = recorded[0]!.quotaResetAt;
+    expect(at).toBeInstanceOf(Date);
+    expect(at!.getTime()).toBeGreaterThanOrEqual(before + 3_600_000 - 5_000);
+    expect(at!.getTime()).toBeLessThanOrEqual(Date.now() + 3_600_000 + 5_000);
+  });
+
+  test("ledger export counts ok, quota, auth, timeout, and provider-down by runner with reset gauge", async () => {
+    const store = new MemoryReviewJobStore();
+    const base = {
+      jobId: 1,
+      jobKey: "review:o/r#1",
+      kind: "review" as const,
+      agentInstance: "jumi",
+      tokensInput: 0,
+      tokensCacheRead: 0,
+      tokensOutput: 0,
+      tokensCacheWrite: 0,
+      tokensReasoning: 0,
+      sessions: 0,
+      startedAt: new Date(1_000_000),
+      endedAt: new Date(1_001_000),
+      durationSeconds: 1,
+    };
+    await store.recordRunUsageRows([
+      { ...base, runner: "codex", model: "gpt-6-sol", exitClass: "ok", runnerOutcome: "ok", quotaResetAt: null },
+      {
+        ...base,
+        runner: "codex",
+        model: "gpt-6-sol",
+        exitClass: "quota",
+        runnerOutcome: "quota",
+        quotaResetAt: new Date(1_800_000_000_000),
+      },
+      {
+        ...base,
+        runner: "claude",
+        model: "claude-opus-5",
+        exitClass: "auth",
+        runnerOutcome: "auth",
+        quotaResetAt: null,
+      },
+      {
+        ...base,
+        runner: "codex",
+        model: "gpt-6-sol",
+        exitClass: "timeout",
+        runnerOutcome: "timeout",
+        quotaResetAt: null,
+      },
+      {
+        ...base,
+        runner: "opencode",
+        model: "xai/grok-4.6",
+        exitClass: "incomplete",
+        runnerOutcome: "provider_down",
+        quotaResetAt: null,
+      },
+    ]);
+    const text = await renderLedgerMetrics(store);
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="ok"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="quota"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="claude",outcome="auth"} 1');
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="timeout"} 1');
+    expect(text).toContain(
+      'jumi_opencode_runner_exits_total{kind="review",runner="opencode",outcome="provider_down"} 1'
+    );
+    expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="auth"} 0');
+    // The legacy series still counts provider outages as incomplete.
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="quota"} 1');
+    expect(text).toContain('jumi_opencode_exits_total{kind="review",class="incomplete"} 1');
+    expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="codex"} 1800000000');
+    expect(text).toContain('jumi_opencode_runner_quota_reset_seconds{runner="claude"} 0');
+  });
+});
+
+describe("run usage migration", () => {
+  test("backfills pre-upgrade rows from the exit class they already carry", () => {
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("SET runner_outcome = exit_class");
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("exit_class IN ('ok', '143', 'timeout', 'infra', 'auth', 'quota')");
+    expect(RUN_USAGE_SCHEMA_SQL).toContain("WHERE runner_outcome = 'incomplete'");
+  });
+});
+
 describe("renderLedgerMetrics", () => {
   test("reports durable totals that survive an in-process reset", async () => {
     const store = new MemoryReviewJobStore();
@@ -215,6 +344,8 @@ describe("renderLedgerMetrics", () => {
         tokensReasoning: 6,
         sessions: 2,
         exitClass: "ok",
+        runnerOutcome: "ok",
+        quotaResetAt: null,
         startedAt: new Date(1_000_000),
         endedAt: new Date(1_090_000),
         durationSeconds: 90,

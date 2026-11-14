@@ -21,9 +21,13 @@ export function isJumiCloserForIssue(
   owner: string,
   repo: string,
   issueNumber: number,
-  botUsername: string
+  botUsername: string,
+  branchPrefix?: string
 ): boolean {
-  return isInScopeJumiPR(pr, owner, repo, botUsername) && extractWorkingIssueNumber(pr) === issueNumber;
+  return (
+    isInScopeJumiPR(pr, owner, repo, botUsername, branchPrefix) &&
+    extractWorkingIssueNumber(pr, branchPrefix) === issueNumber
+  );
 }
 
 export async function classifyCloserWork(opts: {

@@ -58,6 +58,15 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `setup.timeout` | integer minutes, at least 1 | `10` | How long the setup command may run. A failed, timed-out, or dirty setup never counts as a runner exit, never triggers a hop, and never consumes hop budget | Ceiling: `SETUP_TIMEOUT_MAX_MS` (unset defaults to 10 minutes, so a repository can only shorten out of the box); a value above the maximum applies as the maximum |
 | `setup.on_failure` | `"continue"` \| `"fail"` | `"continue"` | `continue` runs the job anyway (the agent prompt carries a `<repo_setup state="failed\|timeout\|dirty">` block with the output tail); `fail` starts no engine (a review posts a `failure` status naming the setup error, a worker job leaves one comment where it was started) | No deployer setting |
 | `setup.kinds` | list of `"review"`, `"implement"`, `"followup"`, `"conflict"` | all four | Which job kinds run setup. Can only narrow; there is no way to run setup on another kind. A blank or unknown entry makes the whole file invalid | No deployer setting |
+| `branch_prefix` | non-blank string | `jumi` | Branch prefix for issue branches: `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`; no leading or trailing slash, no `..`. The full branch must pass `git check-ref-format`, and prefixes colliding with Jumi's internal refs (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are invalid. Branch recognition accepts the configured prefix and keeps accepting `jumi/issue-<N>-`, so PRs opened before a prefix change keep working. A branch name alone never makes a PR count as Jumi's: the existing author and identity checks still apply. Exactly one spelling: `branch-prefix` or `branchPrefix` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker branches keep today's format) |
+| `pr_title` | non-blank string template | `{title}` | Pull-request title template for forge issues. The only placeholders are `{title}` (the issue title) and `{issue}` (the issue number). Any other `{...}` or stray brace makes the whole file invalid. Exactly one spelling: `pr-title` or `prTitle` is an unknown key rejected with the usual "did you mean" error. A blank or non-string value makes the whole file invalid | No deployer setting. Read from the default branch only; forge issues only (external-tracker titles keep today's format) |
+| `commit_message` | non-blank string template | `Implement #{issue}: {title}` | Commit message template for the commit Jumi's parent creates. The only placeholders are `{title}` and `{issue}`; any other `{...}` or stray brace makes the whole file invalid. When set, the worker prompt also names the template as the repository's commit message convention. Exactly one spelling: `commit-message` or `commitMessage` is an unknown key rejected with the usual "did you mean" error | No deployer setting. Read from the default branch only; forge issues only |
+| `closing_keyword` | `"closes"` \| `"refs"` | `"closes"` | `closes` keeps today's `Fixes #N` fallback body; `refs` uses a non-closing `Refs #N` fallback and asks the worker for a non-closing reference. When set to `refs`, a model body that uses a closing keyword for the worked issue is rewritten to `Refs #N`, and the issue stays open after merge. A blocker issue then stays unresolved until someone closes it. Exactly one spelling: `closing-keyword` or `closingKeyword` is an unknown key rejected with the usual "did you mean" error. A blank, non-string, or other value makes the whole file invalid | No deployer setting. Read from the default branch only |
+| `review_drafts` | boolean | `false` (skip drafts, as today) | `true` reviews draft PRs and `WIP:`-titled PRs on every review-dispatch path, on both forges. Worker eligibility stays draft-excluded: no follow-up, takeover, or auto-merge on a draft. `PR title disables review` (`wip` / `[wip]` prefix) keeps working, and marking the PR ready still triggers a review, as today | No deployer setting. Missing, invalid, or unreadable files skip drafts, as today |
+| `max_suggestions` | non-negative integer (`0` is valid and means no suggestions) | the parent ceiling (`5`) | Caps 💡 findings for this repository. 🔴, 🟡 and ❓ findings are never capped. The `Jumi dropped N suggestions (cap X)` note shows the effective cap | Ceiling: `MAX_SUGGESTION_FINDINGS` (`5`); a higher file value applies as `5`, like the `max_followup_rounds` ceiling rule |
+| `review_budget` | mapping (may be empty) | `{}` (no overrides) | Size budget overrides for reviews in this repository (see the two rows below). Read once when the job starts; applied wherever `maxFiles` and `maxPatchBytes` are read for a review (including replay) | Each present key is a ceiling against its deployer maximum (below); a non-mapping value, an unknown sub-key, or a non-positive-integer value makes the whole file invalid |
+| `review_budget.max_files` | positive integer, at least 1 | `MAX_FILES` | How many changed files are sent to OpenCode for reviews in this repository | Ceiling: `MAX_FILES_MAX` (unset defaults to `MAX_FILES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
+| `review_budget.max_patch_bytes` | positive integer, at least 1 | `MAX_PATCH_BYTES` | How many patch bytes are sent to OpenCode for reviews in this repository | Ceiling: `MAX_PATCH_BYTES_MAX` (unset defaults to `MAX_PATCH_BYTES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
 
 ## Complete example
 
@@ -101,7 +110,19 @@ followup_ignore_logins: # union with FOLLOWUP_IGNORE_LOGINS; cannot remove deplo
 ignore_conflicts_label: ignore-conflicts # override for IGNORE_CONFLICTS_LABEL
 pickup_label: jumi # override for the GitHub pickup label; Gitea ignores it
 
+branch_prefix: bot/jumi # issue branches are bot/jumi/issue-<N>-<slug> (default jumi)
+pr_title: "feat: {title}" # PR title template (default "{title}")
+commit_message: "chore: {title} (#{issue})" # parent commit template (default "Implement #{issue}: {title}")
+closing_keyword: closes # closes (default) | refs (non-closing Refs #N)
+
 mode: full # full (default) | review-only | off
+
+review_drafts: true # false (the default) skips draft PRs and WIP:-titled PRs, as today
+max_suggestions: 2 # ceiling against MAX_SUGGESTION_FINDINGS (5); 0 means no suggestions
+
+review_budget: # file count and patch bytes sent to OpenCode; absent keys run with the deployment values
+  max_files: 300 # ceiling: MAX_FILES_MAX
+  max_patch_bytes: 2000000 # ceiling: MAX_PATCH_BYTES_MAX
 
 ci_gate: # absent (or wait absent) means required: wait for required checks, falling back to every check
   wait: required # all waits for every check regardless of branch protection; none reviews without waiting
@@ -133,6 +154,16 @@ Review-only repository (reviews keep working; no implement, follow-up, or confli
 
 ```yaml
 mode: review-only
+```
+
+Conventional-commits repository (commitlint / title checks pass: prefixed
+branches, `feat:` PR titles, `chore:` parent commits, no closing keyword):
+
+```yaml
+branch_prefix: bot/jumi
+pr_title: "feat: {title}"
+commit_message: "chore: {title} (#{issue})"
+closing_keyword: refs
 ```
 
 Review before slow CI finishes (the review does not wait for pending or absent CI; pending
@@ -181,7 +212,11 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Follow-up ignores (`followup_ignore_logins`) | Deployer list (`FOLLOWUP_IGNORE_LOGINS`) | Deployer list still applies; the repository list contributes nothing | Deployer list (fail-open, logged) |
 | Ignore-conflicts label (`ignore_conflicts_label`) | Deployment value (`IGNORE_CONFLICTS_LABEL`) | Deployment value still applies | Deployment value (fail-open, logged) |
 | Pickup label (`pickup_label`, GitHub only; Gitea ignores it) | `jumi` | `jumi`: a custom label in an invalid file changes nothing, and `jumi` no longer starts work in a repo whose valid file names another label | `jumi` (fail-open, logged) |
+| PR conventions (`branch_prefix`, `pr_title`, `commit_message`, `closing_keyword`) | Today's formats: `jumi/issue-<N>-<slug>` branches, the issue title as PR title, `Implement #N: <title>` commits, `Fixes #N` bodies | Whole file invalid, so today's formats apply but — like any other runner job — no runner job starts while the default-branch file is invalid (see Runners row). A reserved or malformed prefix (`jumi/target`, `a//b`, `../x`, `/x`), an unknown `{...}` placeholder or stray brace, or a blank/non-string value invalidates the file | Today's formats (fail-open, logged) |
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |
+| Review drafts (`review_drafts`) | Drafts skipped, as today | Drafts skipped (invalid never reviews a draft by accident) | Drafts skipped (fail-open, logged) |
+| Suggestion cap (`max_suggestions`) | Parent ceiling (`5`) | Parent ceiling still applies — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Parent ceiling (fail-open, logged) |
+| Review budget (`review_budget`) | Deployment values (`MAX_FILES`, `MAX_PATCH_BYTES`) | Deployment values still apply — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Deployment values (fail-open, logged) |
 | CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 | Setup (`setup`) | No setup: the job runs as today, with no extra log line and no prompt change | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No setup, logged; the job otherwise runs as today |

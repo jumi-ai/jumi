@@ -52,6 +52,9 @@ export interface ServiceConfig {
   queueConcurrency: number;
   maxFiles: number;
   maxPatchBytes: number;
+  /** Deployer maxima for the review size budget. Unset each defaults to the deployment value, so a repository can only lower the budget. */
+  maxFilesMax: number;
+  maxPatchBytesMax: number;
   maxOutputBytes: number;
   maxWebhookBytes: number;
   opencodeTimeoutMs: number;
@@ -253,6 +256,10 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const setupTimeoutMaxMs = intEnv(resolved, "SETUP_TIMEOUT_MAX_MS", 10 * 60 * 1000);
+  const maxFiles = intEnv(resolved, "MAX_FILES", 100);
+  const maxPatchBytes = intEnv(resolved, "MAX_PATCH_BYTES", 500_000);
+  const maxFilesMax = intEnv(resolved, "MAX_FILES_MAX", maxFiles);
+  const maxPatchBytesMax = intEnv(resolved, "MAX_PATCH_BYTES_MAX", maxPatchBytes);
   const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: role !== "engine" });
   const fromEnv = {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
@@ -288,8 +295,10 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     home: optionalEnv(resolved, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(resolved, "WORKDIR", "/work") ?? "/work",
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),
-    maxFiles: intEnv(resolved, "MAX_FILES", 100),
-    maxPatchBytes: intEnv(resolved, "MAX_PATCH_BYTES", 500_000),
+    maxFiles,
+    maxPatchBytes,
+    maxFilesMax,
+    maxPatchBytesMax,
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
