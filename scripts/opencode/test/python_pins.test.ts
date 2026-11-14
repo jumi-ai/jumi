@@ -29,6 +29,7 @@ describe("python 3.13 default with pytest and PyYAML", () => {
     expect(dockerfile).toContain("COPY requirements.txt /tmp/requirements.txt");
     expect(dockerfile).toContain("--requirement /tmp/requirements.txt");
     expect(dockerfile).toContain("uv pip install --system");
+    expect(dockerfile).toContain("--break-system-packages");
     expect(dockerfile).toContain("uv python install 3.13 --install-dir /opt/cpython --no-bin");
   });
 

@@ -220,7 +220,7 @@ RUN set -eu; \
     ln -sfn "${py_bin}" /usr/local/bin/python3.13; \
     ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python3; \
     ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python; \
-    /usr/local/bin/uv pip install --system --python "${py_bin}" --requirement /tmp/requirements.txt; \
+    /usr/local/bin/uv pip install --system --break-system-packages --python "${py_bin}" --requirement /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt; \
     /usr/local/bin/python3.13 --version; \
     python3 --version; \
