@@ -13,10 +13,12 @@ export function closesIssuePattern(issueNumber: number): RegExp {
   return new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#${issueNumber}\b`, "i");
 }
 
+const REFS_PHRASES = "refs?|part of|progress towards?|related to";
+
 export function refsIssuePattern(issueNumber: number): RegExp {
   // Non-closing reference: `Refs #N` (and common equivalents like
   // `Part of #N`) keeps the issue open after merge.
-  return new RegExp(String.raw`\b(?:refs?|part of|progress towards?|related to)\s*:?\s*#${issueNumber}\b`, "i");
+  return new RegExp(String.raw`\b(?:${REFS_PHRASES})\s*:?\s*#${issueNumber}\b`, "i");
 }
 
 export const JUMI_ISSUE_BRANCH = /^jumi\/issue-(\d+)-/;
@@ -91,7 +93,7 @@ export function extractRefsIssueNumber(pr: {
   head?: { ref?: string };
 }): number | undefined {
   const text = `${pr.title}\n${pr.body ?? ""}`;
-  const pattern = /\b(?:refs?|part of|progress towards?|related to)\s*:?\s*#(\d+)\b/gi;
+  const pattern = new RegExp(String.raw`\b(?:${REFS_PHRASES})\s*:?\s*#(\d+)\b`, "gi");
   const matches = [...text.matchAll(pattern)].map((match) => Number(match[1]));
   const fromRef = matches[0];
   if (fromRef === undefined || !Number.isFinite(fromRef)) return undefined;

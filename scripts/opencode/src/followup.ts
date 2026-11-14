@@ -1495,12 +1495,21 @@ export async function implementFollowUp(
 
   // After a pushed follow-up, rewrite only the jumi-owned region from JUMI_PR.md.
   // Missing/empty artifact or an unfenced body leaves the posted body alone, and
-  // a forge failure here must not fail a good code fix. Returns true when the
-  // posted body changed.
-  const refreshPullRequestBody = async (description: string | null): Promise<boolean> => {
-    if (description == null || !description.replaceAll("\0", "").trim()) return false;
+  // a forge failure here must not fail a good code fix. Returns the live head
+  // and timestamp from the same `getPR` so a body-only requeue never enqueues
+  // the stale snapshot with no `prUpdatedAt` (which would cancel a newer
+  // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
+  const refreshPullRequestBody = async (
+    description: string | null,
+    fallbackHeadSha?: string
+  ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
+    const fallback = fallbackHeadSha || pr.head.sha;
+    if (description == null || !description.replaceAll("\0", "").trim()) return { changed: false, headSha: fallback };
     try {
       const live = await opts.api.getPR(owner, repo, pr.number);
+      const liveHeadSha = live.head?.sha ?? fallback;
+      const liveUpdatedAt = typeof live.updated_at === "string" && live.updated_at ? live.updated_at : undefined;
+      const seen = { headSha: liveHeadSha, ...(liveUpdatedAt ? { prUpdatedAt: liveUpdatedAt } : {}) };
       const body = replaceJumiPrBodyRegion(
         live.body,
         buildPullRequestBody(
@@ -1511,26 +1520,30 @@ export async function implementFollowUp(
           followupConventions.closingKeyword
         )
       );
-      if (body == null || body === live.body) return false;
+      if (body == null || body === live.body) return { changed: false, ...seen };
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
-      return true;
+      return { changed: true, ...seen };
     } catch (err) {
       log(
         `PR body refresh failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
       );
-      return false;
+      return { changed: false, headSha: fallback };
     }
   };
 
   // A body-only round never pushes, so GitHub `edited` never wakes the
   // reviewer. When this round changed the Jumi-owned region on a head whose
-  // last Jumi review failed, queue that same head again. Human edits outside
+  // last Jumi review failed, queue that live head again. Human edits outside
   // the fence never reach this path, and an unchanged body never re-queues.
-  const maybeQueueBodyOnlyReview = async (bodyChanged: boolean, headSha: string): Promise<void> => {
+  const maybeQueueBodyOnlyReview = async (
+    refreshed: { changed: boolean; headSha: string; prUpdatedAt?: string },
+    fallbackHeadSha: string
+  ): Promise<void> => {
     if (!opts.reviewQueue) return;
+    const headSha = refreshed.headSha || fallbackHeadSha;
     if (
       !shouldQueueReviewAfterBodyChange(
-        bodyChanged,
+        refreshed.changed,
         isLastJumiReviewFailedOnHead(pendingItems, headSha, opts.botUsername)
       )
     )
@@ -1543,6 +1556,7 @@ export async function implementFollowUp(
       action: BODY_ONLY_REVIEW_ACTION,
       headSha,
       receivedAt: new Date().toISOString(),
+      ...(refreshed.prUpdatedAt ? { prUpdatedAt: refreshed.prUpdatedAt } : {}),
     };
     try {
       await opts.reviewQueue.enqueue(job);
@@ -2003,8 +2017,8 @@ export async function implementFollowUp(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-        const bodyChanged = await refreshPullRequestBody(prFileContents);
-        await maybeQueueBodyOnlyReview(bodyChanged, pr.head.sha);
+        const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+        await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
