@@ -1,5 +1,6 @@
 import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "./auth.ts";
 import { isCiWaitSkipReason } from "./ci.ts";
+import { parseReviewOutput } from "./verdict.ts";
 
 /**
  * Requeue-a-review kick ("replace the empty commit").
@@ -247,6 +248,48 @@ export function parseKickBody(body: unknown, headerIdempotencyKey: string): Kick
 /** Current reason of a terminal row: the publish reason, else the error text. */
 export function terminalReasonOf(row: { resultReason: string | null; error: string | null }): string {
   return (row.resultReason ?? row.error ?? "").trim();
+}
+
+/**
+ * Failing-verdict reason for a succeeded review row. A review that ran fine
+ * but published a failure trailer (`<!-- jumi-check: failure; ... -->`) is a
+ * successful job, so `terminalReasonOf` is empty; the kick id is the verdict
+ * description instead. Returns undefined for success trailers, incomplete
+ * reviews, and empty markdown.
+ */
+export function failingVerdictReasonFromMarkdown(markdown: string | null | undefined): string | undefined {
+  if (!markdown?.trim()) return undefined;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete) return undefined;
+  if (parsed.verdict.state !== "failure") return undefined;
+  const reason = parsed.verdict.description.trim();
+  return reason !== "" ? reason : undefined;
+}
+
+/** True for a succeeded review row whose published verdict failed. */
+export function isFailingVerdictRow(row: { state: string; resultMarkdown: string | null }): boolean {
+  return row.state === "succeeded" && failingVerdictReasonFromMarkdown(row.resultMarkdown) !== undefined;
+}
+
+/**
+ * Kick id for a terminal review row: the failing-verdict description for a
+ * succeeded failure-verdict row, else the publish reason / error text.
+ */
+export function kickReasonOf(row: {
+  state: string;
+  resultReason: string | null;
+  error: string | null;
+  resultMarkdown: string | null;
+}): string {
+  if (row.state === "succeeded") {
+    return failingVerdictReasonFromMarkdown(row.resultMarkdown) ?? "";
+  }
+  return terminalReasonOf(row);
+}
+
+/** Terminal rows eligible for a same-commit requeue, including failing verdicts. */
+export function isKickableReviewRow(row: { state: string; resultMarkdown: string | null }): boolean {
+  return isKickableTerminalState(row.state) || isFailingVerdictRow(row);
 }
 
 export interface ReopenKickRequest {
