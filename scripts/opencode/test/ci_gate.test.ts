@@ -354,6 +354,118 @@ describe("CI gate: slots and waiting rows", () => {
   });
 });
 
+describe("CI gate: required-context narrowing", () => {
+  type GateStatus = { id: number; context: string; status: "pending" | "success" | "failure" };
+  function requiredApi(statuses: GateStatus[], required: string[]) {
+    const base = makeCiApi({
+      listCommitStatuses: async () => statuses,
+      getPR: async () => makePR(),
+    });
+    return {
+      ...base,
+      getBranch: async () => ({ enableStatusCheck: true, requiredContexts: required }),
+    } as unknown as ReviewApi & {
+      getBranch: () => Promise<{ enableStatusCheck: boolean; requiredContexts: string[] }>;
+    };
+  }
+
+  test("required success with a non-required pending check enqueues dispatchable", async () => {
+    const store = new MemoryReviewJobStore();
+    const now = Date.now();
+    const job = makeJob({ headSha: "required-done" });
+    const lines: string[] = [];
+    const gated = await enqueueReviewWithCiGate(store, job, {
+      ciApi: requiredApi(
+        [
+          { id: 1, context: "build", status: "success" },
+          { id: 2, context: "optional", status: "pending" },
+        ],
+        ["build"]
+      ),
+      home: "/tmp",
+      nowMs: now,
+      logger: (m) => lines.push(m),
+    });
+    expect(gated.queued).toBe(true);
+    const row = store.rows.find((r) => r.jobKey === gated.key)!;
+    expect(row.leasedUntil).toBeNull();
+    expect(row.error).toBeNull();
+    expect(lines.some((l) => l.includes("required checks done, ignoring pending optional: optional"))).toBe(true);
+    expect(await store.peekRunnable([REVIEW_KIND], 10, new Date(now))).toHaveLength(1);
+  });
+
+  test("a pending required context waits", async () => {
+    const store = new MemoryReviewJobStore();
+    const now = Date.now();
+    const job = makeJob({ headSha: "required-pending" });
+    await enqueueReviewWithCiGate(store, job, {
+      ciApi: requiredApi(
+        [
+          { id: 1, context: "build", status: "pending" },
+          { id: 2, context: "optional", status: "success" },
+        ],
+        ["build"]
+      ),
+      home: "/tmp",
+      nowMs: now,
+    });
+    const row = store.rows[0]!;
+    expect(isCiWaitMarker(row.error)).toBe(true);
+    expect(await store.peekRunnable([REVIEW_KIND], 10, new Date(now))).toEqual([]);
+  });
+
+  test("a required context that never reported waits", async () => {
+    const store = new MemoryReviewJobStore();
+    const now = Date.now();
+    const job = makeJob({ headSha: "required-missing" });
+    await enqueueReviewWithCiGate(store, job, {
+      ciApi: requiredApi([{ id: 2, context: "optional", status: "success" }], ["build"]),
+      home: "/tmp",
+      nowMs: now,
+    });
+    const row = store.rows[0]!;
+    expect(isCiWaitMarker(row.error)).toBe(true);
+    expect(await store.peekRunnable([REVIEW_KIND], 10, new Date(now))).toEqual([]);
+  });
+
+  test("CI wake with a red required check and a pending optional check promotes", async () => {
+    const store = new MemoryReviewJobStore();
+    const now = Date.now();
+    const job = makeJob({ headSha: "wake-red" });
+    await enqueueReviewWithCiGate(store, job, {
+      ciApi: requiredApi([{ id: 1, context: "build", status: "pending" }], ["build"]),
+      home: "/tmp",
+      nowMs: now,
+    });
+    expect(isCiWaitMarker(store.rows[0]?.error)).toBe(true);
+    const failingBase = makeCiApi({
+      listCommitStatuses: async () => [
+        { id: 1, context: "build", status: "failure" },
+        { id: 2, context: "optional", status: "pending" },
+      ],
+      getPR: async () => makePR(),
+    });
+    const failing = {
+      ...failingBase,
+      getBranch: async () => ({ enableStatusCheck: true, requiredContexts: ["build"] }),
+    } as unknown as ReviewApi & {
+      getBranch: () => Promise<{ enableStatusCheck: boolean; requiredContexts: string[] }>;
+    };
+    const lines: string[] = [];
+    const wake = await enqueueCiWakeWithGate(store, job, {
+      ciApi: failing,
+      home: "/tmp",
+      nowMs: now + 1000,
+      logger: (m) => lines.push(m),
+    });
+    expect("waiting" in wake).toBe(false);
+    const row = store.rows[0]!;
+    expect(row.leasedUntil).toBeNull();
+    expect(row.error).toBeNull();
+    expect(lines.some((l) => l.includes("required checks done, ignoring pending optional: optional"))).toBe(true);
+  });
+});
+
 describe("CI gate: skip-only metric", () => {
   test("ledger counts skipped CI-pending rows and exposes them on /metrics", async () => {
     const store = new MemoryReviewJobStore();

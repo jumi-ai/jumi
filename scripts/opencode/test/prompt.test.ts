@@ -442,6 +442,19 @@ describe("formatCiResults", () => {
   test("returns no block when there are no checks", () => {
     expect(formatCiResults("abc123", [])).toBe("");
   });
+
+  test("marks still-running non-required checks as not required", () => {
+    const block = formatCiResults(
+      "abc123",
+      [
+        { name: "build", conclusion: "success" },
+        { name: "optional", conclusion: "pending" },
+      ],
+      ["optional"]
+    );
+    expect(block).toContain('<check name="optional" conclusion="pending" required="false"/>');
+    expect(block).toContain('<check name="build" conclusion="success"/>');
+  });
 });
 
 describe("buildPROpenedPrompt ci_results", () => {

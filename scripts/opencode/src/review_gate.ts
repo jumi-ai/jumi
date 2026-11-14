@@ -1,4 +1,12 @@
-import { CI_LOOKUP_BUDGET_MS, type CiInspection, ciWaitForInspection, encodeCiAbsentWait, inspectCi } from "./ci.ts";
+import {
+  CI_LOOKUP_BUDGET_MS,
+  type CiInspection,
+  ciWaitForInspection,
+  encodeCiAbsentWait,
+  inspectCi,
+  type RequiredCiResolver,
+  resolveRequiredCiContexts,
+} from "./ci.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewApi } from "./review.ts";
 import type { EnqueueReviewOpts } from "./review_jobs.ts";
@@ -8,10 +16,36 @@ export interface ReviewGateQueue {
   enqueue(job: ReviewJob, opts?: EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 }
 
-export type CiGateApi = Pick<ReviewApi, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
+export type CiGateApi = Pick<
+  ReviewApi,
+  "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs"
+> &
+  Partial<RequiredCiResolver>;
+
+async function requiredContextsForGate(
+  api: CiGateApi,
+  job: ReviewJob,
+  opts: { baseBranch?: string; logger?: (message: string) => void }
+): Promise<string[] | undefined> {
+  return resolveRequiredCiContexts(api, {
+    owner: job.owner,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+    ...(opts.logger ? { log: opts.logger } : {}),
+  });
+}
+
+function logGatePass(logger: ((message: string) => void) | undefined, job: ReviewJob, ci: CiInspection): void {
+  if (ci.pendingOptional.length > 0) {
+    logger?.(
+      `CI gate: required checks done, ignoring pending optional: ${ci.pendingOptional.join(", ")} for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}`
+    );
+  }
+}
 
 /**
- * Router-side CI gate: store a review whose head CI is pending as waiting
+ * Router-side CI gate: store a review whose CI is not yet ready as waiting
  * (not dispatchable) so control creates no Job until the CI-completion wake
  * promotes it. Uses the same `CiInspection` the review path uses. Heads with
  * no checks wait until the lookup budget expires, then become dispatchable.
@@ -26,11 +60,13 @@ export async function enqueueReviewWithCiGate(
     home: string;
     logger?: (message: string) => void;
     nowMs?: number;
+    baseBranch?: string;
   }
 ): Promise<EnqueueResult> {
   const nowMs = opts.nowMs ?? Date.now();
   const api = opts.ciApi;
   if (!api) return queue.enqueue(job);
+  const requiredContexts = await requiredContextsForGate(api, job, opts);
   let ci: CiInspection;
   try {
     ci = await inspectCi({
@@ -41,6 +77,7 @@ export async function enqueueReviewWithCiGate(
       home: opts.home,
       issueNumber: job.prNumber,
       log: opts.logger,
+      ...(requiredContexts ? { requiredContexts } : {}),
     });
   } catch (err) {
     opts.logger?.(
@@ -53,7 +90,10 @@ export async function enqueueReviewWithCiGate(
     });
   }
   const wait = ciWaitForInspection(ci, nowMs);
-  if (!wait) return queue.enqueue(job);
+  if (!wait) {
+    logGatePass(opts.logger, job, ci);
+    return queue.enqueue(job);
+  }
   opts.logger?.(
     `CI gate waiting for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} pending=${ci.pending} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)} until=${new Date(wait.untilMs).toISOString()}`
   );
@@ -75,11 +115,13 @@ export async function enqueueCiWakeWithGate(
     home: string;
     logger?: (message: string) => void;
     nowMs?: number;
+    baseBranch?: string;
   }
 ): Promise<EnqueueResult | { key: string; queued: false; waiting: true }> {
   const api = opts.ciApi;
   if (!api) return queue.enqueue(job);
   const key = `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`;
+  const requiredContexts = await requiredContextsForGate(api, job, opts);
   let ci: CiInspection;
   try {
     ci = await inspectCi({
@@ -90,6 +132,7 @@ export async function enqueueCiWakeWithGate(
       home: opts.home,
       issueNumber: job.prNumber,
       log: opts.logger,
+      ...(requiredContexts ? { requiredContexts } : {}),
     });
   } catch (err) {
     opts.logger?.(
@@ -119,5 +162,6 @@ export async function enqueueCiWakeWithGate(
     });
     return { key, queued: false, waiting: true };
   }
+  logGatePass(opts.logger, job, ci);
   return queue.enqueue(job);
 }

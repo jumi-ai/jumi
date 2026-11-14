@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ActionJob, BranchProtection, Check, CheckState, Forge } from "./ports.ts";
+import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
@@ -50,6 +50,8 @@ export interface CiInspection {
   lookupFailed?: boolean;
   /** Deduped non-Jumi checks seen on the head (`latestStatuses` order, non-success first). */
   checks: CiCheckSummary[];
+  /** Pending checks that are not required by branch protection. Only set when a required set was applied. */
+  pendingOptional: string[];
 }
 
 export const CI_PENDING_REASON = "CI still pending";
@@ -239,7 +241,7 @@ const UNPACK_NOISE =
   /^(Unpacking |Selecting previously unselected |Preparing to unpack |Setting up |Processing triggers for |Get:\d|Hit:\d|Ign:\d|Fetched \d|Reading package lists|Building dependency tree| {2}inflating:| {2}creating: |Extracting |Unzipping )/i;
 
 function emptyInspection(sha: string): CiInspection {
-  return { sha, pending: false, failed: [], unhandled: [], empty: true, checks: [] };
+  return { sha, pending: false, failed: [], unhandled: [], empty: true, checks: [], pendingOptional: [] };
 }
 
 export function actionJobCheckState(job: ActionJob): CheckState | undefined {
@@ -298,6 +300,104 @@ export function branchRequiresReviewCheck(
   branch: Pick<BranchProtection, "enableStatusCheck" | "requiredContexts">
 ): boolean {
   return branch.enableStatusCheck === true && (branch.requiredContexts ?? []).includes(JUMI_REVIEW_CONTEXT);
+}
+
+/** Required contexts that gate `pending`, with Jumi's own review check removed. */
+export function requiredCiContextsForPending(requiredContexts: readonly string[] | undefined): string[] {
+  return (requiredContexts ?? []).filter(
+    (context) => typeof context === "string" && context.length > 0 && !isJumiReviewContext(context)
+  );
+}
+
+/**
+ * True when a reported check covers a required context. Exact matches cover
+ * the Gitea and GitHub shapes (the required name equals the forge context).
+ * The suffix fallbacks cover a required bare job name against a forge
+ * `workflow / job (event)` context (or the reverse) so a naming-shape
+ * difference never reads a reported check as missing.
+ */
+export function requiredMatchesCheck(checkContext: string | undefined, required: string): boolean {
+  if (!checkContext) return false;
+  if (checkContext === required) return true;
+  if (checkContext.endsWith(` / ${required}`)) return true;
+  if (required.endsWith(` / ${checkContext}`)) return true;
+  if (checkContext.includes(` / ${required} (`)) return true;
+  if (required.includes(` / ${checkContext} (`)) return true;
+  return false;
+}
+
+export interface RequiredCiResolver {
+  getBranch?: (owner: string, repo: string, branch: string) => Promise<BranchProtection>;
+  getPR?: (owner: string, repo: string, index: number) => Promise<Pull>;
+}
+
+/**
+ * Single helper every `pending` gate uses to read the base branch's required
+ * check set. Returns the required contexts (Jumi's own review check removed)
+ * when branch protection enables status checks and names at least one other
+ * context. Returns `undefined` for every fallback case — no base branch, no
+ * `getBranch`, an unreadable branch, disabled checks, or no required contexts
+ * besides Jumi's own — so callers keep today's any-check behaviour. Logs the
+ * fallback once per call; never throws.
+ */
+export async function resolveRequiredCiContexts(
+  api: RequiredCiResolver,
+  opts: {
+    owner: string;
+    repo: string;
+    prNumber?: number;
+    issueNumber?: number;
+    baseBranch?: string;
+    log?: (message: string) => void;
+  }
+): Promise<string[] | undefined> {
+  const ref = opts.prNumber ?? opts.issueNumber;
+  const label = `${opts.owner}/${opts.repo}${ref !== undefined ? `#${ref}` : ""}`;
+  let baseBranch = opts.baseBranch;
+  if (!baseBranch && opts.prNumber !== undefined && typeof api.getPR === "function") {
+    try {
+      const pr = await api.getPR(opts.owner, opts.repo, opts.prNumber);
+      baseBranch = pr?.base?.ref;
+    } catch (err) {
+      opts.log?.(
+        `CI required checks unreadable for ${label}: base branch unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+      );
+      return undefined;
+    }
+  }
+  if (!baseBranch) {
+    opts.log?.(`CI required checks unreadable for ${label}: no base branch; falling back to any-check pending`);
+    return undefined;
+  }
+  if (typeof api.getBranch !== "function") {
+    opts.log?.(
+      `CI required checks unreadable for ${label}: branch requirements are not readable; falling back to any-check pending`
+    );
+    return undefined;
+  }
+  let branch: BranchProtection;
+  try {
+    branch = await api.getBranch(opts.owner, opts.repo, baseBranch);
+  } catch (err) {
+    opts.log?.(
+      `CI required checks unreadable for ${label}: ${baseBranch} unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+    );
+    return undefined;
+  }
+  if (branch.enableStatusCheck !== true) {
+    opts.log?.(
+      `CI required checks unreadable for ${label}: ${baseBranch} requires no status checks; falling back to any-check pending`
+    );
+    return undefined;
+  }
+  const required = requiredCiContextsForPending(branch.requiredContexts);
+  if (required.length === 0) {
+    opts.log?.(
+      `CI required checks unreadable for ${label}: ${baseBranch} names no required checks; falling back to any-check pending`
+    );
+    return undefined;
+  }
+  return required;
 }
 
 export function checkDurationMs(check: Check): number | undefined {
@@ -654,6 +754,13 @@ export async function inspectCi(opts: {
   issueNumber: number;
   skipLatches?: SkipLatchStore;
   log?: (message: string) => void;
+  /**
+   * Base branch required contexts (Jumi's own review check is ignored).
+   * When non-empty, `pending` is true only when a required context is
+   * pending or has not reported yet; other pending checks land in
+   * `pendingOptional`. When unset or empty, every pending check counts.
+   */
+  requiredContexts?: readonly string[];
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
   let lookupFailed = false;
@@ -703,7 +810,30 @@ export async function inspectCi(opts: {
   const others = latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
     (status) => !isJumiReviewContext(status.context)
   );
-  const pending = others.some((status) => commitStatusState(status) === "pending");
+  const required = requiredCiContextsForPending(opts.requiredContexts);
+  let pending: boolean;
+  let pendingOptional: string[] = [];
+  if (required.length > 0) {
+    pending = required.some((context) => {
+      const match = others.find((status) => requiredMatchesCheck(status.context, context));
+      if (!match) return true;
+      return commitStatusState(match) === "pending";
+    });
+    pendingOptional = [
+      ...new Set(
+        others
+          .filter(
+            (status) =>
+              commitStatusState(status) === "pending" &&
+              !required.some((context) => requiredMatchesCheck(status.context, context))
+          )
+          .map((status) => status.context ?? "")
+          .filter((name) => name.length > 0)
+      ),
+    ].sort();
+  } else {
+    pending = others.some((status) => commitStatusState(status) === "pending");
+  }
   const red = others.filter((status) => {
     const state = commitStatusState(status);
     return state === "failure" || state === "error";
@@ -717,6 +847,7 @@ export async function inspectCi(opts: {
       empty: !sawShaJobs,
       lookupFailed,
       checks: summarizeCiChecks(others),
+      pendingOptional,
     };
   }
 
@@ -751,20 +882,45 @@ export async function inspectCi(opts: {
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));
-  return { sha: opts.sha, pending, failed, unhandled, empty: false, lookupFailed, checks: summarizeCiChecks(others) };
+  return {
+    sha: opts.sha,
+    pending,
+    failed,
+    unhandled,
+    empty: false,
+    lookupFailed,
+    checks: summarizeCiChecks(others),
+    pendingOptional,
+  };
 }
 
 export async function needsCiFollowUp(opts: {
-  api: CiApi;
+  api: CiApi & Partial<RequiredCiResolver>;
   owner: string;
   repo: string;
   sha: string;
   home: string;
   issueNumber: number;
   skipLatches?: SkipLatchStore;
+  requiredContexts?: readonly string[];
+  baseBranch?: string;
+  log?: (message: string) => void;
 }): Promise<boolean> {
   try {
-    const inspection = await inspectCi(opts);
+    let requiredContexts = opts.requiredContexts;
+    if (requiredContexts === undefined && opts.baseBranch) {
+      requiredContexts = await resolveRequiredCiContexts(opts.api, {
+        owner: opts.owner,
+        repo: opts.repo,
+        issueNumber: opts.issueNumber,
+        baseBranch: opts.baseBranch,
+        ...(opts.log ? { log: opts.log } : {}),
+      });
+    }
+    const inspection = await inspectCi({
+      ...opts,
+      ...(requiredContexts ? { requiredContexts } : {}),
+    });
     if (inspection.pending) return false;
     return inspection.unhandled.length > 0;
   } catch {
