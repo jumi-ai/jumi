@@ -5,7 +5,7 @@ import { disabledKickWhy, isKickableTerminalState, STUCK_KICK_ALIASES, terminalR
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
-import { isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
+import { BODY_ONLY_REVIEW_ACTION, isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
 import type { ReviewSuggestionCounts, ReviewSuggestionTotalsRow } from "./review_suggestions.ts";
 import {
   CLOSED_PULLS_SCHEMA_SQL,
@@ -1033,7 +1033,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         await this.sits.clearPullClosed?.(job.owner, job.repo, job.prNumber);
       }
       const sameKey = this.rows.filter((row) => row.jobKey === key);
-      if (sameKey.some((row) => isTerminalOutcome(row.state, row.resultReason))) {
+      // A follow-up body-only refresh re-queues the same head after a failed
+      // review without a code push. It uses its own action so unrelated human
+      // `edited` events (which the router never enqueues) cannot wake the
+      // reviewer through this path.
+      const isBodyOnlyReReview = job.action === BODY_ONLY_REVIEW_ACTION;
+      if (!isBodyOnlyReReview && sameKey.some((row) => isTerminalOutcome(row.state, row.resultReason))) {
         await this.sits.remember(job.owner, job.repo, job.prNumber, "terminal-result");
         return { key, queued: false };
       }
@@ -2796,7 +2801,14 @@ export class PgReviewJobStore implements ReviewJobStore {
           [key]
         )
       );
-      if (done.some((row) => isTerminalOutcome(str(row.state) as ReviewJobState, strOrNull(row.result_reason)))) {
+      // Same-head body-only re-review bypasses the terminal row: the follow-up
+      // changed only the Jumi-owned body region on a failed head, so the same
+      // head is queued again without a code push. Human `edited` events never
+      // use this action and stay unhandled.
+      if (
+        job.action !== BODY_ONLY_REVIEW_ACTION &&
+        done.some((row) => isTerminalOutcome(str(row.state) as ReviewJobState, strOrNull(row.result_reason)))
+      ) {
         await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "terminal-result");
         return { key, queued: false };
       }
