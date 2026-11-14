@@ -137,8 +137,8 @@ import {
   capSuggestionFindings,
   countQuestionFindings,
   findingFingerprint,
+  hasBlockingFindings,
   hasColonEndingFinding,
-  hasPublishedFindings,
   isBlockingQuestionAuthor,
   keepReviewFindingLines,
   MAX_SUGGESTION_FINDINGS,
@@ -1575,11 +1575,14 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     : undefined;
   // A failure trailer with no published finding is an incomplete review: the
   // trailer reason is not a finding, and prose the publisher drops must not
-  // become a blank required-check failure. Success with no findings stays clean.
+  // become a blank required-check failure. A failure that publishes only
+  // non-blocking findings (💡/❓) is incomplete for the same reason: a
+  // "N blocking" trailer with no open 🔴/🟡 finding would fail the check
+  // with nothing actionable. Success with no findings stays clean.
   if (
     !parsed.verdict.incomplete &&
     parsed.verdict.state === "failure" &&
-    !hasPublishedFindings(parsed.comment, { singleFilePath })
+    !hasBlockingFindings(parsed.comment, { singleFilePath })
   ) {
     const result: ReviewResult = { status: "skipped", reason: INCOMPLETE_NO_FINDINGS_REASON };
     await upsertStuckText(forgeApi, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
@@ -2605,7 +2608,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         gated = `${opts.noCiNote}\n\n${gated}`;
       }
       const parsed = parseReviewOutput(gated);
-      if (parsed.verdict.state === "failure" && !hasPublishedFindings(parsed.comment)) {
+      if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }
       return await publishMarkdownVerdict(gated);
@@ -2783,7 +2786,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             const singleFilePath = needsSingleFilePath(parsedArtifact.comment)
               ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, opts.prNumber, log)
               : undefined;
-            blankFailure = !hasPublishedFindings(parsedArtifact.comment, { singleFilePath });
+            blankFailure = !hasBlockingFindings(parsedArtifact.comment, { singleFilePath });
             if (!blankFailure) {
               const keptArtifact = keepReviewFindingLines(parsedArtifact.comment, { singleFilePath });
               if (hasColonEndingFinding(keptArtifact, { singleFilePath })) {

@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 import {
   blockingOpenQuestionCount,
   buildFindingsList,
+  countBlockingFindings,
   countMaintainerQuestionFindings,
   countQuestionFindings,
   findingFingerprint,
   findingListLine,
+  hasBlockingFindings,
   hasOnlyMaintainerQuestions,
   hasPublishedFindings,
+  isBlockingFindingFirstLine,
   isBlockingQuestionAuthor,
   isMaintainerOnlyQuestionText,
   isMaintainerQuestionInline,
@@ -316,6 +319,19 @@ describe("keepReviewFindingLines", () => {
   test("requires at least one published finding block for a failure trailer", () => {
     expect(hasPublishedFindings("tour only, no findings")).toBe(false);
     expect(hasPublishedFindings("src/a.ts:1: 🔴 bug: null deref.\n  - detail kept")).toBe(true);
+  });
+
+  test("blocking findings ignore suggestions, questions, and prose", () => {
+    expect(hasBlockingFindings("tour only, no findings")).toBe(false);
+    expect(hasBlockingFindings("src/a.ts:1: 💡 simpler: drop the helper.")).toBe(false);
+    expect(hasBlockingFindings("src/a.ts:1: ❓ q: is the timeout intentional?")).toBe(false);
+    expect(hasBlockingFindings("src/a.ts:1: 🔴 bug: null deref.")).toBe(true);
+    expect(hasBlockingFindings("src/a.ts:1: 🟡 risk: swallowed error.")).toBe(true);
+    expect(hasBlockingFindings("🔴 bug: null deref with no location.")).toBe(true);
+    expect(countBlockingFindings("src/a.ts:1: 🔴 bug: one.\nsrc/b.ts:2: 🟡 risk: two.")).toBe(2);
+    expect(countBlockingFindings("src/a.ts:1: 💡 simpler: one.\nsrc/b.ts:2: ❓ q: two?")).toBe(0);
+    expect(isBlockingFindingFirstLine("src/a.ts:1: 🔴 bug: null deref.")).toBe(true);
+    expect(isBlockingFindingFirstLine("src/a.ts:1: 💡 simpler: drop it.")).toBe(false);
   });
 });
 

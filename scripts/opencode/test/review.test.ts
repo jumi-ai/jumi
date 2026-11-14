@@ -4235,6 +4235,60 @@ describe("publishReviewResult", () => {
     ]);
     expect((reviews[0] as { body: string }).body).not.toContain("jumi-findings-list");
   });
+
+  test("a failure with only suggestions is incomplete, not N blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    let posted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 💡 simpler: extract a helper.",
+        "src/bar.ts:7: 💡 simpler: drop the wrapper.",
+        "<!-- jumi-check: failure; 2 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async () => {
+          posted = true;
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no findings" });
+    expect(posted).toBe(false);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.state).toBe("failure");
+    expect(statuses[0]?.description).toBe("Incomplete review: no findings");
+  });
+
+  test("a failure with only questions is incomplete, not N blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    let posted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ q: is the timeout intentional?",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async () => {
+          posted = true;
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no findings" });
+    expect(posted).toBe(false);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.description).toBe("Incomplete review: no findings");
+  });
 });
 
 describe("suggestion hold", () => {

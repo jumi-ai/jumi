@@ -435,7 +435,7 @@ export function buildNoFindingsWritePrompt(lastAssistant?: string): string {
   const base = buildIncompleteWritePrompt(lastAssistant);
   return `${base}
 
-Your previous JUMI_REVIEW.md claimed failure but published no findings: after the publisher keeps only finding lines, the body was empty with no inline comments. A trailer reason such as "1 risk" is not a finding. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
+Your previous JUMI_REVIEW.md claimed failure but published no blocking findings: after the publisher keeps only finding lines, the body had no 🔴/🟡 finding and no inline comments. A trailer reason such as "1 risk" or "2 blocking" is not a finding, and 💡/❓ findings never fail the check. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real 🔴/🟡 finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
 }
 
 export function buildNoTrailerWritePrompt(lastAssistant?: string): string {
@@ -452,7 +452,7 @@ export function buildMcpIncompletePrompt(): string {
 export function buildMcpNoFindingsPrompt(): string {
   return `${buildMcpIncompletePrompt()}
 
-Your previous turn recorded a failure verdict but no findings: after the publisher keeps only finding lines, the body would be empty. A reason such as "1 risk" is not a finding. Record a real finding you can stand behind with add_finding, or change the verdict to success with set_verdict if there are no blocking findings.`;
+Your previous turn recorded a failure verdict but no blocking findings: after the publisher keeps only finding lines, the body would have no 🔴/🟡 finding. A reason such as "1 risk" or "2 blocking" is not a finding, and 💡/❓ findings never fail the check. Record a real 🔴/🟡 finding you can stand behind with add_finding, or change the verdict to success with set_verdict if there are no blocking findings.`;
 }
 
 export function buildMcpNoVerdictPrompt(): string {

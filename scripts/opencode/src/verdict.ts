@@ -573,6 +573,35 @@ export function countSuggestionFindings(text: string, opts?: { singleFilePath?: 
   return count;
 }
 
+const BLOCKING_MARKER_RE =
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🔴|🟡|(?:bug|risk)\s*:)/iu;
+
+export function isBlockingFindingFirstLine(original: string): boolean {
+  return BLOCKING_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+/**
+ * Count the blocking findings in a review body: one per finding block whose
+ * first line carries the `🔴`/`🟡` (or `bug:`/`risk:`) marker. `💡`/`❓`
+ * blocks are ignored. A failure trailer claiming "N blocking" must match at
+ * least one such published finding; otherwise the check would fail with no
+ * actionable finding.
+ */
+export function countBlockingFindings(text: string, opts?: { singleFilePath?: string }): number {
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (isBlockingFindingFirstLine(block.first)) count++;
+  }
+  return count;
+}
+
+/** Whether the review body publishes at least one blocking (`🔴`/`🟡`) finding. */
+export function hasBlockingFindings(text: string, opts?: { singleFilePath?: string }): boolean {
+  return countBlockingFindings(text, opts) > 0;
+}
+
 /** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
 export function formatSuggestionCapNote(dropped: number, cap: number = MAX_SUGGESTION_FINDINGS): string {
   return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${cap}).`;
