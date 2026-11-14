@@ -602,6 +602,28 @@ describe("exportOpenCodeTrace", () => {
     expect(traceExportErrors()).toBe(1);
   });
 
+  test("PHOENIX_PUBLIC_HOST normalizes URL and host:port forms to the hostname", async () => {
+    for (const value of [
+      "https://phoenix.example.test",
+      "https://phoenix.example.test/v1/traces",
+      "phoenix.example.test:6006",
+      "https://phoenix.example.test:6006/v1/traces",
+    ]) {
+      process.env.PHOENIX_PUBLIC_HOST = value;
+      expect(phoenixPublicHost()).toBe("phoenix.example.test");
+      process.env.PHOENIX_OTLP_ENDPOINT = "https://phoenix.example.test/v1/traces";
+      let called = false;
+      setTraceFetchForTests(async () => {
+        called = true;
+        return new Response(null, { status: 200 });
+      });
+      await exportOpenCodeTrace({ dbPath: "/no/such.db" });
+      expect(called).toBe(false);
+      expect(traceExportErrors()).toBe(1);
+      resetTraceExportForTests();
+    }
+  });
+
   test("POSTs OTLP protobuf and records HTTP failures", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
     const dbPath = join(dir, "opencode-session.db");

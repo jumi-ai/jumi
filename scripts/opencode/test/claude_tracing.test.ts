@@ -59,6 +59,10 @@ describe("phoenixPluginEndpoint", () => {
     process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
     expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBeUndefined();
     expect(phoenixPluginEndpoint(`https://phoenix.example.test/v1/traces`)).toBeUndefined();
+    process.env.PHOENIX_PUBLIC_HOST = "https://phoenix.example.test/v1/traces";
+    expect(phoenixPublicHost()).toBe("phoenix.example.test");
+    expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBeUndefined();
+    process.env.PHOENIX_PUBLIC_HOST = "phoenix.example.test";
     delete process.env.PHOENIX_PUBLIC_HOST;
     expect(phoenixPublicHost()).toBeUndefined();
     expect(phoenixPluginEndpoint(`https://phoenix.example.test`)).toBe("https://phoenix.example.test");
