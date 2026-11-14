@@ -5,12 +5,14 @@ import {
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
   type CiCheckSummary,
+  type CiGateResolverApi,
   type CiInspection,
   inspectCi,
   isCiLookupRetryMarker,
   isCiWaitMarker,
   JUMI_REVIEW_CONTEXT,
   type RequiredCiResolver,
+  resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
 } from "./ci.ts";
@@ -21,7 +23,7 @@ import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwI
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
-import { extractClosingIssueNumbers } from "./gitea_issues.ts";
+import { extractClosingIssueNumbers, isWipOrDraft } from "./gitea_issues.ts";
 import {
   isIndependentReviewRefusal,
   provenanceLookupFailureReason,
@@ -58,9 +60,13 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
+import type { CiGateWait } from "./repo_settings.ts";
 import {
   applyRepoChain,
   compileReviewExcludePatterns,
+  effectiveReviewBudget,
+  effectiveSuggestionCap,
+  isReviewDraftsEnabled,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
@@ -119,6 +125,7 @@ import {
   hasPublishedFindings,
   isBlockingQuestionAuthor,
   keepReviewFindingLines,
+  MAX_SUGGESTION_FINDINGS,
   openQuestionDescription,
   parseReviewFindings,
   parseReviewOutput,
@@ -218,6 +225,9 @@ export interface ReviewOptions {
   timeoutMs?: number;
   maxFiles?: number;
   maxPatchBytes?: number;
+  /** Deployer maxima for the review size budget. Unset each defaults to the deployment value. */
+  maxFilesMax?: number;
+  maxPatchBytesMax?: number;
   maxThreadBytes?: number;
   /** Byte budget for the base branch's REVIEW.md sections pasted into the prompt. */
   maxReviewMdBytes?: number;
@@ -843,9 +853,28 @@ export const PR_AUTHOR_CANNOT_PUSH = "PR author cannot push to the base reposito
 export function skipReasonForPR(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
-  if (/^\s*(wip|\[wip\])/i.test(pr.title)) {
+  // Bare `wip` / `[wip]` prefixes disable the review. A `wip:` prefix (with
+  // the colon) is owned solely by the draft gate below (`skipReasonForDraft`
+  // via `isWipOrDraft`), so `review_drafts: true` reviews `WIP:` titles.
+  if (/^\s*(wip(?!:)|\[wip\])/i.test(pr.title)) {
     return "PR title disables review";
   }
+}
+
+/**
+ * Draft / `WIP:` skip for reviews. Returns `"draft or WIP pull request"` when
+ * the pull is a draft or has a `WIP:` title and the repository has not opted
+ * in via `.jumi.yml` `review_drafts: true`. `PR title disables review`
+ * (bare `wip` / `[wip]` prefix, no colon) is a separate mechanism and keeps
+ * working.
+ */
+export function skipReasonForDraft(
+  pr: { title: string; draft?: boolean },
+  reviewDraftsEnabled: boolean
+): string | undefined {
+  if (reviewDraftsEnabled) return undefined;
+  if (isWipOrDraft(pr)) return "draft or WIP pull request";
+  return undefined;
 }
 
 /** Production wait before the one CI re-list; tests default to no wait. */
@@ -855,14 +884,32 @@ export async function inspectOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
     baseBranch?: string;
+    defaultBranch?: string;
     requiredContexts?: readonly string[];
+    wait?: CiGateWait;
   },
   sha: string,
   log: (message: string) => void
 ): Promise<CiInspection> {
   const resolveBranch = opts.baseBranch;
   let requiredContexts = opts.requiredContexts;
-  if (requiredContexts === undefined && resolveBranch) {
+  let wait = opts.wait;
+  if (wait === undefined) {
+    try {
+      const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        ...(resolveBranch ? { baseBranch: resolveBranch } : {}),
+        ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+        log,
+      });
+      wait = gate.wait;
+      if (requiredContexts === undefined) requiredContexts = gate.requiredContexts;
+    } catch {
+      wait = "required";
+    }
+  } else if (wait !== "all" && wait !== "none" && requiredContexts === undefined && resolveBranch) {
     requiredContexts = await resolveRequiredCiContexts(opts.api as unknown as RequiredCiResolver, {
       owner: opts.owner,
       repo: opts.repo,
@@ -880,9 +927,10 @@ export async function inspectOtherChecks(
     issueNumber: opts.prNumber,
     log,
     ...(requiredContexts ? { requiredContexts } : {}),
+    ...(wait && wait !== "required" ? { wait } : {}),
   };
   let ci = await inspectCi(inspectOpts);
-  if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
+  if ((ci.empty || ci.lookupFailed) && opts.relist !== false && wait !== "none") {
     // Actions may not have created the push's jobs yet, or a list call blipped;
     // give it one short beat, then re-list once. Still no checks is not green:
     // the engine waits on the CI lookup budget, then reviews and says so.
@@ -896,13 +944,38 @@ export async function skipReasonForOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
     baseBranch?: string;
+    defaultBranch?: string;
     requiredContexts?: readonly string[];
+    wait?: CiGateWait;
   },
   sha: string,
   log: (message: string) => void
 ): Promise<string | undefined> {
   try {
-    return reviewSkipReasonForCi(await inspectOtherChecks(opts, sha, log));
+    let wait = opts.wait;
+    let requiredContexts = opts.requiredContexts;
+    if (wait === undefined) {
+      try {
+        const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: opts.prNumber,
+          ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+          ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+          log,
+        });
+        wait = gate.wait;
+        if (requiredContexts === undefined) requiredContexts = gate.requiredContexts;
+      } catch {
+        wait = "required";
+      }
+    }
+    const ci = await inspectOtherChecks(
+      { ...opts, ...(wait ? { wait } : {}), ...(requiredContexts ? { requiredContexts } : {}) },
+      sha,
+      log
+    );
+    return reviewSkipReasonForCi(ci, wait);
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
@@ -1276,11 +1349,13 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const forgeApi = opts.forge ?? opts.api;
   const pr = await forgeApi.getPR(opts.owner, opts.repo, opts.prNumber);
   const reviewLabel = `${opts.owner}/${opts.repo}#${opts.prNumber}`;
-  // Effective blocking authors: the deployer list plus the repository's
-  // default-branch file. Read from the default branch only so a change takes
-  // effect when it reaches the default branch. Fail-open to the deployer
-  // list: a missing, invalid, or unreadable file contributes nothing.
+  // Effective blocking authors and suggestion cap: the deployer list plus the
+  // repository's default-branch file. Read from the default branch only so a
+  // change takes effect when it reaches the default branch. Fail-open to the
+  // deployer list and ceiling: a missing, invalid, or unreadable file
+  // contributes nothing.
   let blockingQuestionAuthors = opts.blockingQuestionAuthors;
+  let suggestionCap = MAX_SUGGESTION_FINDINGS;
   try {
     const repoInfo = await forgeApi.getRepo(opts.owner, opts.repo);
     const defaultBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
@@ -1293,9 +1368,69 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         opts.blockingQuestionAuthors,
         log
       );
+      try {
+        const settingsLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, defaultBranch);
+        if (settingsLoad.state === "valid") {
+          suggestionCap = effectiveSuggestionCap(settingsLoad, MAX_SUGGESTION_FINDINGS);
+          const draftSkipEarly = skipReasonForDraft(pr, isReviewDraftsEnabled(settingsLoad));
+          if (draftSkipEarly) {
+            const result: ReviewResult = { status: "skipped", reason: draftSkipEarly };
+            const { state, description } = statusForResult(result);
+            await postReviewStatus(
+              forgeApi,
+              opts.owner,
+              opts.repo,
+              opts.expectedHeadSha,
+              state,
+              description,
+              pr.html_url
+            );
+            return result;
+          }
+        } else if (isWipOrDraft(pr)) {
+          const result: ReviewResult = { status: "skipped", reason: "draft or WIP pull request" };
+          const { state, description } = statusForResult(result);
+          await postReviewStatus(
+            forgeApi,
+            opts.owner,
+            opts.repo,
+            opts.expectedHeadSha,
+            state,
+            description,
+            pr.html_url
+          );
+          return result;
+        }
+      } catch {
+        if (isWipOrDraft(pr)) {
+          const result: ReviewResult = { status: "skipped", reason: "draft or WIP pull request" };
+          const { state, description } = statusForResult(result);
+          await postReviewStatus(
+            forgeApi,
+            opts.owner,
+            opts.repo,
+            opts.expectedHeadSha,
+            state,
+            description,
+            pr.html_url
+          );
+          return result;
+        }
+      }
+    } else if (isWipOrDraft(pr)) {
+      const result: ReviewResult = { status: "skipped", reason: "draft or WIP pull request" };
+      const { state, description } = statusForResult(result);
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+      return result;
     }
   } catch {
     // Fail-open: the deployer list still applies.
+    if (isWipOrDraft(pr)) {
+      const result: ReviewResult = { status: "skipped", reason: "draft or WIP pull request" };
+      const { state, description } = statusForResult(result);
+      await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
+      return result;
+    }
   }
   const skipReason = skipReasonForPR(pr) ?? skipReasonForHeadChange(pr, opts.expectedHeadSha);
   if (skipReason) {
@@ -1383,10 +1518,11 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // would collapse any line containing it (a child disclosure, or a real
   // finding about the setting) to the bare marker.
   const kept = keepReviewFindingLines(parsed.comment, { singleFilePath, keep: [CI_ABSENT_NOTE] });
-  // Parent-enforced 💡 cap: at most MAX_SUGGESTION_FINDINGS publish. 🔴/🟡/❓
-  // are never dropped. The dropped count rides in one body line so the next
-  // follow-up still sees the trailer but not a wall of suggestions.
-  const capped = capSuggestionFindings(kept, { singleFilePath, keep: [CI_ABSENT_NOTE] });
+  // Parent-enforced 💡 cap: the repository `max_suggestions` (ceiling
+  // MAX_SUGGESTION_FINDINGS) publish. 🔴/🟡/❓ are never dropped. The dropped
+  // count rides in one body line so the next follow-up still sees the trailer
+  // but not a wall of suggestions.
+  const capped = capSuggestionFindings(kept, { singleFilePath, keep: [CI_ABSENT_NOTE], maxSuggestions: suggestionCap });
   // Parent-enforced left-out disclosure: a green review must never read as
   // covering files whose patches were withheld. Always appended when non-empty
   // so it publishes exactly once with the canonical names/count even when the
@@ -1544,6 +1680,27 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     );
   }
   const defaultBranch = earlyRepo?.default_branch ?? "";
+  // Draft / WIP: reviews run only when the repository opts in via
+  // `.jumi.yml` `review_drafts: true`. Fail-open to today's skip so an
+  // unreadable file never reviews a draft by accident. Worker eligibility
+  // stays draft-excluded elsewhere, so only this review gate opens.
+  let repoBudgetLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
+  {
+    const branch = (defaultBranch ?? "").trim();
+    if (branch) {
+      try {
+        repoBudgetLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, branch);
+      } catch (err) {
+        log(
+          `review settings unreadable for ${repoFullName}@${branch}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        repoBudgetLoad = undefined;
+      }
+    }
+    const draftsEnabled = repoBudgetLoad?.state === "valid" ? isReviewDraftsEnabled(repoBudgetLoad) : false;
+    const draftSkip = skipReasonForDraft(pr, draftsEnabled);
+    if (draftSkip) return { status: "skipped", reason: draftSkip };
+  }
   if (opts.chain && opts.chain.length > 0) {
     // Only the resolve runs in the fail-open `try` (inside the helper);
     // the fail-closed publish below runs after it so a status or ledger
@@ -1607,14 +1764,35 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   let ciResults: { headSha: string; checks: CiCheckSummary[]; pendingOptional?: readonly string[] } | undefined;
   if (opts.inspectOtherChecks !== false) {
     let ci: CiInspection;
+    let ciWait: CiGateWait = "required";
     try {
-      ci = await inspectOtherChecks({ ...opts, api: forgeApi, baseBranch: pr.base.ref }, reviewedHeadSha, log);
+      const gate = await resolveCiGate(forgeApi as unknown as CiGateResolverApi, {
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        baseBranch: pr.base.ref,
+        ...(defaultBranch ? { defaultBranch } : {}),
+        log,
+      });
+      ciWait = gate.wait;
+      ci = await inspectOtherChecks(
+        {
+          ...opts,
+          api: forgeApi,
+          baseBranch: pr.base.ref,
+          ...(defaultBranch ? { defaultBranch } : {}),
+          ...(gate.requiredContexts ? { requiredContexts: gate.requiredContexts } : {}),
+          ...(gate.wait !== "required" ? { wait: gate.wait } : {}),
+        },
+        reviewedHeadSha,
+        log
+      );
     } catch (err) {
       if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
       log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
       return { status: "skipped", reason: CI_LOOKUP_FAILED_REASON };
     }
-    const ciSkip = reviewSkipReasonForCi(ci);
+    const ciSkip = reviewSkipReasonForCi(ci, ciWait);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
     if (ci.checks.length > 0)
       ciResults = {
@@ -1870,8 +2048,21 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       permissionDetail,
     });
 
-    const maxFiles = opts.maxFiles ?? 100;
-    const maxPatchBytes = opts.maxPatchBytes ?? 500_000;
+    const deploymentMaxFiles = opts.maxFiles ?? 100;
+    const deploymentMaxPatchBytes = opts.maxPatchBytes ?? 500_000;
+    const deploymentMaxFilesMax = opts.maxFilesMax ?? deploymentMaxFiles;
+    const deploymentMaxPatchBytesMax = opts.maxPatchBytesMax ?? deploymentMaxPatchBytes;
+    const budget =
+      repoBudgetLoad?.state === "valid"
+        ? effectiveReviewBudget(repoBudgetLoad, {
+            maxFiles: deploymentMaxFiles,
+            maxFilesMax: deploymentMaxFilesMax,
+            maxPatchBytes: deploymentMaxPatchBytes,
+            maxPatchBytesMax: deploymentMaxPatchBytesMax,
+          })
+        : { maxFiles: deploymentMaxFiles, maxPatchBytes: deploymentMaxPatchBytes };
+    const maxFiles = budget.maxFiles;
+    const maxPatchBytes = budget.maxPatchBytes;
     const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
     const rawPatchBytes = prFiles.reduce((sum, file) => sum + (file.patch ? byteLength(file.patch) : 0), 0);
     const { files, notes: fileNotes } = prepareFiles(strippedPrFiles, maxFiles, maxPatchBytes);

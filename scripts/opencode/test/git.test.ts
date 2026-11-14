@@ -1294,7 +1294,8 @@ cat
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toBe(IMPLEMENT_PROMPT);
+        expect(result.stdout).toContain(IMPLEMENT_PROMPT);
+        expect(result.stdout).toContain("Injected files for this job: JUMI_TASK.md. No others exist.");
       }
     );
   });
@@ -1544,13 +1545,13 @@ describe("worker prompts", () => {
       expect(prompt).toContain("Public upstream docs are fine");
       expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
-      expect(prompt).toContain("JUMI_QUEUE.md");
-      expect(prompt).toContain("JUMI_PR.md");
       expect(prompt).toContain("Verify once at the end");
       expect(prompt).toContain("Do not ask questions");
       expect(prompt).not.toContain("denied");
       expect(prompt).not.toContain("Do not run git");
+      expect(prompt).not.toContain("The only Jumi files to read are");
     }
+    expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
   });
 
   test("workers commit per logical step and never push", () => {
@@ -1641,11 +1642,11 @@ describe("resolveOpenCodePrompt", () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-prompt-"));
     try {
       await writeFile(join(dir, "JUMI_TASK.md"), "task");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(IMPLEMENT_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(IMPLEMENT_PROMPT);
       await writeFile(join(dir, "JUMI_FEEDBACK.md"), "feedback");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(FOLLOWUP_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(FOLLOWUP_PROMPT);
       await writeFile(join(dir, "JUMI_CONFLICT.md"), "conflict");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toBe(CONFLICT_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(CONFLICT_PROMPT);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

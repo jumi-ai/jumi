@@ -19,6 +19,8 @@ import {
   type ExitCountRow,
   type NewRunUsageRow,
   RUN_USAGE_SCHEMA_SQL,
+  type RunnerExitCountRow,
+  type RunnerQuotaResetRow,
   type SessionTotalRow,
   type TokenTotalRow,
 } from "./run_usage.ts";
@@ -200,6 +202,10 @@ export interface ReviewJobStore {
   getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
   /** Ledger run counts by (kind, exit class). */
   getRunExitCounts(): Promise<ExitCountRow[]>;
+  /** Ledger run counts by (kind, runner, outcome), with provider outages split out. */
+  getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]>;
+  /** Latest quota reset a runner's provider stated, unix seconds. */
+  getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]>;
   /** Ledger run durations by (kind, exit class), for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
   /**
@@ -1488,6 +1494,32 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         else counts.set(key, { kind: row.kind, exitClass: row.exitClass, count: 1 });
       }
       return [...counts.values()];
+    });
+  }
+
+  getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
+    return this.locked(() => {
+      const counts = new Map<string, RunnerExitCountRow>();
+      for (const row of this.runUsage) {
+        const key = `${row.kind}\0${row.runner}\0${row.runnerOutcome}`;
+        const existing = counts.get(key);
+        if (existing) existing.count += 1;
+        else counts.set(key, { kind: row.kind, runner: row.runner, outcome: row.runnerOutcome, count: 1 });
+      }
+      return [...counts.values()];
+    });
+  }
+
+  getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]> {
+    return this.locked(() => {
+      const latest = new Map<string, number>();
+      for (const row of this.runUsage) {
+        if (!row.quotaResetAt) continue;
+        const seconds = Math.floor(row.quotaResetAt.getTime() / 1000);
+        const prev = latest.get(row.runner);
+        if (prev == null || seconds > prev) latest.set(row.runner, seconds);
+      }
+      return [...latest.entries()].map(([runner, resetAtSeconds]) => ({ runner, resetAtSeconds }));
     });
   }
 
@@ -3469,10 +3501,10 @@ export class PgReviewJobStore implements ReviewJobStore {
   async recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
     if (rows.length === 0) return;
     const columns =
-      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, started_at, ended_at, duration_seconds, clone_seconds, build_seconds)";
+      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, runner_outcome, quota_reset_at, started_at, ended_at, duration_seconds, clone_seconds, build_seconds)";
     const values: unknown[] = [];
     const tuples = rows.map((row, index) => {
-      const base = index * 18;
+      const base = index * 20;
       values.push(
         row.jobId,
         row.jobKey,
@@ -3487,16 +3519,18 @@ export class PgReviewJobStore implements ReviewJobStore {
         Math.max(0, Math.floor(row.tokensReasoning)),
         Math.max(0, Math.floor(row.sessions)),
         row.exitClass,
+        row.runnerOutcome,
+        row.quotaResetAt ? row.quotaResetAt.toISOString() : null,
         row.startedAt.toISOString(),
         row.endedAt.toISOString(),
         row.durationSeconds,
         row.cloneSeconds ?? null,
         row.buildSeconds ?? null
       );
-      const refs = Array.from({ length: 18 }, (_, offset) => {
-        // started_at/ended_at ride as ISO strings with an explicit cast, the
-        // same way review_jobs timestamps do.
-        if (offset === 13 || offset === 14) return `$${base + offset + 1}::timestamptz`;
+      const refs = Array.from({ length: 20 }, (_, offset) => {
+        // Timestamps ride as ISO strings with an explicit cast, the same way
+        // review_jobs timestamps do.
+        if (offset === 14 || offset === 15 || offset === 16) return `$${base + offset + 1}::timestamptz`;
         return `$${base + offset + 1}`;
       });
       return `(${refs.join(", ")})`;
@@ -3573,6 +3607,29 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows.map((row) => ({ kind: str(row.kind), exitClass: str(row.exit_class), count: num(row.n) }));
+  }
+
+  async getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
+    const rows = asRows<{ kind: unknown; runner: unknown; outcome: unknown; n: unknown }>(
+      await this.sql.unsafe(
+        `SELECT kind, runner, runner_outcome AS outcome, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, runner, runner_outcome`
+      )
+    );
+    return rows.map((row) => ({
+      kind: str(row.kind),
+      runner: str(row.runner),
+      outcome: str(row.outcome),
+      count: num(row.n),
+    }));
+  }
+
+  async getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]> {
+    const rows = asRows<{ runner: unknown; reset_at: unknown }>(
+      await this.sql.unsafe(
+        `SELECT runner, EXTRACT(EPOCH FROM MAX(quota_reset_at))::bigint AS reset_at FROM jumi_run_usage WHERE quota_reset_at IS NOT NULL GROUP BY runner`
+      )
+    );
+    return rows.map((row) => ({ runner: str(row.runner), resetAtSeconds: num(row.reset_at) }));
   }
 
   async getRunDurations(): Promise<DurationRow[]> {

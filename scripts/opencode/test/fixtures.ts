@@ -314,6 +314,8 @@ export function makeConfig(overrides: Partial<ServiceConfig> = {}): ServiceConfi
     queueConcurrency: 1,
     maxFiles: 100,
     maxPatchBytes: 500_000,
+    maxFilesMax: 100,
+    maxPatchBytesMax: 500_000,
     maxOutputBytes: 80_000,
     maxWebhookBytes: 1_048_576,
     opencodeTimeoutMs: 900_000,

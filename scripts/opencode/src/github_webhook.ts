@@ -33,6 +33,7 @@ import {
   effectivePickupLabel,
   effectiveTrustedSenderLogins,
   loadRepoSettings,
+  loadReviewDraftsEnabled,
 } from "./repo_settings.ts";
 import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
@@ -341,14 +342,15 @@ export function shouldEnqueueGithubIssue(
   return { type: "skip", reason: `unsupported action ${payload.action}` };
 }
 
-function validateGithubReview(
+export function validateGithubReview(
   payload: ReturnType<typeof parsePullRequestPayload>,
-  policy: WebhookPolicy
+  policy: WebhookPolicy,
+  opts?: { reviewDrafts?: boolean }
 ): ReviewJob | { skip: string } {
   if (!GITHUB_REVIEW_ACTIONS.has(payload.action)) {
     return { skip: `unsupported action ${payload.action}` };
   }
-  if (isWipOrDraft(payload.pull_request)) return { skip: "draft or WIP pull request" };
+  if (!opts?.reviewDrafts && isWipOrDraft(payload.pull_request)) return { skip: "draft or WIP pull request" };
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
   if (!payload.pull_request.head?.sha) throw new Error("Invalid webhook payload: missing pull_request.head.sha");
   if (!payload.pull_request.updated_at) throw new Error("Invalid webhook payload: missing pull_request.updated_at");
@@ -538,7 +540,28 @@ export async function handleGithubWebhookEvent(
     if (action && GITHUB_REVIEW_ACTIONS.has(action) && deps.review) {
       try {
         const payload = parsePullRequestPayload(rawBody);
-        const validation = validateGithubReview(payload, policy);
+        let reviewDrafts = false;
+        try {
+          const [draftOwner, draftRepo] = payload.repository.full_name.split("/");
+          const defaultBranch =
+            typeof payload.repository.default_branch === "string" ? payload.repository.default_branch : "";
+          const draftsApi = deps.worker?.api as
+            | {
+                getRepoFile?: (
+                  o: string,
+                  r: string,
+                  p: string,
+                  ref: string
+                ) => Promise<{ found: boolean; content?: string }>;
+              }
+            | undefined;
+          if (draftOwner && draftRepo && draftsApi && typeof draftsApi.getRepoFile === "function") {
+            reviewDrafts = await loadReviewDraftsEnabled(draftsApi, draftOwner, draftRepo, defaultBranch, logger);
+          }
+        } catch {
+          reviewDrafts = false;
+        }
+        const validation = validateGithubReview(payload, policy, { reviewDrafts });
         if ("skip" in validation) {
           const [owner, repo] = payload.repository.full_name.split("/");
           if (owner && repo) {
@@ -572,6 +595,9 @@ export async function handleGithubWebhookEvent(
           logger,
           ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
             ? { baseBranch: payload.pull_request.base.ref }
+            : {}),
+          ...(typeof payload.repository?.default_branch === "string" && payload.repository.default_branch
+            ? { defaultBranch: payload.repository.default_branch }
             : {}),
         });
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);

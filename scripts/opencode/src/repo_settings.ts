@@ -21,6 +21,11 @@ export interface RepoTimeouts {
   conflict?: number;
 }
 
+export interface RepoReviewBudget {
+  maxFiles?: number;
+  maxPatchBytes?: number;
+}
+
 export interface RepoSettings {
   automerge: boolean;
   /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
@@ -59,6 +64,19 @@ export interface RepoSettings {
   pickupLabel?: string;
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
+  /** Review draft PRs and `WIP:`-titled PRs. Absent means false (skip drafts, as today). */
+  reviewDrafts: boolean;
+  /** Cap for 💡 findings in this repository. Absent means the deployment ceiling. */
+  maxSuggestions?: number;
+  /** Review size budget overrides. Absent keys run with the deployment value. */
+  reviewBudget: RepoReviewBudget;
+  /**
+   * CI gate wait mode. `undefined` (key absent) means `required`: wait only
+   * for the base branch's required checks, falling back to every check when
+   * protection can't be read. `all` waits for every non-Jumi check whatever
+   * branch protection says. `none` never waits for pending or absent CI.
+   */
+  ciGate?: { wait: CiGateWait };
   /**
    * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
    * behavior (first allowed method on GitHub, default style on Gitea).
@@ -71,6 +89,16 @@ export interface RepoSettings {
 export type RepoMode = "full" | "review-only" | "off";
 
 export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+/** CI gate wait mode: `required` waits only for required checks, `all` waits for every check, `none` never waits. */
+export type CiGateWait = "all" | "required" | "none";
+
+export const CI_GATE_WAITS: readonly CiGateWait[] = ["all", "required", "none"];
+
+export const DEFAULT_CI_GATE_WAIT: CiGateWait = "required";
+
+/** Known sub-keys of the `ci_gate` mapping. */
+export const CI_GATE_KEYS = ["wait"] as const;
 
 export const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
 export type RepoAutomergeMethod = (typeof AUTOMERGE_METHODS)[number];
@@ -102,6 +130,10 @@ export const KNOWN_KEYS = new Set([
   "ignore_conflicts_label",
   "pickup_label",
   "mode",
+  "review_drafts",
+  "max_suggestions",
+  "review_budget",
+  "ci_gate",
 ]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
@@ -112,6 +144,13 @@ export type RepoTimeoutKey = (typeof TIMEOUT_KEYS)[number];
 export const MIN_TIMEOUT_MINUTES = 1;
 
 export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
+
+/** Repository review-budget keys: `max_files` caps changed files, `max_patch_bytes` caps patch bytes. */
+export const REVIEW_BUDGET_KEYS = ["max_files", "max_patch_bytes"] as const;
+export type RepoReviewBudgetKey = (typeof REVIEW_BUDGET_KEYS)[number];
+
+/** Documented minimum for every repository review-budget value: 1. Below this the file is invalid. */
+export const MIN_REVIEW_BUDGET_VALUE = 1;
 
 /** Default per-issue auto-merge opt-in label. Repository `.jumi.yml` may rename it. */
 export const DEFAULT_AUTOMERGE_LABEL = "automerge";
@@ -140,6 +179,8 @@ function defaultRepoSettings(): RepoSettings {
     ignoreConflictsLabel: undefined,
     pickupLabel: undefined,
     mode: "full",
+    reviewDrafts: false,
+    reviewBudget: {},
   };
 }
 
@@ -190,6 +231,53 @@ function parseTimeoutsValue(value: unknown): TimeoutsParse {
   return { ok: true, timeouts };
 }
 
+type ReviewBudgetParse = { ok: true; reviewBudget: RepoReviewBudget } | { ok: false; error: string };
+
+function parseReviewBudgetValue(value: unknown): ReviewBudgetParse {
+  if (value === undefined) return { ok: true, reviewBudget: {} };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"review_budget" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  const reviewBudget: RepoReviewBudget = {};
+  for (const key of Object.keys(record)) {
+    if (!(REVIEW_BUDGET_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, REVIEW_BUDGET_KEYS, "review_budget") };
+    }
+    const budget = record[key];
+    if (typeof budget !== "number" || !Number.isInteger(budget) || budget < MIN_REVIEW_BUDGET_VALUE) {
+      return {
+        ok: false,
+        error: `"review_budget.${key}" must be a positive integer`,
+      };
+    }
+    if (key === "max_files") reviewBudget.maxFiles = budget;
+    else reviewBudget.maxPatchBytes = budget;
+  }
+  return { ok: true, reviewBudget };
+}
+
+type CiGateParse = { ok: true; ciGate?: { wait: CiGateWait } } | { ok: false; error: string };
+
+function parseCiGateValue(value: unknown): CiGateParse {
+  if (value === undefined) return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"ci_gate" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!(CI_GATE_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, CI_GATE_KEYS, "ci_gate") };
+    }
+  }
+  if (!("wait" in record) || record.wait === undefined) return { ok: true, ciGate: { wait: "required" } };
+  const wait = record.wait;
+  if (typeof wait !== "string" || !(CI_GATE_WAITS as readonly string[]).includes(wait)) {
+    return { ok: false, error: `"ci_gate.wait" must be one of "all", "required", "none"` };
+  }
+  return { ok: true, ciGate: { wait: wait as CiGateWait } };
+}
+
 function parserErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   const single = message.replace(/\s+/g, " ").trim();
@@ -228,11 +316,16 @@ function parserErrorMessage(err: unknown): string {
  * whole file invalid. Absent `followup_ignore_logins` means no extra
  * ignores (union with the deployment list). Absent `ignore_conflicts_label`
  * means the deployment value; absent `pickup_label` means `jumi` (Gitea
- * ignores it). `mode` must be
- * `full`, `review-only`, or `off` when present. Absent `automerge_method`
- * means today's merge method (first allowed on GitHub, default style on
- * Gitea); a present value must be one of `merge`, `squash`, `rebase`,
- * `rebase-merge`, or `fast-forward-only`.
+ * ignores it). `mode` must be `full`, `review-only`, or `off` when present.
+ * Absent `review_drafts` (or `false`) means drafts and `WIP:` titles are
+ * skipped, as today; `true` reviews them on every review-dispatch path.
+ * Absent `max_suggestions` means the parent ceiling; `0` is valid and means
+ * no suggestion. Absent `review_budget` (or an empty mapping) means no
+ * budget overrides; each present key is a positive integer, and a value
+ * above the deployer maximum runs with the maximum. Absent
+ * `automerge_method` means today's merge method (first allowed on GitHub,
+ * default style on Gitea); a present value must be one of `merge`,
+ * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -368,6 +461,28 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     mode = record.mode as RepoMode;
   }
+  let reviewDrafts = false;
+  if ("review_drafts" in record && record.review_drafts !== undefined) {
+    if (typeof record.review_drafts !== "boolean") return { ok: false, error: `"review_drafts" must be a boolean` };
+    reviewDrafts = record.review_drafts;
+  }
+  if ("max_suggestions" in record && record.max_suggestions !== undefined) {
+    const value = record.max_suggestions;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+      return { ok: false, error: `"max_suggestions" must be a non-negative integer` };
+  }
+  let reviewBudget: RepoReviewBudget = {};
+  if ("review_budget" in record && record.review_budget !== undefined) {
+    const parsed = parseReviewBudgetValue(record.review_budget);
+    if (!parsed.ok) return parsed;
+    reviewBudget = parsed.reviewBudget;
+  }
+  let ciGate: { wait: CiGateWait } | undefined;
+  if ("ci_gate" in record && record.ci_gate !== undefined) {
+    const parsed = parseCiGateValue(record.ci_gate);
+    if (!parsed.ok) return parsed;
+    ciGate = parsed.ciGate;
+  }
   let automergeMethod: RepoAutomergeMethod | undefined;
   if ("automerge_method" in record && record.automerge_method !== undefined) {
     if (
@@ -400,12 +515,17 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
+    reviewDrafts,
+    reviewBudget,
+    ...(ciGate !== undefined ? { ciGate } : {}),
     ...(automergeMethod !== undefined ? { automergeMethod } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
   if ("max_conflict_rounds" in record && record.max_conflict_rounds !== undefined)
     settings.maxConflictRounds = record.max_conflict_rounds as number;
+  if ("max_suggestions" in record && record.max_suggestions !== undefined)
+    settings.maxSuggestions = record.max_suggestions as number;
   return { ok: true, settings };
 }
 
@@ -464,6 +584,10 @@ export type RepoSettingsLoad =
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
       mode: RepoMode;
+      reviewDrafts: boolean;
+      maxSuggestions?: number;
+      reviewBudget: RepoReviewBudget;
+      ciGate?: { wait: CiGateWait };
       automergeMethod?: RepoAutomergeMethod;
     }
   | { state: "invalid"; error: string };
@@ -500,6 +624,147 @@ export function effectiveTimeoutMsForKind(load: RepoSettingsLoad, kind: string, 
  */
 export function effectiveLeaseMs(configLeaseMs: number, effectiveTimeoutMs: number): number {
   return Math.max(configLeaseMs, effectiveTimeoutMs + TIMEOUT_LEASE_BUFFER_MS);
+}
+
+/**
+ * Whether drafts and `WIP:` titles are reviewed in this repository. Missing
+ * or invalid files behave as today (`false`): drafts are skipped.
+ */
+export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return false;
+  return load.reviewDrafts === true;
+}
+
+/**
+ * Load the default-branch settings file and report whether drafts review.
+ * Missing, invalid, or unreadable files fall back to `false` (skip drafts,
+ * as today). Never throws.
+ */
+export async function loadReviewDraftsEnabled(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<boolean> {
+  if (!defaultBranch.trim()) return false;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return false;
+    return isReviewDraftsEnabled(settings);
+  } catch (err) {
+    log?.(
+      `review drafts settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return false;
+  }
+}
+
+/**
+ * Effective budget value for one key. Missing settings, a missing key, or an
+ * invalid file runs with the deployment value (`base`). A value above the
+ * deployer maximum (`max`) applies as the maximum. Unset, the maximum is
+ * the deployment value itself, so a repository can only lower the budget.
+ */
+export function effectiveReviewBudgetValue(
+  load: RepoSettingsLoad,
+  key: "maxFiles" | "maxPatchBytes",
+  base: number,
+  max: number
+): number {
+  if (load.state !== "valid") return base;
+  const wanted = key === "maxFiles" ? load.reviewBudget.maxFiles : load.reviewBudget.maxPatchBytes;
+  if (wanted === undefined) return base;
+  const cap = max > 0 ? max : base;
+  return Math.min(wanted, cap);
+}
+
+export interface EffectiveReviewBudget {
+  maxFiles: number;
+  maxPatchBytes: number;
+}
+
+/**
+ * Effective review size budget. Missing, invalid, or unreadable files run
+ * with the deployment values; a higher file value applies as the deployer
+ * maximum (which defaults to the deployment value, so a repository can only
+ * lower the budget out of the box).
+ */
+export function effectiveReviewBudget(
+  load: RepoSettingsLoad,
+  deployment: { maxFiles: number; maxFilesMax: number; maxPatchBytes: number; maxPatchBytesMax: number }
+): EffectiveReviewBudget {
+  return {
+    maxFiles: effectiveReviewBudgetValue(load, "maxFiles", deployment.maxFiles, deployment.maxFilesMax),
+    maxPatchBytes: effectiveReviewBudgetValue(
+      load,
+      "maxPatchBytes",
+      deployment.maxPatchBytes,
+      deployment.maxPatchBytesMax
+    ),
+  };
+}
+
+/**
+ * Load the default-branch settings file and resolve the effective review
+ * budget. Missing, invalid, or unreadable files fall back to the deployment
+ * values. Never throws.
+ */
+export async function loadEffectiveReviewBudget(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployment: { maxFiles: number; maxFilesMax: number; maxPatchBytes: number; maxPatchBytesMax: number },
+  log?: (message: string) => void
+): Promise<EffectiveReviewBudget> {
+  const fallback: EffectiveReviewBudget = { maxFiles: deployment.maxFiles, maxPatchBytes: deployment.maxPatchBytes };
+  if (!defaultBranch.trim()) return fallback;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return fallback;
+    return effectiveReviewBudget(settings, deployment);
+  } catch (err) {
+    log?.(
+      `review budget settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
+  }
+}
+
+/**
+ * Effective 💡 suggestion cap for a repository. `MAX_SUGGESTION_FINDINGS` in
+ * `verdict.ts` stays the ceiling: a higher file value applies as the ceiling.
+ * Missing or invalid files run with the ceiling.
+ */
+export function effectiveSuggestionCap(load: RepoSettingsLoad, ceiling: number): number {
+  if (load.state !== "valid" || load.maxSuggestions === undefined) return ceiling;
+  return Math.min(load.maxSuggestions, ceiling);
+}
+
+/**
+ * Load the default-branch settings file and resolve the effective 💡 cap.
+ * Missing, invalid, or unreadable files fall back to the ceiling. Never throws.
+ */
+export async function loadEffectiveSuggestionCap(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  ceiling: number,
+  log?: (message: string) => void
+): Promise<number> {
+  if (!defaultBranch.trim()) return ceiling;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") return ceiling;
+    return effectiveSuggestionCap(settings, ceiling);
+  } catch (err) {
+    log?.(
+      `suggestion settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return ceiling;
+  }
 }
 
 export interface RepoSettingsFileApi {
@@ -559,6 +824,10 @@ export async function loadRepoSettings(
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
+    reviewDrafts: parsed.settings.reviewDrafts,
+    ...(parsed.settings.maxSuggestions !== undefined ? { maxSuggestions: parsed.settings.maxSuggestions } : {}),
+    reviewBudget: parsed.settings.reviewBudget,
+    ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
     ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
   };
 }
@@ -611,6 +880,18 @@ export async function loadDefaultBranchSettings(
 export function repoMode(settings: RepoSettingsLoad): RepoMode {
   if (settings.state !== "valid") return "full";
   return settings.mode;
+}
+
+/**
+ * Effective CI gate wait mode from a loaded settings file. Missing, invalid,
+ * or absent `ci_gate`/`wait` is today's `#502` behaviour (`required`):
+ * nothing ever falls back to `none`.
+ */
+export function effectiveCiGateWait(load: RepoSettingsLoad): CiGateWait {
+  if (load.state !== "valid") return DEFAULT_CI_GATE_WAIT;
+  const wait = load.ciGate?.wait;
+  if (wait === "all" || wait === "none" || wait === "required") return wait;
+  return DEFAULT_CI_GATE_WAIT;
 }
 
 /**
