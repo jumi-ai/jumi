@@ -20,6 +20,7 @@ import {
   flakeSkipReason,
   inspectCi,
   recordCiHandled,
+  resolveRequiredCiContexts,
 } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
@@ -1137,6 +1138,13 @@ export async function implementFollowUp(
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
   let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
+  const requiredContexts = await resolveRequiredCiContexts(opts.api, {
+    owner,
+    repo,
+    issueNumber,
+    baseBranch: pr.base.ref,
+    log,
+  });
   const inspectOpts = {
     api: opts.api,
     owner,
@@ -1146,8 +1154,17 @@ export async function implementFollowUp(
     issueNumber,
     skipLatches: latches,
     log,
+    ...(requiredContexts ? { requiredContexts } : {}),
   };
-  let ci: CiInspection = { sha: pr.head.sha, pending: false, failed: [], unhandled: [], empty: true, checks: [] };
+  let ci: CiInspection = {
+    sha: pr.head.sha,
+    pending: false,
+    failed: [],
+    unhandled: [],
+    empty: true,
+    checks: [],
+    pendingOptional: [],
+  };
   try {
     ci = await inspectCi(inspectOpts);
   } catch (err) {

@@ -486,6 +486,9 @@ export async function handleGithubWebhookEvent(
           ciApi: deps.ciApi ?? deps.worker?.ciApi,
           home: deps.ciHome ?? deps.worker?.ciHome ?? "/data",
           logger,
+          ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
+            ? { baseBranch: payload.pull_request.base.ref }
+            : {}),
         });
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         if (result.queued) {

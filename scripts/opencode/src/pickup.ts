@@ -80,6 +80,7 @@ export async function classifyCloserWork(opts: {
     home: opts.home,
     issueNumber: opts.issueNumber,
     skipLatches: opts.skipLatches,
+    baseBranch: opts.pr.base.ref,
   });
   const authorListed = isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
   let hasJumiCommit: boolean | undefined;

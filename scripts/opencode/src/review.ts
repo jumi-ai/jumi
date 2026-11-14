@@ -10,6 +10,8 @@ import {
   isCiLookupRetryMarker,
   isCiWaitMarker,
   JUMI_REVIEW_CONTEXT,
+  type RequiredCiResolver,
+  resolveRequiredCiContexts,
   reviewSkipReasonForCi,
 } from "./ci.ts";
 import { isEngineTempPath, porcelainPaths } from "./claimed_worktree.ts";
@@ -242,6 +244,8 @@ export interface ReviewOptions {
   ciChecks?: CiCheckSummary[];
   /** Head the forwarded `ciChecks` were inspected on. Defaults to the reviewed head. */
   ciHeadSha?: string;
+  /** Pending checks that are still running but not required; rendered as not-required in the prompt. */
+  ciPendingOptional?: readonly string[];
   /** Prepended to the review when the lookup budget expired with no checks at all. */
   noCiNote?: string;
   /** Previous job error (e.g. quota-wait marker) for the wait-budget decision. */
@@ -843,10 +847,23 @@ export const CI_RELIST_DELAY_MS = 5_000;
 export async function inspectOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
+    baseBranch?: string;
+    requiredContexts?: readonly string[];
   },
   sha: string,
   log: (message: string) => void
 ): Promise<CiInspection> {
+  const resolveBranch = opts.baseBranch;
+  let requiredContexts = opts.requiredContexts;
+  if (requiredContexts === undefined && resolveBranch) {
+    requiredContexts = await resolveRequiredCiContexts(opts.api as unknown as RequiredCiResolver, {
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: opts.prNumber,
+      baseBranch: resolveBranch,
+      log,
+    });
+  }
   const inspectOpts = {
     api: opts.api,
     owner: opts.owner,
@@ -855,6 +872,7 @@ export async function inspectOtherChecks(
     home: opts.home ?? "",
     issueNumber: opts.prNumber,
     log,
+    ...(requiredContexts ? { requiredContexts } : {}),
   };
   let ci = await inspectCi(inspectOpts);
   if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
@@ -870,6 +888,8 @@ export async function inspectOtherChecks(
 export async function skipReasonForOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
+    baseBranch?: string;
+    requiredContexts?: readonly string[];
   },
   sha: string,
   log: (message: string) => void
@@ -1577,11 +1597,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
   }
 
-  let ciResults: { headSha: string; checks: CiCheckSummary[] } | undefined;
+  let ciResults: { headSha: string; checks: CiCheckSummary[]; pendingOptional?: readonly string[] } | undefined;
   if (opts.inspectOtherChecks !== false) {
     let ci: CiInspection;
     try {
-      ci = await inspectOtherChecks({ ...opts, api: forgeApi }, reviewedHeadSha, log);
+      ci = await inspectOtherChecks({ ...opts, api: forgeApi, baseBranch: pr.base.ref }, reviewedHeadSha, log);
     } catch (err) {
       if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
       log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
@@ -1589,9 +1609,20 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     }
     const ciSkip = reviewSkipReasonForCi(ci);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
-    if (ci.checks.length > 0) ciResults = { headSha: reviewedHeadSha, checks: ci.checks };
+    if (ci.checks.length > 0)
+      ciResults = {
+        headSha: reviewedHeadSha,
+        checks: ci.checks,
+        ...(ci.pendingOptional.length > 0 ? { pendingOptional: ci.pendingOptional } : {}),
+      };
   } else if (opts.ciChecks && opts.ciChecks.length > 0) {
-    ciResults = { headSha: opts.ciHeadSha ?? reviewedHeadSha, checks: opts.ciChecks };
+    ciResults = {
+      headSha: opts.ciHeadSha ?? reviewedHeadSha,
+      checks: opts.ciChecks,
+      ...(opts.ciPendingOptional && opts.ciPendingOptional.length > 0
+        ? { pendingOptional: opts.ciPendingOptional }
+        : {}),
+    };
   }
 
   // Parent-owned independent reviewer selection from exact-head writer provenance.

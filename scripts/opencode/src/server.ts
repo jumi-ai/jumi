@@ -171,6 +171,7 @@ export async function runReviewJob(
   }
   let noCiNote: string | undefined;
   let ciChecks: CiCheckSummary[] | undefined;
+  let ciPendingOptional: readonly string[] | undefined;
   const inspectHeadCi = async (relist?: boolean): Promise<string | undefined> => {
     try {
       const ci = await inspectOtherChecks(
@@ -182,12 +183,14 @@ export async function runReviewJob(
           home: config.home,
           abortSignal: extras.abortSignal,
           ciRelistDelayMs: extras.ciRelistDelayMs,
+          baseBranch: pr.base.ref,
           ...(relist === false ? { relist: false as const } : {}),
         },
         job.headSha,
         logger
       );
       if (ci.checks.length > 0) ciChecks = ci.checks;
+      if (ci.pendingOptional.length > 0) ciPendingOptional = ci.pendingOptional;
       return reviewSkipReasonForCi(ci);
     } catch (err) {
       if (isAbortError(err) || extras.abortSignal?.aborted) throw err;
@@ -258,6 +261,7 @@ export async function runReviewJob(
       ciRelistDelayMs: extras.ciRelistDelayMs,
       inspectOtherChecks: false,
       ...(ciChecks ? { ciChecks, ciHeadSha: job.headSha } : {}),
+      ...(ciPendingOptional && ciPendingOptional.length > 0 ? { ciPendingOptional } : {}),
       noCiNote,
       previousError: extras.previousError,
       failedRunner: extras.failedRunner,
@@ -424,6 +428,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             ciApi: deps.ciApi,
             home: deps.ciHome ?? config.home,
             logger,
+            ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
+              ? { baseBranch: payload.pull_request.base.ref }
+              : {}),
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
           if (payload.action === "opened" && deps.worker?.api) {

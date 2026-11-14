@@ -91,7 +91,7 @@ const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this 
   <rule>Shell is open for inspection. Pipes, quotes, and git grep regex are allowed.</rule>
   <rule>Keep tool output small: never dump directory-wide or high-context git patches into the session; prefer --stat, single-file --unified=3, and built-in read.</rule>
   <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
-  <rule><ci_results> lists the checks that ran on this head and their conclusions. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking.</rule>
+  <rule><ci_results> lists the checks that ran on this head and their conclusions. A check with required="false" is still running but not required by branch protection: read it as still-running, never as green. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking.</rule>
   <rule>The only file you should write is JUMI_REVIEW.md at the repository root. Stdout is logs, not the sticky.</rule>
   <rule>Do not git add source, git commit, git push, or force-push.</rule>
   <rule>Do not run mutating git commands, helm upgrade, helm install, kubectl apply, package installs, or arbitrary network shell commands. The only network-shell exception is a read-only shallow clone of a public upstream repository at the tags/refs named in the diff into "$TMPDIR" scratch outside the porcelain (for example \`git clone --depth 1 --branch <tag> <public-url> "$TMPDIR/upstream-<tag>"\`) and diffing those two refs there, then removing the clone (for example \`rm -rf "$TMPDIR/upstream-<tag>"\`); the clone must stay under "$TMPDIR" so the porcelain/HEAD freeze still holds, must never carry a forge token, and the forge host stays denied.</rule>
@@ -124,7 +124,7 @@ export interface PROpenedPromptOptions {
   prFiles: PullFile[];
   reviewNotes?: string[];
   /** Deduped non-Jumi checks inspected on the head, rendered as a `<ci_results>` block. */
-  ciResults?: { headSha: string; checks: CiCheckSummary[] };
+  ciResults?: { headSha: string; checks: CiCheckSummary[]; pendingOptional?: readonly string[] };
   thread?: ReviewThread;
   /** Set for a later review: previous findings and the commits since the reviewed SHA. */
   delta?: ReviewDelta;
@@ -142,8 +142,9 @@ export interface PROpenedPromptOptions {
 export const CI_RESULTS_MAX_CHECKS = 50;
 export const CI_RESULTS_MAX_BYTES = 4 * 1024;
 
-function formatCiCheckLine(check: CiCheckSummary): string {
+function formatCiCheckLine(check: CiCheckSummary, pendingOptional?: ReadonlySet<string>): string {
   let attrs = `name="${escapeXml(check.name)}" conclusion="${escapeXml(check.conclusion)}"`;
+  if (pendingOptional?.has(check.name)) attrs += ` required="false"`;
   if (check.duration !== undefined) attrs += ` duration="${escapeXml(check.duration)}"`;
   if (check.url !== undefined) attrs += ` url="${escapeXml(check.url)}"`;
   return `  <check ${attrs}/>`;
@@ -153,9 +154,16 @@ function formatCiCheckLine(check: CiCheckSummary): string {
  * Render the `<ci_results>` block for checks inspected on this head. Empty
  * when there are no checks (the no-CI note covers that case). Past the cap,
  * non-success entries are kept first and a `<truncated count="N"/>` line
- * records how many entries were dropped. No logs are included.
+ * records how many entries were dropped. No logs are included. Checks named
+ * in `pendingOptional` are still running but not required by branch
+ * protection: they render with `required="false"` so the reviewer reads them
+ * as still-running, never as green.
  */
-export function formatCiResults(headSha: string, checks: CiCheckSummary[]): string {
+export function formatCiResults(
+  headSha: string,
+  checks: CiCheckSummary[],
+  pendingOptional?: readonly string[]
+): string {
   if (checks.length === 0) return "";
   const ordered = [...checks].sort((a, b) => {
     const aBad = a.conclusion === "success" ? 1 : 0;
@@ -164,8 +172,9 @@ export function formatCiResults(headSha: string, checks: CiCheckSummary[]): stri
   });
   const total = ordered.length;
   const encoder = new TextEncoder();
+  const optionalSet = pendingOptional && pendingOptional.length > 0 ? new Set(pendingOptional) : undefined;
   const build = (shown: CiCheckSummary[]): string => {
-    const lines = shown.map(formatCiCheckLine);
+    const lines = shown.map((check) => formatCiCheckLine(check, optionalSet));
     const dropped = total - shown.length;
     if (dropped > 0) lines.push(`  <truncated count="${dropped}"/>`);
     return `<ci_results head="${escapeXml(headSha)}">\n${lines.join("\n")}\n</ci_results>`;
@@ -242,7 +251,9 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const formattedNotes = reviewNotes.length
     ? `\n  <review_notes>\n${reviewNotes.map((note) => `    <note>${escapeXml(note)}</note>`).join("\n")}\n  </review_notes>`
     : "";
-  const ciBlock = opts.ciResults ? formatCiResults(opts.ciResults.headSha, opts.ciResults.checks) : "";
+  const ciBlock = opts.ciResults
+    ? formatCiResults(opts.ciResults.headSha, opts.ciResults.checks, opts.ciResults.pendingOptional)
+    : "";
   const formattedCi = ciBlock ? `\n${ciBlock}` : "";
   const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
   const pullReviewsXml = formatPullReviewsXml(thread?.pullReviews ?? []);
