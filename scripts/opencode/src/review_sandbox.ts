@@ -573,7 +573,95 @@ export const AGY_REVIEW_FILE_TOOLS: readonly string[] = [
   "replace_file_content",
   "multi_replace_file_content",
 ];
-export const OPENCODE_REVIEW_FILE_TOOLS: readonly string[] = ["read", "grep", "glob"];
+export const OPENCODE_REVIEW_FILE_TOOLS: readonly string[] = ["read", "edit", "write", "grep", "glob", "list"];
+
+/** Languages for the shared hook deny predicate (Python hooks and the OpenCode JS plugin). */
+export type ReviewShellDenyPredicateLanguage = "python" | "javascript";
+
+/**
+ * Shared deny predicate for all three review hook scripts. Hook candidates are
+ * lexical paths: relative candidates resolve against the spawn workdir
+ * (embedded at generation time), `..`/`.`/duplicate slashes collapse, and a
+ * candidate is denied when it is inside a denied prefix *or* a denied prefix
+ * is inside it. The bidirectional check closes ancestor bypasses (`/`, `/tmp`,
+ * or a harness-temp parent): listing a parent must not reveal the token files
+ * beneath it. The hook is defense in depth for agent file tools; Landlock
+ * still enforces shell filesystem access.
+ */
+export function reviewShellDenyPredicateSnippet(
+  language: ReviewShellDenyPredicateLanguage,
+  workdir: string,
+  deniedPrefixes: readonly string[]
+): string {
+  const denied = JSON.stringify([...deniedPrefixes]);
+  const dir = JSON.stringify(workdir);
+  if (language === "javascript") {
+    return [
+      `const sandboxWorkdir = ${dir};`,
+      `const deniedPrefixes = ${denied};`,
+      `const normalizeCandidate = (p) => {`,
+      `  if (typeof p !== "string" || p.length === 0) return "";`,
+      `  const abs = p.startsWith("/") ? p : sandboxWorkdir + "/" + p;`,
+      `  const stack = [];`,
+      `  for (const part of abs.split("/")) {`,
+      `    if (part === "" || part === ".") continue;`,
+      `    if (part === "..") { if (stack.length > 0) stack.pop(); continue; }`,
+      `    stack.push(part);`,
+      `  }`,
+      `  return "/" + stack.join("/");`,
+      `};`,
+      `const normalizePrefix = (d) => {`,
+      `  if (typeof d !== "string" || d.length === 0 || !d.startsWith("/")) return "";`,
+      `  let normalized = d;`,
+      `  while (normalized.length > 1 && normalized.charAt(normalized.length - 1) === "/") {`,
+      `    normalized = normalized.slice(0, -1);`,
+      `  }`,
+      `  return normalized;`,
+      `};`,
+      `const isDenied = (p) => {`,
+      `  const norm = normalizeCandidate(p);`,
+      `  if (!norm) return false;`,
+      `  const slash = norm === "/" ? "/" : norm + "/";`,
+      `  return deniedPrefixes.some((raw) => {`,
+      `    const d = normalizePrefix(raw);`,
+      `    if (!d) return false;`,
+      `    const want = d === "/" ? "/" : d + "/";`,
+      `    return norm === d || norm.startsWith(want) || d.startsWith(slash);`,
+      `  });`,
+      `};`,
+    ].join("\n");
+  }
+  return [
+    `WORKDIR = ${dir}`,
+    `DENIED = ${denied}`,
+    ``,
+    `def _normalize_candidate(path):`,
+    `    if not isinstance(path, str) or not path:`,
+    `        return ""`,
+    `    return os.path.normpath(os.path.join(WORKDIR, path))`,
+    ``,
+    `def _normalize_prefix(value):`,
+    `    if not isinstance(value, str) or not value:`,
+    `        return ""`,
+    `    if not os.path.isabs(value):`,
+    `        return ""`,
+    `    return os.path.normpath(value)`,
+    ``,
+    `def is_denied(path):`,
+    `    norm = _normalize_candidate(path)`,
+    `    if not norm:`,
+    `        return False`,
+    `    slash = "/" if norm == "/" else norm + "/"`,
+    `    for raw in DENIED:`,
+    `        prefix = _normalize_prefix(raw)`,
+    `        if not prefix:`,
+    `            continue`,
+    `        want = "/" if prefix == "/" else prefix + "/"`,
+    `        if norm == prefix or norm.startswith(want) or prefix.startswith(slash):`,
+    `            return True`,
+    `    return False`,
+  ].join("\n");
+}
 
 /** Matcher for the Claude/Codex `PreToolUse` hook: Bash plus every file tool. */
 export function claudeReviewHookMatcher(): string {
@@ -594,17 +682,23 @@ export function agyReviewHookMatcher(): string {
  */
 export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
-  const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
   const shellEnv = JSON.stringify(sandboxedShellEnv(input.scratchDir));
   const scrubKeys = JSON.stringify([...REVIEW_SHELL_SCRUB_KEYS]);
   const fileTools = JSON.stringify([...OPENCODE_REVIEW_FILE_TOOLS]);
+  const denyPredicate = reviewShellDenyPredicateSnippet(
+    "javascript",
+    input.workdir,
+    reviewShellDeniedReadPrefixes(input)
+  );
   return `// Jumi-owned review shell sandbox (jumi#550). Loaded from the harness temp root, never the checkout.
 import { Plugin } from "@opencode/plugin";
 export default Plugin.define({
   id: "jumi-review-shell-sandbox",
   async setup(ctx) {
-    const deniedPrefixes = ${denied};
-    const isDenied = (p) => typeof p === "string" && deniedPrefixes.some((d) => d && (p === d || p.startsWith(d + "/")));
+${denyPredicate
+  .split("\n")
+  .map((line) => `    ${line}`)
+  .join("\n")}
     const prefix = ${JSON.stringify(prefix)};
     const shellEnv = ${shellEnv};
     const scrubKeys = ${scrubKeys};
@@ -647,20 +741,16 @@ export default Plugin.define({
  */
 export function claudeReviewHookScriptCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
-  const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
   const fileTools = `(${[...CLAUDE_REVIEW_FILE_TOOLS].map((tool) => JSON.stringify(tool)).join(", ")})`;
+  const denyPredicate = reviewShellDenyPredicateSnippet("python", input.workdir, reviewShellDeniedReadPrefixes(input));
   return `#!/usr/bin/env python3
 """Jumi-owned review shell sandbox hook (jumi#550). Rewrites Bash through Landlock, denies credential reads."""
 import json
+import os
 import sys
 
 PREFIX = ${JSON.stringify(prefix)}
-DENIED = ${denied}
-
-def is_denied(path):
-    if not isinstance(path, str) or not path:
-        return False
-    return any(path == d or path.startswith(d + "/") for d in DENIED if d)
+${denyPredicate}
 
 def main():
     try:
@@ -742,21 +832,18 @@ export function agyReviewHooksJson(hookCommand: string): string {
  */
 export function agyReviewHookScriptCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
-  const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
   const fileTools = `(${[...AGY_REVIEW_FILE_TOOLS].map((tool) => JSON.stringify(tool)).join(", ")})`;
+  const claudeFileTools = `(${[...CLAUDE_REVIEW_FILE_TOOLS].map((tool) => JSON.stringify(tool)).join(", ")})`;
   const shellTool = JSON.stringify(AGY_REVIEW_SHELL_TOOL);
+  const denyPredicate = reviewShellDenyPredicateSnippet("python", input.workdir, reviewShellDeniedReadPrefixes(input));
   return `#!/usr/bin/env python3
 """Jumi-owned review shell sandbox hook for Agy (jumi#550). Handles the Agy toolCall envelope."""
 import json
+import os
 import sys
 
 PREFIX = ${JSON.stringify(prefix)}
-DENIED = ${denied}
-
-def is_denied(path):
-    if not isinstance(path, str) or not path:
-        return False
-    return any(path == d or path.startswith(d + "/") for d in DENIED if d)
+${denyPredicate}
 
 def main():
     try:
@@ -788,7 +875,7 @@ def main():
             new_input["command"] = PREFIX + " sh -c '" + cmd.replace("'", "'\\\\''") + "'"
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": new_input}}))
         sys.exit(0)
-    if tool in ("Read", "Edit", "Write", "Grep", "Glob"):
+    if tool in ${claudeFileTools}:
         path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if is_denied(path):
             print("Blocked: review sandbox denies reads of agent credentials", file=sys.stderr)

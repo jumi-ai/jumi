@@ -27,7 +27,7 @@
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   forgeOpenCodeConfigContent,
   forgeOpenCodeGlobalConfig,
@@ -136,6 +136,12 @@ interface RunState {
   search?: boolean;
   /** True when the stub's model calls the searxng MCP search tool. */
   mcpSearch?: boolean;
+  /** True while the stub drives the production review shell plugin case. */
+  pluginCase?: boolean;
+  /** Harness MCP token path the plugin case must deny. */
+  pluginTokenPath?: string;
+  /** Tool results from the plugin-case run, in call order. */
+  pluginResults?: string[];
 }
 
 function sse(chunks: readonly unknown[]): string {
@@ -150,10 +156,16 @@ function toolCall(state: RunState): { name: string; arguments: string } {
 }
 
 /**
- * OpenAI-compatible `/v1/chat/completions` good enough for one tool-call turn:
- * first request returns the `webfetch` call, the next returns plain text so the
- * session ends. Also serves the probe targets themselves.
+ * Scripted calls for the review-plugin case: the stub model first runs `bash`
+ * (the plugin must wrap it through the shell sandbox), then `read` and
+ * `list` on the harness MCP token (both must come back blocked), then ends.
  */
+function reviewPluginCall(toolMessages: number, tokenPath: string): { name: string; arguments: string } | undefined {
+  if (toolMessages === 0) return { name: "bash", arguments: JSON.stringify({ command: "printenv HOME" }) };
+  if (toolMessages === 1) return { name: "read", arguments: JSON.stringify({ path: tokenPath }) };
+  if (toolMessages === 2) return { name: "list", arguments: JSON.stringify({ path: dirname(tokenPath) }) };
+  return undefined;
+}
 function startProbeServer(state: RunState) {
   return Bun.serve({
     hostname: "127.0.0.1",
@@ -167,23 +179,38 @@ function startProbeServer(state: RunState) {
       const body = (await req.json()) as { model?: string; messages?: { role?: string; content?: unknown }[] };
       if (JSON.stringify(body.messages ?? []).includes(INSTRUCTIONS_MARKER)) state.instructionsSeen = true;
       if (JSON.stringify(body.messages ?? []).includes(REVIEW_BASE_MARKER)) state.baseSeen = true;
-      const toolMessage = (body.messages ?? []).find((m) => m.role === "tool");
+      const toolMessages = (body.messages ?? []).filter((m) => m.role === "tool");
+      const toolMessage = toolMessages[toolMessages.length - 1];
       if (toolMessage) state.toolResult = String(toolMessage.content ?? "");
       const base = { id: "chatcmpl-probe", created: Math.floor(Date.now() / 1000), model: body.model ?? MODEL_ID };
-      const delta = toolMessage
-        ? { role: "assistant", content: "probe complete" }
-        : {
-            role: "assistant",
-            tool_calls: [
-              {
-                index: 0,
-                id: "call_probe",
-                type: "function",
-                function: toolCall(state),
-              },
-            ],
-          };
-      const finish = toolMessage ? "stop" : "tool_calls";
+      const pluginCall =
+        state.pluginCase !== true || state.pluginTokenPath === undefined
+          ? undefined
+          : reviewPluginCall(toolMessages.length, state.pluginTokenPath);
+      if (pluginCall !== undefined) state.pluginResults?.push(`called:${pluginCall.name}`);
+      if (toolMessage !== undefined && state.pluginCase === true) {
+        state.pluginResults?.push(`result:${String(toolMessage.content ?? "").slice(0, 2000)}`);
+      }
+      const delta =
+        pluginCall !== undefined
+          ? {
+              role: "assistant",
+              tool_calls: [{ index: 0, id: "call_plugin", type: "function", function: pluginCall }],
+            }
+          : toolMessage
+            ? { role: "assistant", content: "probe complete" }
+            : {
+                role: "assistant",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "call_probe",
+                    type: "function",
+                    function: toolCall(state),
+                  },
+                ],
+              };
+      const finish = pluginCall !== undefined || toolMessage === undefined ? "tool_calls" : "stop";
       return new Response(
         sse([
           { ...base, object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: null }] },
@@ -364,6 +391,110 @@ async function runReviewOpenCode(
     return { code: await proc.exited, output: `${stdout}${stderr}`, timedOut };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/** Marker standing in for the review MCP bearer token the plugin must deny. */
+const REVIEW_PLUGIN_TOKEN = "JUMI-REVIEW-PLUGIN-PROBE-TOKEN";
+
+/** Marker for the wrapped shell HOME the plugin case expects back from `bash`. */
+const REVIEW_PLUGIN_SANDBOX_HOME_SUFFIX = "sandbox-home";
+
+/**
+ * Review-plugin case through the production path: the production
+ * `writeOpenCodeReviewShellPlugin` output registered in a scratch global
+ * config (the `plugins` key under a scratch `XDG_CONFIG_HOME`, exactly like
+ * `runOpenCode` registers it), then the installed binary drives the stub
+ * model through `bash` (must come back wrapped: HOME is the sandbox home),
+ * `read` of the harness token (must come back blocked), and `list` of the
+ * harness temp (blocked too). Project config stays disabled so the checkout
+ * cannot shadow the harness plugin.
+ */
+async function runReviewPluginOpenCode(
+  workdir: string,
+  configPath: string,
+  xdgConfig: string,
+  onHarness: (tokenPath: string) => void
+): Promise<{ code: number; output: string; timedOut: boolean; sandboxHome: string; pluginDir: string }> {
+  const {
+    ensureSandboxedShellHome,
+    resolveWorktreeGitDirsSync,
+    reviewSandboxWrapperPath,
+    sandboxedShellEnv,
+    writeOpenCodeReviewShellPlugin,
+  } = await import("./review_sandbox.ts");
+  // Harness temp under the shared tmpdir (never the checkout), mirroring
+  // `makeReviewHarnessTempRoot`: the shell policy omits the shared tmpdir so
+  // the token configs stay unreachable outside the plugin deny.
+  const harnessTemp = await mkdtemp("/tmp/jumi-review-plugin-probe-");
+  try {
+    const scratchDir = join(workdir, ".jumi-tmp", "scratch");
+    await mkdir(scratchDir, { recursive: true });
+    await ensureSandboxedShellHome(scratchDir);
+    const sandboxHome = sandboxedShellEnv(scratchDir).HOME;
+    const tokenPath = join(harnessTemp, "review-mcp.json");
+    await writeFile(tokenPath, JSON.stringify({ token: REVIEW_PLUGIN_TOKEN }), { mode: 0o600 });
+    onHarness(tokenPath);
+    const home = process.env.HOME ?? workdir;
+    const pluginDir = await writeOpenCodeReviewShellPlugin(harnessTemp, {
+      workdir,
+      scratchDir,
+      harnessTempDir: harnessTemp,
+      homeDir: home,
+      gitDirs: resolveWorktreeGitDirsSync(workdir),
+      wrapperPath: reviewSandboxWrapperPath(),
+    });
+    await mkdir(join(xdgConfig, "opencode"), { recursive: true });
+    const globalPath = join(xdgConfig, "opencode", "opencode.json");
+    let globalConfig: Record<string, unknown> = {};
+    try {
+      globalConfig = JSON.parse(await readFile(globalPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      globalConfig = {};
+    }
+    const existing = Array.isArray(globalConfig.plugins) ? (globalConfig.plugins as unknown[]) : [];
+    if (!existing.includes(pluginDir)) globalConfig.plugins = [...existing, pluginDir];
+    await writeFile(globalPath, JSON.stringify(globalConfig), { mode: 0o600 });
+    const configContent = JSON.stringify({
+      permissions: [
+        { action: "bash", resource: "*", effect: "allow" },
+        { action: "read", resource: "*", effect: "allow" },
+        { action: "list", resource: "*", effect: "allow" },
+        { action: "edit", resource: "*", effect: "deny" },
+        { action: "subagent", resource: "*", effect: "deny" },
+        { action: "question", resource: "*", effect: "deny" },
+      ],
+    });
+    const proc = Bun.spawn(
+      ["opencode", "run", "--standalone", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "run the requested tools"],
+      {
+        cwd: workdir,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          ...process.env,
+          PWD: workdir,
+          OPENCODE_CONFIG: configPath,
+          OPENCODE_CONFIG_CONTENT: configContent,
+          OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+          XDG_CONFIG_HOME: xdgConfig,
+        },
+      }
+    );
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, RUN_TIMEOUT_MS);
+    try {
+      const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      return { code: await proc.exited, output: `${stdout}${stderr}`, timedOut, sandboxHome, pluginDir };
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    await rm(harnessTemp, { recursive: true, force: true });
   }
 }
 
@@ -688,6 +819,57 @@ async function main(): Promise<number> {
       ok: !(await Bun.file(reviewPluginMarker).exists()),
       line: `review: head plugin does not load (${(await Bun.file(reviewPluginMarker).exists()) ? "RAN" : "did not run"})`,
     });
+    // Review shell-sandbox plugin case: the production review plugin
+    // registered in a scratch global config, driven against the installed
+    // binary. The stub model runs `bash` (must come back wrapped: HOME is the
+    // sandbox home), then `read` and `list` on the harness MCP token (both
+    // must come back blocked, never the token). If the binary never loads the
+    // plugin directory, rejects the plugin id, or drops either hook, `bash`
+    // runs unwrapped and the reads succeed — failing the case instead of
+    // failing open.
+    const pluginWorkdir = join(dir, "review-plugin-workspace");
+    await Bun.$`mkdir -p ${pluginWorkdir}`.quiet();
+    await Bun.$`git init -q`.cwd(pluginWorkdir).quiet();
+    state.pluginCase = true;
+    state.pluginResults = [];
+    state.pluginTokenPath = undefined;
+    try {
+      const pluginRun = await runReviewPluginOpenCode(
+        pluginWorkdir,
+        configPath,
+        join(dir, "review-plugin-xdg"),
+        (tokenPath) => {
+          state.pluginTokenPath = tokenPath;
+        }
+      );
+      const pluginSteps = state.pluginResults ?? [];
+      const pluginResultFor = (tool: string): string => {
+        const at = pluginSteps.indexOf(`called:${tool}`);
+        return at >= 0 ? (pluginSteps[at + 1] ?? "") : "";
+      };
+      const pluginBash = pluginResultFor("bash");
+      const pluginRead = pluginResultFor("read");
+      const pluginList = pluginResultFor("list");
+      const pluginBlocked = "Blocked: review sandbox denies reads of agent credentials";
+      reviewChecks.push({
+        ok:
+          !pluginRun.timedOut &&
+          pluginRun.sandboxHome.endsWith(REVIEW_PLUGIN_SANDBOX_HOME_SUFFIX) &&
+          pluginBash.includes(pluginRun.sandboxHome),
+        line: `review: plugin wraps bash through the shell sandbox (HOME comes back as the sandbox home)`,
+      });
+      reviewChecks.push({
+        ok: !pluginRun.timedOut && pluginRead.includes(pluginBlocked) && !pluginRead.includes(REVIEW_PLUGIN_TOKEN),
+        line: `review: plugin denies read of the harness MCP token (no token in the tool result)`,
+      });
+      reviewChecks.push({
+        ok: !pluginRun.timedOut && pluginList.includes(pluginBlocked) && !pluginList.includes(REVIEW_PLUGIN_TOKEN),
+        line: `review: plugin denies list of the harness temp (no token in the tool result)`,
+      });
+    } finally {
+      state.pluginCase = false;
+      state.pluginTokenPath = undefined;
+    }
     for (const { ok, line } of reviewChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
     if (reviewChecks.some((check) => !check.ok)) return 1;
   } finally {

@@ -74,6 +74,12 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
   asserts ABI ≥ 6 and is the startup check. Unit tests repeat the same shape
   with a fake runner (`test/review_sandbox.test.ts`). Neither probe has run
   in a job pod yet — the image job owns that confirmation.
+- `src/webfetch_probe.ts` (review section) registers the production OpenCode
+  review plugin dir in a scratch global config and drives the installed
+  `opencode` binary through it: `bash` must come back wrapped (HOME is the
+  sandbox home), `read`/`list` of the harness token must come back blocked.
+  A binary that never loads the plugin or drops either hook fails the case
+  instead of running unwrapped.
 
 ## Per-runner wiring
 
@@ -86,7 +92,12 @@ unsandboxed; its shells are wrapped separately:
   and registered as a directory under the V2 `plugins` key of the Jumi-owned
   global `opencode.json`). The tool hook rewrites `bash` input through the shell
   wrapper prefix and denies reads of the harness temp / credential files
-  (`read`/`grep`/`glob`); the shell hook rewraps every shell creation and pins
+  (`read`/`edit`/`write`/`grep`/`glob`/`list` — reads, writes, search, and
+  listing, so `list /tmp` cannot reveal the harness temp either). Candidates
+  are normalized (relative paths resolve against the checkout, `..`/`.`/extra
+  slashes collapse) and denied bidirectionally: a path inside a denied prefix
+  *or* an ancestor of one is denied. The shell hook rewraps every shell
+  creation and pins
   HOME/XDG/TMPDIR at scratch while scrubbing provider keys.
 - Claude: Jumi-owned `PreToolUse` hook (`updatedInput` rewrite) in a
   `--plugin-dir` plugin under the outside harness temp. Same rewrite, and the

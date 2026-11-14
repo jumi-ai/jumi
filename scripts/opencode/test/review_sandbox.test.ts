@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runAgy } from "../src/agy.ts";
 import { runClaude } from "../src/claude.ts";
@@ -11,15 +11,18 @@ import { EngineFailedError } from "../src/engine.ts";
 import { runOpenCode } from "../src/git.ts";
 import {
   ALLOW_UNSANDBOXED_REVIEWS_ENV,
+  agyReviewHookScriptCode,
   agyReviewHooksJson,
   allowUnsandboxedReviews,
   assertReviewRunnerSandboxable,
   checkReviewSandbox,
+  claudeReviewHookScriptCode,
   claudeReviewHooksJson,
   codexReviewHooksJson,
   findOnPath,
   findReviewEnvViolations,
   makeReviewHarnessTempRoot,
+  OPENCODE_REVIEW_FILE_TOOLS,
   openCodeReviewShellPluginCode,
   REVIEW_SANDBOX_MIN_ABI,
   REVIEW_SANDBOX_WRAPPER_ENV,
@@ -29,6 +32,8 @@ import {
   reviewSandboxArgv,
   reviewSandboxRules,
   reviewSandboxWrapperPath,
+  reviewShellDeniedReadPrefixes,
+  reviewShellDenyPredicateSnippet,
   reviewShellSandboxRules,
   sandboxedShellEnv,
   setReviewSandboxProbeForTests,
@@ -371,6 +376,13 @@ describe("resolveReviewSpawnSandbox", () => {
         expect(plugin).toContain("jumi-review-shell-sandbox");
         expect(plugin).toContain("/w/review_sandbox.py");
         expect(plugin).toContain(harnessTemp);
+        // File tools cover reads, writes, search, and listing: an
+        // unsandboxed agent must not reach credentials through `list /tmp`
+        // or an edit/write path either.
+        expect(OPENCODE_REVIEW_FILE_TOOLS).toEqual(["read", "edit", "write", "grep", "glob", "list"]);
+        expect(plugin).toContain('"list"');
+        expect(plugin).toContain('"edit"');
+        expect(plugin).toContain('"write"');
         // Claude/Codex hooks rewrite Bash via updatedInput.
         const claudeDir = await writeClaudeReviewShellPlugin(harnessTemp, input);
         const claudeHook = await readFile(join(claudeDir, "hooks", "sandbox-bash.py"), "utf8");
@@ -408,6 +420,100 @@ describe("resolveReviewSpawnSandbox", () => {
         expect(() => assertReviewRunnerSandboxable("no-such-runner")).toThrow(
           /review spawn refused.*cannot be sandboxed/
         );
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    } finally {
+      await rm(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("hook deny predicates block ancestors, exact paths, and relative traversal", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "sandbox-deny-"));
+    try {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        const denied = reviewShellDeniedReadPrefixes(input);
+        const tokenFile = join(harnessTemp, "review-mcp.json");
+        await writeFile(tokenFile, `{"token": "t"}`, { mode: 0o600 });
+        // Relative traversal from the checkout into the outside harness temp.
+        const traversal = relative(workdir, tokenFile);
+        expect(traversal.startsWith("..")).toBe(true);
+        const sibling = `${harnessTemp}-evil`;
+
+        // The JS predicate in the shipped OpenCode plugin, graded live.
+        const jsSnippet = reviewShellDenyPredicateSnippet("javascript", workdir, denied);
+        const jsPredicate = new Function(
+          `${jsSnippet}\nreturn { token: isDenied(${JSON.stringify(
+            tokenFile
+          )}), ancestor: isDenied("/tmp"), root: isDenied("/"), traversal: isDenied(${JSON.stringify(
+            traversal
+          )}), checkout: isDenied(${JSON.stringify(workdir)}), sibling: isDenied(${JSON.stringify(
+            sibling
+          )}), empty: isDenied("") };`
+        ) as () => Record<string, boolean>;
+        expect(jsPredicate()).toEqual({
+          token: true,
+          ancestor: true,
+          root: true,
+          traversal: true,
+          checkout: false,
+          sibling: false,
+          empty: false,
+        });
+
+        // The Python predicates in the shipped hook scripts, graded live
+        // through both envelopes (Claude exit-2 deny, Agy decision deny).
+        const runPythonHook = (script: string, event: unknown) => {
+          const eventPath = join(scratch, `deny-event-${Math.random().toString(36).slice(2)}.json`);
+          return (async () => {
+            await writeFile(eventPath, JSON.stringify(event));
+            try {
+              return Bun.spawnSync(["python3", script], {
+                stdin: Bun.file(eventPath),
+                stdout: "pipe",
+                stderr: "pipe",
+              });
+            } finally {
+              await rm(eventPath, { force: true });
+            }
+          })();
+        };
+        const claudeHook = join(scratch, "deny-claude-hook.py");
+        await writeFile(claudeHook, claudeReviewHookScriptCode(input), { mode: 0o700 });
+        const claudeEvent = (tool: string, path: string) => ({
+          tool_name: tool,
+          tool_input: { path },
+        });
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", tokenFile))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", "/tmp"))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", "/"))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", traversal))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", workdir))).exitCode).toBe(0);
+        expect((await runPythonHook(claudeHook, claudeEvent("Grep", sibling))).exitCode).toBe(0);
+
+        const agyHook = join(scratch, "deny-agy-hook.py");
+        await writeFile(agyHook, agyReviewHookScriptCode(input), { mode: 0o700 });
+        const agyEvent = (name: string, args: Record<string, string>) => ({ toolCall: { name, args } });
+        const denyOutcome = async (name: string, args: Record<string, string>) => {
+          const proc = await runPythonHook(agyHook, agyEvent(name, args));
+          expect(proc.exitCode).toBe(0);
+          return String(proc.stdout ?? "");
+        };
+        expect(await denyOutcome("view_file", { FilePath: tokenFile })).toContain('"decision": "deny"');
+        expect(await denyOutcome("list_dir", { directory: "/tmp" })).toContain('"decision": "deny"');
+        expect(await denyOutcome("grep_search", { directory: traversal })).toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: workdir })).not.toContain('"decision": "deny"');
       } finally {
         await rm(harnessTemp, { recursive: true, force: true });
       }
