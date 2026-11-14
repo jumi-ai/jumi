@@ -5,12 +5,14 @@ import {
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
   type CiCheckSummary,
+  type CiGateResolverApi,
   type CiInspection,
   inspectCi,
   isCiLookupRetryMarker,
   isCiWaitMarker,
   JUMI_REVIEW_CONTEXT,
   type RequiredCiResolver,
+  resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
 } from "./ci.ts";
@@ -58,6 +60,7 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
+import type { CiGateWait } from "./repo_settings.ts";
 import {
   applyRepoChain,
   compileReviewExcludePatterns,
@@ -848,14 +851,32 @@ export async function inspectOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
     baseBranch?: string;
+    defaultBranch?: string;
     requiredContexts?: readonly string[];
+    wait?: CiGateWait;
   },
   sha: string,
   log: (message: string) => void
 ): Promise<CiInspection> {
   const resolveBranch = opts.baseBranch;
   let requiredContexts = opts.requiredContexts;
-  if (requiredContexts === undefined && resolveBranch) {
+  let wait = opts.wait;
+  if (wait === undefined) {
+    try {
+      const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        ...(resolveBranch ? { baseBranch: resolveBranch } : {}),
+        ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+        log,
+      });
+      wait = gate.wait;
+      if (requiredContexts === undefined) requiredContexts = gate.requiredContexts;
+    } catch {
+      wait = "required";
+    }
+  } else if (wait !== "all" && wait !== "none" && requiredContexts === undefined && resolveBranch) {
     requiredContexts = await resolveRequiredCiContexts(opts.api as unknown as RequiredCiResolver, {
       owner: opts.owner,
       repo: opts.repo,
@@ -873,9 +894,10 @@ export async function inspectOtherChecks(
     issueNumber: opts.prNumber,
     log,
     ...(requiredContexts ? { requiredContexts } : {}),
+    ...(wait && wait !== "required" ? { wait } : {}),
   };
   let ci = await inspectCi(inspectOpts);
-  if ((ci.empty || ci.lookupFailed) && opts.relist !== false) {
+  if ((ci.empty || ci.lookupFailed) && opts.relist !== false && wait !== "none") {
     // Actions may not have created the push's jobs yet, or a list call blipped;
     // give it one short beat, then re-list once. Still no checks is not green:
     // the engine waits on the CI lookup budget, then reviews and says so.
@@ -889,13 +911,38 @@ export async function skipReasonForOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
     baseBranch?: string;
+    defaultBranch?: string;
     requiredContexts?: readonly string[];
+    wait?: CiGateWait;
   },
   sha: string,
   log: (message: string) => void
 ): Promise<string | undefined> {
   try {
-    return reviewSkipReasonForCi(await inspectOtherChecks(opts, sha, log));
+    let wait = opts.wait;
+    let requiredContexts = opts.requiredContexts;
+    if (wait === undefined) {
+      try {
+        const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+          owner: opts.owner,
+          repo: opts.repo,
+          prNumber: opts.prNumber,
+          ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+          ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+          log,
+        });
+        wait = gate.wait;
+        if (requiredContexts === undefined) requiredContexts = gate.requiredContexts;
+      } catch {
+        wait = "required";
+      }
+    }
+    const ci = await inspectOtherChecks(
+      { ...opts, ...(wait ? { wait } : {}), ...(requiredContexts ? { requiredContexts } : {}) },
+      sha,
+      log
+    );
+    return reviewSkipReasonForCi(ci, wait);
   } catch (err) {
     if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
     log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
@@ -1600,14 +1647,35 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   let ciResults: { headSha: string; checks: CiCheckSummary[]; pendingOptional?: readonly string[] } | undefined;
   if (opts.inspectOtherChecks !== false) {
     let ci: CiInspection;
+    let ciWait: CiGateWait = "required";
     try {
-      ci = await inspectOtherChecks({ ...opts, api: forgeApi, baseBranch: pr.base.ref }, reviewedHeadSha, log);
+      const gate = await resolveCiGate(forgeApi as unknown as CiGateResolverApi, {
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        baseBranch: pr.base.ref,
+        ...(defaultBranch ? { defaultBranch } : {}),
+        log,
+      });
+      ciWait = gate.wait;
+      ci = await inspectOtherChecks(
+        {
+          ...opts,
+          api: forgeApi,
+          baseBranch: pr.base.ref,
+          ...(defaultBranch ? { defaultBranch } : {}),
+          ...(gate.requiredContexts ? { requiredContexts: gate.requiredContexts } : {}),
+          ...(gate.wait !== "required" ? { wait: gate.wait } : {}),
+        },
+        reviewedHeadSha,
+        log
+      );
     } catch (err) {
       if (isAbortError(err) || opts.abortSignal?.aborted) throw err;
       log(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
       return { status: "skipped", reason: CI_LOOKUP_FAILED_REASON };
     }
-    const ciSkip = reviewSkipReasonForCi(ci);
+    const ciSkip = reviewSkipReasonForCi(ci, ciWait);
     if (ciSkip) return { status: "skipped", reason: ciSkip };
     if (ci.checks.length > 0)
       ciResults = {

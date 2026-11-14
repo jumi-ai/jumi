@@ -32,6 +32,7 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `automerge` | boolean | `false` (off) | `true` lets Jumi schedule the forge's native auto-merge on pull requests it opens, once every other gate passes | Both switches: the deployment (`JUMI_AUTOMERGE_ENABLED` on, and deprecated `JUMI_AUTOMERGE_REPOS` when set must allow the repository) **and** this key must be `true` — unless a per-PR override label decides (see below). Either one alone schedules nothing |
 | `automerge_label` | non-blank string | `automerge` | Name of the per-PR label that opts one Jumi PR into auto-merge, even when `automerge` is `false` or absent. Matches case-insensitively. A blank, non-string, or identical (case-insensitive) pair with `no_automerge_label` makes the whole file invalid; hyphen/camel spellings are unknown keys rejected with the usual "did you mean" error | The label only counts when the person who added it passes the same sender check a handover needs (`TRUSTED_SENDER_LOGINS` when set, write access otherwise). Jumi copies the label from the worked issue onto the PR at open time, then the PR's labels decide; label history that cannot be read fails closed |
 | `no_automerge_label` | non-blank string | `no-automerge` | Name of the per-PR label that opts one Jumi PR out of auto-merge, even when `automerge` is `true`. Honoured whoever added it (safe direction). Matches case-insensitively; same validation as `automerge_label` | Overrides `automerge` and `automerge_label`: both labels together never schedule, with one conflict note. Adding/removing either label on an open Jumi PR re-runs every gate |
+| `automerge_method` | one of `"merge"`, `"squash"`, `"rebase"`, `"rebase-merge"`, `"fast-forward-only"` | today's method (first allowed on GitHub, default style on Gitea) | Merge method Jumi schedules with, on the first schedule and the restore/re-arm path. `merge`, `squash`, `rebase` work on both forges; `rebase-merge` and `fast-forward-only` are Gitea-only. A non-string or unknown value makes the whole file invalid; `automerge-method` / `automergeMethod` are unknown keys rejected with the usual "did you mean" error. The method must be one the repository allows (GitHub: `allow_merge_commit` / `allow_squash_merge` / `allow_rebase_merge`; Gitea: `allow_merge_commits` / `allow_squash_merge` / `allow_rebase` / `allow_rebase_explicit` / `allow_fast_forward_only_merge`): when the repository does not allow it, or a Gitea-only value is set on GitHub, Jumi schedules nothing and leaves one note saying the repository does not allow `<method>` merges. An unknown allow flag (older forge, fakes) trusts the setting | No deployer setting |
 | `allowed_runners` | list of runner names | no restriction (the full active chain) | Narrows every job for the repository — review, implement, follow-up, conflict — to the chain entries whose name is on the list, keeping chain order | Narrowing only: names outside the active chain grant nothing and are only logged. An explicitly empty list is invalid (the whole file is invalid — use `mode: off` or `mode: review-only` instead); a non-empty list that matches nothing fails closed with no runner job starting (see Runners row below). Without `JUMI_RUNNERS_FILE` the chain is synthesized and its entries are stably named `primary` (and `fallback` when a fallback model is set) |
 | `review_exclude` | list of glob strings | `[]` (nothing is left out) | A changed file whose repository-relative path matches is left out of the review: its patch is withheld from the reviewer in first and later reviews. The file is still listed as changed and marked as left out, and the published review names the files (or the count, when the list is long) | No deployer setting. Uses the same gitignore-style glob dialect as `REVIEW.md` path sections (`**/generated/**`, `pnpm-lock.yaml`, `docs/`; a bare word is not a glob, so scope it like `**/Dockerfile`). The settings file itself can never be left out: a pattern matching it has no effect on it. Patterns come from the default branch only, so a pull that adds a pattern is still reviewed in full |
 | `followup_on_suggestions` | boolean | `true` (follow up, as today) | `false` turns off follow-up on a `success` review that only has suggestions. Failing reviews, blocking questions, red CI, and conflicts still run as today, and a comment or review from someone allowed to steer follow-up still starts it whatever this setting says | No deployer setting |
@@ -46,6 +47,8 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `pickup_label` | non-blank string | `jumi` | The GitHub label that hands an issue or pull to Jumi. Covers every place the `jumi` label is used on GitHub: issue pickup, handing over a pull, and the marker Jumi leaves on taken-over pulls (removing it still cancels). Gitea keeps using assignment and ignores this key. Because the label webhook reads the repository's default-branch settings for the name, a missing, unreadable, or invalid file falls back to `jumi`. A blank or non-string value makes the whole file invalid. Logins are not involved; label matching stays case-insensitive | No deployer setting (the deployment default is `jumi`) |
 | `conflict_regenerate` | list of `{file, run}` mappings | no repository entries (only the built-in helm locks regenerate) | Names lockfiles the conflict job rebuilds with a shell command instead of handing to the model: `file` is a lock basename (no slash, matched the same way as `Chart.lock`/`requirements.lock`), `run` is the shell command run in the directory that contains the conflicted file. The entry comes from the default branch only, never the pull request head, so a pull cannot add a command. The command runs in the worker sandbox with the same sanitized child environment the conflict model run gets (no forge token, same network policy), bounded by 10 minutes; when it fails, times out, or leaves the file conflicted or missing, the file is logged and handed to the model. Each mapping has exactly the keys `file` and `run`, both non-blank strings; a duplicate basename or a basename the built-ins own (`Chart.lock`, `requirements.lock`) makes the whole file invalid | No deployer setting |
 | `mode` | `"full"` \| `"review-only"` \| `"off"` | `"full"` | `review-only` keeps reviews and the review status working as today but starts no implement, follow-up, or conflict job (handing work to Jumi leaves one note saying worker jobs are turned off). `off` starts no job of any kind, posts no status, and comments nothing. The mode is checked before a runner starts so a restricted repository costs no model time; it is read when a job starts, so a running job finishes while a queued job follows the new mode. Auto-merge is never scheduled in a restricted mode | No deployer setting |
+| `ci_gate` | mapping (may be empty) | `{}` (waits for required checks) | Chooses which CI checks gate reviews (see the `ci_gate.wait` row). Read from the default branch like every other key; a non-mapping value makes the whole file invalid | No deployer setting |
+| `ci_gate.wait` | `"all"` \| `"required"` \| `"none"` | `"required"` | `required` waits only for the base branch's required checks, falling back to every check when protection can't be read or names no required check besides `jumi/opencode-review`; `all` waits for every non-Jumi check whatever branch protection says (the pre-#502 behaviour, never resolves the required set); `none` never waits for pending or absent CI — the router gate dispatches at once and the review job runs, listing pending checks as still running so the reviewer never reads them as green. A red check fails the review and runs the CI follow-up in every mode. `ci_gate` must be a mapping, `wait` one of the three strings; unknown sub-keys and dash/camel spellings (`ci-gate`, `ciGate`) are rejected with the usual "did you mean" error, and any invalid value makes the whole file invalid | No deployer setting |
 | `timeouts` | mapping (may be empty) | `{}` (no overrides) | Per-kind run timeouts in whole minutes (see the four rows below). Read once when the job starts; a change never affects an already running job. Everything derived from the timeout follows the effective value for that job: the queue lease length and the credential-refresh budget at job start | Each present key is a ceiling against its deployer maximum (below); a smaller, non-integer, or non-numeric value makes the whole file invalid |
 | `timeouts.review` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` | How long reviews may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout, so a repository can only shorten out of the box); a value above the maximum runs with the maximum |
 | `timeouts.implement` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` (worker default is 4h) | How long first implementations may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS`, same rule as `review`. Each kind has its own deployer maximum |
@@ -64,6 +67,7 @@ automerge: true # needs the deployment switch (JUMI_AUTOMERGE_ENABLED on, no
   # JUMI_AUTOMERGE_REPOS narrowing) plus the base branch requiring jumi/opencode-review
 automerge_label: automerge # per-PR opt-in label (default automerge)
 no_automerge_label: no-automerge # per-PR opt-out label (default no-automerge)
+automerge_method: squash # merge (default) | squash | rebase | rebase-merge (Gitea-only) | fast-forward-only (Gitea-only)
 
 allowed_runners: # absent means no restriction; present narrows every job to these chain names
   - primary
@@ -99,6 +103,9 @@ conflict_regenerate: # rebuild these locks with a command instead of handing the
 
 mode: full # full (default) | review-only | off
 
+ci_gate: # absent (or wait absent) means required: wait for required checks, falling back to every check
+  wait: required # all waits for every check regardless of branch protection; none reviews without waiting
+
 timeouts: # whole minutes per kind; absent keys run with the deployment timeout
   review: 10 # ceiling: OPENCODE_TIMEOUT_MAX_MS
   implement: 120 # ceiling: OPENCODE_TIMEOUT_MAX_MS
@@ -121,6 +128,23 @@ Review-only repository (reviews keep working; no implement, follow-up, or confli
 mode: review-only
 ```
 
+Review before slow CI finishes (the review does not wait for pending or absent CI; pending
+checks are still listed as still running, and red checks still fail the review as today).
+Note that it spends review time on pull requests whose tests may still fail:
+
+```yaml
+ci_gate:
+  wait: none
+```
+
+Wait for every check regardless of branch protection (the pre-#502 behaviour; the required
+set is never resolved):
+
+```yaml
+ci_gate:
+  wait: all
+```
+
 ## What happens when the file is missing, invalid, or unreadable
 
 "Unreadable" is a failed read (for example a forge error); the parent logs it. Missing
@@ -130,6 +154,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Feature | Missing | Invalid (whole file) | Unreadable |
 |---------|---------|----------------------|------------|
 | Auto-merge | No schedule, silent (same as `automerge: false`), unless an admitted `automerge` label opts that PR in (copied from the worked issue at open time) | No schedule; the pull request gets one note naming the parser's error | No schedule; the pull request gets one note saying the file could not be read |
+| `automerge_method` | Today's method (first allowed on GitHub, default style on Gitea) | Whole file invalid: no schedule; the pull request gets one note naming the parser's error (same as `automerge`) | No schedule; the pull request gets one note saying the file could not be read (same as `automerge`). A method the repository does not allow, or a Gitea-only value on GitHub, schedules nothing with one note saying the repository does not allow `<method>` merges |
 | Override labels | Label names fall back to `automerge` / `no-automerge`; `no-automerge` present opts out silently, an admitted `automerge` forces a schedule through every gate, both together cancel with a conflict note, an untrusted or unreadable `automerge` labeller posts one note and never schedules | Custom label names are invalid with the rest of the file, so the invalid note above applies and labels change nothing | Label history that cannot be read fails closed with one note |
 | `review_exclude` | No exclusions; the review runs in full | No exclusions; the review runs in full (the pull still carries the parser-error note via auto-merge/head validation, but nothing is left out) | No exclusions; the review runs in full |
 | Follow-up (`followup_on_suggestions`, `max_*_rounds`) | Deployment caps, suggestions on | Policy falls back to deployment caps with suggestions on — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Deployment caps, suggestions on (fail-open); a runner job still runs on the full chain |
@@ -139,6 +164,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Pickup label (`pickup_label`, GitHub only; Gitea ignores it) | `jumi` | `jumi`: a custom label in an invalid file changes nothing, and `jumi` no longer starts work in a repo whose valid file names another label | `jumi` (fail-open, logged) |
 | `conflict_regenerate` | No repository entries: only the built-in helm locks regenerate | No repository entries (the whole file is invalid, so no entry applies) | No repository entries (fail-open, logged) |
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |
+| CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 
 Two related guards: a pull request that changes `.jumi.yml` never auto-merges through

@@ -143,6 +143,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `HOME`
 - `WORKDIR`
 - `GRADLE_SEED_HOME`
+- `JUMI_CACHE_DIR`
 - `QUEUE_CONCURRENCY`
 - `MAX_OUTPUT_BYTES`
 - `MAX_WEBHOOK_BYTES`
@@ -186,8 +187,9 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `/data`
 - `/work`
 - `/gradle-seed`
+- `/cache`
 
-`/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set (see `GRADLE_SEED_HOME`); without it the worker runs cold.
+`/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set (see `GRADLE_SEED_HOME`); without it the worker runs cold. `/cache` is the optional shared tool-cache root mounted only when `JUMI_CACHE_DIR` is set (for example `JUMI_CACHE_DIR=/cache`); without it the worker keeps per-pod caches under `$WORKDIR`. Worker children get an effective `HOME` that is writable (`$HOME` probed, `$WORKDIR/.home` fallback) and `-Duser.home` on it, with per-repository caches under `<JUMI_CACHE_DIR>/<owner>/<repo>/` when set.
 
 ### control
 
@@ -297,6 +299,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `HOME`
 - `WORKDIR`
 - `GRADLE_SEED_HOME`
+- `JUMI_CACHE_DIR`
 - `MAX_OUTPUT_BYTES`
 - `OPENCODE_TIMEOUT_MS`
 - `FOLLOWUP_TIMEOUT_MS`
@@ -337,8 +340,9 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 #### volumes
 - `/work`
 - `/gradle-seed`
+- `/cache`
 
-`HOME` is an emptyDir (empty `HOME`, no xAI or Antigravity grant adoption). No shared cache across Jobs; each Job clones full history into its own emptyDir. `/data` is not mounted. `/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set; without it the job runs cold.
+`HOME` is an emptyDir (empty `HOME`, no xAI or Antigravity grant adoption). Each Job clones full history into its own emptyDir. `/data` is not mounted. `/gradle-seed` is the read-only Gradle seed mounted only when `GRADLE_SEED_HOME` is set; without it the job runs cold. `/cache` is the optional shared tool-cache root mounted only when `JUMI_CACHE_DIR` is set (for example `JUMI_CACHE_DIR=/cache`); without it the job keeps per-pod caches under `$WORKDIR`. Worker children get an effective `HOME` that is writable (`$HOME` probed, `$WORKDIR/.home` fallback) and `-Duser.home` on it, with per-repository caches under `<JUMI_CACHE_DIR>/<owner>/<repo>/` when set.
 
 ## Metrics
 
