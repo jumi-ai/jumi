@@ -717,6 +717,24 @@ async function main(): Promise<number> {
           observed: `exit ${run.code}: ${(run.stderr + run.stdout).slice(-300)}`,
         });
       }
+      // `alwaysLoad` isolation: with tool search back on (no
+      // `ENABLE_TOOL_SEARCH=false`), the search tool must still preload with
+      // no `ToolSearch` call. If `alwaysLoad` were silently ignored, the tool
+      // would defer and the stub would search — this run pins the key itself,
+      // independent of the env flag.
+      state.firstRequestTools = undefined;
+      state.toolSearchCalls = 0;
+      state.wantPreloaded = ["mcp__searxng__search"];
+      const alwaysLoadRun = await runClaudeArgv(configured, origin, home, workdir, {}, { toolSearch: "on" });
+      state.wantPreloaded = [];
+      results.push(judgeWebPreload(["mcp__searxng__search"], state));
+      if (alwaysLoadRun.code !== 0 || !alwaysLoadRun.stdout.includes(PROBE_MARKER)) {
+        results.push({
+          name: "alwaysLoad isolation run still completes",
+          ok: false,
+          observed: `exit ${alwaysLoadRun.code}: ${(alwaysLoadRun.stderr + alwaysLoadRun.stdout).slice(-300)}`,
+        });
+      }
     } finally {
       await rm(shadowMcp, { force: true });
       if (previousSearxng === undefined) delete process.env.JUMI_SEARXNG_URL;
