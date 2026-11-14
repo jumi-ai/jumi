@@ -2,16 +2,27 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { buildBoardGroups } from "../src/board.ts";
+import { MemoryReviewJobStore } from "../src/review_jobs.ts";
+import { normalizeSitReason } from "../src/router_sits.ts";
 import {
   appendStuckFingerprint,
+  blockingFindingIdentities,
   detectStuck,
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
+  fingerprintFindingIdentity,
+  fingerprintFindingIdentityFromParts,
   fingerprintFollowUpText,
+  fingerprintPrDiffFromFiles,
   fingerprintReviewArtifact,
+  fingerprintSameFinding,
   isSkipLatchReason,
   readStuckState,
+  SAME_FINDING_STUCK,
+  sameFindingDisplayFromParts,
+  sameFindingLatchReasonFromParts,
   stuckComment,
   writeStuckState,
 } from "../src/stuck.ts";
@@ -164,6 +175,7 @@ describe("stuckComment", () => {
     expect(stuckComment("repeated-action")).toBe("stuck: repeated action");
     expect(stuckComment("repeated-error")).toBe("stuck: repeated error");
     expect(stuckComment("ping-pong")).toBe("stuck: ping-pong");
+    expect(stuckComment("same-finding")).toBe(SAME_FINDING_STUCK);
   });
 });
 
@@ -199,5 +211,96 @@ describe("stuck state file", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("same finding repeated", () => {
+  const reviewOne = "src/foo.ts:123: 🟡 risk: Null check missing for bar.\n\n<!-- jumi-check: failure -->";
+  const reviewTwo =
+    "src/foo.ts:124: 🟡 risk: Missing null check for bar! Re-checked on this head abc1234, still present.\n\n<!-- jumi-check: failure -->";
+  const reviewThree =
+    "src/foo.ts:123: 🟡 risk: bar null check missing. Re-checked after base merge def5678.\n\n<!-- jumi-check: failure -->";
+  const otherFinding = "src/foo.ts:123: 🟡 risk: Race condition in cache.\n\n<!-- jumi-check: failure -->";
+  const diffA = [{ filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+new" }];
+  const diffB = [{ filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+fixed" }];
+
+  function combined(review: string, diffHash: string): { kind: "finding"; hash: string } {
+    const findingHash = fingerprintFindingIdentity(review)!;
+    expect(findingHash).toBeTruthy();
+    return { kind: "finding", hash: fingerprintSameFinding(findingHash, diffHash) };
+  }
+
+  test("reworded finding keeps the same identity across nearby lines", () => {
+    expect(blockingFindingIdentities(reviewOne)).toHaveLength(1);
+    expect(fingerprintFindingIdentity(reviewOne)).toBe(fingerprintFindingIdentity(reviewTwo));
+    expect(fingerprintFindingIdentity(reviewOne)).toBe(fingerprintFindingIdentity(reviewThree));
+    expect(fingerprintFindingIdentity(reviewOne)).not.toBe(fingerprintFindingIdentity(otherFinding));
+  });
+
+  test("three reviews with the same identity on an unchanged diff are stuck", () => {
+    const diffHash = fingerprintPrDiffFromFiles(diffA)!;
+    const one = combined(reviewOne, diffHash);
+    const two = combined(reviewTwo, diffHash);
+    const three = combined(reviewThree, diffHash);
+    expect(one.hash).toBe(two.hash);
+    expect(two.hash).toBe(three.hash);
+    expect(detectStuck([one, two])).toBeUndefined();
+    expect(detectStuck([one, two, three])).toBe("same-finding");
+    expect(evaluateStuck([one, two], three)).toBe("same-finding");
+  });
+
+  test("a real change to the PR diff resets the count", () => {
+    const before = fingerprintPrDiffFromFiles(diffA)!;
+    const after = fingerprintPrDiffFromFiles(diffB)!;
+    expect(before).not.toBe(after);
+    const one = combined(reviewOne, before);
+    const two = combined(reviewTwo, before);
+    const changed = combined(reviewThree, after);
+    expect(changed.hash).not.toBe(one.hash);
+    expect(evaluateStuck([one, two], changed)).toBeUndefined();
+  });
+
+  test("a different finding does not trip", () => {
+    const diffHash = fingerprintPrDiffFromFiles(diffA)!;
+    const one = combined(reviewOne, diffHash);
+    const two = combined(reviewTwo, diffHash);
+    const otherHash = fingerprintFindingIdentity(otherFinding)!;
+    const other = { kind: "finding" as const, hash: fingerprintSameFinding(otherHash, diffHash) };
+    expect(other.hash).not.toBe(one.hash);
+    expect(evaluateStuck([one, two], other)).toBeUndefined();
+  });
+
+  test("suggestions do not count as blocking findings", () => {
+    const suggestion = "src/foo.ts:123: 💡 suggestion: Rename this helper.\n\n<!-- jumi-check: failure -->";
+    expect(blockingFindingIdentities(suggestion)).toEqual([]);
+    expect(fingerprintFindingIdentity(suggestion)).toBeUndefined();
+  });
+
+  test("inline findings feed the same identity", () => {
+    const inlineBody = "🟡 risk: Null check missing for bar. Re-checked on this head abc1234.";
+    const fromBody = fingerprintFindingIdentity(reviewOne)!;
+    const fromParts = fingerprintFindingIdentityFromParts(undefined, [
+      { path: "src/foo.ts", new_position: 124, body: inlineBody },
+    ])!;
+    expect(fromParts).toBe(fromBody);
+  });
+
+  test("same-finding latch maps to an implement-latch sit and shows on the board", async () => {
+    const latchReason = sameFindingLatchReasonFromParts(reviewOne, []);
+    expect(latchReason.startsWith(SAME_FINDING_STUCK)).toBe(true);
+    expect(normalizeSitReason(latchReason)).toBe("implement-latch");
+    expect(normalizeSitReason("stuck: too many follow-up rounds")).toBe("implement-latch");
+
+    const store = new MemoryReviewJobStore();
+    await store.sits.remember("kirmanak", "demo", 12, "implement-latch");
+    await store.setIssueSkipReason("kirmanak", "demo", 12, latchReason);
+    const groups = await buildBoardGroups(store);
+    const item = groups.needs_kick.find((entry) => entry.number === 12);
+    expect(item).toBeDefined();
+    expect(item?.kick?.kick).toBe("stuck");
+    expect(item?.message).toContain(SAME_FINDING_STUCK);
+    expect(item?.message).toContain("src/foo.ts");
+    const display = sameFindingDisplayFromParts(reviewOne, []);
+    expect(item?.message).toContain(display!.slice(0, 20));
   });
 });

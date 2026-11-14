@@ -115,7 +115,6 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text === "success trailer") return undefined;
   if (text === "comment already handled") return undefined;
   if (text === "no unhandled feedback") return undefined;
-  if (text.startsWith("stuck: too many")) return undefined;
   if (text === "failed to load issue") return undefined;
   if (text.startsWith("failed to load ")) return undefined;
   if (text.startsWith("failed to re-check")) return undefined;
