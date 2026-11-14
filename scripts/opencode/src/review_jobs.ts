@@ -312,6 +312,10 @@ export interface ReviewJobStore {
   recordRoleInfra(role: RoleGateRole, now?: Date): Promise<void>;
   recordRoleSuccess(role: RoleGateRole): Promise<void>;
   recordRoleQuotaWait(role: RoleGateRole, until: Date | number): Promise<void>;
+  /** Per-runner cooldowns, persisted alongside the role gate. Best-effort: missing table reads empty. */
+  recordRunnerCooldown?(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void>;
+  clearRunnerCooldown?(role: RoleGateRole, runner: string): Promise<void>;
+  listRunnerCooldowns?(role: RoleGateRole): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>>;
 }
 
 export interface IssueSkipLatch {
@@ -644,6 +648,17 @@ CREATE TABLE IF NOT EXISTS role_gates (
 );
 `;
 
+export const RUNNER_COOLDOWNS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS runner_cooldowns (
+  role TEXT NOT NULL,
+  runner TEXT NOT NULL,
+  cooldown_until TIMESTAMPTZ NOT NULL,
+  reason TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (role, runner)
+);
+`;
+
 export const REVIEW_SUGGESTIONS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS jumi_review_suggestions (
   id BIGSERIAL PRIMARY KEY,
@@ -958,6 +973,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     RoleGateRole,
     { infraConsecutive: number; infraOpenUntil: number | null; quotaUntil: number | null }
   >();
+  private readonly runnerCooldowns = new Map<string, { untilMs: number; reason: string | null }>();
   private readonly kickLog: KickLogRecord[] = [];
   private nextKickId = 1;
   private nextRunUsageId = 1;
@@ -2392,6 +2408,37 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       });
     });
   }
+
+  recordRunnerCooldown(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void> {
+    return this.locked(() => {
+      const untilMs = until instanceof Date ? until.getTime() : until;
+      if (!runner || !Number.isFinite(untilMs)) return;
+      const key = `${role}:${runner}`;
+      const prev = this.runnerCooldowns.get(key);
+      if (prev == null || untilMs > prev.untilMs) {
+        this.runnerCooldowns.set(key, { untilMs, reason: reason ?? null });
+      }
+    });
+  }
+
+  clearRunnerCooldown(role: RoleGateRole, runner: string): Promise<void> {
+    return this.locked(() => {
+      this.runnerCooldowns.delete(`${role}:${runner}`);
+    });
+  }
+
+  listRunnerCooldowns(role: RoleGateRole): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>> {
+    return this.locked(() => {
+      const out: Array<{ runner: string; untilMs: number; reason: string | null }> = [];
+      for (const [key, value] of this.runnerCooldowns) {
+        const sep = key.indexOf(":");
+        if (sep < 0) continue;
+        if (key.slice(0, sep) !== role) continue;
+        out.push({ runner: key.slice(sep + 1), untilMs: value.untilMs, reason: value.reason });
+      }
+      return out;
+    });
+  }
 }
 
 type ReviewJobRow = {
@@ -2607,6 +2654,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(RUN_USAGE_SCHEMA_SQL);
         await tx.unsafe(REVIEW_SUGGESTIONS_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
+        await tx.unsafe(RUNNER_COOLDOWNS_SCHEMA_SQL);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
       });
     } catch (err) {
@@ -3688,6 +3736,56 @@ export class PgReviewJobStore implements ReviewJobStore {
          updated_at = NOW()`,
       [role, new Date(untilMs).toISOString()]
     );
+  }
+
+  async recordRunnerCooldown(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void> {
+    const untilMs = until instanceof Date ? until.getTime() : until;
+    if (!runner || !Number.isFinite(untilMs)) return;
+    try {
+      await this.sql.unsafe(
+        `INSERT INTO runner_cooldowns (role, runner, cooldown_until, reason, updated_at)
+         VALUES ($1, $2, $3::timestamptz, $4, NOW())
+         ON CONFLICT (role, runner) DO UPDATE SET
+           cooldown_until = CASE
+             WHEN EXCLUDED.cooldown_until > runner_cooldowns.cooldown_until THEN EXCLUDED.cooldown_until
+             ELSE runner_cooldowns.cooldown_until
+           END,
+           reason = EXCLUDED.reason,
+           updated_at = NOW()`,
+        [role, runner, new Date(untilMs).toISOString(), reason ?? null]
+      );
+    } catch {
+      // Best-effort when the router has not migrated yet: the process-local
+      // cooldown still skips the dead runner for this process lifetime.
+    }
+  }
+
+  async clearRunnerCooldown(role: RoleGateRole, runner: string): Promise<void> {
+    if (!runner) return;
+    try {
+      await this.sql.unsafe(`DELETE FROM runner_cooldowns WHERE role = $1 AND runner = $2`, [role, runner]);
+    } catch {
+      // Best-effort (see recordRunnerCooldown).
+    }
+  }
+
+  async listRunnerCooldowns(
+    role: RoleGateRole
+  ): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>> {
+    try {
+      const rows = asRows<{ runner: unknown; cooldown_until: unknown; reason: unknown }>(
+        await this.sql.unsafe(`SELECT runner, cooldown_until, reason FROM runner_cooldowns WHERE role = $1`, [role])
+      );
+      const out: Array<{ runner: string; untilMs: number; reason: string | null }> = [];
+      for (const row of rows) {
+        const untilMs = epoch(row.cooldown_until);
+        if (row.runner == null || untilMs == null) continue;
+        out.push({ runner: str(row.runner), untilMs, reason: strOrNull(row.reason) });
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   private mapKickRow(row: {

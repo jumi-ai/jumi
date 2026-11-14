@@ -67,6 +67,9 @@ export interface RunWorkerJobExtras {
   abortSignal?: AbortSignal;
   breaker?: InfraCircuitBreaker;
   quotaCooldown?: QuotaCooldown;
+  runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore;
+  runnerCooldownConfig?: import("./runner_cooldown.ts").RunnerCooldownConfig;
+  cooldownNowMs?: () => number;
   now?: () => number;
   /** One-shot jobs inject a full-clone runtime (no shared cache). Long-running keeps the standing pod. */
   runtime?: StandingPodRuntime;
@@ -480,6 +483,26 @@ export async function processWorkerTick(
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
   const nowMs = extras.now?.() ?? Date.now();
+  if (extras.runnerCooldowns && typeof store.listRunnerCooldowns === "function") {
+    try {
+      const persisted = await store.listRunnerCooldowns("worker");
+      for (const entry of persisted) {
+        if (entry.untilMs <= nowMs) {
+          await store.clearRunnerCooldown?.("worker", entry.runner).catch(() => undefined);
+          continue;
+        }
+        if (!extras.runnerCooldowns.isCooled(entry.runner, nowMs)) {
+          extras.runnerCooldowns.restore(entry.runner, {
+            untilMs: entry.untilMs,
+            reason: (entry.reason as "quota" | "credit" | "auth") ?? "quota",
+            source: "default",
+          });
+        }
+      }
+    } catch {
+      // Fail-open.
+    }
+  }
   const needsLedger = !extras.breaker || !extras.quotaCooldown;
   const gate = needsLedger ? await store.checkRoleGate("worker", new Date(nowMs)) : undefined;
   if (extras.breaker) {
@@ -759,6 +782,11 @@ export async function processWorkerTick(
       chain: orderedRunners(effectiveConfig),
       runnerSelection: effectiveConfig.runnerSelection,
       independentReview: effectiveConfig.independentReview,
+      ...(extras.runnerCooldowns ? { runnerCooldowns: extras.runnerCooldowns } : {}),
+      runnerCooldownConfig:
+        extras.runnerCooldownConfig ??
+        (effectiveConfig as { runnerCooldown?: RunWorkerJobExtras["runnerCooldownConfig"] }).runnerCooldown,
+      ...((extras.cooldownNowMs ?? extras.now) ? { cooldownNowMs: extras.cooldownNowMs ?? extras.now } : {}),
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
@@ -921,6 +949,32 @@ export async function processWorkerTick(
     }
     if (isQuotaWaitError(err)) {
       const failedRunner = failedRunnerNameForWorkerRetry(config, err);
+      if (extras.runnerCooldowns && failedRunner && typeof store.recordRunnerCooldown === "function") {
+        const until = extras.runnerCooldowns.cooldownUntil(failedRunner);
+        const entry = extras.runnerCooldowns.entry(failedRunner);
+        if (until > Date.now()) {
+          await store.recordRunnerCooldown("worker", failedRunner, until, entry?.reason).catch(() => undefined);
+        }
+      }
+      if (extras.runnerCooldowns) {
+        try {
+          const chain = orderedRunners(config);
+          const now = Date.now();
+          const healthy = chain.filter((r) => !extras.runnerCooldowns!.isCooled(r.name, now));
+          if (healthy.length > 0) {
+            try {
+              await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
+            } catch (expireErr) {
+              logger(
+                `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
+              );
+            }
+            return "processed";
+          }
+        } catch {
+          // Fail-open to the role-wide wait below.
+        }
+      }
       try {
         const now = Date.now();
         await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);

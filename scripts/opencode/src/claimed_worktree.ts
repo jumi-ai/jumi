@@ -10,6 +10,7 @@ import { withEngineChain } from "./fallback.ts";
 import { isInfraFailure } from "./infra.ts";
 import type { IssueApi } from "./ports.ts";
 import { isQuotaWaitError } from "./quota.ts";
+import type { RunnerCooldownConfig, RunnerCooldownStore } from "./runner_cooldown.ts";
 import {
   describeAttemptOrder,
   type NamedRunner,
@@ -87,6 +88,9 @@ export interface BeginClaimedWorktreeOpts {
   logger?: (message: string) => void;
   branch?: string;
   forgetTerminal?: boolean;
+  runnerCooldowns?: RunnerCooldownStore;
+  runnerCooldownConfig?: RunnerCooldownConfig;
+  cooldownNowMs?: () => number;
 }
 
 export function isClaimedEarlyResult(value: object): value is ClaimedEarlyResult {
@@ -118,11 +122,24 @@ export async function beginClaimedWorktree(
   const pidAlive = opts.pidAlive ?? isPidAlive;
   const git = opts.gitRunner ?? runGit;
   const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
+  const cooldownOrdering = opts.runnerCooldowns
+    ? {
+        cooldowns: opts.runnerCooldowns,
+        nowMs: opts.cooldownNowMs?.() ?? Date.now(),
+        logger: opts.logger,
+      }
+    : undefined;
   const effectiveChain =
     opts.chain && opts.chain.length > 1
       ? opts.failedRunner
-        ? orderChainForRetry(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random, opts.failedRunner)
-        : orderChainForJob(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random)
+        ? orderChainForRetry(
+            opts.chain,
+            runnerSelection,
+            opts.runnerRandom ?? Math.random,
+            opts.failedRunner,
+            cooldownOrdering
+          )
+        : orderChainForJob(opts.chain, runnerSelection, opts.runnerRandom ?? Math.random, cooldownOrdering)
       : opts.chain
         ? [...opts.chain]
         : undefined;
@@ -143,6 +160,9 @@ export async function beginClaimedWorktree(
     remainingLeaseMs: opts.remainingLeaseMs,
     extendLease: opts.extendLease,
     logger: opts.logger,
+    ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+    ...(opts.runnerCooldownConfig ? { runnerCooldownConfig: opts.runnerCooldownConfig } : {}),
+    ...(opts.cooldownNowMs ? { cooldownNowMs: opts.cooldownNowMs } : {}),
   });
   const owner = assertSafeSegment(opts.job.owner, "owner");
   const repo = assertSafeSegment(opts.job.repo, "repo");

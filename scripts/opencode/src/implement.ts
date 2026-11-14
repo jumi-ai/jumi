@@ -69,7 +69,7 @@ import { isJumiCloserForIssue, runCloserWork } from "./pickup.ts";
 import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
-import { throwIfQuotaWait } from "./quota_wait.ts";
+import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import { applyRepoChain } from "./repo_settings.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -203,6 +203,9 @@ export interface ImplementOptions extends PickupPolicy {
   fallbackModel?: string;
   fallbackVariant?: string;
   chain?: NamedRunner[];
+  runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore;
+  runnerCooldownConfig?: import("./runner_cooldown.ts").RunnerCooldownConfig;
+  cooldownNowMs?: () => number;
   /**
    * Opt-in runner distribution. `ordered` (default when absent) keeps
    * configured order; `random-start` uniformly picks a start per fresh job.
@@ -1154,8 +1157,16 @@ export async function implementIssue(
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
           });
           const quotaReason = quotaStuckReasonForText(result.message);
+          if (
+            opts.runnerCooldowns &&
+            hasHealthyRunnerForQuota(jobChain, opts.runnerCooldowns, opts.cooldownNowMs?.() ?? Date.now())
+          ) {
+            throw new Error(quotaReason);
+          }
           await diary(quotaReason);
           await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1332,6 +1343,8 @@ export async function implementIssue(
               fallbackModel: opts.fallbackModel,
               chain: jobChain,
               previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
             });
             const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
             // The stuck outcome is decided; teardown noise must not replace it.
@@ -1475,6 +1488,8 @@ export async function implementIssue(
           fallbackModel: opts.fallbackModel,
           chain: jobChain,
           previousError: opts.previousError,
+          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
         });
         const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
         await diary(quotaReason).catch(() => undefined);
