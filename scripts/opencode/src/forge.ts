@@ -9,8 +9,6 @@ export type ForgeKind = "gitea" | "github";
 
 export const DEFAULT_FORGE_COMMITTER_NAME = "jumi";
 export const DEFAULT_FORGE_COMMITTER_EMAIL = "jumi@localhost";
-export const FORGE_COMMITTER_NAME = DEFAULT_FORGE_COMMITTER_NAME;
-export const FORGE_COMMITTER_EMAIL = DEFAULT_FORGE_COMMITTER_EMAIL;
 
 export function forgeCommitterName(env: Record<string, string | undefined> = process.env): string {
   return env.JUMI_GIT_NAME?.trim() || DEFAULT_FORGE_COMMITTER_NAME;

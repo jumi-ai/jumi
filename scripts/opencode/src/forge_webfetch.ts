@@ -31,17 +31,20 @@ export function forgeHostFromUrl(url: string | undefined): string {
   if (!raw) return "";
   try {
     const parsed = new URL(raw);
-    if (!parsed.hostname) return "";
-    return parsed.hostname.toLowerCase().replace(/:\d+$/, "");
+    // A bare `host:port` parses as scheme `host:` with an empty hostname, so
+    // only trust the parse when it actually yielded a host; otherwise fall
+    // through to the bare parsing below.
+    if (parsed.hostname) return parsed.hostname.toLowerCase().replace(/:\d+$/, "");
   } catch {
-    const bare =
-      raw
-        .toLowerCase()
-        .replace(/^https?:\/\//, "")
-        .split("/")[0] ?? "";
-    const host = bare.split("@").pop() ?? "";
-    return host.replace(/:\d+$/, "");
+    // Not a URL at all: parse it as a bare host below.
   }
+  const bare =
+    raw
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .split("/")[0] ?? "";
+  const host = bare.split("@").pop() ?? "";
+  return host.replace(/:\d+$/, "");
 }
 
 /**

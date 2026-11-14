@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { agentInstance } from "./agent_instance.ts";
 import type { TraceContext } from "./engine.ts";
+import { forgeHostFromUrl } from "./forge_webfetch.ts";
 import {
   encodeTracesRequest,
   type OtlpResource,
@@ -77,8 +78,10 @@ function phoenixEndpoint(): string {
 }
 
 export function phoenixPublicHost(): string | undefined {
-  const raw = process.env.PHOENIX_PUBLIC_HOST?.trim().toLowerCase();
-  return raw ? raw : undefined;
+  const raw = process.env.PHOENIX_PUBLIC_HOST?.trim();
+  if (!raw) return undefined;
+  const host = forgeHostFromUrl(raw);
+  return host ? host : undefined;
 }
 
 function noteError(): void {
