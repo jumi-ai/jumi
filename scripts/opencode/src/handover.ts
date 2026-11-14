@@ -1,4 +1,4 @@
-import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
+import { hasLabel, isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
@@ -8,6 +8,7 @@ import {
   effectiveBlockingQuestionAuthors,
   effectiveConflictRounds,
   effectiveFollowupRounds,
+  effectivePickupLabel,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type RepoSettingsLoad,
@@ -182,6 +183,18 @@ export async function enqueueFollowUpFromReview(
     return logSkip("repository mode is restricted");
   }
 
+  // GitHub pickup label from the same default-branch read: Gitea keeps using
+  // assignment and ignores the key. Missing, invalid, or unreadable falls back
+  // to `jumi` via the loader default (`repoSettings` is `missing` there).
+  const effectivePickup =
+    repoSettings.state === "valid" && repoSettings.pickupLabel
+      ? repoSettings.pickupLabel
+      : effectivePickupLabel(repoSettings);
+  const usesGithubPickup = Boolean(opts.isPickedUp);
+  const effectivePickupPolicy: PickupPolicy = usesGithubPickup
+    ? { botUsername: opts.botUsername, isPickedUp: (issue) => hasLabel(issue, effectivePickup) }
+    : { botUsername: opts.botUsername };
+
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   if (pr.head.sha !== opts.row.headSha) return logSkip("head moved");
 
@@ -193,7 +206,7 @@ export async function enqueueFollowUpFromReview(
   const closer = extractWorkingIssueNumber(pr);
   const foreign =
     closer === undefined &&
-    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, opts) &&
+    isAssignedForeignPR(pr, opts.row.owner, opts.row.repo, opts.botUsername, effectivePickupPolicy) &&
     !isJumiPrIdentity(pr, opts.botUsername);
   if (closer === undefined && !foreign) {
     await rememberSitBestEffort(
@@ -209,7 +222,7 @@ export async function enqueueFollowUpFromReview(
 
   const issueNumber = closer ?? pr.number;
   const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);
-  if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, opts))) {
+  if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, effectivePickupPolicy))) {
     return logSkip("unassigned");
   }
 

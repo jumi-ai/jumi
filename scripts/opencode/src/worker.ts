@@ -25,8 +25,12 @@ import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import {
+  effectiveFollowupIgnoreLogins,
+  effectiveIgnoreConflictsLabel,
   effectiveLeaseMs,
+  effectivePickupLabel,
   effectiveTimeoutMsForKind,
+  effectiveTrustedSenderLogins,
   loadDefaultBranchSettings,
   REPO_MODE_DISABLED_NOTE,
   REPO_MODE_OFF_REASON,
@@ -164,6 +168,7 @@ export function createIssueQueue(
         // start so it behaves like the ledger tick. Fail-open to deployment
         // defaults when the file is missing, invalid, or unreadable.
         const {
+          load: localSettingsLoad,
           implementMs: localImplementMs,
           followupMs: localFollowupMs,
           conflictMs: localConflictMs,
@@ -181,11 +186,15 @@ export function createIssueQueue(
           giteaUrl: config.giteaUrl,
           giteaToken: config.giteaToken,
           gitAuthResolver: gitAuthResolverFor(config, api, { owner: job.owner, repo: job.repo }),
-          ...pickupPolicyForForge(config.forge, config.botUsername),
-          followupIgnoreLogins: config.followupIgnoreLogins,
-          trustedSenderLogins: config.trustedSenderLogins,
+          ...pickupPolicyForForge(
+            config.forge,
+            config.botUsername,
+            config.forge === "github" ? effectivePickupLabel(localSettingsLoad) : undefined
+          ),
+          followupIgnoreLogins: effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, localSettingsLoad),
+          trustedSenderLogins: effectiveTrustedSenderLogins(config.trustedSenderLogins, localSettingsLoad),
           blockingQuestionAuthors: config.blockingQuestionAuthors,
-          ignoreConflictsLabel: config.ignoreConflictsLabel,
+          ignoreConflictsLabel: effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, localSettingsLoad),
           automergeRepos: config.automergeRepos,
           automergeEnabled: config.automergeEnabled,
           forgeKind: config.forge,
@@ -524,6 +533,7 @@ export async function processWorkerTick(
       ? (row.payload as { defaultBranch?: unknown }).defaultBranch
       : undefined;
   const {
+    load: tickSettingsLoad,
     implementMs: effectiveImplementMs,
     followupMs: effectiveFollowupMs,
     conflictMs: effectiveConflictMs,
@@ -542,11 +552,24 @@ export async function processWorkerTick(
         ? effectiveFollowupMs
         : effectiveImplementMs;
   const effectiveLease = effectiveLeaseMs(config.leaseMs, effectiveTimeoutForLease);
+  // Repository `trusted_senders` (intersection, never widening),
+  // `followup_ignore_logins` (union), `ignore_conflicts_label` (override), and
+  // `pickup_label` (GitHub only) all come from the same default-branch read
+  // that supplied the timeouts. Missing, invalid, or unreadable falls back to
+  // the deployment values.
+  const repoTrusted = effectiveTrustedSenderLogins(config.trustedSenderLogins, tickSettingsLoad);
+  const repoFollowupIgnore = effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, tickSettingsLoad);
+  const repoIgnoreLabel = effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, tickSettingsLoad);
+  const repoPickup = config.forge === "github" ? effectivePickupLabel(tickSettingsLoad) : undefined;
   const effectiveConfig =
     effectiveImplementMs === config.opencodeTimeoutMs &&
     effectiveFollowupMs === config.followupTimeoutMs &&
     effectiveConflictMs === config.conflictTimeoutMs &&
-    effectiveLease === config.leaseMs
+    effectiveLease === config.leaseMs &&
+    repoTrusted === config.trustedSenderLogins &&
+    repoFollowupIgnore === config.followupIgnoreLogins &&
+    repoIgnoreLabel === config.ignoreConflictsLabel &&
+    (config.forge !== "github" || repoPickup === undefined || repoPickup === "jumi")
       ? config
       : {
           ...config,
@@ -554,6 +577,9 @@ export async function processWorkerTick(
           followupTimeoutMs: effectiveFollowupMs,
           conflictTimeoutMs: effectiveConflictMs,
           leaseMs: effectiveLease,
+          trustedSenderLogins: repoTrusted ?? [],
+          followupIgnoreLogins: repoFollowupIgnore,
+          ignoreConflictsLabel: repoIgnoreLabel,
         };
   if (effectiveLease !== config.leaseMs) {
     await store.heartbeat(row.id, leasedBy, effectiveLease).catch(() => undefined);
@@ -718,7 +744,7 @@ export async function processWorkerTick(
       giteaUrl: effectiveConfig.giteaUrl,
       giteaToken: effectiveConfig.giteaToken,
       gitAuthResolver: gitAuthResolverFor(effectiveConfig, api, { owner: job.owner, repo: job.repo }),
-      ...pickupPolicyForForge(effectiveConfig.forge, effectiveConfig.botUsername),
+      ...pickupPolicyForForge(effectiveConfig.forge, effectiveConfig.botUsername, repoPickup),
       followupIgnoreLogins: effectiveConfig.followupIgnoreLogins,
       trustedSenderLogins: effectiveConfig.trustedSenderLogins,
       blockingQuestionAuthors: effectiveConfig.blockingQuestionAuthors,
@@ -861,7 +887,7 @@ export async function processWorkerTick(
       try {
         const conflictJob = await conflictJobIfUnmergeable(api, job, prNumber, logger, {
           botUsername: config.botUsername,
-          ignoreConflictsLabel: config.ignoreConflictsLabel,
+          ignoreConflictsLabel: repoIgnoreLabel,
         });
         if (conflictJob) {
           const enqueued = await store.enqueueIssue(conflictJob);

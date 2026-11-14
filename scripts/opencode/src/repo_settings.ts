@@ -44,6 +44,19 @@ export interface RepoSettings {
   ignoreConflictsAuthors: string[];
   /** PR-author logins whose open ❓ questions block the review status in this repository. */
   blockingQuestionAuthors: string[];
+  /**
+   * Trusted senders for the repository. `undefined` (key absent) means no
+   * repository list: the deployment list (or write access when unset) decides.
+   * A defined list narrows a set deployment list (intersection) and never
+   * widens it. An explicitly empty list is invalid.
+   */
+  trustedSenders?: string[];
+  /** Extra follow-up ignore logins for this repository. Union with the deployment list. */
+  followupIgnoreLogins?: string[];
+  /** Override for `IGNORE_CONFLICTS_LABEL` in this repository. `undefined` means the deployment value. */
+  ignoreConflictsLabel?: string;
+  /** Override for the GitHub pickup label in this repository. `undefined` means `jumi`. Gitea ignores it. */
+  pickupLabel?: string;
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
 }
@@ -73,6 +86,10 @@ export const KNOWN_KEYS = new Set([
   "takeover_authors",
   "ignore_conflicts_authors",
   "blocking_question_authors",
+  "trusted_senders",
+  "followup_ignore_logins",
+  "ignore_conflicts_label",
+  "pickup_label",
   "mode",
 ]);
 
@@ -89,6 +106,10 @@ export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 export const DEFAULT_AUTOMERGE_LABEL = "automerge";
 /** Default per-issue auto-merge opt-out label. Repository `.jumi.yml` may rename it. */
 export const DEFAULT_NO_AUTOMERGE_LABEL = "no-automerge";
+/** Default GitHub pickup label. Repository `.jumi.yml` may rename it with `pickup_label`. Gitea ignores it. */
+export const DEFAULT_PICKUP_LABEL = "jumi";
+/** Default ignore-conflicts label. Repository `.jumi.yml` may rename it with `ignore_conflicts_label`. */
+export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
 
 /** Default settings: every site that needs default values uses this. */
 function defaultRepoSettings(): RepoSettings {
@@ -103,6 +124,10 @@ function defaultRepoSettings(): RepoSettings {
     takeoverAuthors: [],
     ignoreConflictsAuthors: [],
     blockingQuestionAuthors: [],
+    trustedSenders: undefined,
+    followupIgnoreLogins: undefined,
+    ignoreConflictsLabel: undefined,
+    pickupLabel: undefined,
     mode: "full",
   };
 }
@@ -185,7 +210,14 @@ function parserErrorMessage(err: unknown): string {
  * whole minutes for that kind (`followup` controls `follow-up` jobs). A
  * value above the deployer maximum runs with the maximum; a value below
  * the documented minimum makes the whole file invalid. Absent
- * `blocking_question_authors` means no repo-listed authors. `mode` must be
+ * `blocking_question_authors` means no repo-listed authors.
+ * Absent `trusted_senders` means no repository list (the deployment list or
+ * write access decides); a present list narrows a set deployment list
+ * (intersection) and never widens it, and an explicitly empty list makes the
+ * whole file invalid. Absent `followup_ignore_logins` means no extra
+ * ignores (union with the deployment list). Absent `ignore_conflicts_label`
+ * means the deployment value; absent `pickup_label` means `jumi` (Gitea
+ * ignores it). `mode` must be
  * `full`, `review-only`, or `off` when present.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
@@ -279,6 +311,42 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!parsed.ok) return parsed;
     blockingQuestionAuthors = parsed.values;
   }
+  let trustedSenders: string[] | undefined;
+  if ("trusted_senders" in record && record.trusted_senders !== undefined) {
+    const parsed = parseStringList(record.trusted_senders, "trusted_senders", {
+      notListError: `"trusted_senders" must be a list of logins`,
+    });
+    if (!parsed.ok) return parsed;
+    if (parsed.values.length === 0) {
+      return {
+        ok: false,
+        error: `"trusted_senders" is empty, so no sender could work on the repository; use mode: off or mode: review-only`,
+      };
+    }
+    trustedSenders = parsed.values;
+  }
+  let followupIgnoreLogins: string[] | undefined;
+  if ("followup_ignore_logins" in record && record.followup_ignore_logins !== undefined) {
+    const parsed = parseStringList(record.followup_ignore_logins, "followup_ignore_logins", {
+      notListError: `"followup_ignore_logins" must be a list of logins`,
+    });
+    if (!parsed.ok) return parsed;
+    followupIgnoreLogins = parsed.values;
+  }
+  let ignoreConflictsLabel: string | undefined;
+  if ("ignore_conflicts_label" in record && record.ignore_conflicts_label !== undefined) {
+    if (typeof record.ignore_conflicts_label !== "string" || !record.ignore_conflicts_label.trim()) {
+      return { ok: false, error: `"ignore_conflicts_label" must be a non-blank string` };
+    }
+    ignoreConflictsLabel = record.ignore_conflicts_label.trim();
+  }
+  let pickupLabel: string | undefined;
+  if ("pickup_label" in record && record.pickup_label !== undefined) {
+    if (typeof record.pickup_label !== "string" || !record.pickup_label.trim()) {
+      return { ok: false, error: `"pickup_label" must be a non-blank string` };
+    }
+    pickupLabel = record.pickup_label.trim();
+  }
   let mode: RepoMode = "full";
   if ("mode" in record && record.mode !== undefined) {
     if (typeof record.mode !== "string" || !(REPO_MODES as readonly string[]).includes(record.mode)) {
@@ -300,6 +368,10 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     takeoverAuthors: takeover.authors,
     ignoreConflictsAuthors: ignoreConflicts.authors,
     blockingQuestionAuthors,
+    trustedSenders,
+    followupIgnoreLogins,
+    ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
+    ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
@@ -359,6 +431,10 @@ export type RepoSettingsLoad =
       takeoverAuthors: string[];
       ignoreConflictsAuthors: string[];
       blockingQuestionAuthors: string[];
+      trustedSenders?: string[];
+      followupIgnoreLogins?: string[];
+      ignoreConflictsLabel?: string;
+      pickupLabel?: string;
       mode: RepoMode;
     }
   | { state: "invalid"; error: string };
@@ -447,6 +523,12 @@ export async function loadRepoSettings(
     takeoverAuthors: parsed.settings.takeoverAuthors,
     ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
     blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
+    trustedSenders: parsed.settings.trustedSenders,
+    followupIgnoreLogins: parsed.settings.followupIgnoreLogins,
+    ...(parsed.settings.ignoreConflictsLabel !== undefined
+      ? { ignoreConflictsLabel: parsed.settings.ignoreConflictsLabel }
+      : {}),
+    ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
   };
 }
@@ -672,6 +754,199 @@ export async function loadEffectiveBlockingQuestionAuthors(
     return [...(deployerAuthors ?? [])];
   }
   return effectiveBlockingQuestionAuthors(deployerAuthors, settings);
+}
+
+/**
+ * Effective trusted senders for a repository. When the deployment list is
+ * set, the effective list is the intersection: a repository can narrow it,
+ * never widen it. When the deployment leaves it unset, the repository list
+ * is the list (listing is the admit, same as the env list today). Neither
+ * set means no list (write-access fallback). Invalid, missing, or unreadable
+ * files fall back to the deployment list, so an invalid file never widens
+ * access. Matching stays case-insensitive whole-login at the check site.
+ */
+export function effectiveTrustedSenderLogins(
+  deployerLogins: readonly string[] | undefined | null,
+  settings: RepoSettingsLoad
+): readonly string[] | undefined {
+  const deployer = [...(deployerLogins ?? [])].filter((entry) => entry.trim() !== "");
+  const hasDeployer = deployer.some((entry) => entry.trim() !== "");
+  if (settings.state !== "valid" || settings.trustedSenders === undefined) {
+    return hasDeployer ? deployer : undefined;
+  }
+  const repo = settings.trustedSenders;
+  if (!hasDeployer) return [...repo];
+  const deployerKeys = new Set(deployer.map((entry) => entry.trim().toLowerCase()));
+  return repo.filter((entry) => deployerKeys.has(entry.trim().toLowerCase()));
+}
+
+/**
+ * Load the default-branch settings file and intersect its `trusted_senders`
+ * with the deployer list. Missing, invalid, or unreadable files fall back to
+ * the deployer list so one repository's file never widens access. Never
+ * throws.
+ */
+export async function loadEffectiveTrustedSenderLogins(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployerLogins: readonly string[] | undefined | null,
+  log?: (message: string) => void
+): Promise<readonly string[] | undefined> {
+  if (!defaultBranch.trim())
+    return (deployerLogins ?? []).some((entry) => entry.trim() !== "") ? [...(deployerLogins ?? [])] : undefined;
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `trusted sender settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    const deployer = [...(deployerLogins ?? [])].filter((entry) => entry.trim() !== "");
+    return deployer.length > 0 ? deployer : undefined;
+  }
+  if (settings.state === "invalid") {
+    log?.(`trusted sender settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    const deployer = [...(deployerLogins ?? [])].filter((entry) => entry.trim() !== "");
+    return deployer.length > 0 ? deployer : undefined;
+  }
+  return effectiveTrustedSenderLogins(deployerLogins, settings);
+}
+
+/**
+ * Effective follow-up ignore logins for a repository: the deployer's list
+ * plus the repository file's list. The file cannot remove a login the
+ * deployer listed, the same rule as `blocking_question_authors`. Invalid or
+ * missing files contribute nothing (the deployer list still applies).
+ */
+export function effectiveFollowupIgnoreLogins(
+  deployerLogins: readonly string[] | undefined | null,
+  settings: RepoSettingsLoad
+): string[] {
+  const merged = [...(deployerLogins ?? [])];
+  const seen = new Set(merged.map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+  if (settings.state === "valid") {
+    for (const entry of settings.followupIgnoreLogins ?? []) {
+      const key = entry.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(entry.trim());
+    }
+  }
+  return merged;
+}
+
+/**
+ * Load the default-branch settings file and merge its
+ * `followup_ignore_logins` with the deployer list. Missing, invalid, or
+ * unreadable files fall back to the deployer list. Never throws.
+ */
+export async function loadEffectiveFollowupIgnoreLogins(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployerLogins: readonly string[] | undefined | null,
+  log?: (message: string) => void
+): Promise<string[]> {
+  if (!defaultBranch.trim()) return [...(deployerLogins ?? [])];
+  let settings: RepoSettingsLoad;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+  } catch (err) {
+    log?.(
+      `followup ignore settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [...(deployerLogins ?? [])];
+  }
+  if (settings.state === "invalid") {
+    log?.(`followup ignore settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+    return [...(deployerLogins ?? [])];
+  }
+  return effectiveFollowupIgnoreLogins(deployerLogins, settings);
+}
+
+/**
+ * Effective ignore-conflicts label for a repository: the file's
+ * `ignore_conflicts_label` when present, otherwise the deployment value.
+ * Missing, invalid, or unreadable files fall back to the deployment value.
+ */
+export function effectiveIgnoreConflictsLabel(
+  deployerLabel: string | undefined | null,
+  settings: RepoSettingsLoad
+): string {
+  const fallback = (deployerLabel ?? "").trim() ? (deployerLabel as string).trim() : DEFAULT_IGNORE_CONFLICTS_LABEL;
+  if (settings.state !== "valid" || !settings.ignoreConflictsLabel) return fallback;
+  return settings.ignoreConflictsLabel;
+}
+
+/**
+ * Load the default-branch settings file and resolve its
+ * `ignore_conflicts_label` against the deployment value. Missing, invalid, or
+ * unreadable files fall back to the deployment value. Never throws.
+ */
+export async function loadEffectiveIgnoreConflictsLabel(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deployerLabel: string | undefined | null,
+  log?: (message: string) => void
+): Promise<string> {
+  const fallback = (deployerLabel ?? "").trim() ? (deployerLabel as string).trim() : DEFAULT_IGNORE_CONFLICTS_LABEL;
+  if (!defaultBranch.trim()) return fallback;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") {
+      if (settings.state === "invalid")
+        log?.(`ignore-conflicts label settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+      return fallback;
+    }
+    return effectiveIgnoreConflictsLabel(deployerLabel, settings);
+  } catch (err) {
+    log?.(
+      `ignore-conflicts label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
+  }
+}
+
+/**
+ * Effective GitHub pickup label for a repository: the file's `pickup_label`
+ * when present, otherwise `jumi`. Missing, invalid, or unreadable files fall
+ * back to `jumi`. Gitea ignores the key and keeps using assignment.
+ */
+export function effectivePickupLabel(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.pickupLabel) return DEFAULT_PICKUP_LABEL;
+  return settings.pickupLabel;
+}
+
+/**
+ * Load the default-branch settings file and resolve its `pickup_label`.
+ * Missing, invalid, or unreadable files fall back to `jumi`. Never throws.
+ */
+export async function loadEffectivePickupLabel(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<string> {
+  if (!defaultBranch.trim()) return DEFAULT_PICKUP_LABEL;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state === "invalid") {
+      log?.(`pickup label settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+      return DEFAULT_PICKUP_LABEL;
+    }
+    return effectivePickupLabel(settings);
+  } catch (err) {
+    log?.(
+      `pickup label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return DEFAULT_PICKUP_LABEL;
+  }
 }
 
 function normalizePath(filename: string): string {

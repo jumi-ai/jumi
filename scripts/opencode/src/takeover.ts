@@ -1,6 +1,6 @@
 import { isWipOrDraft } from "./gitea_issues.ts";
-import { isListedLogin, senderCanSteer } from "./permissions.ts";
-import { loadRepoSettings } from "./repo_settings.ts";
+import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
+import { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 
 export const TAKEOVER_NOTE_MARKER = "<!-- jumi-takeover -->";
@@ -40,11 +40,12 @@ export function isTakeoverEligiblePull(
   return true;
 }
 
-export function takeoverRefusedNote(authorLogin: string, detail: string): string {
+export function takeoverRefusedNote(authorLogin: string, detail: string, pickupLabel = "jumi"): string {
   const who = authorLogin.trim() || "listed author";
+  const label = pickupLabel.trim() ? pickupLabel.trim() : "jumi";
   return (
     `Jumi did not take over this pull request: \`${who}\` is listed in the repository settings ` +
-    `but ${detail} A person can still hand the pull request over by assigning Jumi (Gitea) or adding the \`jumi\` label (GitHub).`
+    `but ${detail} A person can still hand the pull request over by assigning Jumi (Gitea) or adding the \`${label}\` label (GitHub).`
   );
 }
 
@@ -100,6 +101,45 @@ export async function loadTakeoverAuthors(
   } catch (err) {
     logger?.(`takeover authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
     return [];
+  }
+}
+
+/**
+ * Single default-branch read serving the takeover list, the effective trusted
+ * list, and the pickup marker. Missing, invalid, or unreadable falls back to
+ * deployment behaviour (`jumi` marker, deployer trust list, no takeover).
+ * When `preloadedAuthors` is set only the authors read is skipped; the file
+ * is still read once for the trust list and marker.
+ */
+async function loadTakeoverRepoPolicy(
+  api: TakeoverFileApi | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null,
+  trustedSenderLogins: readonly string[] | undefined,
+  log: (message: string) => void,
+  preloadedAuthors?: readonly string[]
+): Promise<{ authors: readonly string[]; effectiveTrusted: readonly string[] | undefined; pickupLabel: string }> {
+  const fallback = {
+    authors: preloadedAuthors ?? ([] as readonly string[]),
+    effectiveTrusted: trustedSenderLogins,
+    pickupLabel: "jumi",
+  };
+  try {
+    const branch = typeof defaultBranch === "string" ? defaultBranch.trim() : "";
+    if (!branch || !api || typeof api.getRepoFile !== "function") return fallback;
+    const loaded = await loadRepoSettings(api as never, owner, repo, branch);
+    if (loaded.state !== "valid") {
+      return preloadedAuthors === undefined ? { ...fallback, authors: [] } : fallback;
+    }
+    return {
+      authors: preloadedAuthors ?? [...(loaded.takeoverAuthors ?? [])],
+      effectiveTrusted: effectiveTrustedSenderLogins(trustedSenderLogins, loaded),
+      pickupLabel: effectivePickupLabel(loaded),
+    };
+  } catch (err) {
+    log(`takeover settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    return fallback;
   }
 }
 
@@ -253,14 +293,22 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
   const log = input.log ?? (() => undefined);
   const author = typeof input.prAuthorLogin === "string" ? input.prAuthorLogin.trim() : "";
   if (!author) return { takeover: false, refused: false };
-  let authors = input.takeoverAuthors;
-  if (authors === undefined) {
-    authors = await loadTakeoverAuthors(input.api, input.owner, input.repo, input.defaultBranch, log);
-  }
+  const policy = await loadTakeoverRepoPolicy(
+    input.api,
+    input.owner,
+    input.repo,
+    input.defaultBranch,
+    input.trustedSenderLogins,
+    log,
+    input.takeoverAuthors
+  );
+  const authors = policy.authors;
+  const effectiveTrusted = policy.effectiveTrusted;
+  const pickupLabel = policy.pickupLabel;
   if (!isTakeoverAuthor(author, authors)) return { takeover: false, refused: false };
   let admitted = false;
   try {
-    admitted = await senderCanSteer(input.api, input.owner, input.repo, author, input.trustedSenderLogins);
+    admitted = await senderCanSteer(input.api, input.owner, input.repo, author, effectiveTrusted);
   } catch (err) {
     log(
       `takeover sender check failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
@@ -268,10 +316,9 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
     return { takeover: false, refused: false };
   }
   if (!admitted) {
-    const { hasTrustedSenders } = await import("./permissions.ts");
-    const trusted = (input.hasTrustedSenders ?? hasTrustedSenders)(input.trustedSenderLogins);
+    const trusted = (input.hasTrustedSenders ?? hasTrustedSenders)(effectiveTrusted);
     const detail = trusted
-      ? "that author is not on the deployer's trusted-sender list."
+      ? "that author is not on the trusted-sender list."
       : "that author has no write-level access to this repository.";
     await postTakeoverNoteOnce(
       input.api,
@@ -279,7 +326,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
       input.repo,
       input.prNumber,
       input.botUsername,
-      takeoverRefusedNote(author, detail)
+      takeoverRefusedNote(author, detail, pickupLabel)
     );
     return { takeover: false, refused: true };
   }
@@ -287,7 +334,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
     if (input.forgeKind === "github") {
       const label = input.api.addIssueLabel;
       if (typeof label === "function") {
-        await label.call(input.api, input.owner, input.repo, input.prNumber, "jumi");
+        await label.call(input.api, input.owner, input.repo, input.prNumber, pickupLabel);
       }
     } else {
       const assign = input.api.addIssueAssignees;

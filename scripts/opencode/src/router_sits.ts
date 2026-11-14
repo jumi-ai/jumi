@@ -161,7 +161,7 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text === "PR author cannot push to the base repository") return "no-write-access";
 
   // Not labeled / not assigned: the object is not picked up.
-  if (text === "not labeled jumi") return "not-labeled";
+  if (text === "not labeled jumi" || text.startsWith("not labeled ")) return "not-labeled";
   if (text === "not assigned to bot") return "not-labeled";
   if (text === "labeled other label") return "not-labeled";
   if (text === "not a jumi pull request") return "not-labeled";

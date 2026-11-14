@@ -86,9 +86,20 @@ export async function shouldEnqueuePushConflicts(
   const pulls = await api.listOpenPulls(owner, repo);
   const jobs: Omit<IssueJob, "delivery" | "receivedAt">[] = [];
   const sender = pushSender(payload);
-  const ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
   const ignoreAuthors = await loadIgnoreConflictsAuthors(api, owner, repo, payload.repository.default_branch, logger);
   if (ignoreAuthors === undefined) return { type: "skip", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  // Repository `ignore_conflicts_label` overrides the deployment value.
+  // Missing, invalid, or unreadable falls back to the deployment value.
+  let ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
+  try {
+    const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
+    if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
+      const loaded = await loadRepoSettings(api as never, owner, repo, payload.repository.default_branch);
+      ignoreLabel = effectiveIgnoreConflictsLabel(policy.ignoreConflictsLabel, loaded);
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
   let ignoredByLabel = 0;
   let ignoredAuthor: string | undefined;
 
