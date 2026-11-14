@@ -115,6 +115,118 @@
       "autoReplaceStringTemplate": "UV_ARM64_TAG={{{newValue}}}\nUV_SHA256_ARM64={{{newDigest}}}"
     },
     {
+      "description": "promtool amd64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "PROMTOOL_AMD64_TAG=(?<currentValue>v[^\\s]+)\\nPROMTOOL_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "prometheus/prometheus",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "PROMTOOL_AMD64_TAG={{{newValue}}}\nPROMTOOL_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "promtool arm64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "PROMTOOL_ARM64_TAG=(?<currentValue>v[^\\s]+)\\nPROMTOOL_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "prometheus/prometheus",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "PROMTOOL_ARM64_TAG={{{newValue}}}\nPROMTOOL_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
+      "description": "tofu amd64 zip checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "TOFU_AMD64_TAG=(?<currentValue>v[^\\s]+)\\nTOFU_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "opentofu/opentofu",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "TOFU_AMD64_TAG={{{newValue}}}\nTOFU_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "tofu arm64 zip checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "TOFU_ARM64_TAG=(?<currentValue>v[^\\s]+)\\nTOFU_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "opentofu/opentofu",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "TOFU_ARM64_TAG={{{newValue}}}\nTOFU_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
+      "description": "kubeconform amd64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "KUBECONFORM_AMD64_TAG=(?<currentValue>v[^\\s]+)\\nKUBECONFORM_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "yannh/kubeconform",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "KUBECONFORM_AMD64_TAG={{{newValue}}}\nKUBECONFORM_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "kubeconform arm64 tarball checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/vX.Y.Z.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "KUBECONFORM_ARM64_TAG=(?<currentValue>v[^\\s]+)\\nKUBECONFORM_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "yannh/kubeconform",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "KUBECONFORM_ARM64_TAG={{{newValue}}}\nKUBECONFORM_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
+      "description": "kubectl amd64 binary checksum: tag plus its verified sha256 moves with the release. Values stay in tag form so lookups use releases/tags/vX.Y.Z; the binary itself is fetched from dl.k8s.io, not a release attachment.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "KUBECTL_AMD64_TAG=(?<currentValue>v[^\\s]+)\\nKUBECTL_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "kubernetes/kubernetes",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "KUBECTL_AMD64_TAG={{{newValue}}}\nKUBECTL_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "kubectl arm64 binary checksum: tag plus its verified sha256 moves with the release. Values stay in tag form so lookups use releases/tags/vX.Y.Z; the binary itself is fetched from dl.k8s.io, not a release attachment.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "KUBECTL_ARM64_TAG=(?<currentValue>v[^\\s]+)\\nKUBECTL_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "github-release-attachments",
+      "depNameTemplate": "kubernetes/kubernetes",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$",
+      "autoReplaceStringTemplate": "KUBECTL_ARM64_TAG={{{newValue}}}\nKUBECTL_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -201,6 +313,106 @@
       "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
       "groupName": "uv",
       "groupSlug": "uv"
+    },
+    {
+      "description": "promtool numeric version via github-releases: vX.Y.Z tags map to PROMTOOL_VERSION, only stable numeric releases, grouped so version and both tarball checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "prometheus/prometheus"
+      ],
+      "extractVersion": "^v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "promtool",
+      "groupSlug": "promtool"
+    },
+    {
+      "description": "promtool tag-form tarball checksums via github-release-attachments stay on vX.Y.Z tags so getDigest requests releases/tags/vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "prometheus/prometheus"
+      ],
+      "allowedVersions": "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "promtool",
+      "groupSlug": "promtool"
+    },
+    {
+      "description": "tofu numeric version via github-releases: vX.Y.Z tags map to TOFU_VERSION, only stable numeric releases, grouped so version and both zip checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "opentofu/opentofu"
+      ],
+      "extractVersion": "^v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "tofu",
+      "groupSlug": "tofu"
+    },
+    {
+      "description": "tofu tag-form zip checksums via github-release-attachments stay on vX.Y.Z tags so getDigest requests releases/tags/vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "opentofu/opentofu"
+      ],
+      "allowedVersions": "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "tofu",
+      "groupSlug": "tofu"
+    },
+    {
+      "description": "kubeconform numeric version via github-releases: vX.Y.Z tags map to KUBECONFORM_VERSION, only stable numeric releases, grouped so version and both tarball checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "yannh/kubeconform"
+      ],
+      "extractVersion": "^v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "kubeconform",
+      "groupSlug": "kubeconform"
+    },
+    {
+      "description": "kubeconform tag-form tarball checksums via github-release-attachments stay on vX.Y.Z tags so getDigest requests releases/tags/vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "yannh/kubeconform"
+      ],
+      "allowedVersions": "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "kubeconform",
+      "groupSlug": "kubeconform"
+    },
+    {
+      "description": "kubectl numeric version via github-releases: vX.Y.Z tags map to KUBECTL_VERSION, only stable numeric releases, grouped so version and both binary checksums move in one update.",
+      "matchDatasources": [
+        "github-releases"
+      ],
+      "matchPackageNames": [
+        "kubernetes/kubernetes"
+      ],
+      "extractVersion": "^v(?<version>.+)$",
+      "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "kubectl",
+      "groupSlug": "kubectl"
+    },
+    {
+      "description": "kubectl tag-form binary checksums stay on vX.Y.Z tags so lookups use releases/tags/vX.Y.Z; only stable tags, grouped with the numeric version update.",
+      "matchDatasources": [
+        "github-release-attachments"
+      ],
+      "matchPackageNames": [
+        "kubernetes/kubernetes"
+      ],
+      "allowedVersions": "/^v[0-9]+\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "kubectl",
+      "groupSlug": "kubectl"
     },
     {
       "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",

@@ -23,6 +23,18 @@ fi
 : "${UV_VERSION:?UV_VERSION is required}"
 : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
+: "${PROMTOOL_VERSION:?PROMTOOL_VERSION is required}"
+: "${PROMTOOL_SHA256_AMD64:?PROMTOOL_SHA256_AMD64 is required}"
+: "${PROMTOOL_SHA256_ARM64:?PROMTOOL_SHA256_ARM64 is required}"
+: "${TOFU_VERSION:?TOFU_VERSION is required}"
+: "${TOFU_SHA256_AMD64:?TOFU_SHA256_AMD64 is required}"
+: "${TOFU_SHA256_ARM64:?TOFU_SHA256_ARM64 is required}"
+: "${KUBECONFORM_VERSION:?KUBECONFORM_VERSION is required}"
+: "${KUBECONFORM_SHA256_AMD64:?KUBECONFORM_SHA256_AMD64 is required}"
+: "${KUBECONFORM_SHA256_ARM64:?KUBECONFORM_SHA256_ARM64 is required}"
+: "${KUBECTL_VERSION:?KUBECTL_VERSION is required}"
+: "${KUBECTL_SHA256_AMD64:?KUBECTL_SHA256_AMD64 is required}"
+: "${KUBECTL_SHA256_ARM64:?KUBECTL_SHA256_ARM64 is required}"
 
 primary_tag="$1"
 shift
@@ -66,6 +78,18 @@ buildah bud \
   --build-arg "UV_VERSION=${UV_VERSION}" \
   --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
   --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
+  --build-arg "PROMTOOL_VERSION=${PROMTOOL_VERSION}" \
+  --build-arg "PROMTOOL_SHA256_AMD64=${PROMTOOL_SHA256_AMD64}" \
+  --build-arg "PROMTOOL_SHA256_ARM64=${PROMTOOL_SHA256_ARM64}" \
+  --build-arg "TOFU_VERSION=${TOFU_VERSION}" \
+  --build-arg "TOFU_SHA256_AMD64=${TOFU_SHA256_AMD64}" \
+  --build-arg "TOFU_SHA256_ARM64=${TOFU_SHA256_ARM64}" \
+  --build-arg "KUBECONFORM_VERSION=${KUBECONFORM_VERSION}" \
+  --build-arg "KUBECONFORM_SHA256_AMD64=${KUBECONFORM_SHA256_AMD64}" \
+  --build-arg "KUBECONFORM_SHA256_ARM64=${KUBECONFORM_SHA256_ARM64}" \
+  --build-arg "KUBECTL_VERSION=${KUBECTL_VERSION}" \
+  --build-arg "KUBECTL_SHA256_AMD64=${KUBECTL_SHA256_AMD64}" \
+  --build-arg "KUBECTL_SHA256_ARM64=${KUBECTL_SHA256_ARM64}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
@@ -124,6 +148,26 @@ verify_reviewer_runtime() {
   if ! buildah run "${ctr}" -- uv --version; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "uv missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- promtool --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "promtool missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- kubeconform -v; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "kubeconform missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- tofu version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "tofu missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- kubectl version --client; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "kubectl missing in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- ps --version; then
@@ -288,7 +332,7 @@ verify_reviewer_runtime() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified python3, helm, curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
+  echo "Verified python3, helm, curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python/yaml/offline-3.13, claude flags, agy forge read_url deny, review-proof skill, opencode debug config, webfetch denies, and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
