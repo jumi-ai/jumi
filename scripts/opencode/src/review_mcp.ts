@@ -251,11 +251,6 @@ export function openCodeReviewMcpEntry(url: string, token: string): Record<strin
   return { type: "remote", url, headers: { Authorization: `Bearer ${token}` } };
 }
 
-/** OpenCode `OPENCODE_CONFIG_CONTENT` overlay carrying only the review server. */
-export function openCodeReviewMcpOverlay(url: string, token: string): string {
-  return JSON.stringify({ mcp: { "jumi-review": openCodeReviewMcpEntry(url, token) } });
-}
-
 /** Claude `--mcp-config` file content. `--strict-mcp-config` keeps the repo's `.mcp.json` from shadowing it. */
 export function claudeReviewMcpConfig(url: string, token: string): string {
   return `${JSON.stringify(
@@ -267,21 +262,4 @@ export function claudeReviewMcpConfig(url: string, token: string): string {
 
 export function claudeMcpArgs(configPath: string): string[] {
   return ["--mcp-config", configPath, "--strict-mcp-config"];
-}
-
-/**
- * Which runners can register the loopback HTTP review server headlessly in
- * the pinned image. OpenCode and Claude can; Codex and Antigravity stay on
- * the `JUMI_REVIEW.md` file fallback in this transition release.
- */
-export function reviewMcpSupportedRunner(type: string | undefined): boolean {
-  return type === "opencode" || type === "claude" || type === undefined;
-}
-
-export function reviewMcpRefusalMessage(runner: { type?: string; model?: string; name?: string }): string {
-  const who = runner.name?.trim() || `${runner.type ?? "unknown"}/${runner.model ?? "unknown"}`;
-  return (
-    `${who} refuses review job: HTTP MCP review server is not supported in the pinned image ` +
-    `for type ${runner.type ?? "unknown"}; wire the review tools before removing the JUMI_REVIEW.md fallback`
-  );
 }

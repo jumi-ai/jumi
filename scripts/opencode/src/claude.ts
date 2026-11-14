@@ -38,6 +38,7 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { claudeMcpArgs } from "./review_mcp.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
@@ -355,7 +356,7 @@ export function claudeArgv(opts: EngineRunOptions, imageSkillsPlugin?: string, r
   if (imageSkillsPlugin) args.push("--plugin-dir", imageSkillsPlugin);
   // Parent-owned review verdict server: strict config so a repository
   // `.mcp.json` cannot shadow the parent's server.
-  if (reviewMcpConfigPath) args.push("--mcp-config", reviewMcpConfigPath, "--strict-mcp-config");
+  if (reviewMcpConfigPath) args.push(...claudeMcpArgs(reviewMcpConfigPath));
   if (opts.continueSession) args.push("--continue");
   return args;
 }

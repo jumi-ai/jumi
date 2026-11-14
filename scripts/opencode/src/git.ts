@@ -253,7 +253,7 @@ async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Prom
     const { openCodeReviewMcpEntry } = await import("./review_mcp.ts");
     base.mcp = { "jumi-review": openCodeReviewMcpEntry(opts.reviewMcp.url, opts.reviewMcp.token) };
   }
-  await writeFile(join(dir, "opencode.json"), JSON.stringify(base));
+  await writeFile(join(dir, "opencode.json"), JSON.stringify(base), { mode: 0o600 });
 }
 
 /**

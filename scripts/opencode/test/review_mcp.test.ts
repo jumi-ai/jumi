@@ -7,11 +7,8 @@ import {
   claudeMcpArgs,
   claudeReviewMcpConfig,
   openCodeReviewMcpEntry,
-  openCodeReviewMcpOverlay,
   probeReviewMcpInit,
   probeReviewMcpServer,
-  reviewMcpRefusalMessage,
-  reviewMcpSupportedRunner,
   startReviewMcpServer,
 } from "../src/review_mcp.ts";
 import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
@@ -136,17 +133,13 @@ describe("review MCP server", () => {
     }
   });
 
-  test("per-runner wiring: opencode entry, claude strict config, codex/agy refusal", () => {
-    expect(reviewMcpSupportedRunner("opencode")).toBe(true);
-    expect(reviewMcpSupportedRunner("claude")).toBe(true);
-    expect(reviewMcpSupportedRunner("codex")).toBe(false);
-    expect(reviewMcpSupportedRunner("agy")).toBe(false);
-    const overlay = JSON.parse(openCodeReviewMcpOverlay("http://127.0.0.1:9/mcp", "tok")) as {
-      mcp: Record<string, { url: string; headers: Record<string, string> }>;
+  test("per-runner wiring: opencode entry, claude strict config", () => {
+    const entry = openCodeReviewMcpEntry("http://127.0.0.1:9/mcp", "tok") as {
+      url: string;
+      headers: Record<string, string>;
     };
-    expect(overlay.mcp["jumi-review"].url).toBe("http://127.0.0.1:9/mcp");
-    expect(overlay.mcp["jumi-review"].headers.Authorization).toBe("Bearer tok");
-    expect(openCodeReviewMcpEntry("http://127.0.0.1:9/mcp", "tok")).toEqual(overlay.mcp["jumi-review"]);
+    expect(entry.url).toBe("http://127.0.0.1:9/mcp");
+    expect(entry.headers.Authorization).toBe("Bearer tok");
     const cfg = JSON.parse(claudeReviewMcpConfig("http://127.0.0.1:9/mcp", "tok")) as {
       mcpServers: Record<string, { url: string; headers: Record<string, string> }>;
     };
@@ -155,6 +148,5 @@ describe("review MCP server", () => {
     const argv = claudeArgv({ model: "m", workdir: "/w" }, undefined, "/tmp/x.json");
     expect(argv).toContain("--mcp-config");
     expect(argv).toContain("--strict-mcp-config");
-    expect(reviewMcpRefusalMessage({ type: "codex", model: "gpt-5", name: "c" })).toMatch(/refuses review job/);
   });
 });
