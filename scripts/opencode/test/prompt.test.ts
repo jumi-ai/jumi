@@ -9,7 +9,9 @@ import {
   buildIncompleteWritePrompt,
   buildPROpenedPrompt,
   CI_RESULTS_MAX_BYTES,
+  CLOSING_ISSUES_GUIDANCE,
   formatCiResults,
+  formatClosingIssues,
   TOOL_INSTALL_RULE,
   TOOL_INSTALL_RULE_SENTENCE,
 } from "../src/prompt.ts";
@@ -388,6 +390,32 @@ describe("buildPROpenedPrompt", () => {
     });
 
     expect(prompt).not.toContain("<blocking_questions>");
+  });
+
+  test("renders the forge closing-issue list with authoritative guidance", () => {
+    expect(formatClosingIssues([12, 13])).toContain('count="2"');
+    expect(formatClosingIssues([12, 13])).toContain('<issue number="12"/>');
+    expect(formatClosingIssues([])).toContain('count="0"');
+
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR({ body: "`Fixes #12`\n\nFixes #13" }),
+      prFiles: [],
+      closingIssues: [13],
+    });
+    expect(prompt).toContain("<closing_issues");
+    expect(prompt).toContain('<issue number="13"/>');
+    expect(prompt).not.toContain('<issue number="12"/>');
+    expect(prompt).toContain(CLOSING_ISSUES_GUIDANCE);
+  });
+
+  test("omits the closing-issue block for legacy callers", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+    expect(prompt).not.toContain("<closing_issues");
   });
 });
 
