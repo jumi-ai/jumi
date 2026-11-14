@@ -249,6 +249,9 @@ export interface ImplementOptions extends PickupPolicy {
   engine?: Engine;
   openCodeRunner?: Engine;
   helmRunner?: HelmRunner;
+  conflictRegenerate?: import("./repo_settings.ts").ConflictRegenerateEntry[];
+  regenRunner?: import("./conflict.ts").ConflictRegenRunner;
+  regenTimeoutMs?: number;
   now?: () => Date;
   pid?: number;
   pidAlive?: (pid: number) => boolean;
