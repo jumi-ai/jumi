@@ -319,9 +319,20 @@ export interface ReviewJobStore {
   recordRoleSuccess(role: RoleGateRole): Promise<void>;
   recordRoleQuotaWait(role: RoleGateRole, until: Date | number): Promise<void>;
   /** Per-runner cooldowns, persisted alongside the role gate. Best-effort: missing table reads empty. */
-  recordRunnerCooldown?(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void>;
+  recordRunnerCooldown?(
+    role: RoleGateRole,
+    runner: string,
+    until: Date | number,
+    reason?: string,
+    source?: string | null,
+    fingerprint?: string | null
+  ): Promise<void>;
   clearRunnerCooldown?(role: RoleGateRole, runner: string): Promise<void>;
-  listRunnerCooldowns?(role: RoleGateRole): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>>;
+  listRunnerCooldowns?(
+    role: RoleGateRole
+  ): Promise<
+    Array<{ runner: string; untilMs: number; reason: string | null; source: string | null; fingerprint: string | null }>
+  >;
 }
 
 export interface IssueSkipLatch {
@@ -660,6 +671,8 @@ CREATE TABLE IF NOT EXISTS runner_cooldowns (
   runner TEXT NOT NULL,
   cooldown_until TIMESTAMPTZ NOT NULL,
   reason TEXT,
+  source TEXT,
+  fingerprint TEXT,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (role, runner)
 );
@@ -979,7 +992,10 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     RoleGateRole,
     { infraConsecutive: number; infraOpenUntil: number | null; quotaUntil: number | null }
   >();
-  private readonly runnerCooldowns = new Map<string, { untilMs: number; reason: string | null }>();
+  private readonly runnerCooldowns = new Map<
+    string,
+    { untilMs: number; reason: string | null; source: string | null; fingerprint: string | null }
+  >();
   private readonly kickLog: KickLogRecord[] = [];
   private nextKickId = 1;
   private nextRunUsageId = 1;
@@ -2441,14 +2457,29 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  recordRunnerCooldown(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void> {
+  recordRunnerCooldown(
+    role: RoleGateRole,
+    runner: string,
+    until: Date | number,
+    reason?: string,
+    source?: string | null,
+    fingerprint?: string | null
+  ): Promise<void> {
     return this.locked(() => {
       const untilMs = until instanceof Date ? until.getTime() : until;
       if (!runner || !Number.isFinite(untilMs)) return;
       const key = `${role}:${runner}`;
       const prev = this.runnerCooldowns.get(key);
+      // Keep the max: a shorter cooldown never shortens a longer one, and the
+      // stored reason/source/fingerprint always describe the winning entry.
+      // Mirrors the Postgres upsert below; REVIEW.md requires both to agree.
       if (prev == null || untilMs > prev.untilMs) {
-        this.runnerCooldowns.set(key, { untilMs, reason: reason ?? null });
+        this.runnerCooldowns.set(key, {
+          untilMs,
+          reason: reason ?? null,
+          source: source ?? null,
+          fingerprint: fingerprint ?? null,
+        });
       }
     });
   }
@@ -2459,14 +2490,30 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  listRunnerCooldowns(role: RoleGateRole): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>> {
+  listRunnerCooldowns(
+    role: RoleGateRole
+  ): Promise<
+    Array<{ runner: string; untilMs: number; reason: string | null; source: string | null; fingerprint: string | null }>
+  > {
     return this.locked(() => {
-      const out: Array<{ runner: string; untilMs: number; reason: string | null }> = [];
+      const out: Array<{
+        runner: string;
+        untilMs: number;
+        reason: string | null;
+        source: string | null;
+        fingerprint: string | null;
+      }> = [];
       for (const [key, value] of this.runnerCooldowns) {
         const sep = key.indexOf(":");
         if (sep < 0) continue;
         if (key.slice(0, sep) !== role) continue;
-        out.push({ runner: key.slice(sep + 1), untilMs: value.untilMs, reason: value.reason });
+        out.push({
+          runner: key.slice(sep + 1),
+          untilMs: value.untilMs,
+          reason: value.reason,
+          source: value.source,
+          fingerprint: value.fingerprint,
+        });
       }
       return out;
     });
@@ -2687,6 +2734,10 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(REVIEW_SUGGESTIONS_SCHEMA_SQL);
         await tx.unsafe(ROLE_GATES_SCHEMA_SQL);
         await tx.unsafe(RUNNER_COOLDOWNS_SCHEMA_SQL);
+        // Columns added after the table first shipped: existing deployments
+        // keep their rows, new columns read NULL until the next cooldown.
+        await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS source TEXT`);
+        await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS fingerprint TEXT`);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
       });
     } catch (err) {
@@ -3795,21 +3846,41 @@ export class PgReviewJobStore implements ReviewJobStore {
     );
   }
 
-  async recordRunnerCooldown(role: RoleGateRole, runner: string, until: Date | number, reason?: string): Promise<void> {
+  async recordRunnerCooldown(
+    role: RoleGateRole,
+    runner: string,
+    until: Date | number,
+    reason?: string,
+    source?: string | null,
+    fingerprint?: string | null
+  ): Promise<void> {
     const untilMs = until instanceof Date ? until.getTime() : until;
     if (!runner || !Number.isFinite(untilMs)) return;
     try {
       await this.sql.unsafe(
-        `INSERT INTO runner_cooldowns (role, runner, cooldown_until, reason, updated_at)
-         VALUES ($1, $2, $3::timestamptz, $4, NOW())
+        `INSERT INTO runner_cooldowns (role, runner, cooldown_until, reason, source, fingerprint, updated_at)
+         VALUES ($1, $2, $3::timestamptz, $4, $5, $6, NOW())
          ON CONFLICT (role, runner) DO UPDATE SET
            cooldown_until = CASE
              WHEN EXCLUDED.cooldown_until > runner_cooldowns.cooldown_until THEN EXCLUDED.cooldown_until
              ELSE runner_cooldowns.cooldown_until
            END,
-           reason = EXCLUDED.reason,
+           -- The stored reason/source/fingerprint always describe the winning
+           -- (later) entry, mirroring the memory store's keep-max rule.
+           reason = CASE
+             WHEN EXCLUDED.cooldown_until > runner_cooldowns.cooldown_until THEN EXCLUDED.reason
+             ELSE runner_cooldowns.reason
+           END,
+           source = CASE
+             WHEN EXCLUDED.cooldown_until > runner_cooldowns.cooldown_until THEN EXCLUDED.source
+             ELSE runner_cooldowns.source
+           END,
+           fingerprint = CASE
+             WHEN EXCLUDED.cooldown_until > runner_cooldowns.cooldown_until THEN EXCLUDED.fingerprint
+             ELSE runner_cooldowns.fingerprint
+           END,
            updated_at = NOW()`,
-        [role, runner, new Date(untilMs).toISOString(), reason ?? null]
+        [role, runner, new Date(untilMs).toISOString(), reason ?? null, source ?? null, fingerprint ?? null]
       );
     } catch {
       // Best-effort when the router has not migrated yet: the process-local
@@ -3828,16 +3899,39 @@ export class PgReviewJobStore implements ReviewJobStore {
 
   async listRunnerCooldowns(
     role: RoleGateRole
-  ): Promise<Array<{ runner: string; untilMs: number; reason: string | null }>> {
+  ): Promise<
+    Array<{ runner: string; untilMs: number; reason: string | null; source: string | null; fingerprint: string | null }>
+  > {
     try {
-      const rows = asRows<{ runner: unknown; cooldown_until: unknown; reason: unknown }>(
-        await this.sql.unsafe(`SELECT runner, cooldown_until, reason FROM runner_cooldowns WHERE role = $1`, [role])
+      const rows = asRows<{
+        runner: unknown;
+        cooldown_until: unknown;
+        reason: unknown;
+        source: unknown;
+        fingerprint: unknown;
+      }>(
+        await this.sql.unsafe(
+          `SELECT runner, cooldown_until, reason, source, fingerprint FROM runner_cooldowns WHERE role = $1`,
+          [role]
+        )
       );
-      const out: Array<{ runner: string; untilMs: number; reason: string | null }> = [];
+      const out: Array<{
+        runner: string;
+        untilMs: number;
+        reason: string | null;
+        source: string | null;
+        fingerprint: string | null;
+      }> = [];
       for (const row of rows) {
         const untilMs = epoch(row.cooldown_until);
         if (row.runner == null || untilMs == null) continue;
-        out.push({ runner: str(row.runner), untilMs, reason: strOrNull(row.reason) });
+        out.push({
+          runner: str(row.runner),
+          untilMs,
+          reason: strOrNull(row.reason),
+          source: strOrNull(row.source),
+          fingerprint: strOrNull(row.fingerprint),
+        });
       }
       return out;
     } catch {
