@@ -1613,7 +1613,7 @@ describe("worker prompts", () => {
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
       expect(prompt).toContain("Verify once at the end");
       expect(prompt).toContain("Do not ask questions");
-      expect(prompt).not.toContain("denied");
+      expect(prompt).toContain("forge host stays denied");
       expect(prompt).not.toContain("Do not run git");
       expect(prompt).not.toContain("The only Jumi files to read are");
     }

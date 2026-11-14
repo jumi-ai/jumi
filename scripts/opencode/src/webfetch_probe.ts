@@ -58,6 +58,14 @@ const CHECKOUT_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/ski
 const SKILL_BODY_MARKER = "JUMI-SKILL-PROBE-BODY";
 
 const SHIPPED_CONFIGS = ["opencode-review.json", "opencode-implement.json"];
+/** Base-branch marker for the review case: the head marker must never reach a review. */
+const REVIEW_BASE_MARKER = "JUMI-REVIEW-BASE-AGENTS-MD-PROBE-REACHED";
+/** Base-branch skill for the review case. */
+const REVIEW_BASE_SKILL = "jumi-review-base-skill";
+/** Head-only skill for the review case. */
+const REVIEW_HEAD_SKILL = "jumi-review-head-skill";
+/** Head-only skill under OpenCode's own skills root: project config off must block it too. */
+const REVIEW_HEAD_OPENCODE_SKILL = "jumi-review-head-opencode-skill";
 /** Keeps the search off the network: a failed search must leave the run alive. */
 const SEARCH_OFFLINE_ENV = {
   HTTPS_PROXY: "http://127.0.0.1:9",
@@ -118,6 +126,8 @@ interface RunState {
   reached: boolean;
   /** True once any model request carried the planted `AGENTS.md`. */
   instructionsSeen: boolean;
+  /** True once any model request carried the review base `AGENTS.md`. */
+  baseSeen: boolean;
   /** Skill the stub's model loads instead of calling `webfetch`, when set. */
   skillId?: string;
   /** True when the stub's model calls `websearch` instead of `webfetch`. */
@@ -154,6 +164,7 @@ function startProbeServer(state: RunState) {
       }
       const body = (await req.json()) as { model?: string; messages?: { role?: string; content?: unknown }[] };
       if (JSON.stringify(body.messages ?? []).includes(INSTRUCTIONS_MARKER)) state.instructionsSeen = true;
+      if (JSON.stringify(body.messages ?? []).includes(REVIEW_BASE_MARKER)) state.baseSeen = true;
       const toolMessage = (body.messages ?? []).find((m) => m.role === "tool");
       if (toolMessage) state.toolResult = String(toolMessage.content ?? "");
       const base = { id: "chatcmpl-probe", created: Math.floor(Date.now() / 1000), model: body.model ?? MODEL_ID };
@@ -289,6 +300,71 @@ async function runOpenCode(
   }
 }
 
+/**
+ * Review spawn through the production path: `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+ * with the forge deny still in force, plus the base skills/instructions from
+ * outside the checkout. The head's `opencode.json`, plugin, skills, and
+ * `AGENTS.md` stay on disk but must never load.
+ */
+async function runReviewOpenCode(
+  workdir: string,
+  configPath: string,
+  baseDir: string,
+  xdgConfig: string,
+  extraEnv: Record<string, string> = {}
+): Promise<{ code: number; output: string; timedOut: boolean }> {
+  const { readFile } = await import("node:fs/promises");
+  let baseAgents = "";
+  try {
+    baseAgents = await readFile(join(baseDir, "AGENTS.md"), "utf8");
+  } catch {
+    baseAgents = "";
+  }
+  void baseAgents;
+  const configContent = JSON.stringify({
+    permissions: [
+      { action: "webfetch", resource: "*", effect: "allow" },
+      { action: "websearch", resource: "*", effect: "allow" },
+      { action: "skill", resource: "*", effect: "allow" },
+      { action: "edit", resource: "*", effect: "deny" },
+      { action: "subagent", resource: "*", effect: "deny" },
+      { action: "question", resource: "*", effect: "deny" },
+      ...forgePermissions(FORGE_DENY_DOMAIN),
+    ],
+    skills: [join(baseDir, "skills")],
+    instructions: [join(baseDir, "AGENTS.md")],
+  });
+  const proc = Bun.spawn(
+    ["opencode", "run", "--standalone", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url"],
+    {
+      cwd: workdir,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        PWD: workdir,
+        OPENCODE_CONFIG: configPath,
+        OPENCODE_CONFIG_CONTENT: configContent,
+        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        XDG_CONFIG_HOME: xdgConfig,
+        ...extraEnv,
+      },
+    }
+  );
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    proc.kill();
+  }, RUN_TIMEOUT_MS);
+  try {
+    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    return { code: await proc.exited, output: `${stdout}${stderr}`, timedOut };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 interface CaseResult {
   readonly probe: ProbeCase;
   readonly ok: boolean;
@@ -362,7 +438,7 @@ function judgeSearchDeny(label: string, result: string | undefined): { ok: boole
 }
 
 async function main(): Promise<number> {
-  const state: RunState = { url: "", reached: false, instructionsSeen: false };
+  const state: RunState = { url: "", reached: false, instructionsSeen: false, baseSeen: false };
   const server = startProbeServer(state);
   const origin = `http://127.0.0.1:${server.port}`;
   const dir = await mkdtemp(join(tmpdir(), "jumi-webfetch-probe-"));
@@ -371,6 +447,7 @@ async function main(): Promise<number> {
   const searchChecks: { ok: boolean; line: string }[] = [];
   const searxngChecks: { ok: boolean; line: string }[] = [];
   let pluginRan = false;
+  let workerInstructionsSeen = false;
   try {
     const workdir = join(dir, "workspace");
     await Bun.$`mkdir -p ${workdir}`.quiet();
@@ -535,6 +612,82 @@ async function main(): Promise<number> {
     } finally {
       searxngStub.stop(true);
     }
+    // The worker verdicts above are final: the review runs below reuse the
+    // shared stub state, so snapshot them before they are reset.
+    workerInstructionsSeen = state.instructionsSeen;
+
+    // Review case: the head must not configure its reviewer. Fresh workdir
+    // with a head marker, a head plugin, and a head skill; the base dir holds
+    // a different marker and one base skill. The review spawn disables
+    // project config and points skills/instructions at the base dir.
+    const reviewChecks: { ok: boolean; line: string }[] = [];
+    const reviewWorkdir = join(dir, "review-workspace");
+    await Bun.$`mkdir -p ${reviewWorkdir}`.quiet();
+    await Bun.$`git init -q`.cwd(reviewWorkdir).quiet();
+    await writeFile(join(reviewWorkdir, "AGENTS.md"), `${INSTRUCTIONS_MARKER}\n`);
+    const reviewPluginMarker = join(dir, "review-plugin-ran");
+    await seedRepository(reviewWorkdir, reviewPluginMarker);
+    const reviewRanMarker = join(dir, "review-skill-command-ran");
+    await seedCheckoutSkill(reviewWorkdir, ".agents/skills", REVIEW_HEAD_SKILL, reviewRanMarker);
+    const reviewOpencodeRanMarker = join(dir, "review-opencode-skill-command-ran");
+    await seedCheckoutSkill(reviewWorkdir, ".opencode/skills", REVIEW_HEAD_OPENCODE_SKILL, reviewOpencodeRanMarker);
+    const reviewBase = join(dir, "review-base");
+    await mkdir(join(reviewBase, "skills", REVIEW_BASE_SKILL), { recursive: true });
+    await writeFile(join(reviewBase, "AGENTS.md"), `${REVIEW_BASE_MARKER}\n`);
+    await writeFile(
+      join(reviewBase, "skills", REVIEW_BASE_SKILL, "SKILL.md"),
+      `---\nname: ${REVIEW_BASE_SKILL}\ndescription: "base skill"\n---\n${SKILL_BODY_MARKER}\n`
+    );
+    state.instructionsSeen = false;
+    state.baseSeen = false;
+    state.skillId = REVIEW_HEAD_SKILL;
+    state.toolResult = undefined;
+    state.url = `${origin}/docs/upstream/readme`;
+    state.reached = false;
+    {
+      const { timedOut } = await runReviewOpenCode(reviewWorkdir, configPath, reviewBase, join(dir, "xdg-config"));
+      const headLoaded = !timedOut && (state.toolResult ?? "").includes(SKILL_BODY_MARKER);
+      const headRan = await Bun.file(reviewRanMarker).exists();
+      reviewChecks.push({
+        ok: !headLoaded && !headRan,
+        line: `review: head skill does not load and its hook does not run (loaded=${headLoaded}, ran=${headRan})`,
+      });
+    }
+    state.skillId = REVIEW_BASE_SKILL;
+    state.toolResult = undefined;
+    {
+      const { timedOut } = await runReviewOpenCode(reviewWorkdir, configPath, reviewBase, join(dir, "xdg-config"));
+      const baseLoaded = !timedOut && (state.toolResult ?? "").includes(SKILL_BODY_MARKER);
+      reviewChecks.push({
+        ok: baseLoaded,
+        line: `review: base skill loads (${baseLoaded ? "loaded" : "DID NOT LOAD"})`,
+      });
+    }
+    state.skillId = REVIEW_HEAD_OPENCODE_SKILL;
+    state.toolResult = undefined;
+    {
+      const { timedOut } = await runReviewOpenCode(reviewWorkdir, configPath, reviewBase, join(dir, "xdg-config"));
+      const headLoaded = !timedOut && (state.toolResult ?? "").includes(SKILL_BODY_MARKER);
+      const headRan = await Bun.file(reviewOpencodeRanMarker).exists();
+      reviewChecks.push({
+        ok: !headLoaded && !headRan,
+        line: `review: head .opencode/skills skill does not load and its hook does not run (loaded=${headLoaded}, ran=${headRan})`,
+      });
+    }
+    reviewChecks.push({
+      ok: !state.instructionsSeen,
+      line: `review: head AGENTS.md does not reach the model (${state.instructionsSeen ? "LEAKED" : "absent"})`,
+    });
+    reviewChecks.push({
+      ok: state.baseSeen,
+      line: `review: base AGENTS.md reaches the model (${state.baseSeen ? "seen" : "missing"})`,
+    });
+    reviewChecks.push({
+      ok: !(await Bun.file(reviewPluginMarker).exists()),
+      line: `review: head plugin does not load (${(await Bun.file(reviewPluginMarker).exists()) ? "RAN" : "did not run"})`,
+    });
+    for (const { ok, line } of reviewChecks) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
+    if (reviewChecks.some((check) => !check.ok)) return 1;
   } finally {
     server.stop(true);
     await rm(dir, { recursive: true, force: true });
@@ -543,13 +696,13 @@ async function main(): Promise<number> {
   for (const { probe, ok, observed } of results) {
     console.log(`${ok ? "ok  " : "FAIL"} expect=${probe.expect} ${probe.name} <${probe.url}> -> ${observed}`);
   }
-  console.log(`${state.instructionsSeen ? "ok  " : "FAIL"} the repository's AGENTS.md reaches the model`);
+  console.log(`${workerInstructionsSeen ? "ok  " : "FAIL"} the repository's AGENTS.md reaches the model`);
   console.log(`${pluginRan ? "ok  " : "FAIL"} the repository's plugin loads`);
   for (const { ok, line } of [...skillChecks, ...searchChecks, ...searxngChecks])
     console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
   const failures = results.filter((r) => !r.ok).length;
   if (
-    !state.instructionsSeen ||
+    !workerInstructionsSeen ||
     !pluginRan ||
     [...skillChecks, ...searchChecks, ...searxngChecks].some((check) => !check.ok)
   )

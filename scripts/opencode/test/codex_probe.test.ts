@@ -6,8 +6,13 @@ import {
   judgeConfigured,
   judgeControl,
   judgeProduction,
+  judgeReview,
+  judgeReviewArgv,
   offeredTools,
   probeArgv,
+  REVIEW_BASE_SKILL,
+  REVIEW_HEAD_AGENTS,
+  REVIEW_HEAD_SKILL,
   SEARXNG_DEFERRED_NAMESPACE,
   withoutWebSearchOverride,
 } from "../src/codex_probe.ts";
@@ -87,6 +92,51 @@ describe("judgeControl", () => {
     expect(judgeControl(report([request([shell])])).ok).toBe(true);
     expect(judgeControl(report([request([shell, search])])).ok).toBe(false);
     expect(judgeControl(report([])).ok).toBe(false);
+  });
+});
+
+describe("judgeReview", () => {
+  const reviewArgv = codexArgv({
+    prompt: "",
+    model: "gpt-5.5",
+    workdir: "/work",
+    trace: { kind: "review", owner: "o", repo: "r" },
+  });
+  test("review argv drops the hook-trust bypass workers need", () => {
+    expect(judgeReviewArgv(reviewArgv).ok).toBe(true);
+    expect(judgeReviewArgv(codexArgv({ prompt: "", model: "gpt-5.5", workdir: "/work" })).ok).toBe(false);
+  });
+
+  test("passes with the head blocked and the base skill advertised", () => {
+    const bodies = [JSON.stringify({ instructions: REVIEW_BASE_SKILL, tools: [shell, search] })];
+    expect(judgeReview({ bodies, hookRan: false, mcpRan: false, shadowRan: false }).every((result) => result.ok)).toBe(
+      true
+    );
+  });
+
+  test("fails when the head config, instructions, hook, MCP, or skill leaks", () => {
+    const leaked = {
+      bodies: [
+        JSON.stringify({ instructions: "JUMI-CODEX-CONFIG-PROBE-REACHED", tools: [shell] }),
+        JSON.stringify({ instructions: REVIEW_HEAD_AGENTS, tools: [shell] }),
+        JSON.stringify({ instructions: REVIEW_HEAD_SKILL, tools: [shell] }),
+      ],
+      hookRan: true,
+      mcpRan: true,
+      shadowRan: false,
+    };
+    expect(
+      judgeReview(leaked)
+        .filter((result) => !result.ok)
+        .map((result) => result.name)
+    ).toEqual([
+      "review: the head's .codex/config.toml does not load",
+      "review: the head's AGENTS.md does not load",
+      "review: the head hook does not run",
+      "review: the head MCP server does not start",
+      expect.stringContaining("base skill") as unknown as string,
+      expect.stringContaining("web search") as unknown as string,
+    ]);
   });
 });
 

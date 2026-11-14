@@ -187,6 +187,71 @@ export function judgeConfigured(run: RunReport): CaseResult[] {
   ];
 }
 
+/** Base-branch skill for the review case: the head's skill must not load, this one must. */
+export const REVIEW_BASE_SKILL = "jumi-probe-base-skill";
+const REVIEW_BASE_SKILL_BODY = "JUMI-CODEX-BASE-SKILL-PROBE-BODY";
+export const REVIEW_HEAD_SKILL = "jumi-probe-head-skill";
+const REVIEW_HEAD_SKILL_BODY = "JUMI-CODEX-HEAD-SKILL-PROBE-BODY-should-never-load";
+/** Head `AGENTS.md` marker for the review case: untrusted workdirs must not supply project instructions. */
+export const REVIEW_HEAD_AGENTS = "JUMI-CODEX-HEAD-AGENTS-MD-PROBE-REACHED-should-never-load";
+
+/** The review argv must not bypass hook trust: the workdir is untrusted, so no head hook loads. */
+export function judgeReviewArgv(argv: readonly string[]): CaseResult {
+  const ok = !argv.includes("--dangerously-bypass-hook-trust");
+  return {
+    name: "review argv drops --dangerously-bypass-hook-trust (untrusted workdir loads no head hook)",
+    ok,
+    observed: ok ? "bypass flag absent on review spawns" : "review argv still bypasses hook trust",
+  };
+}
+
+export function judgeReview(run: RunReport): CaseResult[] {
+  const headSeen = run.bodies.some((body) => body.includes(INSTRUCTIONS_MARKER));
+  const headAgentsSeen = run.bodies.some((body) => body.includes(REVIEW_HEAD_AGENTS));
+  // Skills are advertised by ID; bodies load only on invocation.
+  const baseSeen = run.bodies.some((body) => body.includes(REVIEW_BASE_SKILL));
+  const headSkillSeen = run.bodies.some(
+    (body) => body.includes(REVIEW_HEAD_SKILL) || body.includes(REVIEW_HEAD_SKILL_BODY)
+  );
+  const tools = offeredTools(run.bodies);
+  return [
+    {
+      name: "review: the head's .codex/config.toml does not load",
+      ok: run.bodies.length > 0 && !headSeen,
+      observed: headSeen
+        ? "head marker reached a model request"
+        : `${run.bodies.length} request(s), head marker absent`,
+    },
+    {
+      name: "review: the head's AGENTS.md does not load",
+      ok: run.bodies.length > 0 && !headAgentsSeen,
+      observed: headAgentsSeen
+        ? "head AGENTS.md reached a model request"
+        : `${run.bodies.length} request(s), head AGENTS.md marker absent`,
+    },
+    {
+      name: "review: the head hook does not run",
+      ok: !run.hookRan,
+      observed: run.hookRan ? "head hook ran" : "did not run",
+    },
+    {
+      name: "review: the head MCP server does not start",
+      ok: !run.mcpRan,
+      observed: run.mcpRan ? "started" : "did not start",
+    },
+    {
+      name: "review: the base skill arrives, the head skill does not",
+      ok: baseSeen && !headSkillSeen,
+      observed: `base=${baseSeen ? "seen" : "missing"} head=${headSkillSeen ? "LEAKED" : "absent"}`,
+    },
+    {
+      name: "review: web search stays on",
+      ok: tools.length > 0 && offersWebSearch(run.bodies),
+      observed: `tools: ${tools.join(", ") || "<none>"}`,
+    },
+  ];
+}
+
 async function runCodex(argv: readonly string[], dir: string, workdir: string): Promise<RunReport> {
   const bodies: string[] = [];
   const server = Bun.serve({
@@ -224,6 +289,86 @@ async function runCodex(argv: readonly string[], dir: string, workdir: string): 
   };
 }
 
+/**
+ * Review run through the production review path: review-only CODEX_HOME that
+ * marks the workdir untrusted, the head's `.agents/skills` hidden and the
+ * base skill staged with the shared helper, then the review argv (no bypass
+ * flag). Uses `OPENAI_API_KEY`, so no ChatGPT auth is needed.
+ */
+async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> {
+  const { mkdtemp: mkTemp } = await import("node:fs/promises");
+  const { tmpdir: osTmp } = await import("node:os");
+  const { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } = await import("./review_base.ts");
+  const bodies: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(req) {
+      if (req.method === "POST") bodies.push(await req.text());
+      return new Response("refused", { status: 400 });
+    },
+  });
+  const home = await mkTemp(join(dir, "review-home-"));
+  await mkdir(join(home, ".codex"), { recursive: true });
+  const reviewHome = join(home, "review-codex-home");
+  await writeCodexReviewHome(reviewHome, workdir);
+  // Head checkout for the review case: the production seed plus a head-only
+  // skill and a head-only AGENTS.md. The base dir holds only the base skill.
+  // The untrusted review home must keep both head markers out of requests.
+  await mkdir(join(workdir, ".agents", "skills", REVIEW_HEAD_SKILL), { recursive: true });
+  await writeFile(
+    join(workdir, ".agents", "skills", REVIEW_HEAD_SKILL, "SKILL.md"),
+    `---\nname: ${REVIEW_HEAD_SKILL}\ndescription: "head skill"\n---\n${REVIEW_HEAD_SKILL_BODY}\n`
+  );
+  await writeFile(join(workdir, "AGENTS.md"), `${REVIEW_HEAD_AGENTS}\n`);
+  const baseDir = await mkTemp(join(osTmp(), "jumi-codex-review-base-"));
+  try {
+    await mkdir(join(baseDir, "skills", REVIEW_BASE_SKILL), { recursive: true });
+    await writeFile(
+      join(baseDir, "skills", REVIEW_BASE_SKILL, "SKILL.md"),
+      `---\nname: ${REVIEW_BASE_SKILL}\ndescription: "base skill"\n---\n${REVIEW_BASE_SKILL_BODY}\n`
+    );
+    const staging = await stageBaseSkillsIntoWorkdir(workdir, baseDir);
+    await rm(join(dir, "hook-ran"), { force: true });
+    await rm(join(dir, "mcp-ran"), { force: true });
+    const argv = codexArgv({
+      prompt: "",
+      model: "gpt-5.5",
+      workdir,
+      trace: { kind: "review", owner: "o", repo: "r" },
+    });
+    const proc = Bun.spawn(probeArgv(argv, `http://127.0.0.1:${server.port}`), {
+      cwd: workdir,
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      env: {
+        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        HOME: home,
+        CODEX_HOME: reviewHome,
+        TMPDIR: dir,
+        OPENAI_API_KEY: "probe",
+      },
+    });
+    const timer = setTimeout(() => proc.kill(), RUN_TIMEOUT_MS);
+    try {
+      await proc.exited;
+    } finally {
+      clearTimeout(timer);
+      server.stop(true);
+    }
+    await staging.cleanup().catch(() => undefined);
+    return {
+      bodies,
+      hookRan: await Bun.file(join(dir, "hook-ran")).exists(),
+      mcpRan: await Bun.file(join(dir, "mcp-ran")).exists(),
+      shadowRan: false,
+    };
+  } finally {
+    await rm(baseDir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<number> {
   const dir = await mkdtemp(join(tmpdir(), "jumi-codex-probe-"));
   const results: CaseResult[] = [];
@@ -246,6 +391,14 @@ async function main(): Promise<number> {
       if (previous === undefined) delete process.env.JUMI_SEARXNG_URL;
       else process.env.JUMI_SEARXNG_URL = previous;
     }
+    const reviewArgv = codexArgv({
+      prompt: "",
+      model: "gpt-5.5",
+      workdir,
+      trace: { kind: "review", owner: "o", repo: "r" },
+    });
+    results.push(judgeReviewArgv(reviewArgv));
+    results.push(...judgeReview(await runReviewCodex(dir, workdir)));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

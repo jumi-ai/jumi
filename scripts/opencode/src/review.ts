@@ -73,6 +73,7 @@ import {
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
 } from "./repo_settings.ts";
+import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -2243,6 +2244,40 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       log
     );
 
+    // Base-branch instructions and skills. The head never configures its
+    // reviewer: AGENTS.md/CLAUDE.md and both skill roots come from the base
+    // commit via read-only git and are staged outside the tracked checkout
+    // (under the spawn's `.jumi-tmp`). Runners load that copy through their
+    // own project-off switches; the head's copies stay on disk as diff
+    // content only.
+    const baseInstructionsDir = join(opts.workspace, ".jumi-tmp", "base-instructions");
+    let baseInstructions: { text: string; truncated: boolean } | undefined;
+    try {
+      const staged = await stageBaseReviewInstructions(
+        { git, cwd: opts.workspace, env: gitCmdEnv, baseRef: pr.base.sha },
+        baseInstructionsDir,
+        { maxBytes: opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES }
+      );
+      const parts: string[] = [];
+      for (const name of ["AGENTS.md", "CLAUDE.md"] as const) {
+        const text = await readStagedBaseFile(baseInstructionsDir, name);
+        if (text?.trim()) parts.push(text.trim());
+      }
+      if (parts.length > 0) {
+        const text = parts.join("\n\n");
+        baseInstructions = { text, truncated: staged.truncated };
+      }
+      logDiagnostic(log, "review_base", {
+        review: reviewLabel,
+        files: staged.files.length,
+        skills: staged.skills.length,
+        bytes: staged.bytes,
+        truncated: staged.truncated,
+      });
+    } catch (err) {
+      log(`base instructions unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
@@ -2252,6 +2287,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       thread: fitted.thread,
       delta,
       reviewMd,
+      ...(baseInstructions ? { baseInstructions } : {}),
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
@@ -2302,6 +2338,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         logger: log,
         abortSignal: opts.abortSignal,
         ...(extra?.continueSession ? { continueSession: true } : {}),
+        // Staged base-branch instructions for the runners' project-off
+        // switches (outside the tracked checkout). Workers never set this.
+        baseInstructionsDir,
         trace: {
           kind: "review",
           owner: opts.owner,

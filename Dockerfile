@@ -365,6 +365,42 @@ RUN git --version \
   && unzip -v \
   && shellcheck --version \
   && UV_OFFLINE=1 uv run --no-project --python 3.13 python -V
+# Preinstalled-tool manifest for the `<installed_tools>` prompt block.
+# Same commands as the version check above: one `name version` line each, so the
+# prompt never hand-maintains the list. Reviewed and worker images share this
+# file; the worker stage appends the JDK below.
+RUN set -eu; \
+  mkdir -p /app; \
+  manifest="/app/installed-tools.txt"; \
+  : > "${manifest}"; \
+  printf 'git %s\n' "$(git --version)" >> "${manifest}"; \
+  printf 'rg %s\n' "$(rg --version | head -n 1)" >> "${manifest}"; \
+  printf 'jq %s\n' "$(jq --version)" >> "${manifest}"; \
+  printf 'file %s\n' "$(file --version | head -n 1)" >> "${manifest}"; \
+  printf 'python3 %s pyyaml %s\n' "$(python3 --version 2>&1)" "$(python3 -c 'import yaml; print(yaml.__version__)')" >> "${manifest}"; \
+  printf 'helm %s\n' "$(helm version --short)" >> "${manifest}"; \
+  printf 'bun %s\n' "$(bun --version)" >> "${manifest}"; \
+  printf 'node %s\n' "$(node --version)" >> "${manifest}"; \
+  printf 'npm %s\n' "$(npm --version)" >> "${manifest}"; \
+  printf 'npx %s\n' "$(npx --version)" >> "${manifest}"; \
+  printf 'opencode %s\n' "$(/usr/local/bin/opencode --version | head -n 1)" >> "${manifest}"; \
+  printf 'claude %s\n' "$(/usr/local/bin/claude --version | head -n 1)" >> "${manifest}"; \
+  printf 'agy %s\n' "$(/usr/local/bin/agy --version | head -n 1)" >> "${manifest}"; \
+  printf 'codex %s\n' "$(/usr/local/bin/codex --version | head -n 1)" >> "${manifest}"; \
+  printf 'curl %s\n' "$(curl --version | head -n 1)" >> "${manifest}"; \
+  printf 'yq %s\n' "$(yq --version)" >> "${manifest}"; \
+  printf 'uv %s\n' "$(uv --version)" >> "${manifest}"; \
+  printf 'promtool %s\n' "$(promtool --version 2>&1 | head -n 1)" >> "${manifest}"; \
+  printf 'kubeconform %s\n' "$(kubeconform -v 2>&1 | head -n 1)" >> "${manifest}"; \
+  printf 'tofu %s\n' "$(tofu version 2>&1 | head -n 1)" >> "${manifest}"; \
+  printf 'kubectl %s\n' "$(kubectl version --client 2>&1 | head -n 1)" >> "${manifest}"; \
+  printf 'ps %s\n' "$(ps --version | head -n 1)" >> "${manifest}"; \
+  printf 'unzip %s\n' "$(unzip -v | head -n 1)" >> "${manifest}"; \
+  printf 'shellcheck %s\n' "$(shellcheck --version | head -n 1)" >> "${manifest}"; \
+  printf 'python %s\n' "$(python --version 2>&1)" >> "${manifest}"; \
+  printf 'python3.13 %s\n' "$(/usr/local/bin/python3.13 --version 2>&1)" >> "${manifest}"; \
+  cat "${manifest}"; \
+  test -s "${manifest}"
 
 WORKDIR /app/scripts/opencode
 COPY --from=build /app/scripts/opencode ./
@@ -406,6 +442,12 @@ FROM runtime AS worker
 USER root
 COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
+# The reviewer manifest above is inherited from `runtime`; the worker appends
+# the JDK so its `<installed_tools>` block also names java.
+RUN set -eu; \
+  printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
+  cat /app/installed-tools.txt; \
+  test -s /app/installed-tools.txt
 USER 10001:10001
 ENV JAVA_HOME=/opt/java/openjdk \
     OPENCODE_CONFIG=/app/.gitea/opencode-implement.json \

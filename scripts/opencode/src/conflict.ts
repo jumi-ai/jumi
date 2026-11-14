@@ -12,6 +12,8 @@ import {
   restoreCheckpoint,
   sweepStaleCheckpoints,
 } from "./checkpoint.ts";
+import { CHILD_FORBIDDEN_KEYS, CHILD_FORBIDDEN_PREFIXES } from "./child_env.ts";
+import { isChildStrippedKey } from "./child_git_proxy.ts";
 import { buildCiMarkdown, CI_LOG_FILE, inspectCi } from "./ci.ts";
 import { conflictStatePath } from "./claim.ts";
 import {
@@ -84,6 +86,7 @@ import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
+  type ConflictRegenerateEntry,
   effectiveIgnoreConflictsLabel,
   loadRepoFollowupPolicy,
   loadRepoSettings,
@@ -110,6 +113,19 @@ export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
 
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
+
+/** Per-command bound for a `conflict_regenerate` entry, inside the conflict timeout. */
+export const CONFLICT_REGEN_TIMEOUT_MS = 10 * 60 * 1000;
+
+/**
+ * Shell command runner for a `conflict_regenerate` entry. The default spawn
+ * runs `sh -c <command>` in the lockfile's directory with the sanitized
+ * child env. Tests inject a fake and assert the env carries no forge token.
+ */
+export type ConflictRegenRunner = (
+  command: string,
+  opts: { cwd: string; env: Record<string, string | undefined> }
+) => Promise<string | undefined>;
 
 export type ConflictResult =
   | { status: "pushed"; prNumber: number; htmlUrl: string }
@@ -168,6 +184,15 @@ export interface MergeDefaultIntoWorktreeOpts {
   timeoutMs?: number;
   openCodeRunner: OpenCodeRunner;
   helmRunner?: HelmRunner;
+  /**
+   * Explicit `conflict_regenerate` entries. When set (even empty) it wins;
+   * otherwise the default-branch `.jumi.yml` is read. Never the PR head.
+   */
+  conflictRegenerate?: ConflictRegenerateEntry[];
+  /** Injected shell runner for `conflict_regenerate` commands (tests). */
+  regenRunner?: ConflictRegenRunner;
+  /** Per-command timeout override for `conflict_regenerate` (tests). */
+  regenTimeoutMs?: number;
   logger?: (message: string) => void;
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
@@ -373,6 +398,205 @@ function helmAvailable(injected?: HelmRunner): boolean {
   return typeof Bun.which === "function" && Boolean(Bun.which("helm"));
 }
 
+function isRegenStrippedKey(key: string): boolean {
+  if ((CHILD_FORBIDDEN_KEYS as readonly string[]).includes(key)) return true;
+  if (CHILD_FORBIDDEN_PREFIXES.some((prefix) => key.startsWith(prefix))) return true;
+  if (isChildStrippedKey(key)) return true;
+  return false;
+}
+
+/**
+ * Child env for a `conflict_regenerate` command: the same sanitized child
+ * the conflict engine run gets (no forge token, same network policy), built
+ * from the worker `extraEnv` without ever touching the parent environment.
+ * Only allowlisted safe base keys come from the parent process; every
+ * credential-looking key from `extraEnv` is stripped.
+ */
+export function buildConflictRegenEnv(
+  extraEnv: Record<string, string | undefined>,
+  opts: { home?: string; workdir?: string }
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  env.HOME = opts.home ?? process.env.HOME ?? opts.workdir;
+  env.PATH = extraEnv.PATH ?? process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
+  for (const key of ["LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(extraEnv)) {
+    if (value === undefined) continue;
+    if (key === "HOME" || key === "PATH") continue;
+    if (isRegenStrippedKey(key)) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
+async function defaultRegenSpawn(
+  command: string,
+  opts: { cwd: string; env: Record<string, string | undefined>; timeoutMs: number; abortSignal?: AbortSignal }
+): Promise<void> {
+  const proc = Bun.spawn(["sh", "-c", command], {
+    cwd: opts.cwd,
+    env: opts.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onAbort = () => {
+    try {
+      proc.kill();
+    } catch {
+      // Already exited.
+    }
+  };
+  if (opts.abortSignal?.aborted) {
+    try {
+      proc.kill();
+    } catch {
+      // Already exited.
+    }
+    throw new Error("cancelled");
+  }
+  opts.abortSignal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        try {
+          proc.kill();
+        } catch {
+          // Already exited.
+        }
+        reject(new Error(`timed out after ${opts.timeoutMs}ms`));
+      }, opts.timeoutMs);
+      timer.unref?.();
+    });
+    const ran = (async () => {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      if (exitCode !== 0) {
+        const details = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+        throw new Error(`command failed with exit code ${exitCode}${details ? `:\n${details}` : ""}`);
+      }
+    })();
+    await Promise.race([ran, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    opts.abortSignal?.removeEventListener("abort", onAbort);
+  }
+}
+
+async function runRegenCommand(
+  command: string,
+  opts: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    timeoutMs: number;
+    abortSignal?: AbortSignal;
+    runner?: ConflictRegenRunner;
+  }
+): Promise<void> {
+  if (opts.runner) {
+    const result = await Promise.race([
+      opts.runner(command, { cwd: opts.cwd, env: opts.env }),
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          reject(new Error(`timed out after ${opts.timeoutMs}ms`));
+        }, opts.timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+    await result;
+    return;
+  }
+  await defaultRegenSpawn(command, {
+    cwd: opts.cwd,
+    env: opts.env,
+    timeoutMs: opts.timeoutMs,
+    abortSignal: opts.abortSignal,
+  });
+}
+
+/**
+ * `conflict_regenerate` entries for one merge. Explicit entries win (even
+ * empty); otherwise the default-branch `.jumi.yml` is read, never the PR
+ * head. Missing, invalid, or unreadable files mean no repository entries.
+ */
+async function resolveConflictRegenerateEntries(opts: {
+  api?: {
+    getRepoFile?: (
+      owner: string,
+      repo: string,
+      path: string,
+      ref: string
+    ) => Promise<{ found: boolean; content?: string }>;
+  };
+  owner: string;
+  repo: string;
+  defaultBranch: string;
+  explicit?: ConflictRegenerateEntry[];
+  log?: (message: string) => void;
+}): Promise<ConflictRegenerateEntry[]> {
+  if (opts.explicit !== undefined) return opts.explicit;
+  const getFile = opts.api?.getRepoFile;
+  if (typeof getFile !== "function" || !opts.defaultBranch.trim()) return [];
+  try {
+    const load = await loadRepoSettings(
+      { getRepoFile: getFile.bind(opts.api) },
+      opts.owner,
+      opts.repo,
+      opts.defaultBranch
+    );
+    if (load.state !== "valid") {
+      if (load.state === "invalid") {
+        opts.log?.(
+          `conflict regenerate settings invalid for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${load.error}`
+        );
+      }
+      return [];
+    }
+    return load.conflictRegenerate ?? [];
+  } catch (err) {
+    opts.log?.(
+      `conflict regenerate settings unreadable for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return [];
+  }
+}
+
+async function regenerateCustomLock(
+  git: GitRunner,
+  env: Record<string, string | undefined>,
+  worktree: string,
+  lockPath: string,
+  command: string,
+  regen: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    timeoutMs: number;
+    abortSignal?: AbortSignal;
+    runner?: ConflictRegenRunner;
+  },
+  log: (message: string) => void
+): Promise<boolean> {
+  try {
+    await runRegenCommand(command, regen);
+  } catch (err) {
+    log(`conflict regenerate failed for ${lockPath}: ${command}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+  const absLock = join(worktree, lockPath);
+  if (!(await pathExists(absLock))) {
+    log(`conflict regenerate left ${lockPath} missing, handing to model: ${command}`);
+    return false;
+  }
+  await git(["add", "--", lockPath], { cwd: worktree, env }).catch(() => undefined);
+  return true;
+}
+
 async function regenerateLock(
   git: GitRunner,
   env: Record<string, string | undefined>,
@@ -519,6 +743,27 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
 
   throwIfAborted(opts.abortSignal);
   let conflicted = false;
+  const regenEntries = await resolveConflictRegenerateEntries({
+    api: opts.api as unknown as
+      | {
+          getRepoFile?: (
+            owner: string,
+            repo: string,
+            path: string,
+            ref: string
+          ) => Promise<{ found: boolean; content?: string }>;
+        }
+      | undefined,
+    owner: opts.job.owner,
+    repo: opts.job.repo,
+    defaultBranch,
+    explicit: opts.conflictRegenerate,
+    log,
+  });
+  const regenByBase = new Map(regenEntries.map((entry) => [entry.file, entry.run]));
+  const regenRunner = opts.regenRunner;
+  const regenTimeoutMs = opts.regenTimeoutMs ?? CONFLICT_REGEN_TIMEOUT_MS;
+  const regenFailed = new Set<string>();
   try {
     await git(["merge", "--no-ff", "--no-commit", originDefault], { cwd: worktree, env });
   } catch (err) {
@@ -527,8 +772,30 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     conflicted = true;
     try {
       for (const path of unmerged) {
-        if (!isGeneratedLock(path)) continue;
-        await regenerateLock(git, env, worktree, path, opts.helmRunner);
+        if (isGeneratedLock(path)) {
+          await regenerateLock(git, env, worktree, path, opts.helmRunner);
+          continue;
+        }
+        const base = path.split("/").pop() ?? path;
+        const command = regenByBase.get(base);
+        if (!command) continue;
+        const childEnv = buildConflictRegenEnv(opts.extraEnv, { home: opts.home, workdir: worktree });
+        const ok = await regenerateCustomLock(
+          git,
+          env,
+          worktree,
+          path,
+          command,
+          {
+            cwd: join(worktree, dirname(path)),
+            env: childEnv,
+            timeoutMs: regenTimeoutMs,
+            abortSignal: opts.abortSignal,
+            runner: regenRunner,
+          },
+          log
+        );
+        if (!ok) regenFailed.add(path);
       }
     } catch (regenErr) {
       log(`Failed to regenerate generated lock: ${regenErr instanceof Error ? regenErr.message : String(regenErr)}`);
@@ -541,6 +808,17 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   ];
   const leftoverLocks = remaining.filter(isGeneratedLock);
   remaining = remaining.filter((path) => !isGeneratedLock(path));
+  for (const path of [...remaining]) {
+    const base = path.split("/").pop() ?? path;
+    const command = regenByBase.get(base);
+    if (command && !regenFailed.has(path)) {
+      log(`conflict regenerate left ${path} conflicted, handing to model: ${command}`);
+      regenFailed.add(path);
+    }
+  }
+  for (const path of regenFailed) {
+    if (!remaining.includes(path)) remaining.push(path);
+  }
   let openCodeRan = false;
   let runner: RunnerStamp | undefined;
   let runnerChainIndex: number | undefined;
@@ -997,6 +1275,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           timeoutMs,
           openCodeRunner: activeEngine,
           helmRunner: opts.helmRunner,
+          conflictRegenerate: opts.conflictRegenerate,
+          regenRunner: opts.regenRunner,
+          regenTimeoutMs: opts.regenTimeoutMs,
           logger: log,
           abortSignal: opts.abortSignal,
           ciMarkdown,
