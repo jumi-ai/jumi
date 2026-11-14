@@ -59,11 +59,21 @@ export interface RepoSettings {
   pickupLabel?: string;
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
+  /**
+   * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
+   * behavior (first allowed method on GitHub, default style on Gitea).
+   * A present value must be one the repository allows; otherwise nothing is
+   * scheduled.
+   */
+  automergeMethod?: RepoAutomergeMethod;
 }
 
 export type RepoMode = "full" | "review-only" | "off";
 
 export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+
+export const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
+export type RepoAutomergeMethod = (typeof AUTOMERGE_METHODS)[number];
 
 export const REPO_MODE_DISABLED_NOTE =
   "Jumi worker jobs are turned off in this repository's settings (`.jumi.yml` `mode: review-only`). Reviews still run; assigning or labelling will not start work.";
@@ -76,6 +86,7 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 export const KNOWN_KEYS = new Set([
   "automerge",
   "automerge_label",
+  "automerge_method",
   "no_automerge_label",
   "allowed_runners",
   "timeouts",
@@ -218,7 +229,10 @@ function parserErrorMessage(err: unknown): string {
  * ignores (union with the deployment list). Absent `ignore_conflicts_label`
  * means the deployment value; absent `pickup_label` means `jumi` (Gitea
  * ignores it). `mode` must be
- * `full`, `review-only`, or `off` when present.
+ * `full`, `review-only`, or `off` when present. Absent `automerge_method`
+ * means today's merge method (first allowed on GitHub, default style on
+ * Gitea); a present value must be one of `merge`, `squash`, `rebase`,
+ * `rebase-merge`, or `fast-forward-only`.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -354,6 +368,19 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     mode = record.mode as RepoMode;
   }
+  let automergeMethod: RepoAutomergeMethod | undefined;
+  if ("automerge_method" in record && record.automerge_method !== undefined) {
+    if (
+      typeof record.automerge_method !== "string" ||
+      !(AUTOMERGE_METHODS as readonly string[]).includes(record.automerge_method)
+    ) {
+      return {
+        ok: false,
+        error: `"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"`,
+      };
+    }
+    automergeMethod = record.automerge_method as RepoAutomergeMethod;
+  }
   const settings: RepoSettings = {
     automerge,
     automergeLabel,
@@ -373,6 +400,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
+    ...(automergeMethod !== undefined ? { automergeMethod } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
@@ -436,6 +464,7 @@ export type RepoSettingsLoad =
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
       mode: RepoMode;
+      automergeMethod?: RepoAutomergeMethod;
     }
   | { state: "invalid"; error: string };
 
@@ -530,6 +559,7 @@ export async function loadRepoSettings(
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
+    ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
   };
 }
 
