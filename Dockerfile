@@ -490,9 +490,15 @@ COPY --from=android-sdk /opt/android-sdk /opt/android-sdk
 RUN chmod -R a+rX /opt/android-sdk
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 # The reviewer manifest above is inherited from `runtime`; the worker appends
-# the JDK so its `<installed_tools>` block also names java.
+# the JDK and the baked Android SDK tools so its `<installed_tools>` block
+# names them (sdkmanager/adb are on PATH via the ENV below, so export the same
+# entries here to capture their versions at build time).
 RUN set -eu; \
+  export JAVA_HOME=/opt/java/openjdk; \
+  export PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${JAVA_HOME}/bin:${PATH}"; \
   printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
+  printf 'sdkmanager %s\n' "$(sdkmanager --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
+  printf 'adb %s\n' "$(adb --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   cat /app/installed-tools.txt; \
   test -s /app/installed-tools.txt
 USER 10001:10001

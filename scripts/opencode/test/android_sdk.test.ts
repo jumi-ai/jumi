@@ -18,7 +18,7 @@ function stageAfter(docker: string, name: string): string {
 }
 
 describe("android sdk pin coherence", () => {
-  test("tool-versions.env carries the cmdline-tools pin with SHA-256 and a renovate comment", () => {
+  test("tool-versions.env carries the cmdline-tools pin with SHA-256 and a manual-update note", () => {
     expect(toolVersions).toContain(`ANDROID_CMDLINE_TOOLS_VERSION=${CMDLINE_TOOLS_VERSION}`);
     expect(toolVersions).toContain(`ANDROID_CMDLINE_TOOLS_SHA256=${CMDLINE_TOOLS_SHA256}`);
     const versionLine = /^ANDROID_CMDLINE_TOOLS_VERSION=(?<v>[^\s]+)$/m.exec(toolVersions)?.groups?.v;
@@ -26,7 +26,11 @@ describe("android sdk pin coherence", () => {
     const sha = /^ANDROID_CMDLINE_TOOLS_SHA256=(?<s>[^\s]+)$/m.exec(toolVersions)?.groups?.s;
     expect(sha).toBe(CMDLINE_TOOLS_SHA256);
     expect(sha).toMatch(/^[0-9a-f]{64}$/);
-    expect(toolVersions).toMatch(/# renovate:.*\nANDROID_CMDLINE_TOOLS_VERSION=/);
+    // commandlinetools has no version API, so no renovate extractor matches it
+    // (renovate.json only handles github-releases/npm/node-version plus named
+    // TAG/SHA pairs): the pin moves manually, kubectl/node style.
+    expect(toolVersions).toMatch(/# NOTE\(android\):[^\n]*\n(?:#[^\n]*\n)*ANDROID_CMDLINE_TOOLS_VERSION=/);
+    expect(toolVersions).not.toMatch(/# renovate:.*\nANDROID_CMDLINE_TOOLS_VERSION=/);
   });
 });
 
@@ -78,6 +82,12 @@ describe("android sdk build consumes one effective pin and fails closed", () => 
     expect(implementCopy).toBeGreaterThanOrEqual(0);
     expect(sdkCopy).toBeLessThan(implementCopy);
     expect(worker).toContain("chmod -R a+rX /opt/android-sdk");
+    // The worker manifest must advertise the baked SDK so <installed_tools>
+    // names it; the generic `command -v` CI loop then proves both are on PATH.
+    expect(worker).toMatch(/printf 'sdkmanager %s\\n'/);
+    expect(worker).toContain("sdkmanager --version");
+    expect(worker).toMatch(/printf 'adb %s\\n'/);
+    expect(worker).toContain("adb --version");
   });
 
   test("sdk package list is pinned with the platform and both build-tools", () => {
