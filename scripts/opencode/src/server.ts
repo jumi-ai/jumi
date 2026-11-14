@@ -300,6 +300,7 @@ export async function runReviewJob(
       ...(extras.skipLatches ? { skipLatches: extras.skipLatches } : {}),
       sanitizeOpenCodeEnv: true,
       timeoutMs: config.opencodeTimeoutMs,
+      setupTimeoutMaxMs: config.setupTimeoutMaxMs,
       maxFiles: effectiveBudget.maxFiles,
       maxPatchBytes: effectiveBudget.maxPatchBytes,
       maxFilesMax: config.maxFilesMax,

@@ -269,7 +269,12 @@ function openCodeXdgConfigHome(tempRoot: string): string {
 async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Promise<void> {
   const dir = join(openCodeXdgConfigHome(tempRoot), "opencode");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "opencode.json"), forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv)));
+  const base = JSON.parse(forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv))) as Record<string, unknown>;
+  if (opts.reviewMcp && opts.trace?.kind === "review") {
+    const { openCodeReviewMcpEntry } = await import("./review_mcp.ts");
+    base.mcp = { "jumi-review": openCodeReviewMcpEntry(opts.reviewMcp.url, opts.reviewMcp.token) };
+  }
+  await writeFile(join(dir, "opencode.json"), JSON.stringify(base), { mode: 0o600 });
 }
 
 /**
