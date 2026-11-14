@@ -280,6 +280,11 @@ function cancelled(): Error {
 export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
+  if (opts.reviewMcp && opts.trace?.kind === "review") {
+    log(
+      "agy runner: review MCP server not wired in this release; using JUMI_REVIEW.md fallback (transition, not silent)"
+    );
+  }
   const prompt = await resolveOpenCodePrompt(opts);
   const tempRoot = join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
