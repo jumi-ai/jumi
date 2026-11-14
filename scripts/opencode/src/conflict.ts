@@ -722,7 +722,22 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
 
-  const pr = await resolveWorkerPullRequest(opts.api, owner, repo, issueNumber, opts.botUsername, opts.job.prNumber);
+  const { loadRepoConventions } = await import("./repo_settings.ts");
+  const conventions = await loadRepoConventions(opts.api, owner, repo, opts.job.defaultBranch, log).catch(() => ({
+    branchPrefix: "jumi",
+    prTitle: "{title}",
+    commitMessage: "Implement #{issue}: {title}",
+    closingKeyword: "closes" as const,
+  }));
+  const pr = await resolveWorkerPullRequest(
+    opts.api,
+    owner,
+    repo,
+    issueNumber,
+    opts.botUsername,
+    opts.job.prNumber,
+    conventions.branchPrefix
+  );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
@@ -1135,7 +1150,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       }
       if (gate.continued) {
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
-        await commitIfDirty(loop, await worktreePorcelain(loop), `Implement #${issueNumber}: ${gate.snapshot.title}`);
+        const { renderCommitMessage } = await import("./implement.ts");
+        await commitIfDirty(
+          loop,
+          await worktreePorcelain(loop),
+          renderCommitMessage(conventions.commitMessage, gate.snapshot.title, issueNumber)
+        );
       }
       await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
       await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);

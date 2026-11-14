@@ -59,7 +59,29 @@ export interface RepoSettings {
   pickupLabel?: string;
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
+  /**
+   * Branch prefix for issue branches. `undefined` (key absent) means `jumi`:
+   * `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`.
+   */
+  branchPrefix?: string;
+  /**
+   * Pull-request title template for forge issues. `undefined` means `{title}`.
+   * Only `{title}` and `{issue}` placeholders are allowed.
+   */
+  prTitle?: string;
+  /**
+   * Commit message template for the parent's leftover commit. `undefined`
+   * means `Implement #{issue}: {title}`. Only `{title}` and `{issue}` allowed.
+   */
+  commitMessage?: string;
+  /**
+   * Closing keyword behavior. `undefined` (key absent) means `closes`.
+   * `refs` uses a non-closing `Refs #N` reference instead.
+   */
+  closingKeyword?: RepoClosingKeyword;
 }
+
+export type RepoClosingKeyword = "closes" | "refs";
 
 export type RepoMode = "full" | "review-only" | "off";
 
@@ -91,6 +113,10 @@ export const KNOWN_KEYS = new Set([
   "ignore_conflicts_label",
   "pickup_label",
   "mode",
+  "branch_prefix",
+  "pr_title",
+  "commit_message",
+  "closing_keyword",
 ]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
@@ -110,6 +136,119 @@ export const DEFAULT_NO_AUTOMERGE_LABEL = "no-automerge";
 export const DEFAULT_PICKUP_LABEL = "jumi";
 /** Default ignore-conflicts label. Repository `.jumi.yml` may rename it with `ignore_conflicts_label`. */
 export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
+
+/** Default branch prefix: `jumi/issue-<N>-<slug>`. */
+export const DEFAULT_BRANCH_PREFIX = "jumi";
+/** Default PR title template: the issue title verbatim. */
+export const DEFAULT_PR_TITLE_TEMPLATE = "{title}";
+/** Default commit message template for the parent's leftover commit. */
+export const DEFAULT_COMMIT_MESSAGE_TEMPLATE = "Implement #{issue}: {title}";
+/** Default closing behavior: closing keywords that close the issue on merge. */
+export const DEFAULT_CLOSING_KEYWORD: RepoClosingKeyword = "closes";
+
+export const REPO_CLOSING_KEYWORDS: readonly RepoClosingKeyword[] = ["closes", "refs"];
+
+/**
+ * Validate a `branch_prefix` value. One or more path segments of
+ * `[a-z0-9._-]`; no leading or trailing slash, no empty segments, no `.` or
+ * `..`, and the sample branch `<prefix>/issue-1-x` must pass `git
+ * check-ref-format` rules. Prefixes colliding with Jumi's internal refs
+ * (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are rejected.
+ */
+export function validateBranchPrefix(value: string): { ok: true; prefix: string } | { ok: false; error: string } {
+  const prefix = value.trim();
+  if (!prefix) return { ok: false, error: `"branch_prefix" must be a non-blank string` };
+  if (prefix.startsWith("/") || prefix.endsWith("/")) {
+    return { ok: false, error: `"branch_prefix" must not have a leading or trailing slash` };
+  }
+  if (prefix.includes("//")) {
+    return { ok: false, error: `"branch_prefix" must not contain empty path segments` };
+  }
+  const segments = prefix.split("/");
+  for (const segment of segments) {
+    if (!segment) return { ok: false, error: `"branch_prefix" must not contain empty path segments` };
+    if (segment === "." || segment === "..") {
+      return { ok: false, error: `"branch_prefix" must not contain "." or ".." segments` };
+    }
+    if (!/^[a-z0-9._-]+$/.test(segment)) {
+      return { ok: false, error: `"branch_prefix" segments must match [a-z0-9._-]` };
+    }
+    if (segment.startsWith(".")) {
+      return { ok: false, error: `"branch_prefix" segments must not start with "."` };
+    }
+    if (segment.endsWith(".lock")) {
+      return { ok: false, error: `"branch_prefix" segments must not end with ".lock"` };
+    }
+  }
+  if (prefix.includes("..")) {
+    return { ok: false, error: `"branch_prefix" must not contain ".."` };
+  }
+  if (prefix.includes("@{")) {
+    return { ok: false, error: `"branch_prefix" must not contain "@{"` };
+  }
+  // Collisions with Jumi's internal refs: the review checkout uses
+  // `jumi/target` and `jumi/pr-<n>` branches, and checkpoints live under
+  // `refs/jumi/wip/`. A prefix that is or sits under one of those would
+  // collide with them on the forge.
+  if (prefix === "jumi/target" || prefix.startsWith("jumi/target/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal ref "jumi/target"` };
+  }
+  if (prefix === "jumi/pr" || prefix.startsWith("jumi/pr-") || prefix.startsWith("jumi/pr/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal refs "jumi/pr-*"` };
+  }
+  if (prefix === "refs" || prefix.startsWith("refs/")) {
+    return { ok: false, error: `"branch_prefix" must not collide with Jumi's internal refs "refs/jumi/wip/"` };
+  }
+  // The full branch `<prefix>/issue-1-x` must pass `git check-ref-format`.
+  const sample = `${prefix}/issue-1-x`;
+  const refError = checkRefFormatError(sample);
+  if (refError) return { ok: false, error: `"branch_prefix" ${refError}` };
+  return { ok: true, prefix };
+}
+
+/** Subset of `git check-ref-format` rules relevant to constructed branches. */
+function checkRefFormatError(ref: string): string | undefined {
+  if (!ref || ref.startsWith("/") || ref.endsWith("/") || ref.endsWith(".") || ref.includes("//")) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  if (ref.includes("..") || ref.includes("@{")) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  for (const component of ref.split("/")) {
+    if (!component || component.startsWith(".") || component.endsWith(".lock")) {
+      return `makes an invalid branch name "${ref}"`;
+    }
+  }
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: git forbids control chars and these symbols.
+  if (/[\x00-\x20~^:?*[\\]/.test(ref)) {
+    return `makes an invalid branch name "${ref}"`;
+  }
+  return undefined;
+}
+
+/**
+ * Validate a `pr_title` / `commit_message` template. The only placeholders
+ * are `{title}` and `{issue}`; any other `{...}` or stray brace makes the
+ * whole file invalid.
+ */
+export function validatePrTemplate(
+  key: "pr_title" | "commit_message",
+  value: string
+): { ok: true; template: string } | { ok: false; error: string } {
+  if (!value.trim()) return { ok: false, error: `"${key}" must be a non-blank string` };
+  const withoutValid = value.replaceAll("{title}", "").replaceAll("{issue}", "");
+  if (withoutValid.includes("{") || withoutValid.includes("}")) {
+    const named = /\{[^{}]*\}/.exec(withoutValid)?.[0];
+    if (named) return { ok: false, error: `"${key}" contains unknown placeholder "${named}"` };
+    return { ok: false, error: `"${key}" contains a stray "{" or "}"` };
+  }
+  return { ok: true, template: value };
+}
+
+/** Render a validated title/commit template for one forge issue. */
+export function renderIssueTemplate(template: string, title: string, issueNumber: number): string {
+  return template.replaceAll("{title}", title).replaceAll("{issue}", String(issueNumber));
+}
 
 /** Default settings: every site that needs default values uses this. */
 function defaultRepoSettings(): RepoSettings {
@@ -354,6 +493,44 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     mode = record.mode as RepoMode;
   }
+  let branchPrefix: string | undefined;
+  if ("branch_prefix" in record && record.branch_prefix !== undefined) {
+    if (typeof record.branch_prefix !== "string" || !record.branch_prefix.trim()) {
+      return { ok: false, error: `"branch_prefix" must be a non-blank string` };
+    }
+    const validated = validateBranchPrefix(record.branch_prefix);
+    if (!validated.ok) return validated;
+    branchPrefix = validated.prefix;
+  }
+  let prTitle: string | undefined;
+  if ("pr_title" in record && record.pr_title !== undefined) {
+    if (typeof record.pr_title !== "string" || !record.pr_title.trim()) {
+      return { ok: false, error: `"pr_title" must be a non-blank string` };
+    }
+    const validated = validatePrTemplate("pr_title", record.pr_title);
+    if (!validated.ok) return validated;
+    prTitle = validated.template;
+  }
+  let commitMessage: string | undefined;
+  if ("commit_message" in record && record.commit_message !== undefined) {
+    if (typeof record.commit_message !== "string" || !record.commit_message.trim()) {
+      return { ok: false, error: `"commit_message" must be a non-blank string` };
+    }
+    const validated = validatePrTemplate("commit_message", record.commit_message);
+    if (!validated.ok) return validated;
+    commitMessage = validated.template;
+  }
+  let closingKeyword: RepoClosingKeyword | undefined;
+  if ("closing_keyword" in record && record.closing_keyword !== undefined) {
+    if (typeof record.closing_keyword !== "string" || !record.closing_keyword.trim()) {
+      return { ok: false, error: `"closing_keyword" must be a non-blank string` };
+    }
+    const trimmed = record.closing_keyword.trim();
+    if (!(REPO_CLOSING_KEYWORDS as readonly string[]).includes(trimmed)) {
+      return { ok: false, error: `"closing_keyword" must be one of "closes", "refs"` };
+    }
+    closingKeyword = trimmed as RepoClosingKeyword;
+  }
   const settings: RepoSettings = {
     automerge,
     automergeLabel,
@@ -373,6 +550,10 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
     mode,
+    ...(branchPrefix !== undefined ? { branchPrefix } : {}),
+    ...(prTitle !== undefined ? { prTitle } : {}),
+    ...(commitMessage !== undefined ? { commitMessage } : {}),
+    ...(closingKeyword !== undefined ? { closingKeyword } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
@@ -436,6 +617,10 @@ export type RepoSettingsLoad =
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
       mode: RepoMode;
+      branchPrefix?: string;
+      prTitle?: string;
+      commitMessage?: string;
+      closingKeyword?: RepoClosingKeyword;
     }
   | { state: "invalid"; error: string };
 
@@ -530,6 +715,10 @@ export async function loadRepoSettings(
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
     mode: parsed.settings.mode,
+    ...(parsed.settings.branchPrefix !== undefined ? { branchPrefix: parsed.settings.branchPrefix } : {}),
+    ...(parsed.settings.prTitle !== undefined ? { prTitle: parsed.settings.prTitle } : {}),
+    ...(parsed.settings.commitMessage !== undefined ? { commitMessage: parsed.settings.commitMessage } : {}),
+    ...(parsed.settings.closingKeyword !== undefined ? { closingKeyword: parsed.settings.closingKeyword } : {}),
   };
 }
 
@@ -946,6 +1135,85 @@ export async function loadEffectivePickupLabel(
       `pickup label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
     );
     return DEFAULT_PICKUP_LABEL;
+  }
+}
+
+/** Effective branch prefix: the file's `branch_prefix` or `jumi`. Missing/invalid/unreadable falls back to `jumi`. */
+export function effectiveBranchPrefix(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.branchPrefix) return DEFAULT_BRANCH_PREFIX;
+  return settings.branchPrefix;
+}
+
+/** Effective PR title template: the file's `pr_title` or `{title}`. */
+export function effectivePrTitleTemplate(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.prTitle) return DEFAULT_PR_TITLE_TEMPLATE;
+  return settings.prTitle;
+}
+
+/** Effective commit message template: the file's `commit_message` or the default. */
+export function effectiveCommitMessageTemplate(settings: RepoSettingsLoad): string {
+  if (settings.state !== "valid" || !settings.commitMessage) return DEFAULT_COMMIT_MESSAGE_TEMPLATE;
+  return settings.commitMessage;
+}
+
+/** Effective closing keyword: the file's `closing_keyword` or `closes`. */
+export function effectiveClosingKeyword(settings: RepoSettingsLoad): RepoClosingKeyword {
+  if (settings.state !== "valid" || !settings.closingKeyword) return DEFAULT_CLOSING_KEYWORD;
+  return settings.closingKeyword;
+}
+
+export interface RepoConventions {
+  branchPrefix: string;
+  prTitle: string;
+  commitMessage: string;
+  closingKeyword: RepoClosingKeyword;
+}
+
+export function defaultRepoConventions(): RepoConventions {
+  return {
+    branchPrefix: DEFAULT_BRANCH_PREFIX,
+    prTitle: DEFAULT_PR_TITLE_TEMPLATE,
+    commitMessage: DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+    closingKeyword: DEFAULT_CLOSING_KEYWORD,
+  };
+}
+
+export function conventionsFromLoad(settings: RepoSettingsLoad): RepoConventions {
+  return {
+    branchPrefix: effectiveBranchPrefix(settings),
+    prTitle: effectivePrTitleTemplate(settings),
+    commitMessage: effectiveCommitMessageTemplate(settings),
+    closingKeyword: effectiveClosingKeyword(settings),
+  };
+}
+
+/**
+ * Load PR conventions from the default branch only. Missing, invalid, or
+ * unreadable files fall back to today's formats (fail-open). Never throws.
+ */
+export async function loadRepoConventions(
+  api: RepoSettingsFileApi,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<RepoConventions> {
+  const fallback = defaultRepoConventions();
+  if (!defaultBranch.trim()) return fallback;
+  try {
+    const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
+    if (settings.state !== "valid") {
+      if (settings.state === "invalid") {
+        log?.(`pr convention settings invalid for ${owner}/${repo}@${defaultBranch}: ${settings.error}`);
+      }
+      return fallback;
+    }
+    return conventionsFromLoad(settings);
+  } catch (err) {
+    log?.(
+      `pr convention settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return fallback;
   }
 }
 
