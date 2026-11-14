@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
+import { type CiGateWait, DEFAULT_CI_GATE_WAIT, effectiveCiGateWait, loadRepoSettings } from "./repo_settings.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
@@ -131,8 +132,11 @@ export interface CiWaitPlan {
  * - pending -> wait with long fallback (wake promotes early).
  * - empty / lookupFailed -> wait until the lookup budget expires (wake promotes early).
  * - failed / success -> no wait; existing failed handling applies.
+ * - `wait=none` never waits: the router gate dispatches at once and the
+ *   review job runs without the CI-absent budget.
  */
-export function ciWaitForInspection(ci: CiInspection, nowMs: number): CiWaitPlan | undefined {
+export function ciWaitForInspection(ci: CiInspection, nowMs: number, wait?: CiGateWait): CiWaitPlan | undefined {
+  if (wait === "none") return undefined;
   if (ci.pending) {
     return { untilMs: nowMs + CI_PENDING_WAIT_FALLBACK_MS, marker: encodeCiPendingWait(nowMs) };
   }
@@ -274,7 +278,13 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
   return checks;
 }
 
-export function reviewSkipReasonForCi(ci: CiInspection): string | undefined {
+export function reviewSkipReasonForCi(ci: CiInspection, wait?: CiGateWait): string | undefined {
+  if (wait === "none") {
+    // Red checks are unchanged in every mode; pending and absent never skip.
+    if (ci.failed.length > 0) return CI_FAILED_REASON;
+    if (ci.lookupFailed) return CI_LOOKUP_FAILED_REASON;
+    return undefined;
+  }
   if (ci.pending) return CI_PENDING_REASON;
   if (ci.failed.length > 0) return CI_FAILED_REASON;
   // A thrown list hides checks. Rows from the calls that worked are not a green bill, and not "no CI".
@@ -759,8 +769,13 @@ export async function inspectCi(opts: {
    * When non-empty, `pending` is true only when a required context is
    * pending or has not reported yet; other pending checks land in
    * `pendingOptional`. When unset or empty, every pending check counts.
+   * `wait="all"` ignores the required set (every check counts);
+   * `wait="none"` never reports `pending` — every pending check lands in
+   * `pendingOptional` so the reviewer reads it as still running, never green.
    */
   requiredContexts?: readonly string[];
+  /** CI gate wait mode. Absent means `required`. */
+  wait?: CiGateWait;
 }): Promise<CiInspection> {
   if (!opts.sha) return emptyInspection(opts.sha);
   let lookupFailed = false;
@@ -813,7 +828,19 @@ export async function inspectCi(opts: {
   const required = requiredCiContextsForPending(opts.requiredContexts);
   let pending: boolean;
   let pendingOptional: string[] = [];
-  if (required.length > 0) {
+  if (opts.wait === "none") {
+    pending = false;
+    pendingOptional = [
+      ...new Set(
+        others
+          .filter((status) => commitStatusState(status) === "pending")
+          .map((status) => status.context ?? "")
+          .filter((name) => name.length > 0)
+      ),
+    ].sort();
+  } else if (opts.wait === "all" || required.length === 0) {
+    pending = others.some((status) => commitStatusState(status) === "pending");
+  } else {
     pending = required.some((context) => {
       const match = others.find((status) => requiredMatchesCheck(status.context, context));
       if (!match) return true;
@@ -831,8 +858,6 @@ export async function inspectCi(opts: {
           .filter((name) => name.length > 0)
       ),
     ].sort();
-  } else {
-    pending = others.some((status) => commitStatusState(status) === "pending");
   }
   const red = others.filter((status) => {
     const state = commitStatusState(status);
@@ -894,8 +919,83 @@ export async function inspectCi(opts: {
   };
 }
 
+export type CiGateResolverApi = CiApi &
+  Partial<RequiredCiResolver> & {
+    getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
+    getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
+  };
+
+export interface CiGateResolution {
+  wait: CiGateWait;
+  requiredContexts?: string[];
+}
+
+/**
+ * One decision point for the CI gate wait mode. Reads `.jumi.yml` `ci_gate.wait`
+ * from the default branch like every other key (missing, unreadable, or
+ * invalid means `required`; nothing ever falls back to `none`) and, unless the
+ * mode is `all` or `none`, resolves the base branch's required check set for
+ * `pending`. `all` and `none` never resolve the required set. Callers pass the
+ * returned `wait` and `requiredContexts` to `inspectCi` so the router gate,
+ * the CI wake, the review job, and the follow-up always agree.
+ */
+export async function resolveCiGate(
+  api: CiGateResolverApi,
+  opts: {
+    owner: string;
+    repo: string;
+    prNumber?: number;
+    issueNumber?: number;
+    baseBranch?: string;
+    defaultBranch?: string;
+    log?: (message: string) => void;
+  }
+): Promise<CiGateResolution> {
+  let wait: CiGateWait = DEFAULT_CI_GATE_WAIT;
+  let settingsRef = (opts.defaultBranch ?? "").trim();
+  if (!settingsRef && typeof api.getRepo === "function") {
+    try {
+      const info = await api.getRepo(opts.owner, opts.repo);
+      const branch = info?.default_branch?.trim() ? (info.default_branch as string).trim() : "";
+      if (branch) settingsRef = branch;
+    } catch (err) {
+      opts.log?.(
+        `ci gate settings unreadable for ${opts.owner}/${opts.repo}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  if (!settingsRef && (opts.baseBranch ?? "").trim()) {
+    settingsRef = (opts.baseBranch as string).trim();
+  }
+  if (settingsRef && typeof api.getRepoFile === "function") {
+    try {
+      const load = await loadRepoSettings(api, opts.owner, opts.repo, settingsRef);
+      if (load.state === "invalid") {
+        opts.log?.(`ci gate settings invalid for ${opts.owner}/${opts.repo}@${settingsRef}: ${load.error}`);
+      } else {
+        wait = effectiveCiGateWait(load);
+      }
+    } catch (err) {
+      opts.log?.(
+        `ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  if (wait === "all" || wait === "none") return { wait };
+  const requiredContexts = await resolveRequiredCiContexts(api, {
+    owner: opts.owner,
+    repo: opts.repo,
+    ...(opts.prNumber !== undefined ? { prNumber: opts.prNumber } : {}),
+    ...(opts.issueNumber !== undefined ? { issueNumber: opts.issueNumber } : {}),
+    ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+    ...(opts.log ? { log: opts.log } : {}),
+  });
+  if (!requiredContexts) return { wait };
+  return { wait, requiredContexts };
+}
+
 export async function needsCiFollowUp(opts: {
-  api: CiApi & Partial<RequiredCiResolver>;
+  api: CiGateResolverApi;
   owner: string;
   repo: string;
   sha: string;
@@ -903,12 +1003,26 @@ export async function needsCiFollowUp(opts: {
   issueNumber: number;
   skipLatches?: SkipLatchStore;
   requiredContexts?: readonly string[];
+  wait?: CiGateWait;
   baseBranch?: string;
+  defaultBranch?: string;
   log?: (message: string) => void;
 }): Promise<boolean> {
   try {
+    let wait = opts.wait;
     let requiredContexts = opts.requiredContexts;
-    if (requiredContexts === undefined && opts.baseBranch) {
+    if (wait === undefined) {
+      const gate = await resolveCiGate(opts.api, {
+        owner: opts.owner,
+        repo: opts.repo,
+        issueNumber: opts.issueNumber,
+        ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+        ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+        ...(opts.log ? { log: opts.log } : {}),
+      });
+      wait = gate.wait;
+      if (requiredContexts === undefined) requiredContexts = gate.requiredContexts;
+    } else if (wait !== "all" && wait !== "none" && requiredContexts === undefined && opts.baseBranch) {
       requiredContexts = await resolveRequiredCiContexts(opts.api, {
         owner: opts.owner,
         repo: opts.repo,
@@ -920,6 +1034,7 @@ export async function needsCiFollowUp(opts: {
     const inspection = await inspectCi({
       ...opts,
       ...(requiredContexts ? { requiredContexts } : {}),
+      ...(wait ? { wait } : {}),
     });
     if (inspection.pending) return false;
     return inspection.unhandled.length > 0;

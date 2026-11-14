@@ -6,7 +6,9 @@ import {
   CI_LOOKUP_FAILED_REASON,
   CI_PENDING_REASON,
   type CiCheckSummary,
+  type CiGateResolverApi,
   decideCiLookupRetry,
+  resolveCiGate,
   reviewSkipReasonForCi,
 } from "./ci.ts";
 import type { ServiceConfig } from "./config.ts";
@@ -172,6 +174,21 @@ export async function runReviewJob(
   let noCiNote: string | undefined;
   let ciChecks: CiCheckSummary[] | undefined;
   let ciPendingOptional: readonly string[] | undefined;
+  let ciGateWait: import("./repo_settings.ts").CiGateWait = "required";
+  let ciGateRequiredContexts: readonly string[] | undefined;
+  try {
+    const gate = await resolveCiGate(api as unknown as CiGateResolverApi, {
+      owner: job.owner,
+      repo: job.repo,
+      prNumber: job.prNumber,
+      baseBranch: pr.base.ref,
+      log: logger,
+    });
+    ciGateWait = gate.wait;
+    ciGateRequiredContexts = gate.requiredContexts;
+  } catch {
+    ciGateWait = "required";
+  }
   const inspectHeadCi = async (relist?: boolean): Promise<string | undefined> => {
     try {
       const ci = await inspectOtherChecks(
@@ -184,6 +201,8 @@ export async function runReviewJob(
           abortSignal: extras.abortSignal,
           ciRelistDelayMs: extras.ciRelistDelayMs,
           baseBranch: pr.base.ref,
+          ...(ciGateRequiredContexts ? { requiredContexts: ciGateRequiredContexts } : {}),
+          ...(ciGateWait !== "required" ? { wait: ciGateWait } : {}),
           ...(relist === false ? { relist: false as const } : {}),
         },
         job.headSha,
@@ -191,7 +210,7 @@ export async function runReviewJob(
       );
       if (ci.checks.length > 0) ciChecks = ci.checks;
       if (ci.pendingOptional.length > 0) ciPendingOptional = ci.pendingOptional;
-      return reviewSkipReasonForCi(ci);
+      return reviewSkipReasonForCi(ci, ciGateWait);
     } catch (err) {
       if (isAbortError(err) || extras.abortSignal?.aborted) throw err;
       logger(
@@ -430,6 +449,9 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             logger,
             ...(typeof payload.pull_request.base?.ref === "string" && payload.pull_request.base.ref
               ? { baseBranch: payload.pull_request.base.ref }
+              : {}),
+            ...(typeof payload.repository?.default_branch === "string" && payload.repository.default_branch
+              ? { defaultBranch: payload.repository.default_branch }
               : {}),
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
