@@ -64,6 +64,8 @@ export interface WorkerConfig {
   opencodeTimeoutMaxMs: number;
   followupTimeoutMaxMs: number;
   conflictTimeoutMaxMs: number;
+  /** Deployer maximum for repository `setup` runs. Unset defaults to 10 minutes, so a repository can only shorten. */
+  setupTimeoutMaxMs: number;
   maxFollowupRounds: number;
   maxConflictRounds: number;
   databaseUrl?: string;
@@ -170,6 +172,7 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);
   const conflictTimeoutMs = intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000);
+  const setupTimeoutMaxMs = intEnv(resolved, "SETUP_TIMEOUT_MAX_MS", 10 * 60 * 1000);
   const fromEnv = {
     model: optionalEnv(resolved, "OPENCODE_MODEL", "openai/gpt-5.5") ?? "openai/gpt-5.5",
     variant: optionalEnv(resolved, "OPENCODE_VARIANT"),
@@ -219,6 +222,7 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     opencodeTimeoutMaxMs: intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs),
     followupTimeoutMaxMs: intEnv(resolved, "FOLLOWUP_TIMEOUT_MAX_MS", followupTimeoutMs),
     conflictTimeoutMaxMs: intEnv(resolved, "CONFLICT_TIMEOUT_MAX_MS", conflictTimeoutMs),
+    setupTimeoutMaxMs,
     maxFollowupRounds: intEnv(resolved, "MAX_FOLLOWUP_ROUNDS", 3),
     maxConflictRounds: intEnv(resolved, "MAX_CONFLICT_ROUNDS", 3),
     databaseUrl: optionalEnv(resolved, "DATABASE_URL"),

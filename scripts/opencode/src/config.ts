@@ -65,6 +65,8 @@ export interface ServiceConfig {
   opencodeTimeoutMs: number;
   /** Deployer maximum for the review timeout. Unset defaults to `opencodeTimeoutMs`, so a repository can only shorten. */
   opencodeTimeoutMaxMs: number;
+  /** Deployer maximum for repository `setup` runs. Unset defaults to 10 minutes, so a repository can only shorten. */
+  setupTimeoutMaxMs: number;
   role: JumiRole;
   databaseUrl?: string;
   leaseMs: number;
@@ -261,6 +263,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   void optionalEnv(resolved, "JUMI_SEARXNG_URL");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
+  const setupTimeoutMaxMs = intEnv(resolved, "SETUP_TIMEOUT_MAX_MS", 10 * 60 * 1000);
   const maxFiles = intEnv(resolved, "MAX_FILES", 100);
   const maxPatchBytes = intEnv(resolved, "MAX_PATCH_BYTES", 500_000);
   const maxFilesMax = intEnv(resolved, "MAX_FILES_MAX", maxFiles);
@@ -312,6 +315,7 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),
     opencodeTimeoutMs,
     opencodeTimeoutMaxMs,
+    setupTimeoutMaxMs,
     role,
     databaseUrl: requireEnv(resolved, "DATABASE_URL"),
     leaseMs: intEnv(resolved, "LEASE_MS", opencodeTimeoutMs + 10 * 60 * 1000),

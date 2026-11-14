@@ -79,6 +79,7 @@ import {
   type RepoConventions,
   renderIssueTemplate,
 } from "./repo_settings.ts";
+import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -237,6 +238,10 @@ export interface ImplementOptions extends PickupPolicy {
   timeoutMs?: number;
   followupTimeoutMs?: number;
   conflictTimeoutMs?: number;
+  /** Deployer maximum for repository `setup` runs. Unset falls back to `SETUP_TIMEOUT_MAX_MS`. */
+  setupTimeoutMaxMs?: number;
+  /** Injectable setup script runner (tests stub the shell). Defaults to spawning `sh -e`. */
+  repoSetupRunScript?: RepoSetupRunScript;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
   maxOutputBytes?: number;
@@ -780,7 +785,43 @@ async function implementExternalIssue(
       }
       await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
       throwIfAborted(opts.abortSignal);
-      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
+      let repoSetupBlock: string | undefined;
+      {
+        const setup = await runRepoSetupForKind({
+          api: forge,
+          kind: "implement",
+          workdir: worktree,
+          defaultBranch: effectiveJob.defaultBranch || undefined,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          runScript: opts.repoSetupRunScript,
+        });
+        if (setup.ran) {
+          repoSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            if (typeof briefTracker.postBriefComment === "function") {
+              try {
+                await briefTracker.postBriefComment(ref, setup.failureReason);
+              } catch {}
+            }
+            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+              pushLanded: false,
+              logger: log,
+            });
+            return { status: "skipped", reason: setup.failureReason };
+          }
+        }
+      }
+      const externalTaskMarkdown = repoSetupBlock
+        ? `${buildTaskMarkdown(effectiveJob)}\n${repoSetupBlock}\n`
+        : buildTaskMarkdown(effectiveJob);
+      await writeFile(join(worktree, "JUMI_TASK.md"), externalTaskMarkdown);
       await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
       await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
       // External briefs have no stable issue number (issueNumber is always 0),
@@ -1145,6 +1186,37 @@ export async function implementIssue(
       await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
       throwIfAborted(opts.abortSignal);
+      let repoSetupBlock: string | undefined;
+      {
+        const setup = await runRepoSetupForKind({
+          api: opts.api,
+          kind: "implement",
+          workdir: worktree,
+          defaultBranch: opts.job.defaultBranch || undefined,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          runScript: opts.repoSetupRunScript,
+        });
+        if (setup.ran) {
+          repoSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, setup.failureReason).catch(
+              () => undefined
+            );
+            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+              pushLanded: false,
+              logger: log,
+            });
+            return { status: "skipped", reason: setup.failureReason };
+          }
+        }
+      }
       const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
       const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
       const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
@@ -1154,7 +1226,8 @@ export async function implementIssue(
         await writeHandoffToWorktree(worktree, injectedHandoff);
       };
       const writeTaskFiles = async (job: IssueJob) => {
-        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(job));
+        const taskMarkdown = repoSetupBlock ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n` : buildTaskMarkdown(job);
+        await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
         if (queue.length > 0) {
           await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
         } else {

@@ -896,7 +896,7 @@ describe("reviewPullRequest", () => {
             return { status: "ok", stdout: "I'll inspect and dump the review here" };
           }
           expect(opts.continueSession).toBe(true);
-          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).toContain("JUMI_REVIEW.md");
           expect(task).not.toContain("I'll inspect");
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -930,7 +930,7 @@ describe("reviewPullRequest", () => {
             return { status: "ok", stdout: "I'll inspect and dump the review here" };
           }
           expect(opts.continueSession).toBe(true);
-          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).toContain("JUMI_REVIEW.md");
           expect(task).toContain("write tool");
           expect(task).toContain("already in this session");
           expect(task).not.toContain("Review the pull request above");
@@ -962,7 +962,7 @@ describe("reviewPullRequest", () => {
             return { status: "ok", stdout: "file.ts:1: 🟡 risk: missing null check." };
           }
           expect(opts.continueSession).toBeFalsy();
-          expect(task).toContain("Write JUMI_REVIEW.md");
+          expect(task).toContain("JUMI_REVIEW.md");
           expect(task).toContain("file.ts:1: 🟡 risk: missing null check.");
           expect(task).toContain("input to the write tool, not the sticky");
           expect(task).not.toContain("Review the pull request above");
@@ -1380,7 +1380,7 @@ describe("reviewPullRequest", () => {
         },
       });
       expect(result.status).toBe("posted");
-      expect(engineSaw).toContain("Write JUMI_REVIEW.md");
+      expect(engineSaw).toContain("jumi-review MCP tools");
       expect(await readFile(join(workspace, "JUMI_TASK.md"), "utf8")).toBe(original);
     });
   });

@@ -66,6 +66,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `MAX_WEBHOOK_BYTES`
 - `OPENCODE_TIMEOUT_MS`
 - `OPENCODE_TIMEOUT_MAX_MS`
+- `SETUP_TIMEOUT_MAX_MS`
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `MAX_FOLLOWUP_ROUNDS`
@@ -157,6 +158,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `OPENCODE_TIMEOUT_MAX_MS`
 - `FOLLOWUP_TIMEOUT_MAX_MS`
 - `CONFLICT_TIMEOUT_MAX_MS`
+- `SETUP_TIMEOUT_MAX_MS`
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_CONFLICT_ROUNDS`
 - `LEASE_MS`
@@ -312,6 +314,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `OPENCODE_TIMEOUT_MAX_MS`
 - `FOLLOWUP_TIMEOUT_MAX_MS`
 - `CONFLICT_TIMEOUT_MAX_MS`
+- `SETUP_TIMEOUT_MAX_MS`
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_CONFLICT_ROUNDS`
 - `MAX_INCOMPLETE_RETRIES`

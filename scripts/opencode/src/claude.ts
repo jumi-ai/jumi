@@ -39,6 +39,7 @@ import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsForClaude } from "./review_base.ts";
+import { claudeMcpArgs } from "./review_mcp.ts";
 import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
@@ -362,7 +363,8 @@ export function claudeArgv(
   opts: EngineRunOptions,
   imageSkillsPlugin?: string,
   baseSkillsPlugin?: string,
-  basePrompt?: string
+  basePrompt?: string,
+  reviewMcpConfigPath?: string
 ): string[] {
   const searxngMcpConfig = claudeSearxngMcpConfigForSpawn(opts);
   const isReview = opts.trace?.kind === "review";
@@ -408,6 +410,9 @@ export function claudeArgv(
   if (isReview && basePrompt) {
     args.push("--append-system-prompt", basePrompt);
   }
+  // Parent-owned review verdict server: strict config so a repository
+  // `.mcp.json` cannot shadow the parent's server.
+  if (reviewMcpConfigPath) args.push(...claudeMcpArgs(reviewMcpConfigPath));
   if (opts.continueSession) args.push("--continue");
   return args;
 }
@@ -464,6 +469,17 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     // Image skills are per-kind: review gets the reviewer skill, workers get the
     // worker skill.
     const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
+    // Parent-owned review verdict server: config lives under the spawn temp
+    // root (never the worktree, never the prompt, never the child env) and
+    // `--strict-mcp-config` keeps a repository `.mcp.json` from shadowing it.
+    let reviewMcpConfigPath: string | undefined;
+    if (opts.reviewMcp && opts.trace?.kind === "review") {
+      const { claudeReviewMcpConfig } = await import("./review_mcp.ts");
+      reviewMcpConfigPath = join(tmpDir, "review-mcp.json");
+      await writeFile(reviewMcpConfigPath, claudeReviewMcpConfig(opts.reviewMcp.url, opts.reviewMcp.token), {
+        mode: 0o600,
+      });
+    }
     // Reviews add the base branch's skills as a second plugin. The head's
     // checkout skills never load (`--setting-sources user`); the staged base
     // copy does. Workers never stage this.
@@ -473,7 +489,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       baseSkills = await stageBaseSkillsForClaude(join(tmpDir, "base-skills"), opts.baseInstructionsDir);
       basePrompt = await claudeReviewBasePrompt(opts.baseInstructionsDir);
     }
-    const args = claudeArgv(opts, imageSkills, baseSkills, basePrompt);
+    const args = claudeArgv(opts, imageSkills, baseSkills, basePrompt, reviewMcpConfigPath);
     if (opts.sanitizeEnv) {
       const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
       if (request) {

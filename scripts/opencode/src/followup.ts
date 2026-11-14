@@ -109,6 +109,7 @@ import {
   isSuggestionFollowupEnabled,
   loadRepoSettings,
 } from "./repo_settings.ts";
+import { runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -1549,6 +1550,32 @@ export async function implementFollowUp(
         body: currentIssue.body ?? "",
         htmlUrl: currentIssue.html_url,
       };
+      let followupSetupBlock: string | undefined;
+      {
+        const setup = await runRepoSetupForKind({
+          api: opts.api,
+          kind: "followup",
+          workdir: worktree,
+          defaultBranch: opts.job.defaultBranch || undefined,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          runScript: opts.repoSetupRunScript,
+        });
+        if (setup.ran) {
+          followupSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            await sticky(setup.failureReason, pr.number);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason: setup.failureReason };
+          }
+        }
+      }
       let mergeResult: MergeDefaultResult;
       if (leftToAuthor) {
         mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
@@ -1587,6 +1614,7 @@ export async function implementFollowUp(
             ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
             handoffStore,
             handoffKey,
+            ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
             onPid: loop.engineOnPid(opts.onPid),
             onRunner: (r) => {
               runner = r;
@@ -1651,7 +1679,10 @@ export async function implementFollowUp(
       }
 
       throwIfAborted(opts.abortSignal);
-      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
+      const followupTaskMarkdown = followupSetupBlock
+        ? `${buildTaskMarkdown(taskJob)}\n${followupSetupBlock}\n`
+        : buildTaskMarkdown(taskJob);
+      await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
       // Parent-staged inputs for the follow-up child: the issue's attachments
       // as well as any on the PR. Parent credentials only; the child has no
       // forge read access.
