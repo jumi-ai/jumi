@@ -122,11 +122,14 @@ const WORKER_COMMIT = `Commit at each coherent logical step with a descriptive m
 Do not push. The parent pushes once after this run exits.
 Do not force-push. Do not amend or rebase commits already on the remote branch. Do not commit JUMI_*.md sentinels.`;
 
+const PR_DESCRIPTION_RULE = `JUMI_PR.md is the pull-request description: it is published as the PR body on creation and re-published from JUMI_PR.md on every follow-up round. If the change does not meet the issue's Done condition, write \`Refs #N\` for the issue number and list what is left, not a closing keyword like \`Fixes #N\`.`;
+
 const HANDOFF_INSTRUCTION = `Before finishing, write JUMI_HANDOFF.md at the repository root with notes for the next round: the key files and why they matter, commands that built and tested successfully, environment workarounds, and what is left or risky. If JUMI_HANDOFF.md is already present it is the previous round's notes and may be stale: verify against the code, then replace it. Keep it short (a few KiB at most). Never include forge tokens or secrets. Do not commit JUMI_HANDOFF.md.`;
 
 const IMPLEMENT_FINISH = `Edit, write, and commit as needed.
 ${WORKER_COMMIT}
 Do not ask questions.
+${PR_DESCRIPTION_RULE}
 If there is nothing to change, write JUMI_SKIP.md at the repository root with a short reason. Do not commit JUMI_SKIP.md.
 When the task is complete, write JUMI_PR.md at the repository root with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not commit JUMI_PR.md. Do not open the pull request.
 ${HANDOFF_INSTRUCTION}
@@ -161,6 +164,7 @@ export function buildFollowupPrompt(runnerType?: string): string {
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
+${PR_DESCRIPTION_RULE}
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
 Check before adding. Before adding code for a suggestion, check it against the current code: does anything call or need it, does it reach a real path, is there a smaller fix at the cause? If the suggestion is not needed, or would add a mechanism the task did not ask for, do not implement it: reply in JUMI_PR.md under the reviewer-comments section with the evidence (callers searched, path that cannot be reached). When the same mechanism has needed fixes in two or more rounds, say in JUMI_PR.md whether a simpler design would remove the whole class, then either switch to it or explain why not. A correctness finding (🔴 or 🟡) that holds on the current tree is still fixed; this rule is about suggestions that add code, not skipping real bugs.
