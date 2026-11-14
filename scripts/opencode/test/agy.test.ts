@@ -649,6 +649,49 @@ exec sleep 30`
     });
   });
 
+  test("provider message keeps agent stdout out", async () => {
+    const failed = resultEvent({
+      status: "ERROR",
+      response: "agent draft hello",
+      error: "upstream 503 service unavailable",
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(classifyRunnerOutcome(result)).toBe("provider_down");
+      expect(result.message).toContain("503 service unavailable");
+      // Agent text stays in stdout, never in the hop-classifier message.
+      expect(result.stdout).toContain("agent draft hello");
+      expect(result.message).not.toContain("agent draft hello");
+    });
+  });
+
+  test("agent text mentioning a provider phrase is not a provider outage", async () => {
+    const failed = resultEvent({
+      status: "ERROR",
+      response: "draft comment: service unavailable, will retry wording",
+      error: "tool failed",
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(classifyRunnerOutcome(result)).not.toBe("provider_down");
+      expect(isProviderUnavailableResult(result)).toBe(false);
+    });
+  });
+
   test("signed-out keyring token is auth death", async () => {
     // Verified against Antigravity docs/issues: headless `authentication
     // required`, `Please sign in`, and keyring failures like `You are not

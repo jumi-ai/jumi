@@ -470,30 +470,33 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       });
     }
 
+    // Signal for hop classification: stderr plus the redacted envelope only.
+    // An upstream 5xx can arrive envelope-only with empty stderr/stdout, and
+    // without it the run classifies as `incomplete` with no hop. Agent
+    // message text stays in `stdout` the way the codex harness keeps it out
+    // of `signal`, so a draft mentioning a provider phrase cannot flip a
+    // generic non-zero exit to `provider_down`.
+    const providerError = redactEngineText(stripAnsi((envelope?.error ?? "").trim()), opts);
+    const providerText = [stderr, providerError].filter(Boolean).join("\n");
+
     if (incomplete) {
       return observeEngineRun(opts, {
         status: "exit",
         exitCode,
         stdout,
-        message: [incomplete, combined].filter(Boolean).join("\n"),
+        message: [incomplete, providerText].filter(Boolean).join("\n"),
         infra: false,
         durationMs,
       });
     }
 
-    // The provider check sees the envelope the way quota/auth already do:
-    // an upstream 5xx can arrive envelope-only with empty stderr/stdout, and
-    // without it the run classifies as `incomplete` with no hop. The message
-    // feeds the chain hop classifier, so a provider outage carries the signal
-    // raw the way the codex harness does; agent text stays in `stdout`.
-    const providerText = [combined, envelope?.error].filter(Boolean).join("\n");
     const providerDown = looksLikeProviderUnavailable(providerText);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,
       stdout,
-      message: providerDown ? providerText : engineExitMessage(exitCode, combined),
-      infra: providerDown ? false : looksLikeInfraStderr(combined),
+      message: providerDown ? providerText : engineExitMessage(exitCode, providerText),
+      infra: providerDown ? false : looksLikeInfraStderr(providerText),
       durationMs,
     });
   } catch (err) {
