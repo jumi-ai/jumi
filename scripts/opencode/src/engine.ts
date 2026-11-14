@@ -57,6 +57,28 @@ export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
 
 export type QuotaClass = "resetting" | "hard";
 
+/**
+ * Absolute unix timestamp (ms) at which the provider says the quota resets,
+ * from what the result actually states. An explicit `quotaResetAtMs` (Codex
+ * absolute dates) wins; otherwise a quota result carrying `retryAfterMs` (the
+ * opencode runner's delay form) resolves to `nowMs + retryAfterMs`. Returns
+ * undefined when the result carries no stated reset — never guessed — or when
+ * it is not a quota result.
+ */
+export function resolveQuotaResetAtMs(
+  result: { quota?: QuotaClass | null; quotaResetAtMs?: number; retryAfterMs?: number },
+  nowMs = Date.now()
+): number | undefined {
+  if (result.quota == null) return undefined;
+  if (typeof result.quotaResetAtMs === "number" && Number.isFinite(result.quotaResetAtMs)) {
+    return result.quotaResetAtMs;
+  }
+  if (typeof result.retryAfterMs === "number" && Number.isFinite(result.retryAfterMs)) {
+    return nowMs + result.retryAfterMs;
+  }
+  return undefined;
+}
+
 export interface EngineResult {
   status: EngineStatus;
   exitCode?: number | null;
@@ -67,6 +89,13 @@ export interface EngineResult {
   durationMs?: number;
   quota?: QuotaClass;
   retryAfterMs?: number;
+  /**
+   * Absolute unix timestamp (ms) when the provider says the quota resets, if
+   * the quota message actually states one. Set by the harness on quota
+   * results only; metrics record it per runner and the hop line carries it.
+   * Absent when the message carries no reset time — never guessed.
+   */
+  quotaResetAtMs?: number;
   /** The runner that actually produced this result (after any hop). */
   runner?: RunnerStamp;
   /** Position of `runner` in the engine chain. Model text is not unique. */

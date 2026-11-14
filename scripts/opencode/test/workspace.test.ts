@@ -796,33 +796,48 @@ describe("workerOpenCodeChildEnv", () => {
   test("passes git auth plus JDK/Gradle env under /work, not HOME", () => {
     const originalJavaHome = process.env.JAVA_HOME;
     const originalWorkdir = process.env.WORKDIR;
+    const originalHome = process.env.HOME;
+    const originalCache = process.env.JUMI_CACHE_DIR;
     delete process.env.JAVA_HOME;
     delete process.env.WORKDIR;
+    delete process.env.JUMI_CACHE_DIR;
+    process.env.HOME = "/work/.home-test-unused";
     try {
-      const env = workerOpenCodeChildEnv(auth, "/work/kirmanak/demo/12");
+      const env = workerOpenCodeChildEnv(auth, "/work/kirmanak/demo/12", {
+        home: "/work/kirmanak/demo/12/.jumi-tmp/probe-home",
+        workRoot: "/work",
+      });
       expect(env.GIT_AUTH_TOKEN).toBe("bot-token");
       expect(env.JAVA_HOME).toBe("/opt/java/openjdk");
       expect(env.PATH.startsWith("/opt/java/openjdk/bin:")).toBe(true);
-      expect(env.JAVA_TOOL_OPTIONS).toBe("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp/scratch");
+      expect(env.JAVA_TOOL_OPTIONS).toContain("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp/scratch");
       expect(env.TMPDIR).toBe("/work/kirmanak/demo/12/.jumi-tmp/scratch");
       expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
       expect(env.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
-      expect(env.HOME).toBeUndefined();
     } finally {
       if (originalJavaHome === undefined) delete process.env.JAVA_HOME;
       else process.env.JAVA_HOME = originalJavaHome;
       if (originalWorkdir === undefined) delete process.env.WORKDIR;
       else process.env.WORKDIR = originalWorkdir;
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
     }
   });
 
   test("forwards image JAVA_HOME and WORKDIR", () => {
     const originalJavaHome = process.env.JAVA_HOME;
     const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
     process.env.JAVA_HOME = "/opt/custom-jdk";
     process.env.WORKDIR = "/work";
+    delete process.env.JUMI_CACHE_DIR;
     try {
-      const env = workerOpenCodeChildEnv(auth, "/work/owner/repo/1");
+      const env = workerOpenCodeChildEnv(auth, "/work/owner/repo/1", {
+        home: "/work/.home-test-forward",
+        workRoot: "/work",
+      });
       expect(env.JAVA_HOME).toBe("/opt/custom-jdk");
       expect(env.PATH.startsWith("/opt/custom-jdk/bin:")).toBe(true);
       expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
@@ -831,6 +846,200 @@ describe("workerOpenCodeChildEnv", () => {
       else process.env.JAVA_HOME = originalJavaHome;
       if (originalWorkdir === undefined) delete process.env.WORKDIR;
       else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+    }
+  });
+
+  test("worker child env sets -Duser.home from HOME and keeps java.io.tmpdir", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.HOME = home;
+    process.env.WORKDIR = workRoot;
+    delete process.env.JUMI_CACHE_DIR;
+    try {
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = workerOpenCodeChildEnv(auth, workdir);
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      expect(env.HOME).toBe(home);
+      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Djava.io.tmpdir=${scratch}`);
+      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Duser.home=${home}`);
+      expect(env.JAVA_TOOL_OPTIONS.match(/-Duser\.home=/g)?.length).toBe(1);
+      expect(env.JAVA_TOOL_OPTIONS.match(/-Djava\.io\.tmpdir=/g)?.length).toBe(1);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(home, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("unwritable HOME falls back to WORKDIR/.home and logs once", async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.HOME = join(workRoot, "does-not-exist");
+    process.env.WORKDIR = workRoot;
+    delete process.env.JUMI_CACHE_DIR;
+    const logged: string[] = [];
+    try {
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = workerOpenCodeChildEnv(auth, workdir, { logger: (m) => logged.push(m) });
+      expect(env.HOME).toBe(join(workRoot, ".home"));
+      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Duser.home=${join(workRoot, ".home")}`);
+      expect(logged.length).toBe(1);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(workRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("cache env vars are per-repository under JUMI_CACHE_DIR", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
+    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.HOME = home;
+    process.env.WORKDIR = workRoot;
+    process.env.JUMI_CACHE_DIR = cache;
+    try {
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+      const base = join(cache, "acme", "api");
+      expect(env.GRADLE_USER_HOME).toBe(join(base, "gradle"));
+      expect(env.ANDROID_USER_HOME).toBe(join(base, "android"));
+      expect(env.KONAN_DATA_DIR).toBe(join(base, "konan"));
+      expect(env.npm_config_cache).toBe(join(base, "npm"));
+      expect(env.BUN_INSTALL_CACHE_DIR).toBe(join(base, "bun"));
+      expect(env.UV_CACHE_DIR).toBe(join(base, "uv"));
+      expect(env.PIP_CACHE_DIR).toBe(join(base, "pip"));
+      expect(env.XDG_CACHE_HOME).toBe(join(base, "xdg"));
+      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Dmaven.repo.local=${join(base, "maven")}`);
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(home, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  test("cache path rejects owner or repo with traversal segments", async () => {
+    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.JUMI_CACHE_DIR = cache;
+    try {
+      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "../evil", repo: "api" })).toThrow(
+        "Invalid owner"
+      );
+      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "acme", repo: ".." })).toThrow(
+        "Invalid repo"
+      );
+      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "a/b", repo: "api" })).toThrow(
+        "Invalid owner"
+      );
+    } finally {
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  test("no cache env path is inside the worktree", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
+    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.HOME = home;
+    process.env.WORKDIR = workRoot;
+    process.env.JUMI_CACHE_DIR = cache;
+    try {
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+      const prefix = `${workdir}${sep}`;
+      for (const key of [
+        "GRADLE_USER_HOME",
+        "ANDROID_USER_HOME",
+        "KONAN_DATA_DIR",
+        "npm_config_cache",
+        "BUN_INSTALL_CACHE_DIR",
+        "UV_CACHE_DIR",
+        "PIP_CACHE_DIR",
+        "XDG_CACHE_HOME",
+        "HOME",
+      ]) {
+        const value = env[key];
+        expect(value.startsWith(prefix) || value === workdir).toBe(false);
+      }
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(home, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+    }
+  });
+
+  test("unset JUMI_CACHE_DIR leaves GRADLE_USER_HOME under WORKDIR and adds no volume requirement", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    process.env.HOME = home;
+    process.env.WORKDIR = workRoot;
+    delete process.env.JUMI_CACHE_DIR;
+    try {
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+      expect(env.GRADLE_USER_HOME).toBe(join(workRoot, ".gradle"));
+      expect(env.GRADLE_USER_HOME.startsWith(`${workRoot}${sep}`)).toBe(true);
+      for (const key of [
+        "GRADLE_USER_HOME",
+        "ANDROID_USER_HOME",
+        "KONAN_DATA_DIR",
+        "npm_config_cache",
+        "BUN_INSTALL_CACHE_DIR",
+        "UV_CACHE_DIR",
+        "PIP_CACHE_DIR",
+        "XDG_CACHE_HOME",
+      ]) {
+        expect(env[key].startsWith(`${workRoot}${sep}`)).toBe(true);
+      }
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      await rm(home, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
     }
   });
 });
@@ -1084,6 +1293,52 @@ describe("prepareGradleSeed", () => {
       await chmod(join(seed, "wrapper", "dists"), 0o755).catch(() => {});
       await rm(seed, { recursive: true, force: true });
       await rm(gradleUserHome, { recursive: true, force: true });
+    }
+  });
+
+  test("GRADLE_SEED_HOME still copies wrapper dists into the per-repository GRADLE_USER_HOME", async () => {
+    const home = await makeTempDir("jumi-home-");
+    const workRoot = await makeTempDir("jumi-work-");
+    const cache = await makeTempDir("jumi-cache-");
+    const seed = await makeTempDir("jumi-gradle-seed-");
+    const originalHome = process.env.HOME;
+    const originalWorkdir = process.env.WORKDIR;
+    const originalCache = process.env.JUMI_CACHE_DIR;
+    const originalSeed = process.env.GRADLE_SEED_HOME;
+    process.env.HOME = home;
+    process.env.WORKDIR = workRoot;
+    process.env.JUMI_CACHE_DIR = cache;
+    process.env.GRADLE_SEED_HOME = seed;
+    const logged: string[] = [];
+    try {
+      await mkdir(join(seed, "caches", "modules-2"), { recursive: true });
+      await writeFile(join(seed, "caches", "modules-2", "metadata.bin"), "deps");
+      await mkdir(join(seed, "wrapper", "dists", "gradle-8.10-bin"), { recursive: true });
+      await writeFile(join(seed, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "zip");
+      const workdir = join(workRoot, "acme", "api", "1");
+      const env = await workerOpenCodeChildEnvWithGradleSeed(auth, workdir, {
+        owner: "acme",
+        repo: "api",
+        logger: (m) => logged.push(m),
+      });
+      expect(env.GRADLE_USER_HOME).toBe(join(cache, "acme", "api", "gradle"));
+      expect(env.GRADLE_RO_DEP_CACHE).toBe(join(seed, "caches"));
+      expect(
+        await readFile(join(env.GRADLE_USER_HOME, "wrapper", "dists", "gradle-8.10-bin", "gradle.zip"), "utf8")
+      ).toBe("zip");
+    } finally {
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      if (originalWorkdir === undefined) delete process.env.WORKDIR;
+      else process.env.WORKDIR = originalWorkdir;
+      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
+      else process.env.JUMI_CACHE_DIR = originalCache;
+      if (originalSeed === undefined) delete process.env.GRADLE_SEED_HOME;
+      else process.env.GRADLE_SEED_HOME = originalSeed;
+      await rm(home, { recursive: true, force: true });
+      await rm(workRoot, { recursive: true, force: true });
+      await rm(cache, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
     }
   });
 });

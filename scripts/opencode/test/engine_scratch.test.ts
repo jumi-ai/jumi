@@ -223,7 +223,9 @@ describe("child scratch dir", () => {
     expect(gitOpenCodeChildEnv(auth).TMPDIR).toBeUndefined();
     const worker = workerOpenCodeChildEnv(auth, workdir);
     expect(worker.TMPDIR).toBe(scratch);
-    expect(worker.JAVA_TOOL_OPTIONS).toBe(`-Djava.io.tmpdir=${scratch}`);
+    expect(worker.JAVA_TOOL_OPTIONS).toContain(`-Djava.io.tmpdir=${scratch}`);
+    expect(worker.JAVA_TOOL_OPTIONS).toContain("-Duser.home=");
+    expect(worker.JAVA_TOOL_OPTIONS).toContain("-Dmaven.repo.local=");
   });
 
   test("ensureChildScratchDir creates the dir", async () => {

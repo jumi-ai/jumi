@@ -574,8 +574,8 @@ export function countSuggestionFindings(text: string, opts?: { singleFilePath?: 
 }
 
 /** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
-export function formatSuggestionCapNote(dropped: number): string {
-  return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${MAX_SUGGESTION_FINDINGS}).`;
+export function formatSuggestionCapNote(dropped: number, cap: number = MAX_SUGGESTION_FINDINGS): string {
+  return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${cap}).`;
 }
 
 /**
@@ -589,15 +589,16 @@ export function formatSuggestionCapNote(dropped: number): string {
  */
 export function capSuggestionFindings(
   text: string,
-  opts?: { singleFilePath?: string; keep?: readonly string[] }
+  opts?: { singleFilePath?: string; keep?: readonly string[]; maxSuggestions?: number }
 ): { comment: string; posted: number; dropped: number } {
+  const cap = opts?.maxSuggestions ?? MAX_SUGGESTION_FINDINGS;
   const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
   let total = 0;
   for (const block of blocks) {
     if (block.keepNote) continue;
     if (isSuggestionFindingFirstLine(block.first)) total++;
   }
-  if (total <= MAX_SUGGESTION_FINDINGS) {
+  if (total <= cap) {
     return { comment: text, posted: total, dropped: 0 };
   }
   let keptSuggestions = 0;
@@ -612,7 +613,7 @@ export function capSuggestionFindings(
   };
   for (const block of blocks) {
     if (!block.keepNote && isSuggestionFindingFirstLine(block.first)) {
-      if (keptSuggestions >= MAX_SUGGESTION_FINDINGS) continue;
+      if (keptSuggestions >= cap) continue;
       keptSuggestions++;
       keepBlock(block);
       continue;
@@ -620,7 +621,7 @@ export function capSuggestionFindings(
     keepBlock(block);
   }
   const dropped = total - keptSuggestions;
-  const note = formatSuggestionCapNote(dropped);
+  const note = formatSuggestionCapNote(dropped, cap);
   out = out ? `${out.trimEnd()}\n\n${note}` : note;
   return { comment: out.trim(), posted: keptSuggestions, dropped };
 }
