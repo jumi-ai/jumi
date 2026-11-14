@@ -334,7 +334,7 @@ describe("Engine, Tracker, and Forge ports", () => {
         expect("prompt" in opts).toBe(false);
         expect("configPath" in opts).toBe(false);
         const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
-        expect(task).toContain("Write JUMI_REVIEW.md");
+        expect(task).toContain("jumi-review MCP tools");
         await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
         return { status: "ok" };
       };
