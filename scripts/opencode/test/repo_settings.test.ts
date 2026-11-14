@@ -36,6 +36,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -54,6 +56,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
@@ -69,6 +73,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -87,6 +93,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -118,6 +126,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
@@ -133,6 +143,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -165,6 +177,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("no_automerge_label: hold\n")).toEqual({
@@ -180,6 +194,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     for (const text of [
@@ -224,6 +240,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -242,6 +260,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -260,6 +280,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -302,6 +324,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("takeover_authors: []\n")).toEqual({
@@ -317,6 +341,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -335,6 +361,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: ["renovate[bot]"],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -401,6 +429,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("ignore_conflicts_authors: [a, a, b]\n")).toEqual({
@@ -416,6 +446,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: ["a", "b"],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -434,6 +466,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["renovate-bot"],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
@@ -450,6 +484,8 @@ describe("parseRepoSettingsText", () => {
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: ["Alice", "renovate-bot"],
           mode: "full",
+          reviewDrafts: false,
+          reviewBudget: {},
         },
       }
     );
@@ -469,6 +505,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -509,6 +547,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("mode: review-only\n")).toEqual({
@@ -524,6 +564,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "review-only",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
     expect(parseRepoSettingsText("mode: off\n")).toEqual({
@@ -539,6 +581,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "off",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -557,6 +601,8 @@ describe("parseRepoSettingsText", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -602,6 +648,8 @@ describe("loadRepoSettings", () => {
       ignoreConflictsAuthors: [],
       blockingQuestionAuthors: [],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
   });
 
@@ -625,6 +673,8 @@ describe("loadRepoSettings", () => {
       ignoreConflictsAuthors: [],
       blockingQuestionAuthors: [],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
   });
 
@@ -643,6 +693,8 @@ describe("loadRepoSettings", () => {
       ignoreConflictsAuthors: [],
       blockingQuestionAuthors: [],
       mode: "off",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
   });
 
@@ -672,6 +724,8 @@ describe("loadRepoSettings", () => {
       ignoreConflictsAuthors: ["renovate[bot]"],
       blockingQuestionAuthors: ["alice"],
       mode: "full",
+      reviewDrafts: false,
+      reviewBudget: {},
     });
   });
 
@@ -832,6 +886,8 @@ describe("effectiveBlockingQuestionAuthors", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: ["repo-bot", "DEPLOYER-bot"],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toEqual(["deployer-bot", "repo-bot"]);
   });
@@ -865,6 +921,8 @@ describe("repoMode", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toBe("full");
     expect(
@@ -880,6 +938,8 @@ describe("repoMode", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "review-only",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toBe("review-only");
     expect(
@@ -895,6 +955,8 @@ describe("repoMode", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "off",
+        reviewDrafts: false,
+        reviewBudget: {},
       })
     ).toBe("off");
   });
@@ -1004,6 +1066,8 @@ describe("parseRepoSettingsTimeouts", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -1022,6 +1086,8 @@ describe("parseRepoSettingsTimeouts", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -1040,6 +1106,8 @@ describe("parseRepoSettingsTimeouts", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -1107,6 +1175,8 @@ describe("effectiveTimeoutMsForKind", () => {
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
           mode: "full",
+          reviewDrafts: false,
+          reviewBudget: {},
         },
         "review",
         900_000,
@@ -1131,6 +1201,8 @@ describe("effectiveTimeoutMsForKind", () => {
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
           mode: "full",
+          reviewDrafts: false,
+          reviewBudget: {},
         },
         "review",
         900_000,
@@ -1151,6 +1223,8 @@ describe("effectiveTimeoutMsForKind", () => {
           ignoreConflictsAuthors: [],
           blockingQuestionAuthors: [],
           mode: "full",
+          reviewDrafts: false,
+          reviewBudget: {},
         },
         "review",
         900_000,
@@ -1174,6 +1248,8 @@ describe("effectiveTimeoutMsForKind", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
       "follow-up",
       3_600_000,

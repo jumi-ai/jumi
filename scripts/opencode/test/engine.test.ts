@@ -12,7 +12,7 @@ import {
 } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
-import { EngineFailedError } from "../src/engine.ts";
+import { EngineFailedError, resolveQuotaResetAtMs } from "../src/engine.ts";
 import { encodeInfraMarker, INFRA_SPAWN_REASON, InfraCircuitBreaker } from "../src/infra.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT, QUOTA_WAIT_PREFIX } from "../src/quota.ts";
 import {
@@ -115,6 +115,18 @@ async function withWorkspace<T>(run: (workspace: string) => Promise<T>): Promise
 
 afterEach(() => {
   resetControlMetricsForTests();
+});
+
+describe("resolveQuotaResetAtMs", () => {
+  test("explicit absolute reset wins, retryAfterMs falls back, non-quota never resolves", () => {
+    expect(resolveQuotaResetAtMs({ quota: "resetting", quotaResetAtMs: 1_800_000_000_000 }, 1_000)).toBe(
+      1_800_000_000_000
+    );
+    expect(resolveQuotaResetAtMs({ quota: "resetting", retryAfterMs: 3_600_000 }, 1_000)).toBe(3_601_000);
+    expect(resolveQuotaResetAtMs({ quota: "resetting" }, 1_000)).toBeUndefined();
+    expect(resolveQuotaResetAtMs({ retryAfterMs: 3_600_000 }, 1_000)).toBeUndefined();
+    expect(resolveQuotaResetAtMs({ status: "ok" } as never, 1_000)).toBeUndefined();
+  });
 });
 
 describe("processEngineTick", () => {
