@@ -133,6 +133,12 @@ import {
   sameFindingLatchReasonFromParts,
   stuckComment,
 } from "./stuck.ts";
+import {
+  type HoldStatusApi,
+  postSuggestionHoldSuccess,
+  suggestionHoldCompletedDescription,
+  suggestionHoldSkippedDescription,
+} from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
@@ -167,6 +173,12 @@ export interface HandledReviewFinding {
   sha: string;
 }
 
+export interface SuggestionHoldLatch {
+  consumed?: boolean;
+  headSha?: string;
+  count?: number;
+}
+
 export interface FollowUpState {
   prNumber: number;
   round: number;
@@ -175,6 +187,7 @@ export interface FollowUpState {
   handledReviewIds: number[];
   handledReviewFindings: HandledReviewFinding[];
   updatedAt: string;
+  suggestionHold?: SuggestionHoldLatch;
 }
 
 function logDefault(message: string) {
@@ -214,7 +227,19 @@ export function parseFollowUpState(parsed: unknown): FollowUpState {
       : [],
     handledReviewFindings: parseHandledReviewFindings(state.handledReviewFindings),
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
+    ...parseSuggestionHoldLatch(state.suggestionHold),
   };
+}
+
+function parseSuggestionHoldLatch(value: unknown): Pick<FollowUpState, "suggestionHold"> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const rec = value as { consumed?: unknown; headSha?: unknown; count?: unknown };
+  const hold: SuggestionHoldLatch = {};
+  if (rec.consumed === true) hold.consumed = true;
+  if (typeof rec.headSha === "string" && rec.headSha) hold.headSha = rec.headSha;
+  if (typeof rec.count === "number" && Number.isSafeInteger(rec.count) && rec.count > 0) hold.count = rec.count;
+  if (hold.consumed === undefined && hold.headSha === undefined && hold.count === undefined) return {};
+  return { suggestionHold: hold };
 }
 
 export async function readFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<FollowUpState> {
@@ -227,6 +252,36 @@ export async function writeFollowUpLatch(
   state: FollowUpState
 ): Promise<void> {
   await store.put(key, { followup: state });
+}
+
+/**
+ * Resolve a held suggestion `pending` on a path with no `pr` snapshot yet
+ * (before the pull is fetched). Reads the latch itself; a no-op without a
+ * consumed hold. Never throws.
+ */
+async function resolveHeldFromLatch(
+  api: HoldStatusApi,
+  latches: SkipLatchStore,
+  latchKey: SkipLatchKey,
+  fallback: { owner: string; repo: string; headSha: string },
+  kind: "completed" | "skipped",
+  reason?: string
+): Promise<void> {
+  try {
+    const hold = (await readFollowUpLatch(latches, latchKey)).suggestionHold;
+    if (!hold?.consumed) return;
+    const count = hold.count ?? 0;
+    if (!count) return;
+    const sha = hold.headSha ?? fallback.headSha;
+    if (!sha) return;
+    const description =
+      kind === "completed"
+        ? suggestionHoldCompletedDescription(count)
+        : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
+    await postSuggestionHoldSuccess(api, fallback.owner, fallback.repo, sha, description);
+  } catch {
+    // Best-effort.
+  }
 }
 
 export async function readFollowUpState(path: string): Promise<FollowUpState> {
@@ -1237,7 +1292,22 @@ export async function implementFollowUp(
     });
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
-  if (assigned) return assigned;
+  if (assigned) {
+    // Unassigned/closed (cancelled) and issue-load failures (skipped) end the
+    // job here with no waiter left: the worker tick has no backstop for these
+    // results, so resolve the held `pending` before leaving. The live-claim
+    // early result above intentionally does NOT resolve: the claim holder is
+    // still running and will settle the hold itself.
+    await resolveHeldFromLatch(
+      opts.api as unknown as HoldStatusApi,
+      latches,
+      latchKey,
+      { owner, repo, headSha: opts.job.headSha ?? "" },
+      "skipped",
+      assigned.status === "cancelled" ? "job cancelled" : assigned.reason
+    );
+    return assigned;
+  }
 
   const { loadRepoConventions: loadFollowupConventions, defaultRepoConventions: defaultFollowupConventions } =
     await import("./repo_settings.ts");
@@ -1255,6 +1325,14 @@ export async function implementFollowUp(
     followupPrefix
   );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
+    await resolveHeldFromLatch(
+      opts.api as unknown as HoldStatusApi,
+      latches,
+      latchKey,
+      { owner, repo, headSha: opts.job.headSha ?? "" },
+      "skipped",
+      "no open jumi closing PR"
+    );
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
@@ -1273,14 +1351,38 @@ export async function implementFollowUp(
     policy.followupOnSuggestions
   );
 
+  const state = await readFollowUpLatch(latches, latchKey);
+  // Resolve a held suggestion `pending` to `success` when this round will not
+  // push. The review consumed the one-hold flag; any terminal no-push outcome
+  // must flip the held head back so the merge never waits forever. Pushed
+  // rounds do nothing: the next review posts `success` itself. Never throws.
+  const resolveHeld = async (kind: "completed" | "skipped", reason?: string): Promise<void> => {
+    try {
+      const hold = state.suggestionHold;
+      if (!hold?.consumed) return;
+      const count = hold.count ?? 0;
+      if (!count) return;
+      const sha =
+        hold.headSha && hold.headSha.toLowerCase() === pr.head.sha.toLowerCase()
+          ? pr.head.sha
+          : (hold.headSha ?? pr.head.sha);
+      const description =
+        kind === "completed"
+          ? suggestionHoldCompletedDescription(count)
+          : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
+      await postSuggestionHoldSuccess(opts.api as unknown as HoldStatusApi, owner, repo, sha, description, pr.html_url);
+    } catch {
+      // Best-effort.
+    }
+  };
+
   const branch = pr.head.ref;
   claim.branch = branch;
   if (!branch || branch === opts.job.defaultBranch) {
+    await resolveHeld("skipped", "default branch");
     await forgetClaim();
     return { status: "skipped", reason: "refusing to follow up on the default branch" };
   }
-
-  const state = await readFollowUpLatch(latches, latchKey);
   const pendingItems = await collectFollowUpItems(
     opts.api,
     owner,
@@ -1350,6 +1452,7 @@ export async function implementFollowUp(
     (opts.job.trigger?.reviewId !== undefined && state.handledReviewIds.includes(opts.job.trigger.reviewId))
   ) {
     if (!ciWake) {
+      await resolveHeld("skipped", "comment already handled");
       await forgetClaim();
       return { status: "skipped", reason: "comment already handled" };
     }
@@ -1357,6 +1460,7 @@ export async function implementFollowUp(
   const previousConflict = await readConflictLatch(latches, latchKey);
   const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
   if (ignoreAuthors === undefined) {
+    await resolveHeld("skipped", "settings unreadable");
     await forgetClaim();
     return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   }
@@ -1388,12 +1492,14 @@ export async function implementFollowUp(
   if (pr.mergeable === false && !conflictedLeftToAuthor && previousConflict.round >= maxConflictRounds) {
     const reason = conflictCapReason(previousConflict.round, maxConflictRounds);
     await sticky(conflictCapSticky(previousConflict.round, maxConflictRounds), pr.number);
+    await resolveHeld("skipped", "conflict cap");
     await forgetClaim();
     return { status: "skipped", reason };
   }
   if (hasFeedback && state.round >= maxFollowupRounds) {
     if (!ciWake) {
       await sticky("stuck: too many follow-up rounds", pr.number);
+      await resolveHeld("skipped", "round cap");
       await forgetClaim();
       return { status: "skipped", reason: "stuck: too many follow-up rounds" };
     }
@@ -1401,6 +1507,7 @@ export async function implementFollowUp(
   }
   if (!hasFeedback) {
     if (ci.pending) {
+      await resolveHeld("skipped", "CI still pending");
       await forgetClaim();
       return { status: "skipped", reason: "CI still pending" };
     }
@@ -1409,6 +1516,7 @@ export async function implementFollowUp(
       // follow-up must not silently skip it with `no unhandled feedback`.
       // Conflict resolution runs first.
       if (pr.mergeable !== false) {
+        await resolveHeld("completed");
         await forgetClaim();
         return { status: "skipped", reason: "no unhandled feedback" };
       }
@@ -1425,11 +1533,13 @@ export async function implementFollowUp(
         now,
         skipLatches: latches,
       });
+      await resolveHeld("skipped", "flake");
       await forgetClaim();
       return { status: "skipped", reason: flakeSkipReason(ci.unhandled) };
     }
   }
   if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
+    await resolveHeld("skipped", "left to author");
     await forgetClaim();
     return { status: "skipped", reason: leftReason };
   }
@@ -1505,12 +1615,14 @@ export async function implementFollowUp(
   if (isQuotaStuck(stuckState)) {
     const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
     await sticky(quotaReason, pr.number);
+    await resolveHeld("skipped", "quota");
     await forgetClaim();
     return { status: "skipped", reason: quotaReason };
   }
   const stuckReason = evaluateStuck(stuckState.fingerprints, currentFingerprint);
   if (stuckReason) {
     await sticky(stuckComment(stuckReason), pr.number);
+    await resolveHeld("skipped", "stuck");
     await forgetClaim();
     return { status: "skipped", reason: stuckComment(stuckReason) };
   }
@@ -1521,11 +1633,13 @@ export async function implementFollowUp(
       const display = sameFindingDisplayFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
       log(`same finding repeated${display ? ` (${display})` : ""} on unchanged diff for ${owner}/${repo}#${pr.number}`);
       await sticky(latchReason, pr.number);
+      await resolveHeld("skipped", "same finding");
       await forgetClaim();
       return { status: "skipped", reason: latchReason };
     }
     if (sameFindingStuck) {
       await sticky(stuckComment(sameFindingStuck), pr.number);
+      await resolveHeld("skipped", "stuck");
       await forgetClaim();
       return { status: "skipped", reason: stuckComment(sameFindingStuck) };
     }
@@ -1561,7 +1675,10 @@ export async function implementFollowUp(
         }
       },
     });
-    if (applied.failedClosed) return { status: "skipped", reason: applied.reason };
+    if (applied.failedClosed) {
+      await resolveHeld("skipped", "no eligible runner");
+      return { status: "skipped", reason: applied.reason };
+    }
     if (applied.narrowed) repoChain = applied.chain;
   }
 
@@ -1644,6 +1761,7 @@ export async function implementFollowUp(
       handledReviewIds: uniqueReviews,
       handledReviewFindings: uniqueReviewFindings(handledReviewFindings),
       updatedAt: now().toISOString(),
+      ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
     });
     if (currentFingerprint) {
       await appendStuckLatchFingerprint(latches, latchKey, currentFingerprint, now);
@@ -2308,6 +2426,7 @@ export async function implementFollowUp(
         handledReviewIds: state.handledReviewIds,
         handledReviewFindings: state.handledReviewFindings,
         updatedAt: now().toISOString(),
+        ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
       }).catch(() => undefined);
       // Intentionally no persistCi(): an unsuccessful attempt must not
       // consume the outstanding CI-fix work. Only recordAttempt() on a
@@ -2325,6 +2444,25 @@ export async function implementFollowUp(
       followUpResult.status === "cancelled")
   ) {
     await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+  }
+  // The held `pending` turns `success` once the replies land (no-changes) or
+  // whenever this round cannot push. Pushed rounds do nothing: the next review
+  // posts `success` itself. Never throws.
+  if (typeof followUpResult === "object" && followUpResult !== null && "status" in followUpResult) {
+    if (followUpResult.status === "no-changes") {
+      await resolveHeld("completed");
+    } else if (followUpResult.status === "skipped") {
+      const reason =
+        typeof (followUpResult as { reason?: unknown }).reason === "string" &&
+        (followUpResult as { reason: string }).reason.includes("too many follow-up")
+          ? "round cap"
+          : typeof (followUpResult as { reason?: unknown }).reason === "string"
+            ? (followUpResult as { reason: string }).reason
+            : "follow-up skipped";
+      await resolveHeld("skipped", reason);
+    } else if (followUpResult.status === "cancelled") {
+      await resolveHeld("skipped", "job cancelled");
+    }
   }
   return followUpResult;
 }

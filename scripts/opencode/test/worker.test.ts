@@ -28,6 +28,7 @@ import {
 } from "../src/quota.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { isQuotaStuck, readStuckLatch, readStuckState, writeStuckState } from "../src/stuck.ts";
+import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -210,6 +211,39 @@ describe("handleIssueCancel", () => {
     }
   });
 
+  test("resolves a held pending to success before wiping the latch", async () => {
+    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-hold-"));
+    try {
+      const store = new MemoryReviewJobStore();
+      await markSuggestionHoldConsumed(
+        store.skipLatches,
+        { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+        "headsha",
+        2
+      );
+      const statuses: Array<{ sha: string; state: string; description?: string }> = [];
+      const api = {
+        ...makeApi(),
+        createCommitStatus: async (
+          _owner: string,
+          _repo: string,
+          sha: string,
+          status: { state: "success"; description?: string; target_url?: string }
+        ) => {
+          statuses.push({ sha, state: status.state, description: status.description });
+          return status;
+        },
+      };
+      await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store);
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ sha: "headsha", state: "success" });
+      expect(statuses[0]?.description).toContain("unassigned");
+      expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   test("kills recorded pid and marks leased rows for the tick to settle", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
     try {
@@ -254,6 +288,47 @@ describe("reclaimExpiredWorkerJobs", () => {
 });
 
 describe("processWorkerTick", () => {
+  test("restricted mode resolves a held pending using the pull number for the target link", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "abc123" }));
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "abc123",
+      2
+    );
+    const prIndexes: number[] = [];
+    const statuses: Array<{ sha: string; state: string; description?: string; target_url?: string }> = [];
+    const api = {
+      ...makeApi(),
+      getRepoFile: async () => ({ found: true, content: "mode: review-only\n" }),
+      getPR: async (_owner: string, _repo: string, index: number) => {
+        prIndexes.push(index);
+        return makePR({ number: index, html_url: `https://gitea.kirmanak.stream/kirmanak/demo/pulls/${index}` });
+      },
+      createCommitStatus: async (
+        _owner: string,
+        _repo: string,
+        sha: string,
+        status: { state: "success"; description?: string; target_url?: string }
+      ) => {
+        statuses.push({ sha, state: status.state, description: status.description, target_url: status.target_url });
+        return status;
+      },
+    };
+    const result = await processWorkerTick(store, makeWorkerConfig(), api, "worker-1");
+    expect(result).toBe("processed");
+    // The worked issue is 12 but the pull is 19: the target link must use the pull number.
+    expect(prIndexes).toEqual([19]);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({
+      sha: "abc123",
+      state: "success",
+      target_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/19",
+    });
+    expect(statuses[0]?.description).toContain("mode restricted");
+  });
+
   test("follow-up and conflict use configured timeouts, not OPENCODE_TIMEOUT_MS", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 127, headSha: "headsha" }));

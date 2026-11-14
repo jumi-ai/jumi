@@ -50,6 +50,13 @@ import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import { isSkipLatchReason, isTooManyFollowupRoundsReason } from "./stuck.ts";
+import {
+  type HoldStatusApi,
+  postSuggestionHoldSuccess,
+  readSuggestionHold,
+  suggestionHoldCompletedDescription,
+  suggestionHoldSkippedDescription,
+} from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
@@ -316,6 +323,23 @@ export async function handleIssueCancel(
   }
   const latches = skipLatches ?? store?.skipLatches ?? skipLatchesFor(config);
   const handoffStore = handoffs ?? store?.handoffs ?? handoffsFor({ home: config.home });
+  // A held suggestion `pending` must resolve before the latch wipe below
+  // destroys the only record of it: no follow-up job survives the cancel to
+  // clear it, so the merge would wait forever. Best-effort, never throws.
+  try {
+    const hold = await readSuggestionHold(latches, { owner, repo, issueNumber });
+    if (hold.consumed && hold.count && hold.headSha) {
+      await postSuggestionHoldSuccess(
+        api as unknown as HoldStatusApi,
+        owner,
+        repo,
+        hold.headSha,
+        suggestionHoldSkippedDescription(hold.count, "unassigned")
+      );
+    }
+  } catch {
+    // Best-effort: never fail the cancel on a status post.
+  }
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
     // Worker cancel clears only worker cells; review stuck lives in
@@ -419,7 +443,10 @@ export async function reclaimExpiredWorkerJobs(
   maxAttempts: number,
   logger: (message: string) => void = log,
   opts?: {
-    api?: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment">;
+    api?: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> &
+      Partial<HoldStatusApi> & {
+        getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+      };
     botUsername?: string;
   }
 ): Promise<{ requeued: number; published: number }> {
@@ -449,6 +476,21 @@ export async function reclaimExpiredWorkerJobs(
           );
           logger(`reclaim-cancelled ${row.jobKey}`);
         } else {
+          if (row.kind === "follow-up" && row.issueNumber != null && opts?.api && "createCommitStatus" in opts.api) {
+            await resolveWorkerHeld(
+              opts.api as unknown as HoldStatusApi & {
+                getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+              },
+              store,
+              row.owner,
+              row.repo,
+              row.issueNumber,
+              row.headSha,
+              "skipped",
+              "job failed",
+              row.prNumber
+            );
+          }
           logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
         }
       } else {
@@ -472,6 +514,48 @@ export async function reclaimExpiredWorkerJobs(
     }
   }
   return { requeued: requeued.length, published: publish.length };
+}
+
+/**
+ * Resolve a held suggestion `pending` when the follow-up cannot push from the
+ * worker tick (mode gate, cancel, terminal failure). Follow-up's own returns
+ * already resolve the common paths; this is the backstop for paths that never
+ * reach it. Never throws.
+ */
+async function resolveWorkerHeld(
+  api: HoldStatusApi & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
+  store: ReviewJobStore,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  headSha: string,
+  kind: "completed" | "skipped",
+  reason?: string,
+  prNumber?: number | null
+): Promise<void> {
+  try {
+    const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
+    if (!hold.consumed) return;
+    const count = hold.count ?? 0;
+    if (!count) return;
+    const sha = hold.headSha ?? headSha;
+    const description =
+      kind === "completed"
+        ? suggestionHoldCompletedDescription(count)
+        : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
+    let targetUrl: string | undefined;
+    try {
+      // The worked issue number is not the pull number on Jumi PRs, so the
+      // pull lookup must use the job's pull number, not the issue number.
+      const pr = await api.getPR?.(owner, repo, prNumber ?? issueNumber);
+      if (pr?.html_url) targetUrl = pr.html_url;
+    } catch {
+      // Best-effort.
+    }
+    await postSuggestionHoldSuccess(api, owner, repo, sha, description, targetUrl);
+  } catch {
+    // Best-effort.
+  }
 }
 
 export async function processWorkerTick(
@@ -543,6 +627,21 @@ export async function processWorkerTick(
   if (mode === "off" || mode === "review-only") {
     const reason = mode === "off" ? REPO_MODE_OFF_REASON : REPO_MODE_REVIEW_ONLY_REASON;
     await store.markPublished(row.id, leasedBy, { state: "skipped", reason });
+    if (row.kind === "follow-up" && row.issueNumber != null) {
+      await resolveWorkerHeld(
+        api as unknown as HoldStatusApi & {
+          getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+        },
+        store,
+        row.owner,
+        row.repo,
+        row.issueNumber,
+        row.headSha,
+        "skipped",
+        "mode restricted",
+        row.prNumber
+      );
+    }
     recordJobCompleted(row.kind, "skipped");
     logger(`${row.jobKey} skipped: ${reason}`);
     await clearSitBestEffort(store.sits, row.owner, row.repo, row.issueNumber ?? 0, logger);
@@ -863,13 +962,60 @@ export async function processWorkerTick(
               maxConflictRounds: effectiveConfig.maxConflictRounds,
             });
     stopHeartbeat();
-    if (await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job))) return "processed";
+    if (await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job))) {
+      if (job.mode === "follow-up") {
+        await resolveWorkerHeld(
+          api as unknown as HoldStatusApi & {
+            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+          },
+          store,
+          job.owner,
+          job.repo,
+          job.issueNumber,
+          job.headSha ?? "",
+          "skipped",
+          "job cancelled",
+          job.prNumber
+        );
+      }
+      return "processed";
+    }
     const current = await store.get(row.id);
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
+      if (job.mode === "follow-up") {
+        await resolveWorkerHeld(
+          api as unknown as HoldStatusApi & {
+            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+          },
+          store,
+          job.owner,
+          job.repo,
+          job.issueNumber,
+          job.headSha ?? "",
+          "skipped",
+          "job cancelled",
+          job.prNumber
+        );
+      }
       logger(`${issueJobKey(job)} cancelled`);
       return "processed";
     }
     if (result.status === "cancelled" && extras.abortSignal?.aborted) {
+      if (job.mode === "follow-up") {
+        await resolveWorkerHeld(
+          api as unknown as HoldStatusApi & {
+            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+          },
+          store,
+          job.owner,
+          job.repo,
+          job.issueNumber,
+          job.headSha ?? "",
+          "skipped",
+          "job cancelled",
+          job.prNumber
+        );
+      }
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
     }
@@ -894,6 +1040,21 @@ export async function processWorkerTick(
     const state = workerPublishedState(result.status);
     const published = await store.markPublished(row.id, leasedBy, { state, reason });
     if (published.cancelled) {
+      if (job.mode === "follow-up") {
+        await resolveWorkerHeld(
+          api as unknown as HoldStatusApi & {
+            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+          },
+          store,
+          job.owner,
+          job.repo,
+          job.issueNumber,
+          job.headSha ?? "",
+          "skipped",
+          "job cancelled",
+          job.prNumber
+        );
+      }
       try {
         await cancelIssueWork({
           api,
@@ -946,6 +1107,21 @@ export async function processWorkerTick(
   } catch (err) {
     stopHeartbeat();
     if (await settleObservedCancel(row.owner, row.repo, row.issueNumber ?? 0, row.jobKey).catch(() => false)) {
+      if (row.kind === "follow-up" && row.issueNumber != null) {
+        await resolveWorkerHeld(
+          api as unknown as HoldStatusApi & {
+            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+          },
+          store,
+          row.owner,
+          row.repo,
+          row.issueNumber,
+          row.headSha,
+          "skipped",
+          "job cancelled",
+          row.prNumber
+        );
+      }
       return "processed";
     }
     if (extras.abortSignal?.aborted) {
@@ -1035,6 +1211,21 @@ export async function processWorkerTick(
             }
             logger(`${row.jobKey} cancelled`);
           } else {
+            if (row.kind === "follow-up" && row.issueNumber != null) {
+              await resolveWorkerHeld(
+                api as unknown as HoldStatusApi & {
+                  getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
+                },
+                store,
+                row.owner,
+                row.repo,
+                row.issueNumber,
+                row.headSha,
+                "skipped",
+                "job failed",
+                row.prNumber
+              );
+            }
             recordJobCompleted(row.kind, "failed");
             logger(`infra-published ${row.jobKey} failed: ${decision.reason}`);
           }

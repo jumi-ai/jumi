@@ -3,6 +3,8 @@ import {
   compileReviewExcludePatterns,
   effectiveBlockingQuestionAuthors,
   isReviewExcluded,
+  isSuggestionFollowupEnabled,
+  isSuggestionHoldEnabled,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoMode,
   loadRepoSettings,
@@ -1573,5 +1575,87 @@ describe("publishReviewResult head settings file listing", () => {
     expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no output" });
     expect(calls.prFiles).toBe(1);
     expect(calls.refs).not.toContain("headsha");
+  });
+});
+
+describe("suggestions_hold_merge", () => {
+  test("absent follows automerge", () => {
+    const parsed = parseRepoSettingsText("automerge: true\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.settings.suggestionsHoldMerge).toBeUndefined();
+    expect(parsed.settings.automerge).toBe(true);
+  });
+
+  test("explicit false parses", () => {
+    const parsed = parseRepoSettingsText("automerge: true\nsuggestions_hold_merge: false\n");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.settings.suggestionsHoldMerge).toBe(false);
+  });
+
+  test("a wrong-type value is invalid", () => {
+    const parsed = parseRepoSettingsText("automerge: true\nsuggestions_hold_merge: yes-please\n");
+    expect(parsed.ok).toBe(false);
+  });
+
+  test("dash spelling is an unknown key with a suggestion", () => {
+    const parsed = parseRepoSettingsText("automerge: true\nsuggestions-hold-merge: false\n");
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) return;
+    expect(parsed.error).toContain("suggestions_hold_merge");
+  });
+
+  test("hold is enabled only with automerge on, full mode, and the deployment switch", () => {
+    const on = parseRepoSettingsText("automerge: true\n");
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    expect(
+      isSuggestionHoldEnabled({
+        state: "valid",
+        ...on.settings,
+        reviewExclude: on.settings.reviewExclude,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
+        timeouts: {},
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
+        followupOnSuggestions: true,
+      })
+    ).toBe(true);
+    expect(isSuggestionHoldEnabled({ state: "missing" })).toBe(false);
+    expect(isSuggestionHoldEnabled({ state: "invalid", error: "bad" })).toBe(false);
+  });
+
+  test("hold off when automerge is off, hold key is false, mode is restricted, or deployment is off", () => {
+    const off = parseRepoSettingsText("automerge: false\nsuggestions_hold_merge: true\n");
+    expect(off.ok).toBe(true);
+    if (!off.ok) return;
+    const base = {
+      state: "valid" as const,
+      ...off.settings,
+      reviewExclude: off.settings.reviewExclude,
+      takeoverAuthors: [] as string[],
+      ignoreConflictsAuthors: [] as string[],
+      blockingQuestionAuthors: [] as string[],
+      mode: "full" as const,
+      reviewDrafts: false,
+      reviewBudget: {},
+      timeouts: {},
+      automergeLabel: "automerge",
+      noAutomergeLabel: "no-automerge",
+      followupOnSuggestions: true,
+    };
+    expect(isSuggestionHoldEnabled(base)).toBe(false);
+    expect(isSuggestionHoldEnabled({ ...base, automerge: true, suggestionsHoldMerge: false })).toBe(false);
+    expect(
+      isSuggestionHoldEnabled({ ...base, automerge: true, suggestionsHoldMerge: undefined, mode: "review-only" })
+    ).toBe(false);
+    expect(isSuggestionHoldEnabled({ ...base, automerge: true, suggestionsHoldMerge: undefined }, false)).toBe(false);
+    expect(isSuggestionFollowupEnabled({ ...base, followupOnSuggestions: false })).toBe(false);
   });
 });
