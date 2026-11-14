@@ -230,10 +230,25 @@ function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRu
     existing = {};
   }
   const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
-  env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+  const next: Record<string, unknown> = {
     ...existing,
     permissions: [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv))],
-  });
+  };
+  // Reviews load the base branch's skills and instructions from outside the
+  // checkout. The head's project config never loads
+  // (`OPENCODE_DISABLE_PROJECT_CONFIG=1` below); the base copy arrives here.
+  if (opts.trace?.kind === "review" && opts.baseInstructionsDir) {
+    const base = opts.baseInstructionsDir;
+    const skills = [...listOf(existing.skills), join(base, "skills")];
+    const instructions = [...listOf(existing.instructions)];
+    for (const name of ["AGENTS.md", "CLAUDE.md"] as const) {
+      const candidate = join(base, name);
+      if (!instructions.includes(candidate)) instructions.push(candidate);
+    }
+    next.skills = skills;
+    next.instructions = instructions;
+  }
+  env.OPENCODE_CONFIG_CONTENT = JSON.stringify(next);
 }
 
 function openCodeXdgDataHome(tempRoot: string): string {
@@ -382,6 +397,7 @@ export function buildEnv(
   // child with no restart. The resolved value lives only in this local and
   // the child env: never written back to process.env, never logged.
   const apiKey = resolveOpenCodeApiKey();
+  const isReview = opts.trace?.kind === "review";
   if (!opts.sanitizeEnv) {
     const env = {
       ...process.env,
@@ -392,6 +408,9 @@ export function buildEnv(
       OPENCODE_DB: openCodeDbPath,
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
+    // Reviews never load the head's project config. The forge deny still
+    // applies through the inline config below.
+    if (isReview) env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
     if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
     else if (apiKey.filePath) delete env.OPENCODE_API_KEY;
     if (apiKey.filePath && !apiKey.key) {
@@ -418,6 +437,9 @@ export function buildEnv(
     OPENCODE_MODEL: opts.model,
     OPENCODE_DB: openCodeDbPath,
   };
+  // Reviews never load the head's project config. The forge deny still
+  // applies through the seeded global config and the inline config below.
+  if (opts.trace?.kind === "review") env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
   if (opts.variant) env.OPENCODE_VARIANT = opts.variant;
 
   if (apiKey.key) env.OPENCODE_API_KEY = apiKey.key;
