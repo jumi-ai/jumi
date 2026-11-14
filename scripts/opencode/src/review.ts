@@ -362,6 +362,15 @@ export function reviewJobKey(job: ReviewJob): string {
   return `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`;
 }
 
+/**
+ * Internal action for a body-only re-review: a follow-up round changed only
+ * the Jumi-owned PR body region on a head whose last review failed, so the
+ * same head is queued again without a code push. `pull_request edited` stays
+ * unhandled: human body edits never use this action and never wake the
+ * reviewer through it.
+ */
+export const BODY_ONLY_REVIEW_ACTION = "followup-body";
+
 function markerFor(owner: string, repo: string, prNumber: number): string {
   return `<!-- jumi-review:${owner}/${repo}#${prNumber} -->`;
 }
