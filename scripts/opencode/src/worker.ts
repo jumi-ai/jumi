@@ -834,6 +834,7 @@ export async function processWorkerTick(
         forge: effectiveConfig.forge,
         issueNumber: job.issueNumber,
       },
+      reviewQueue: store,
     };
     const runImplement = extras.implement ?? implementIssue;
     const runFollowUp = extras.followUp ?? implementFollowUp;

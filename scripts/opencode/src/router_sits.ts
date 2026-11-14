@@ -29,6 +29,7 @@ export const ROUTER_SIT_REASONS = [
   "no-write-access",
   "not-labeled",
   "conflict-ignored",
+  "waiting-maintainer",
 ] as const;
 
 export type RouterSitReason = (typeof ROUTER_SIT_REASONS)[number];
@@ -115,7 +116,6 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text === "success trailer") return undefined;
   if (text === "comment already handled") return undefined;
   if (text === "no unhandled feedback") return undefined;
-  if (text.startsWith("stuck: too many")) return undefined;
   if (text === "failed to load issue") return undefined;
   if (text.startsWith("failed to load ")) return undefined;
   if (text.startsWith("failed to re-check")) return undefined;
@@ -168,6 +168,10 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
 
   // Left to the author via the ignore-conflicts label.
   if (text.toLowerCase().startsWith("conflicted, left to author")) return "conflict-ignored";
+
+  // Maintainer-only review question: the worker cannot act, a human answers on the forge.
+  if (text === "waiting on maintainer") return "waiting-maintainer";
+  if (text === "waiting-maintainer") return "waiting-maintainer";
 
   return undefined;
 }

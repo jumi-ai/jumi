@@ -48,6 +48,24 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("do not construct file or release URLs from memory");
   });
 
+  test("maintainer-only actions are ❓ for the maintainer, never 🟡/🔴", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+
+    expect(prompt).toContain("only fix needs a maintainer is a ❓");
+    expect(prompt).toContain("never a 🟡 or 🔴");
+    expect(prompt).toContain("pushing to the branch and writing the PR description");
+    expect(prompt).toContain("filing or closing another issue");
+    expect(prompt).toContain("changing labels or assignment");
+    expect(prompt).toContain("ship part 1 now or keep going");
+    expect(prompt).toContain("PR description itself stay ordinary");
+    expect(prompt).toContain("JUMI_PR.md");
+    expect(prompt).toContain("❓ maintainer:");
+  });
+
   test("asks for JUMI_REVIEW.md with the review rubric and no commit or push", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),

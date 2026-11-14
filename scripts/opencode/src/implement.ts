@@ -111,7 +111,7 @@ import {
   parseRepositoryLines,
   trackerRefOfJob,
 } from "./tracker.ts";
-import type { IssueJob } from "./types.ts";
+import type { IssueJob, ReviewJob } from "./types.ts";
 import {
   type GitAuthResolver,
   type GitRunner,
@@ -288,6 +288,13 @@ export interface ImplementOptions extends PickupPolicy {
     kind: string;
     forge: string;
     issueNumber: number;
+  };
+  /**
+   * Enqueue a fresh review of the same head after a body-only PR update.
+   * Unset keeps the legacy no-op path (tests, local/dev without a ledger).
+   */
+  reviewQueue?: {
+    enqueue(job: ReviewJob): Promise<{ key: string; queued: boolean }> | { key: string; queued: boolean };
   };
 }
 

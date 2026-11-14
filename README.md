@@ -27,7 +27,7 @@ assign issue to bot
       → ledger kind conflict (capped, same branch)
 ```
 
-Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per skip-latch generation (CI follow-up is a separate per-`{head SHA, failed check}` budget). Cancel/unassign/unlabel bumps generation so a later pickup can handover again; succeeded history may remain. Missing `JUMI_REVIEW.md` after OpenCode exit 0 retries at most twice on that head, then posts stuck (not worker follow-up). Stuck loops (same finding 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check.
+Unassign is the kill switch. Caps: 3 review-comment follow-up rounds and 3 conflict rounds per skip-latch generation (CI follow-up is a separate per-`{head SHA, failed check}` budget). Cancel/unassign/unlabel bumps generation so a later pickup can handover again; succeeded history may remain. Missing `JUMI_REVIEW.md` after OpenCode exit 0 retries at most twice on that head, then posts stuck (not worker follow-up). Stuck loops (same blocking finding identity 3× on an unchanged PR diff as `stuck: same finding repeated`, same feedback 4×, same error 3×, A→B→A) skip OpenCode that round and do not fail the review check. The same-finding latch names the finding and sits kickable on the board; base merges alone do not count as PR-diff progress.
 
 ## Control plane
 

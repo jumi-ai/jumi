@@ -110,6 +110,7 @@ import {
   loadRepoSettings,
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
+import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -121,16 +122,25 @@ import {
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
+  fingerprintFindingIdentityFromParts,
   fingerprintFollowUpText,
+  fingerprintPrDiffFromFiles,
+  fingerprintSameFinding,
   isQuotaStuck,
   markQuotaStuckLatch,
   readStuckLatch,
+  sameFindingDisplayFromParts,
+  sameFindingLatchReasonFromParts,
   stuckComment,
 } from "./stuck.ts";
-import type { IssueJob } from "./types.ts";
+import type { IssueJob, ReviewJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
+  countMaintainerQuestionFindings,
+  countQuestionFindings,
   isBlockingQuestionAuthor,
+  isMaintainerOnlyTrailerText,
+  isMaintainerQuestionInline,
   isQuestionInline,
   parseCheckLine,
   trailerSuggestionCount,
@@ -349,6 +359,46 @@ export function isJumiPullReviewWriteup(review: PullReview, botUsername: string)
 export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
+}
+
+/** Queue a fresh review only when Jumi changed the body on a failed head. */
+export function shouldQueueReviewAfterBodyChange(bodyChanged: boolean, lastReviewFailedOnHead: boolean): boolean {
+  return bodyChanged && lastReviewFailedOnHead;
+}
+
+/**
+ * Whether the latest Jumi review on this head failed. Only reviews whose
+ * `Reviewed commit` matches the head count; an older head's failure never
+ * re-queues the current head, and a success on this head never re-queues.
+ */
+export function isLastJumiReviewFailedOnHead(
+  items: { jumiReviews: readonly PullReview[]; jumiStickies: readonly Comment[] },
+  headSha: string,
+  botUsername: string
+): boolean {
+  const candidates: { at: string; failed: boolean }[] = [];
+  for (const review of items.jumiReviews) {
+    if (!isJumiPullReviewWriteup(review, botUsername)) continue;
+    const sha = pullReviewFindingSha(review);
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    const trailer = lastCheckTrailer(pullReviewBody(review));
+    if (!trailer) continue;
+    candidates.push({
+      at: review.submitted_at ?? review.updated_at ?? review.created_at ?? "",
+      failed: trailer.state === "failure",
+    });
+  }
+  for (const comment of items.jumiStickies) {
+    if (!isJumiReviewSticky(comment, botUsername)) continue;
+    const sha = parseReviewedCommitSha(comment.body ?? "");
+    if (!sha || !commitMatchesHead(sha, headSha)) continue;
+    const trailer = lastCheckTrailer(comment.body ?? "");
+    if (!trailer) continue;
+    candidates.push({ at: comment.created_at ?? "", failed: trailer.state === "failure" });
+  }
+  if (candidates.length === 0) return false;
+  candidates.sort((a, b) => a.at.localeCompare(b.at));
+  return candidates[candidates.length - 1]?.failed === true;
 }
 
 export function isJumiPullReviewFinding(
@@ -703,6 +753,80 @@ function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
   return items.jumiInlines.filter(isUnresolvedInline);
 }
 
+/**
+ * A Jumi pull review whose only open questions are maintainer-only:
+ * a complete success trailer with zero suggestions, every body `❓` marked
+ * `❓ maintainer:`, and every open question inline for that review marked
+ * `❓ maintainer:`. At least one question (body or inline) must remain;
+ * failures and suggestion trailers never count.
+ */
+function isMaintainerOnlyPullReview(
+  review: PullReview,
+  allJumiInlines: readonly InlineComment[],
+  botUsername?: string
+): boolean {
+  const body = review.body ?? review.content ?? "";
+  const trailer = lastCheckTrailer(body);
+  if (trailer?.state !== "success") return false;
+  if (trailerSuggestionCount(trailer.reason) !== 0) return false;
+  const bodyQuestions = countQuestionFindings(body);
+  const bodyMaintainers = countMaintainerQuestionFindings(body);
+  if (bodyQuestions !== bodyMaintainers) return false;
+  const inlines = allJumiInlines.filter(
+    (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === review.id
+  );
+  let inlineQuestions = 0;
+  for (const inline of inlines) {
+    if (!isBlockingQuestionInline(inline, botUsername)) continue;
+    inlineQuestions++;
+    if (!isMaintainerQuestionInline(inline.path, inline.body)) return false;
+  }
+  if (bodyQuestions + inlineQuestions === 0) return false;
+  return true;
+}
+
+/**
+ * Whether every unhandled item is a maintainer-only `❓`: no unhandled
+ * human comments, inlines, or reviews, and every unhandled Jumi finding
+ * is maintainer-only. Then the worker must not start a round only to
+ * answer it; the board keeps the PR visible as waiting on a maintainer.
+ */
+function onlyMaintainerQuestionsPending(
+  items: FollowUpItems,
+  state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">,
+  botUsername: string
+): boolean {
+  const handledComments = new Set(state.handledCommentIds);
+  const handledReviews = new Set(state.handledReviewIds);
+  const handledFindings = new Set(
+    state.handledReviewFindings.map((finding) => reviewFindingKey(finding.id, finding.sha))
+  );
+  // Human feedback always needs the worker.
+  if (items.inlines.some((comment) => !handledComments.has(comment.id))) return false;
+  if (items.reviews.some((review) => !handledReviews.has(review.id))) return false;
+  let foundMaintainer = false;
+  for (const comment of items.comments) {
+    const finding = reviewFindingFromComment(comment);
+    if (!finding) {
+      if (!handledComments.has(comment.id)) return false;
+      continue;
+    }
+    if (handledFindings.has(reviewFindingKey(finding.id, finding.sha))) continue;
+    if (!isMaintainerOnlyTrailerText(comment.body)) return false;
+    foundMaintainer = true;
+  }
+  for (const review of items.jumiFindingReviews ?? []) {
+    const finding = reviewFindingFromReview(review);
+    const unhandled = finding
+      ? !handledFindings.has(reviewFindingKey(finding.id, finding.sha))
+      : !handledReviews.has(review.id);
+    if (!unhandled) continue;
+    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername)) return false;
+    foundMaintainer = true;
+  }
+  return foundMaintainer;
+}
+
 function earlierJumiReviews(items: FollowUpItems, lastReview?: Comment): Comment[] {
   const skip = lastReview?.id;
   const out: Comment[] = [];
@@ -825,6 +949,10 @@ export async function needsFollowUp(opts: {
     effectiveTrusted
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
+  // Maintainer-only ❓ needs a human (forge action or scope decision), not
+  // a worker round: filing/closing another issue, labels/assignment, or
+  // "ship part 1 now or keep going" cannot be answered from the branch.
+  if (onlyMaintainerQuestionsPending(items, state, opts.botUsername)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
     return false;
   }
@@ -1167,6 +1295,11 @@ export async function implementFollowUp(
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
   let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
+  // Maintainer-only ❓ is answered on the forge, not from the branch: never
+  // start a worker round only for it.
+  if (hasFeedback && onlyMaintainerQuestionsPending(pendingItems, state, opts.botUsername)) {
+    hasFeedback = false;
+  }
   let requiredContexts: readonly string[] | undefined;
   if (ciGateWaitUpFront !== "all" && ciGateWaitUpFront !== "none") {
     requiredContexts = await resolveRequiredCiContexts(opts.api, {
@@ -1318,6 +1451,56 @@ export async function implementFollowUp(
     : ciHash
       ? { kind: "ci" as const, hash: ciHash }
       : undefined;
+  // Same-finding stuck: the same blocking finding identity repeats while the
+  // PR's own diff has not moved. Base merges change the head SHA but not the
+  // three-dot diff, so the diff hash stays stable across them. A real change
+  // to the PR diff (or a different finding) changes the combined hash and
+  // resets the consecutive count. Fail-open when the diff is unreadable.
+  // The identity covers both the latest review body and unresolved Jumi
+  // inlines: an inline-only repeat has an empty top-level body, so gate on
+  // `hasFeedback` alone and let the helper return undefined when both inputs
+  // are empty.
+  const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
+  const jumiInlinesForIdentity = unresolvedJumiInlines(pendingItems);
+  const findingIdentityHash = hasFeedback
+    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
+    : undefined;
+  let prDiffHash: string | undefined;
+  if (findingIdentityHash) {
+    try {
+      const getFiles = (
+        opts.api as unknown as {
+          getPRFiles?: (
+            owner: string,
+            repo: string,
+            index: number
+          ) => Promise<
+            ReadonlyArray<{
+              filename: string;
+              patch?: string | null | undefined;
+              status?: string | null | undefined;
+              additions?: number | null | undefined;
+              deletions?: number | null | undefined;
+              changes?: number | null | undefined;
+            }>
+          >;
+        }
+      ).getPRFiles;
+      if (typeof getFiles === "function") {
+        const files = await getFiles.call(opts.api, owner, repo, pr.number);
+        prDiffHash = fingerprintPrDiffFromFiles(files);
+      }
+    } catch (err) {
+      log(
+        `same-finding diff unavailable for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      prDiffHash = undefined;
+    }
+  }
+  const sameFindingCurrent =
+    findingIdentityHash && prDiffHash
+      ? { kind: "finding" as const, hash: fingerprintSameFinding(findingIdentityHash, prDiffHash) }
+      : undefined;
   const stuckState = await readStuckLatch(latches, latchKey);
   if (isQuotaStuck(stuckState)) {
     const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
@@ -1330,6 +1513,22 @@ export async function implementFollowUp(
     await sticky(stuckComment(stuckReason), pr.number);
     await forgetClaim();
     return { status: "skipped", reason: stuckComment(stuckReason) };
+  }
+  if (sameFindingCurrent) {
+    const sameFindingStuck = evaluateStuck(stuckState.fingerprints, sameFindingCurrent);
+    if (sameFindingStuck === "same-finding") {
+      const latchReason = sameFindingLatchReasonFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
+      const display = sameFindingDisplayFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
+      log(`same finding repeated${display ? ` (${display})` : ""} on unchanged diff for ${owner}/${repo}#${pr.number}`);
+      await sticky(latchReason, pr.number);
+      await forgetClaim();
+      return { status: "skipped", reason: latchReason };
+    }
+    if (sameFindingStuck) {
+      await sticky(stuckComment(sameFindingStuck), pr.number);
+      await forgetClaim();
+      return { status: "skipped", reason: stuckComment(sameFindingStuck) };
+    }
   }
 
   const loop = openClaimedLoop(claimed, opts);
@@ -1449,16 +1648,29 @@ export async function implementFollowUp(
     if (currentFingerprint) {
       await appendStuckLatchFingerprint(latches, latchKey, currentFingerprint, now);
     }
+    if (sameFindingCurrent) {
+      await appendStuckLatchFingerprint(latches, latchKey, sameFindingCurrent, now);
+    }
     await persistCi();
   };
 
   // After a pushed follow-up, rewrite only the jumi-owned region from JUMI_PR.md.
   // Missing/empty artifact or an unfenced body leaves the posted body alone, and
-  // a forge failure here must not fail a good code fix.
-  const refreshPullRequestBody = async (description: string | null) => {
-    if (description == null || !description.replaceAll("\0", "").trim()) return;
+  // a forge failure here must not fail a good code fix. Returns the live head
+  // and timestamp from the same `getPR` so a body-only requeue never enqueues
+  // the stale snapshot with no `prUpdatedAt` (which would cancel a newer
+  // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
+  const refreshPullRequestBody = async (
+    description: string | null,
+    fallbackHeadSha?: string
+  ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
+    const fallback = fallbackHeadSha || pr.head.sha;
+    if (description == null || !description.replaceAll("\0", "").trim()) return { changed: false, headSha: fallback };
     try {
       const live = await opts.api.getPR(owner, repo, pr.number);
+      const liveHeadSha = live.head?.sha ?? fallback;
+      const liveUpdatedAt = typeof live.updated_at === "string" && live.updated_at ? live.updated_at : undefined;
+      const seen = { headSha: liveHeadSha, ...(liveUpdatedAt ? { prUpdatedAt: liveUpdatedAt } : {}) };
       const body = replaceJumiPrBodyRegion(
         live.body,
         buildPullRequestBody(
@@ -1469,11 +1681,49 @@ export async function implementFollowUp(
           followupConventions.closingKeyword
         )
       );
-      if (body == null || body === live.body) return;
+      if (body == null || body === live.body) return { changed: false, ...seen };
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
+      return { changed: true, ...seen };
     } catch (err) {
       log(
         `PR body refresh failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return { changed: false, headSha: fallback };
+    }
+  };
+
+  // A body-only round never pushes, so GitHub `edited` never wakes the
+  // reviewer. When this round changed the Jumi-owned region on a head whose
+  // last Jumi review failed, queue that live head again. Human edits outside
+  // the fence never reach this path, and an unchanged body never re-queues.
+  const maybeQueueBodyOnlyReview = async (
+    refreshed: { changed: boolean; headSha: string; prUpdatedAt?: string },
+    fallbackHeadSha: string
+  ): Promise<void> => {
+    if (!opts.reviewQueue) return;
+    const headSha = refreshed.headSha || fallbackHeadSha;
+    if (
+      !shouldQueueReviewAfterBodyChange(
+        refreshed.changed,
+        isLastJumiReviewFailedOnHead(pendingItems, headSha, opts.botUsername)
+      )
+    )
+      return;
+    const job: ReviewJob = {
+      delivery: `followup-body-${pr.number}-${headSha}`,
+      owner,
+      repo,
+      prNumber: pr.number,
+      action: BODY_ONLY_REVIEW_ACTION,
+      headSha,
+      receivedAt: new Date().toISOString(),
+      ...(refreshed.prUpdatedAt ? { prUpdatedAt: refreshed.prUpdatedAt } : {}),
+    };
+    try {
+      await opts.reviewQueue.enqueue(job);
+    } catch (err) {
+      log(
+        `body-only review requeue failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   };
@@ -1928,7 +2178,8 @@ export async function implementFollowUp(
       const porcelain = await worktreePorcelain(loop);
       if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-        await refreshPullRequestBody(prFileContents);
+        const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+        await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
         await sticky("no follow-up changes", pr.number);
         await recordAttempt(sha || pr.head.sha);
         await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });

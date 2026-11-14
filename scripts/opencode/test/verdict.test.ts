@@ -2,11 +2,15 @@ import { describe, expect, test } from "bun:test";
 import {
   blockingOpenQuestionCount,
   buildFindingsList,
+  countMaintainerQuestionFindings,
   countQuestionFindings,
   findingFingerprint,
   findingListLine,
+  hasOnlyMaintainerQuestions,
   hasPublishedFindings,
   isBlockingQuestionAuthor,
+  isMaintainerOnlyQuestionText,
+  isMaintainerQuestionInline,
   isQuestionInline,
   keepReviewFindingLines,
   parseReviewFindings,
@@ -377,6 +381,42 @@ describe("blocking questions", () => {
     expect(isQuestionInline("src/foo.ts", "🔴 bug: null deref.")).toBe(false);
     expect(isQuestionInline("src/foo.ts", "Was the default re-checked?")).toBe(false);
     expect(isQuestionInline(undefined, "❓ q: is the timeout intentional?")).toBe(true);
+  });
+
+  test("maintainer-only questions are detected and mixed reviews are not", () => {
+    const maintainer =
+      "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the second scope?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(maintainer)).toBe(1);
+    expect(hasOnlyMaintainerQuestions(maintainer)).toBe(true);
+    expect(isMaintainerOnlyQuestionText("src/foo.ts:12: ❓ maintainer: please close the other issue?")).toBe(true);
+
+    const worker = "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(worker)).toBe(0);
+    expect(hasOnlyMaintainerQuestions(worker)).toBe(false);
+
+    const mixed = [
+      "src/foo.ts:12: ❓ maintainer: please change the label?",
+      "src/bar.ts:7: ❓ q: is the timeout intentional?",
+      "<!-- jumi-check: success -->",
+    ].join("\n");
+    expect(hasOnlyMaintainerQuestions(mixed)).toBe(false);
+
+    const failure = "src/foo.ts:12: ❓ maintainer: please decide the scope?\n<!-- jumi-check: failure; 1 blocking -->";
+    expect(hasOnlyMaintainerQuestions(failure)).toBe(false);
+  });
+
+  test("a path or wording that merely mentions maintainer is not maintainer-only", () => {
+    const pathMention = "src/maintainer.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(pathMention)).toBe(0);
+    expect(hasOnlyMaintainerQuestions(pathMention)).toBe(false);
+    expect(isMaintainerOnlyQuestionText("src/maintainer.ts:12: ❓ q: is the timeout intentional?")).toBe(false);
+
+    const bodyMention = "src/foo.ts:12: ❓ q: the maintainer script is confusing?\n<!-- jumi-check: success -->";
+    expect(countMaintainerQuestionFindings(bodyMention)).toBe(0);
+    expect(hasOnlyMaintainerQuestions(bodyMention)).toBe(false);
+
+    expect(isMaintainerQuestionInline("src/maintainer.ts", "❓ q: is the timeout intentional?")).toBe(false);
+    expect(isMaintainerQuestionInline("src/foo.ts", "❓ maintainer: please file the follow-up issue?")).toBe(true);
   });
 });
 
