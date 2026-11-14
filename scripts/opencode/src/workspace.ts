@@ -1,5 +1,6 @@
+import { accessSync, constants as fsConstants, mkdirSync, statSync } from "node:fs";
 import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
@@ -235,19 +236,198 @@ export function gitOpenCodeChildEnv(auth: GitAuth, workdir?: string): Record<str
   };
 }
 
-export function workerOpenCodeChildEnv(auth: GitAuth, workdir: string): Record<string, string> {
-  const javaHome = process.env.JAVA_HOME || "/opt/java/openjdk";
-  const workRoot = process.env.WORKDIR || "/work";
+export function workerOpenCodeChildEnv(
+  auth: GitAuth,
+  workdir: string,
+  opts?: WorkerChildEnvOptions | ((message: string) => void)
+): Record<string, string> {
+  const resolved = normalizeWorkerChildEnvOpts(opts);
+  const javaHome = resolved.javaHome ?? process.env.JAVA_HOME ?? "/opt/java/openjdk";
+  const workRoot = resolved.workRoot ?? process.env.WORKDIR ?? "/work";
   const path = process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin";
   const scratch = childScratchDir(workdir);
+  const home = resolveEffectiveWorkerHome({
+    home: resolved.home,
+    workRoot,
+    logger: resolved.logger,
+  });
+  const caches = workerToolCacheEnv(workdir, {
+    owner: resolved.owner,
+    repo: resolved.repo,
+    workRoot,
+    cacheDir: resolved.cacheDir,
+  });
+  const javaToolOptions = withJavaOpts(scratch, home, caches.mavenRepo);
   return {
     ...gitOpenCodeChildEnv(auth, workdir),
+    HOME: home,
     JAVA_HOME: javaHome,
     PATH: `${join(javaHome, "bin")}:${path}`,
-    JAVA_TOOL_OPTIONS: `-Djava.io.tmpdir=${scratch}`,
-    GRADLE_USER_HOME: join(workRoot, ".gradle"),
+    JAVA_TOOL_OPTIONS: javaToolOptions,
+    MAVEN_OPTS: `-Dmaven.repo.local=${caches.mavenRepo}`,
+    GRADLE_USER_HOME: caches.gradleHome,
     GRADLE_OPTS: "-Dorg.gradle.daemon=false",
+    ANDROID_USER_HOME: caches.androidHome,
+    ANDROID_HOME: caches.androidSdk,
+    ANDROID_SDK_ROOT: caches.androidSdk,
+    KONAN_DATA_DIR: caches.konanDir,
+    npm_config_cache: caches.npmCache,
+    BUN_INSTALL_CACHE_DIR: caches.bunCache,
+    UV_CACHE_DIR: caches.uvCache,
+    PIP_CACHE_DIR: caches.pipCache,
+    XDG_CACHE_HOME: caches.xdgCache,
   };
+}
+
+/** Options for `workerOpenCodeChildEnv` (a bare logger function stays accepted). */
+export interface WorkerChildEnvOptions {
+  owner?: string;
+  repo?: string;
+  logger?: (message: string) => void;
+  home?: string;
+  workRoot?: string;
+  cacheDir?: string;
+  javaHome?: string;
+}
+
+function normalizeWorkerChildEnvOpts(
+  opts?: WorkerChildEnvOptions | ((message: string) => void)
+): WorkerChildEnvOptions {
+  if (!opts) return {};
+  if (typeof opts === "function") return { logger: opts };
+  return opts;
+}
+
+function isWritableDirSync(path: string): boolean {
+  try {
+    const info = statSync(path);
+    if (!info.isDirectory()) return false;
+    accessSync(path, fsConstants.W_OK | fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Effective HOME for a worker child. The image passwd entry points at
+ * `/data` (read-only under `readOnlyRootFilesystem`), while `$HOME` on a Job
+ * pod is a per-pod writable emptyDir. Probe `$HOME`; when it is missing or
+ * not writable, fall back to `$WORKDIR/.home` (per job, never shared) and log
+ * one line. Only caches are shared via `JUMI_CACHE_DIR`.
+ */
+export function resolveEffectiveWorkerHome(opts?: {
+  home?: string;
+  workRoot?: string;
+  logger?: (message: string) => void;
+}): string {
+  const workRoot = opts?.workRoot ?? process.env.WORKDIR ?? "/work";
+  const raw = (opts?.home ?? process.env.HOME ?? "").trim();
+  if (raw && isWritableDirSync(raw)) return raw;
+  const fallback = join(workRoot, ".home");
+  try {
+    mkdirSync(fallback, { recursive: true });
+  } catch {
+    // Best effort: the child still gets a writable-looking HOME value.
+  }
+  opts?.logger?.(`HOME ${raw || "(unset)"} is missing or not writable, using ${fallback} instead`);
+  return fallback;
+}
+
+export interface WorkerToolCaches {
+  gradleHome: string;
+  androidHome: string;
+  androidSdk: string;
+  konanDir: string;
+  mavenRepo: string;
+  npmCache: string;
+  bunCache: string;
+  uvCache: string;
+  pipCache: string;
+  xdgCache: string;
+}
+
+function inferOwnerRepo(workdir: string, workRoot: string): { owner?: string; repo?: string } {
+  try {
+    const rel = relative(workRoot, workdir);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) return {};
+    const parts = rel.split(sep).filter(Boolean);
+    if (parts.length < 2) return {};
+    return { owner: parts[0], repo: parts[1] };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Per-repository tool caches. When `JUMI_CACHE_DIR` is set the base is
+ * `<cache>/<owner>/<repo>/` (a deployer-provided volume shared across jobs);
+ * unset it keeps a writable per-pod location (`$WORKDIR/.gradle` for Gradle,
+ * the rest under `$WORKDIR/.cache`). Nothing returned here is inside the
+ * worktree or `.jumi-tmp`: only the JVM tmpdir lives there.
+ */
+export function workerToolCacheEnv(
+  workdir: string,
+  opts?: { owner?: string; repo?: string; workRoot?: string; cacheDir?: string }
+): WorkerToolCaches {
+  const workRoot = opts?.workRoot ?? process.env.WORKDIR ?? "/work";
+  const rawCache = (opts?.cacheDir ?? process.env.JUMI_CACHE_DIR ?? "").trim();
+  const inferred = inferOwnerRepo(workdir, workRoot);
+  const owner = opts?.owner ?? inferred.owner;
+  const repo = opts?.repo ?? inferred.repo;
+  // Reject traversal segments whenever the caller names a repository, even
+  // when the cache root is unset (per-pod layout ignores the names).
+  if (opts?.owner !== undefined) assertSafeSegment(opts.owner, "owner");
+  if (opts?.repo !== undefined) assertSafeSegment(opts.repo, "repo");
+  if (rawCache) {
+    if (owner === undefined || repo === undefined) {
+      const base = join(workRoot, ".cache");
+      return podToolCaches(workRoot, base);
+    }
+    const base = join(rawCache, assertSafeSegment(owner, "owner"), assertSafeSegment(repo, "repo"));
+    return {
+      gradleHome: join(base, "gradle"),
+      androidHome: join(base, "android"),
+      androidSdk: join(base, "android-sdk"),
+      konanDir: join(base, "konan"),
+      mavenRepo: join(base, "maven"),
+      npmCache: join(base, "npm"),
+      bunCache: join(base, "bun"),
+      uvCache: join(base, "uv"),
+      pipCache: join(base, "pip"),
+      xdgCache: join(base, "xdg"),
+    };
+  }
+  return podToolCaches(workRoot, join(workRoot, ".cache"));
+}
+
+function podToolCaches(workRoot: string, base: string): WorkerToolCaches {
+  return {
+    gradleHome: join(workRoot, ".gradle"),
+    androidHome: join(base, "android"),
+    androidSdk: join(base, "android-sdk"),
+    konanDir: join(base, "konan"),
+    mavenRepo: join(base, "maven"),
+    npmCache: join(base, "npm"),
+    bunCache: join(base, "bun"),
+    uvCache: join(base, "uv"),
+    pipCache: join(base, "pip"),
+    xdgCache: join(base, "xdg"),
+  };
+}
+
+/** `JAVA_TOOL_OPTIONS` for a worker child: tmpdir + user.home + maven repo, no duplicates. */
+function withJavaOpts(scratch: string, home: string, mavenRepo: string): string {
+  const parts = [`-Djava.io.tmpdir=${scratch}`, `-Duser.home=${home}`, `-Dmaven.repo.local=${mavenRepo}`];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of parts) {
+    const key = part.split("=")[0] ?? part;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(part);
+  }
+  return out.join(" ");
 }
 
 /**
@@ -281,9 +461,10 @@ async function makeCopiedTreeOwnerWritable(root: string): Promise<void> {
  * cold (no extra env). The wrapper copy is kept when only the dependency
  * cache is missing; a failed copy never touches the live destination, so one
  * job's copy error never deletes the shared
- * `$GRADLE_USER_HOME/wrapper/dists` another concurrent job populated and may
- * be running Gradle from (`GRADLE_USER_HOME` is shared by every worker job on
- * the host and the queue runs jobs concurrently). The seed is first copied to
+ * `$GRADLE_USER_HOME/wrapper/dists` another concurrent job of the same
+ * repository populated and may be running Gradle from (per-repository
+ * `GRADLE_USER_HOME` may be shared by concurrent jobs of one repository and
+ * the queue runs jobs concurrently). The seed is first copied to
  * a temp sibling (`wrapper/.dists.seed-*`) and only merged/renamed over
  * `dists` on success. Merging into a pre-existing destination is intentional:
  * stale dists from a rotated seed accumulate rather than risk deleting a live
@@ -329,10 +510,10 @@ export async function prepareGradleSeed(
   }
   if (srcStat?.isDirectory()) {
     const dest = join(gradleUserHome, "wrapper", "dists");
-    // GRADLE_USER_HOME is shared by every worker job on the host, so dest may
-    // already hold a live tree another concurrent job populated. Stage the copy
-    // in a temp sibling and only touch dest on success: a failed copy removes
-    // just the staging dir, never the live tree (no `destExisted` check, which
+    // Per-repository GRADLE_USER_HOME may be shared by concurrent jobs of one
+    // repository, so dest may already hold a live tree another job populated.
+    // Stage the copy in a temp sibling and only touch dest on success: a failed
+    // copy removes just the staging dir, never the live tree (no `destExisted` check, which
     // races when two cold-start jobs both see a missing dest).
     let tmpRoot: string | undefined;
     let staging: string | undefined;
@@ -381,10 +562,11 @@ export async function prepareGradleSeed(
 export async function workerOpenCodeChildEnvWithGradleSeed(
   auth: GitAuth,
   workdir: string,
-  logger?: (message: string) => void
+  opts?: WorkerChildEnvOptions | ((message: string) => void)
 ): Promise<Record<string, string>> {
-  const base = workerOpenCodeChildEnv(auth, workdir);
-  const seedEnv = await prepareGradleSeed(base.GRADLE_USER_HOME, { logger });
+  const resolved = normalizeWorkerChildEnvOpts(opts);
+  const base = workerOpenCodeChildEnv(auth, workdir, resolved);
+  const seedEnv = await prepareGradleSeed(base.GRADLE_USER_HOME, { logger: resolved.logger });
   return { ...base, ...seedEnv };
 }
 

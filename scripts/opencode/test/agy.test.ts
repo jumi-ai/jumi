@@ -21,10 +21,10 @@ import {
 } from "../src/agy.ts";
 import { AgyStreamParser } from "../src/agy_usage.ts";
 import { AUTH_DEATH_REASON } from "../src/auth.ts";
-import { resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { classifyRunnerOutcome, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
-import { agyConversationPath, withEngineChain } from "../src/fallback.ts";
+import { agyConversationPath, isProviderUnavailableResult, withEngineChain } from "../src/fallback.ts";
 import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { SEARXNG_SERVER_NAME } from "../src/searxng.ts";
@@ -617,6 +617,86 @@ exec sleep 30`
     });
   });
 
+  test("structured envelope errors log even with empty stderr", async () => {
+    const failed = resultEvent({ status: "ERROR", error: "RESOURCE_EXHAUSTED: quota per minute" });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const logs: string[] = [];
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+        logger: (message) => logs.push(message),
+      });
+      expect(result.status).toBe("stuck");
+      expect(result.quota).toBe("resetting");
+      expect(logs.some((line) => line.includes("[agy errors]") && line.includes("RESOURCE_EXHAUSTED"))).toBe(true);
+    });
+  });
+
+  test("envelope-only provider outage classifies as provider_down", async () => {
+    const failed = resultEvent({ status: "ERROR", error: "upstream 503 service unavailable" });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(result.auth).toBeFalsy();
+      expect(result.quota).toBeUndefined();
+      expect(result.message).toContain("503 service unavailable");
+      expect(classifyRunnerOutcome(result)).toBe("provider_down");
+      expect(isProviderUnavailableResult(result)).toBe(true);
+    });
+  });
+
+  test("provider message keeps agent stdout out", async () => {
+    const failed = resultEvent({
+      status: "ERROR",
+      response: "agent draft hello",
+      error: "upstream 503 service unavailable",
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(classifyRunnerOutcome(result)).toBe("provider_down");
+      expect(result.message).toContain("503 service unavailable");
+      // Agent text stays in stdout, never in the hop-classifier message.
+      expect(result.stdout).toContain("agent draft hello");
+      expect(result.message).not.toContain("agent draft hello");
+    });
+  });
+
+  test("agent text mentioning a provider phrase is not a provider outage", async () => {
+    const failed = resultEvent({
+      status: "ERROR",
+      response: "draft comment: service unavailable, will retry wording",
+      error: "tool failed",
+    });
+    await withFakeBins({ agy: fakeBin("agy", `printf '%s\\n' '${failed}'\nexit 1`) }, async ({ workdir, argsLog }) => {
+      const result = await runAgy({
+        prompt: "p",
+        model: "m",
+        workdir,
+        sanitizeEnv: true,
+        extraEnv: { ARGS_LOG: argsLog },
+      });
+      expect(result.status).toBe("exit");
+      expect(classifyRunnerOutcome(result)).not.toBe("provider_down");
+      expect(isProviderUnavailableResult(result)).toBe(false);
+    });
+  });
+
   test("signed-out keyring token is auth death", async () => {
     // Verified against Antigravity docs/issues: headless `authentication
     // required`, `Please sign in`, and keyring failures like `You are not
@@ -839,6 +919,30 @@ describe("agy dispatch and chain", () => {
         agy: fakeBin(
           "agy",
           `printf '%s\\n' '${resultEvent({ status: "ERROR", error: "RESOURCE_EXHAUSTED" })}'\nexit 1`
+        ),
+        claude: claudeBin,
+      },
+      async ({ workdir, argsLog }) => {
+        const engine = withEngineChain(registeredEngine, { chain: [agy, claude] });
+        const result = await engine({
+          prompt: "p",
+          model: agy.model,
+          workdir,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+        });
+        expect(result.status).toBe("ok");
+        expect(result.runner).toEqual(runnerStamp(claude));
+      }
+    );
+  });
+
+  test("envelope-only 5xx hops to the next runner", async () => {
+    await withFakeBins(
+      {
+        agy: fakeBin(
+          "agy",
+          `printf '%s\\n' '${resultEvent({ status: "ERROR", error: "upstream 503 service unavailable" })}'\nexit 1`
         ),
         claude: claudeBin,
       },

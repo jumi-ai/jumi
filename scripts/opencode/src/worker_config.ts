@@ -51,6 +51,7 @@ export interface WorkerConfig {
   home: string;
   workdir: string;
   gradleSeedHome?: string;
+  cacheDir?: string;
   queueConcurrency: number;
   maxOutputBytes: number;
   maxWebhookBytes: number;
@@ -205,6 +206,7 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
     home: optionalEnv(resolved, "HOME", "/data") ?? "/data",
     workdir: optionalEnv(resolved, "WORKDIR", "/work") ?? "/work",
     gradleSeedHome: optionalEnv(resolved, "GRADLE_SEED_HOME"),
+    cacheDir: optionalEnv(resolved, "JUMI_CACHE_DIR"),
     queueConcurrency: intEnv(resolved, "QUEUE_CONCURRENCY", 1),
     maxOutputBytes: intEnv(resolved, "MAX_OUTPUT_BYTES", 80_000),
     maxWebhookBytes: intEnv(resolved, "MAX_WEBHOOK_BYTES", 1_048_576),

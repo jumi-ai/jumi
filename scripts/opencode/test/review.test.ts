@@ -22,6 +22,7 @@ import {
   MAX_INCOMPLETE_RETRIES,
   publishReviewResult,
   reviewPullRequest,
+  skipReasonForPR,
 } from "../src/review.ts";
 import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -204,10 +205,50 @@ describe("reviewPullRequest", () => {
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ title: "WIP: no" }) }),
+        api: makeApi({ getPR: async () => makePR({ title: "WIP no" }) }),
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
+    await expect(
+      reviewPullRequest({
+        ...skipOptions,
+        api: makeApi({ getPR: async () => makePR({ title: "WIP: no" }) }),
+        openCodeRunner: runner,
+      })
+    ).resolves.toEqual({ status: "skipped", reason: "draft or WIP pull request" });
+  });
+
+  test("WIP: titles belong to the draft gate, bare wip to the title gate", async () => {
+    expect(skipReasonForPR(makePR({ title: "WIP: add thing" }))).toBeUndefined();
+    expect(skipReasonForPR(makePR({ title: "wip: add thing" }))).toBeUndefined();
+    expect(skipReasonForPR(makePR({ title: "  WIP: add thing" }))).toBeUndefined();
+    expect(skipReasonForPR(makePR({ title: "WIP add thing" }))).toBe("PR title disables review");
+    expect(skipReasonForPR(makePR({ title: "wip" }))).toBe("PR title disables review");
+    expect(skipReasonForPR(makePR({ title: "[wip] add thing" }))).toBe("PR title disables review");
+    expect(skipReasonForPR(makePR({ title: "[WIP]: add thing" }))).toBe("PR title disables review");
+    expect(skipReasonForPR(makePR({ title: "Add thing" }))).toBeUndefined();
+  });
+
+  test("reviews WIP: and draft PRs when review_drafts is enabled", async () => {
+    for (const pr of [makePR({ title: "WIP: add thing" }), makePR({ draft: true, title: "Add thing" })]) {
+      await withWorkspace(async (workspace) => {
+        let runs = 0;
+        const result = await reviewPullRequest({
+          ...reviewOptionsWithSha(workspace),
+          api: makeApi({
+            getPR: async () => ({ ...pr, head: makeBranch({ sha: REVIEW_SHA }) }),
+            getRepoFile: async () => ({ found: true, content: "review_drafts: true\n" }),
+          }),
+          openCodeRunner: async () => {
+            runs++;
+            await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+            return { status: "ok" };
+          },
+        });
+        expect(result).toEqual({ status: "posted" });
+        expect(runs).toBe(1);
+      });
+    }
   });
 
   test("skips pending or failed non-jumi checks without OpenCode or status", async () => {

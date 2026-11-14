@@ -14,7 +14,7 @@ import {
 } from "../src/codex.ts";
 import { buildCodexSpans } from "../src/codex_tracing.ts";
 import { CodexStreamParser } from "../src/codex_usage.ts";
-import { resetControlMetricsForTests } from "../src/control_metrics.ts";
+import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { codexThreadPath, withEngineChain } from "../src/fallback.ts";
 import { exportOtlpSpans, setTraceFetchForTests, setTraceLimitsForTests, traceExportErrors } from "../src/phoenix.ts";
@@ -762,6 +762,128 @@ describe("codex dispatch and chain", () => {
         });
         expect(result.status).toBe("ok");
         expect((await argLines(argsLog))[0]?.startsWith("codex exec")).toBe(true);
+      }
+    );
+  });
+
+  test("usage-limit JSON error event with empty stderr logs the message and hops with class=quota", async () => {
+    const usageError = JSON.stringify({
+      type: "error",
+      error: { message: "You have hit your usage limit. Retry in 45 minutes." },
+    });
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${usageError}'\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const logs: string[] = [];
+        const log = (message: string) => logs.push(message);
+        const before = Date.now();
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude], logger: log });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          logger: log,
+        });
+        const after = Date.now();
+        expect(result.status).toBe("ok");
+        expect(result.runner).toEqual(runnerStamp(claude));
+        // The provider text arrived on stdout, not stderr: it must still be logged.
+        expect(logs.some((line) => line.includes("[codex errors]") && line.includes("usage limit"))).toBe(true);
+        const hop = logs.find((line) => line.includes("event=opencode_hop"));
+        expect(hop).toBeDefined();
+        expect(hop).toContain("class=quota");
+        expect(hop).toContain("from_runner=codex");
+        expect(hop).toContain("to_runner=claude");
+        const resetAt = Number(/reset_at=(\d+)/.exec(hop!)?.[1]);
+        expect(resetAt).toBeGreaterThan(Math.floor(before / 1000) + 44 * 60);
+        expect(resetAt).toBeLessThanOrEqual(Math.floor(after / 1000) + 46 * 60);
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="quota"} 1');
+        expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="claude",outcome="ok"} 1');
+        const gaugeLine = text
+          .split("\n")
+          .find((line) => line.startsWith('jumi_opencode_runner_quota_reset_seconds{runner="codex"}'));
+        expect(gaugeLine).toBeDefined();
+        const gauge = Number(gaugeLine!.split(" ").pop());
+        expect(gauge).toBeGreaterThan(Math.floor(before / 1000) + 44 * 60);
+        expect(gauge).toBeLessThanOrEqual(Math.floor(after / 1000) + 46 * 60);
+      }
+    );
+  });
+
+  test("auth-death JSON error event with empty stderr logs the message and hops with class=auth", async () => {
+    const authError = JSON.stringify({
+      type: "turn.failed",
+      error: { message: "Not logged in. Please log in again." },
+    });
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${authError}'\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const logs: string[] = [];
+        const log = (message: string) => logs.push(message);
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude], logger: log });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          logger: log,
+        });
+        expect(result.status).toBe("ok");
+        expect(result.runner).toEqual(runnerStamp(claude));
+        expect(logs.some((line) => line.includes("[codex errors]") && line.includes("Not logged in"))).toBe(true);
+        const hop = logs.find((line) => line.includes("event=opencode_hop"));
+        expect(hop).toBeDefined();
+        expect(hop).toContain("class=auth");
+        expect(hop).toContain("from_runner=codex");
+        expect(hop).toContain("to_runner=claude");
+        const text = renderRunMetrics();
+        expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="auth"} 1');
+        expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="claude",outcome="ok"} 1');
+      }
+    );
+  });
+
+  test("usage-limit event without a reset time leaves the gauge at 0 and the hop reset unknown", async () => {
+    const usageError = JSON.stringify({
+      type: "error",
+      error: { message: "You have hit your usage limit." },
+    });
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `printf '%s\\n' '${usageError}'\nexit 1`),
+        claude: claudeBin,
+      },
+      async ({ workdir, home, argsLog }) => {
+        const logs: string[] = [];
+        const log = (message: string) => logs.push(message);
+        const engine = withEngineChain(registeredEngine, { chain: [codex, claude], logger: log });
+        const result = await engine({
+          prompt: "p",
+          model: codex.model,
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog },
+          logger: log,
+        });
+        expect(result.status).toBe("ok");
+        const hop = logs.find((line) => line.includes("event=opencode_hop"));
+        expect(hop).toBeDefined();
+        expect(hop).toContain("class=quota");
+        expect(hop).toContain("reset_at=null");
+        expect(renderRunMetrics()).toContain('jumi_opencode_runner_quota_reset_seconds{runner="codex"} 0');
       }
     );
   });

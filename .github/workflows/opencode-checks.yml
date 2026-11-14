@@ -119,6 +119,21 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
+            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
+            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
+            TOFU_VERSION=${{ env.TOFU_VERSION }}
+            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
+            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
+            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
+            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
+            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
+            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
+            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
+            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
+            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
 
       - name: Verify reviewer image
         run: |
@@ -136,12 +151,26 @@ jobs:
           docker run --rm jumi-reviewer:ci curl --version
           docker run --rm jumi-reviewer:ci yq --version
           docker run --rm jumi-reviewer:ci uv --version
+          docker run --rm jumi-reviewer:ci promtool --version
+          docker run --rm jumi-reviewer:ci kubeconform -v
+          docker run --rm jumi-reviewer:ci tofu version
+          docker run --rm jumi-reviewer:ci kubectl version --client
           docker run --rm jumi-reviewer:ci ps --version
           docker run --rm jumi-reviewer:ci unzip -v
           docker run --rm jumi-reviewer:ci shellcheck --version
           docker run --rm jumi-reviewer:ci python --version
           docker run --rm jumi-reviewer:ci python3 -c 'import yaml'
           docker run --rm jumi-reviewer:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          docker run --rm jumi-reviewer:ci bun --version
+          test "$(docker run --rm jumi-reviewer:ci node --version)" = "v${NODE_VERSION}"
+          test "$(docker run --rm jumi-reviewer:ci sh -c 'node -p "process.versions.bun === undefined"')" = "true"
+          docker run --rm jumi-reviewer:ci npm --version
+          docker run --rm jumi-reviewer:ci npx --version
+          test "$(docker run --rm jumi-reviewer:ci sh -c 'command -v node')" = "/usr/local/bin/node"
+          if docker run --rm jumi-reviewer:ci sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+            echo "node resolves to the Bun shim in reviewer image" >&2
+            exit 1
+          fi
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
@@ -288,6 +317,21 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
+            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
+            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
+            TOFU_VERSION=${{ env.TOFU_VERSION }}
+            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
+            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
+            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
+            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
+            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
+            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
+            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
+            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
+            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
 
       - name: Verify worker image
@@ -304,12 +348,26 @@ jobs:
           docker run --rm jumi-worker:ci curl --version
           docker run --rm jumi-worker:ci yq --version
           docker run --rm jumi-worker:ci uv --version
+          docker run --rm jumi-worker:ci promtool --version
+          docker run --rm jumi-worker:ci kubeconform -v
+          docker run --rm jumi-worker:ci tofu version
+          docker run --rm jumi-worker:ci kubectl version --client
           docker run --rm jumi-worker:ci ps --version
           docker run --rm jumi-worker:ci unzip -v
           docker run --rm jumi-worker:ci shellcheck --version
           docker run --rm jumi-worker:ci python --version
           docker run --rm jumi-worker:ci python3 -c 'import yaml'
           docker run --rm jumi-worker:ci sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          docker run --rm jumi-worker:ci bun --version
+          test "$(docker run --rm jumi-worker:ci node --version)" = "v${NODE_VERSION}"
+          test "$(docker run --rm jumi-worker:ci sh -c 'node -p "process.versions.bun === undefined"')" = "true"
+          docker run --rm jumi-worker:ci npm --version
+          docker run --rm jumi-worker:ci npx --version
+          test "$(docker run --rm jumi-worker:ci sh -c 'command -v node')" = "/usr/local/bin/node"
+          if docker run --rm jumi-worker:ci sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+            echo "node resolves to the Bun shim in worker image" >&2
+            exit 1
+          fi
           # Same no-auth help probe as the reviewer job: the worker image also
           # spawns Codex runners, so its binary has to accept the same argv.
           codex_exec_help="$(docker run --rm jumi-worker:ci codex exec --help)"

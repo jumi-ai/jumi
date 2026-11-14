@@ -365,7 +365,9 @@ describe("deploy/contract.md", () => {
       "WORKDIR",
       "QUEUE_CONCURRENCY",
       "MAX_FILES",
+      "MAX_FILES_MAX",
       "MAX_PATCH_BYTES",
+      "MAX_PATCH_BYTES_MAX",
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
       "OPENCODE_TIMEOUT_MS",
@@ -419,6 +421,7 @@ describe("deploy/contract.md", () => {
       "HOME",
       "WORKDIR",
       "GRADLE_SEED_HOME",
+      "JUMI_CACHE_DIR",
       "QUEUE_CONCURRENCY",
       "MAX_OUTPUT_BYTES",
       "MAX_WEBHOOK_BYTES",
@@ -453,7 +456,7 @@ describe("deploy/contract.md", () => {
     expect(parsed.worker.imageTarget).toBe("worker");
     expect(parsed.control.imageTarget).toBe("runtime");
     expect(parsed.reviewer.volumes).toEqual(["/data", "/work"]);
-    expect(parsed.worker.volumes).toEqual(["/data", "/work", "/gradle-seed"]);
+    expect(parsed.worker.volumes).toEqual(["/data", "/work", "/gradle-seed", "/cache"]);
     expect(parsed.control.volumes).toEqual(["/data"]);
     expect(parsed.reviewer.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);
     expect(parsed.worker.requiredConstraints).toEqual([ANTIGRAVITY_HOMELAB_CONSTRAINT]);

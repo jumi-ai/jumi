@@ -16,6 +16,7 @@ import {
   buildPROpenedPrompt,
 } from "./prompt.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
+import { effectiveReviewBudget, loadRepoSettings } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -79,6 +80,7 @@ export type ReplayWriteMethod = (typeof REPLAY_WRITE_METHODS)[number];
 export type ReplayReadApi = Pick<
   ReviewApi,
   | "getRepo"
+  | "getRepoFile"
   | "getPR"
   | "getPRFiles"
   | "listIssueComments"
@@ -100,6 +102,9 @@ const WRITE_METHOD_SET = new Set<string>(REPLAY_WRITE_METHODS);
 export function makeReplayReadOnly(api: ReviewApi): ReplayReadApi {
   const read: ReplayReadApi = {
     getRepo: api.getRepo.bind(api),
+    ...((api as { getRepoFile?: ReviewApi["getRepoFile"] }).getRepoFile
+      ? { getRepoFile: (api as { getRepoFile: NonNullable<ReviewApi["getRepoFile"]> }).getRepoFile.bind(api) }
+      : {}),
     getPR: api.getPR.bind(api),
     getPRFiles: api.getPRFiles.bind(api),
     listIssueComments: api.listIssueComments.bind(api),
@@ -264,6 +269,8 @@ export interface RunReplayCaseOptions {
   home?: string;
   maxFiles?: number;
   maxPatchBytes?: number;
+  maxFilesMax?: number;
+  maxPatchBytesMax?: number;
   maxThreadBytes?: number;
   maxReviewMdBytes?: number;
   maxOutputBytes?: number;
@@ -284,7 +291,9 @@ function logDefault(message: string): void {
 function skipReasonForPrState(pr: Pull): string | undefined {
   if (pr.state !== "open") return `PR is ${pr.state}`;
   if (pr.merged) return "PR is already merged";
-  if (/^\s*(wip|\[wip\])/i.test(pr.title)) return "PR title disables review";
+  // Same split as `skipReasonForPR` in review.ts: bare `wip` / `[wip]`
+  // disables the review, while a `wip:` prefix belongs to the draft gate.
+  if (/^\s*(wip(?!:)|\[wip\])/i.test(pr.title)) return "PR title disables review";
   return undefined;
 }
 
@@ -475,8 +484,12 @@ function quotaSkip(reason: string): string {
 export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayRecord> {
   const log = opts.logger ?? logDefault;
   const started = Date.now();
-  const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
-  const maxPatchBytes = opts.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES;
+  const deploymentMaxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES;
+  const deploymentMaxPatchBytes = opts.maxPatchBytes ?? DEFAULT_MAX_PATCH_BYTES;
+  const deploymentMaxFilesMax = opts.maxFilesMax ?? deploymentMaxFiles;
+  const deploymentMaxPatchBytesMax = opts.maxPatchBytesMax ?? deploymentMaxPatchBytes;
+  let maxFiles = deploymentMaxFiles;
+  let maxPatchBytes = deploymentMaxPatchBytes;
   const maxOutputBytes = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const maxThreadBytes = opts.maxThreadBytes ?? DEFAULT_MAX_THREAD_BYTES;
   const maxReviewMdBytes = opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES;
@@ -490,6 +503,34 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
   });
 
   const repo = await opts.api.getRepo(reviewCase.owner, reviewCase.repo);
+  // Repository size budget comes from the default branch, like the live reviewer.
+  // Missing, invalid, or unreadable files run with the deployment values.
+  try {
+    const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
+    const getFile = (opts.api as { getRepoFile?: unknown }).getRepoFile;
+    if (defaultBranch && typeof getFile === "function") {
+      const load = await loadRepoSettings(
+        opts.api as {
+          getRepoFile(o: string, r: string, p: string, ref: string): Promise<{ found: boolean; content?: string }>;
+        },
+        reviewCase.owner,
+        reviewCase.repo,
+        defaultBranch
+      );
+      const budget = effectiveReviewBudget(load, {
+        maxFiles: deploymentMaxFiles,
+        maxFilesMax: deploymentMaxFilesMax,
+        maxPatchBytes: deploymentMaxPatchBytes,
+        maxPatchBytesMax: deploymentMaxPatchBytesMax,
+      });
+      maxFiles = budget.maxFiles;
+      maxPatchBytes = budget.maxPatchBytes;
+    }
+  } catch (err) {
+    log(
+      `review budget settings unreadable for ${reviewCase.owner}/${reviewCase.repo}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
   let pr: Pull | null = null;
   if (reviewCase.prNumber != null) {
     pr = await opts.api.getPR(reviewCase.owner, reviewCase.repo, reviewCase.prNumber);
@@ -1219,6 +1260,8 @@ interface ReplayCliConfig {
   workdir: string;
   maxFiles: number;
   maxPatchBytes: number;
+  maxFilesMax: number;
+  maxPatchBytesMax: number;
   maxOutputBytes: number;
   timeoutMs: number;
 }
@@ -1265,6 +1308,8 @@ function loadReplayCliConfig(runnerNames: string[] | undefined): ReplayCliConfig
       return found;
     });
   }
+  const maxFiles = intEnvOr(env.MAX_FILES, DEFAULT_MAX_FILES);
+  const maxPatchBytes = intEnvOr(env.MAX_PATCH_BYTES, DEFAULT_MAX_PATCH_BYTES);
   return {
     forge,
     giteaUrl,
@@ -1274,8 +1319,10 @@ function loadReplayCliConfig(runnerNames: string[] | undefined): ReplayCliConfig
     runners,
     home: envOr(env.HOME, "/data"),
     workdir: envOr(env.WORKDIR, "/work"),
-    maxFiles: intEnvOr(env.MAX_FILES, DEFAULT_MAX_FILES),
-    maxPatchBytes: intEnvOr(env.MAX_PATCH_BYTES, DEFAULT_MAX_PATCH_BYTES),
+    maxFiles,
+    maxPatchBytes,
+    maxFilesMax: intEnvOr(env.MAX_FILES_MAX, maxFiles),
+    maxPatchBytesMax: intEnvOr(env.MAX_PATCH_BYTES_MAX, maxPatchBytes),
     maxOutputBytes: intEnvOr(env.MAX_OUTPUT_BYTES, DEFAULT_MAX_OUTPUT_BYTES),
     timeoutMs: intEnvOr(env.OPENCODE_TIMEOUT_MS, 15 * 60 * 1000),
   };
@@ -1365,6 +1412,8 @@ async function main(): Promise<void> {
     home: config.home,
     maxFiles: config.maxFiles,
     maxPatchBytes: config.maxPatchBytes,
+    maxFilesMax: config.maxFilesMax,
+    maxPatchBytesMax: config.maxPatchBytesMax,
     maxOutputBytes: config.maxOutputBytes,
     timeoutMs: config.timeoutMs,
     logger: logDefault,

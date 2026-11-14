@@ -1332,3 +1332,144 @@ describe("clearOpenCodeSession", () => {
     }
   });
 });
+
+describe("opencode_hop cause fields", () => {
+  const first = { name: "codex", type: "codex" as const, model: "gpt-6-sol", effort: "high" };
+  const second = { name: "claude", type: "claude" as const, model: "claude-opus-5", effort: "high" };
+
+  async function hopWith(failure: EngineResult | Error, logs: string[]): Promise<EngineResult> {
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      if (n === 1) {
+        if (failure instanceof Error) throw failure;
+        return failure;
+      }
+      return { status: "ok", exitCode: 0, stdout: "done" };
+    };
+    const result = await withEngineChain(engine, {
+      chain: [first, second],
+      logger: (message) => logs.push(message),
+    })({ model: first.model, workdir: "/tmp" });
+    expect(n).toBe(2);
+    return result;
+  }
+
+  function hopLine(logs: string[]): string {
+    const line = logs.find((entry) => entry.includes("event=opencode_hop"));
+    expect(line).toBeDefined();
+    return line!;
+  }
+
+  test("quota result hops with class=quota, runner names, and the stated reset", async () => {
+    const logs: string[] = [];
+    await hopWith(
+      { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting", quotaResetAtMs: 1_800_000_000_000 },
+      logs
+    );
+    const line = hopLine(logs);
+    expect(line).toContain("class=quota");
+    expect(line).toContain("from_runner=codex");
+    expect(line).toContain("to_runner=claude");
+    expect(line).toContain("reset_at=1800000000");
+  });
+
+  test("auth result hops with class=auth and no reset", async () => {
+    const logs: string[] = [];
+    await hopWith({ status: "exit", exitCode: 1, auth: true, message: "provider auth death" }, logs);
+    const line = hopLine(logs);
+    expect(line).toContain("class=auth");
+    expect(line).toContain("from_runner=codex");
+    expect(line).toContain("to_runner=claude");
+    expect(line).toContain("reset_at=null");
+  });
+
+  test("provider-down result hops with class=provider-down", async () => {
+    const logs: string[] = [];
+    await hopWith(
+      { status: "exit", exitCode: 1, message: "opencode exited with code 1:\n503 service unavailable" },
+      logs
+    );
+    const line = hopLine(logs);
+    expect(line).toContain("class=provider-down");
+    expect(line).toContain("from_runner=codex");
+    expect(line).toContain("reset_at=null");
+  });
+
+  test("auth throw hops with class=auth", async () => {
+    const logs: string[] = [];
+    await hopWith(new EngineFailedError("provider auth death", false, { auth: true }), logs);
+    expect(hopLine(logs)).toContain("class=auth");
+  });
+
+  test("provider throw hops with class=provider-down", async () => {
+    const logs: string[] = [];
+    await hopWith(new EngineFailedError("503 service unavailable", false), logs);
+    expect(hopLine(logs)).toContain("class=provider-down");
+  });
+
+  test("quota throw with a retry delay hops with class=quota and a reset", async () => {
+    const logs: string[] = [];
+    const before = Date.now();
+    await hopWith(new EngineFailedError(QUOTA_MESSAGE, false, { quota: "resetting", retryAfterMs: 3_600_000 }), logs);
+    const line = hopLine(logs);
+    expect(line).toContain("class=quota");
+    const resetAt = Number(/reset_at=(\d+)/.exec(line)?.[1]);
+    expect(resetAt).toBeGreaterThan(Math.floor(before / 1000) + 3590);
+    expect(resetAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 3610);
+  });
+
+  test("quota result with only a retry delay hops with class=quota and a reset", async () => {
+    const logs: string[] = [];
+    const before = Date.now();
+    await hopWith({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting", retryAfterMs: 3_600_000 }, logs);
+    const line = hopLine(logs);
+    expect(line).toContain("class=quota");
+    const resetAt = Number(/reset_at=(\d+)/.exec(line)?.[1]);
+    expect(resetAt).toBeGreaterThan(Math.floor(before / 1000) + 3590);
+    expect(resetAt).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 3610);
+  });
+
+  test("hopFromIncomplete hops with class=incomplete", async () => {
+    const logs: string[] = [];
+    let n = 0;
+    const engine: Engine = async () => {
+      n++;
+      return { status: "ok", exitCode: 0 };
+    };
+    const run = withEngineChain(engine, { chain: [first, second], logger: (message) => logs.push(message) });
+    await run({ model: first.model, workdir: "/tmp" });
+    await run({ model: first.model, workdir: "/tmp", hopFromIncomplete: true });
+    expect(n).toBe(2);
+    const line = hopLine(logs);
+    expect(line).toContain("class=incomplete");
+    expect(line).toContain("from_runner=codex");
+    expect(line).toContain("reset_at=null");
+  });
+
+  test("deferred quota SIGTERM hop records the hopped runner as quota", async () => {
+    resetControlMetricsForTests();
+    const sigterm: EngineResult = {
+      status: "stuck",
+      exitCode: 143,
+      message: QUOTA_MESSAGE,
+      quota: "resetting",
+    };
+    try {
+      const engine: Engine = async (opts) => {
+        if (opts.model === first.model) return observeEngineRun(opts, sigterm);
+        return observeEngineRun(opts, { status: "ok", exitCode: 0 });
+      };
+      const hopped = await withEngineChain(engine, { chain: [first, second] })({
+        model: first.model,
+        workdir: "/tmp",
+      });
+      expect(hopped.status).toBe("ok");
+      const text = renderRunMetrics();
+      expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="codex",outcome="quota"} 1');
+      expect(text).toContain('jumi_opencode_runner_exits_total{kind="review",runner="claude",outcome="ok"} 1');
+    } finally {
+      resetControlMetricsForTests();
+    }
+  });
+});
