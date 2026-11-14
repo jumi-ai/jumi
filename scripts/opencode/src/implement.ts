@@ -70,7 +70,15 @@ import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { applyRepoChain, defaultRepoConventions, loadRepoConventions, type RepoConventions } from "./repo_settings.ts";
+import {
+  applyRepoChain,
+  DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+  DEFAULT_PR_TITLE_TEMPLATE,
+  defaultRepoConventions,
+  loadRepoConventions,
+  type RepoConventions,
+  renderIssueTemplate,
+} from "./repo_settings.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -527,14 +535,12 @@ function pullRequestText(
 
 /** Render the PR title template for one forge issue. Defaults to the issue title verbatim. */
 export function renderPrTitle(template: string | undefined, title: string, issueNumber: number): string {
-  const active = template ?? "{title}";
-  return active.replaceAll("{title}", title).replaceAll("{issue}", String(issueNumber));
+  return renderIssueTemplate(template ?? DEFAULT_PR_TITLE_TEMPLATE, title, issueNumber);
 }
 
 /** Render the parent commit message template for one forge issue. */
 export function renderCommitMessage(template: string | undefined, title: string, issueNumber: number): string {
-  const active = template ?? "Implement #{issue}: {title}";
-  return active.replaceAll("{title}", title).replaceAll("{issue}", String(issueNumber));
+  return renderIssueTemplate(template ?? DEFAULT_COMMIT_MESSAGE_TEMPLATE, title, issueNumber);
 }
 
 /** Whether conventions differ from today's formats (used to augment the worker prompt). */

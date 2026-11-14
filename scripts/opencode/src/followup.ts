@@ -1109,11 +1109,12 @@ export async function implementFollowUp(
   const assigned = await recheckAssignedAndOpen(claimed, opts);
   if (assigned) return assigned;
 
-  const { loadRepoConventions: loadFollowupConventions } = await import("./repo_settings.ts");
+  const { loadRepoConventions: loadFollowupConventions, defaultRepoConventions: defaultFollowupConventions } =
+    await import("./repo_settings.ts");
   const followupConventions = await loadFollowupConventions(opts.api, owner, repo, opts.job.defaultBranch, log).catch(
-    () => ({ branchPrefix: "jumi" as const })
+    () => defaultFollowupConventions()
   );
-  const followupPrefix = (followupConventions as { branchPrefix?: string }).branchPrefix ?? "jumi";
+  const followupPrefix = followupConventions.branchPrefix ?? "jumi";
   const pr = await resolveWorkerPullRequest(
     opts.api,
     owner,
@@ -1454,7 +1455,13 @@ export async function implementFollowUp(
       const live = await opts.api.getPR(owner, repo, pr.number);
       const body = replaceJumiPrBodyRegion(
         live.body,
-        buildPullRequestBody(issueNumber, description, runner, workerPublishSecrets(loop.auth.token, jobChain))
+        buildPullRequestBody(
+          issueNumber,
+          description,
+          runner,
+          workerPublishSecrets(loop.auth.token, jobChain),
+          followupConventions.closingKeyword
+        )
       );
       if (body == null || body === live.body) return;
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
