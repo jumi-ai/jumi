@@ -131,6 +131,11 @@ verify_reviewer_runtime() {
     echo "reviewer image must not ship a JVM" >&2
     exit 1
   fi
+  if buildah run "${ctr}" -- sh -c 'test -n "${ANDROID_HOME:-}" || test -n "${ANDROID_SDK_ROOT:-}" || test -e /opt/android-sdk'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "reviewer image must not set ANDROID_HOME" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "python3 is not CPython 3.13 in reviewer image" >&2
