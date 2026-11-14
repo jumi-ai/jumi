@@ -21,6 +21,11 @@ export interface GiteaRepo {
   clone_url: string;
   default_branch: string;
   default_merge_style?: string;
+  allow_merge_commits?: boolean;
+  allow_squash_merge?: boolean;
+  allow_rebase?: boolean;
+  allow_rebase_explicit?: boolean;
+  allow_fast_forward_only_merge?: boolean;
 }
 
 // ── Issue / Comment ──────────────────────────────────────────────────────────

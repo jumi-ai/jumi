@@ -1,11 +1,12 @@
 import {
   CI_LOOKUP_BUDGET_MS,
+  type CiGateResolverApi,
   type CiInspection,
   ciWaitForInspection,
   encodeCiAbsentWait,
   inspectCi,
   type RequiredCiResolver,
-  resolveRequiredCiContexts,
+  resolveCiGate,
 } from "./ci.ts";
 import type { EnqueueResult } from "./queue.ts";
 import type { ReviewApi } from "./review.ts";
@@ -20,23 +21,35 @@ export type CiGateApi = Pick<
   ReviewApi,
   "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs"
 > &
-  Partial<RequiredCiResolver>;
+  Partial<RequiredCiResolver> &
+  Partial<Pick<CiGateResolverApi, "getRepoFile" | "getRepo">>;
 
-async function requiredContextsForGate(
-  api: CiGateApi,
-  job: ReviewJob,
-  opts: { baseBranch?: string; logger?: (message: string) => void }
-): Promise<string[] | undefined> {
-  return resolveRequiredCiContexts(api, {
-    owner: job.owner,
-    repo: job.repo,
-    prNumber: job.prNumber,
-    ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
-    ...(opts.logger ? { log: opts.logger } : {}),
-  });
+function gatePrefix(wait: string): string {
+  return wait === "required" ? "CI gate" : `CI gate (wait=${wait})`;
 }
 
-function logGatePass(logger: ((message: string) => void) | undefined, job: ReviewJob, ci: CiInspection): void {
+function wakePrefix(wait: string): string {
+  return wait === "required" ? "CI wake" : `CI wake (wait=${wait})`;
+}
+
+function logGatePass(
+  logger: ((message: string) => void) | undefined,
+  job: ReviewJob,
+  ci: CiInspection,
+  wait: string
+): void {
+  if (wait !== "required") {
+    if (wait === "none" && ci.pendingOptional.length > 0) {
+      logger?.(
+        `${gatePrefix(wait)}: dispatching with pending: ${ci.pendingOptional.join(", ")} for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}`
+      );
+      return;
+    }
+    if (wait !== "required") {
+      logger?.(`${gatePrefix(wait)}: dispatching for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}`);
+    }
+    return;
+  }
   if (ci.pendingOptional.length > 0) {
     logger?.(
       `CI gate: required checks done, ignoring pending optional: ${ci.pendingOptional.join(", ")} for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}`
@@ -61,12 +74,22 @@ export async function enqueueReviewWithCiGate(
     logger?: (message: string) => void;
     nowMs?: number;
     baseBranch?: string;
+    defaultBranch?: string;
   }
 ): Promise<EnqueueResult> {
   const nowMs = opts.nowMs ?? Date.now();
   const api = opts.ciApi;
   if (!api) return queue.enqueue(job);
-  const requiredContexts = await requiredContextsForGate(api, job, opts);
+  const gate = await resolveCiGate(api, {
+    owner: job.owner,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+    ...(opts.logger ? { log: opts.logger } : {}),
+  });
+  const waitMode = gate.wait;
+  const requiredContexts = gate.requiredContexts;
   let ci: CiInspection;
   try {
     ci = await inspectCi({
@@ -78,10 +101,17 @@ export async function enqueueReviewWithCiGate(
       issueNumber: job.prNumber,
       log: opts.logger,
       ...(requiredContexts ? { requiredContexts } : {}),
+      ...(waitMode !== "required" ? { wait: waitMode } : {}),
     });
   } catch (err) {
+    if (waitMode === "none") {
+      opts.logger?.(
+        `${gatePrefix(waitMode)}: dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return queue.enqueue(job);
+    }
     opts.logger?.(
-      `CI gate lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, waiting on budget: ${err instanceof Error ? err.message : String(err)}`
+      `${gatePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, waiting on budget: ${err instanceof Error ? err.message : String(err)}`
     );
     return queue.enqueue(job, {
       waitUntilMs: nowMs + CI_LOOKUP_BUDGET_MS,
@@ -89,13 +119,13 @@ export async function enqueueReviewWithCiGate(
       nowMs,
     });
   }
-  const wait = ciWaitForInspection(ci, nowMs);
+  const wait = ciWaitForInspection(ci, nowMs, waitMode);
   if (!wait) {
-    logGatePass(opts.logger, job, ci);
+    logGatePass(opts.logger, job, ci, waitMode);
     return queue.enqueue(job);
   }
   opts.logger?.(
-    `CI gate waiting for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} pending=${ci.pending} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)} until=${new Date(wait.untilMs).toISOString()}`
+    `${gatePrefix(waitMode)} waiting for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} pending=${ci.pending} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)} until=${new Date(wait.untilMs).toISOString()}`
   );
   return queue.enqueue(job, { waitUntilMs: wait.untilMs, waitMarker: wait.marker, nowMs });
 }
@@ -116,12 +146,22 @@ export async function enqueueCiWakeWithGate(
     logger?: (message: string) => void;
     nowMs?: number;
     baseBranch?: string;
+    defaultBranch?: string;
   }
 ): Promise<EnqueueResult | { key: string; queued: false; waiting: true }> {
   const api = opts.ciApi;
   if (!api) return queue.enqueue(job);
   const key = `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`;
-  const requiredContexts = await requiredContextsForGate(api, job, opts);
+  const gate = await resolveCiGate(api, {
+    owner: job.owner,
+    repo: job.repo,
+    prNumber: job.prNumber,
+    ...(opts.baseBranch ? { baseBranch: opts.baseBranch } : {}),
+    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+    ...(opts.logger ? { log: opts.logger } : {}),
+  });
+  const waitMode = gate.wait;
+  const requiredContexts = gate.requiredContexts;
   let ci: CiInspection;
   try {
     ci = await inspectCi({
@@ -133,10 +173,17 @@ export async function enqueueCiWakeWithGate(
       issueNumber: job.prNumber,
       log: opts.logger,
       ...(requiredContexts ? { requiredContexts } : {}),
+      ...(waitMode !== "required" ? { wait: waitMode } : {}),
     });
   } catch (err) {
+    if (waitMode === "none") {
+      opts.logger?.(
+        `${wakePrefix(waitMode)} dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return queue.enqueue(job);
+    }
     opts.logger?.(
-      `CI wake lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, keeping budget wait: ${err instanceof Error ? err.message : String(err)}`
+      `${wakePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, keeping budget wait: ${err instanceof Error ? err.message : String(err)}`
     );
     const nowMs = opts.nowMs ?? Date.now();
     await queue.enqueue(job, {
@@ -147,13 +194,19 @@ export async function enqueueCiWakeWithGate(
     return { key, queued: false, waiting: true };
   }
   if (ci.pending) {
-    opts.logger?.(`CI wake still pending for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}, keeping wait`);
+    opts.logger?.(
+      `${wakePrefix(waitMode)} still pending for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha}, keeping wait`
+    );
     return { key, queued: false, waiting: true };
   }
   if ((ci.empty || ci.lookupFailed) && ci.failed.length === 0) {
+    if (waitMode === "none") {
+      logGatePass(opts.logger, job, ci, waitMode);
+      return queue.enqueue(job);
+    }
     const nowMs = opts.nowMs ?? Date.now();
     opts.logger?.(
-      `CI wake lookup incomplete for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)}, keeping budget wait`
+      `${wakePrefix(waitMode)} lookup incomplete for ${job.owner}/${job.repo}#${job.prNumber}@${job.headSha} empty=${ci.empty} lookupFailed=${Boolean(ci.lookupFailed)}, keeping budget wait`
     );
     await queue.enqueue(job, {
       waitUntilMs: nowMs + CI_LOOKUP_BUDGET_MS,
@@ -162,6 +215,6 @@ export async function enqueueCiWakeWithGate(
     });
     return { key, queued: false, waiting: true };
   }
-  logGatePass(opts.logger, job, ci);
+  logGatePass(opts.logger, job, ci, waitMode);
   return queue.enqueue(job);
 }
