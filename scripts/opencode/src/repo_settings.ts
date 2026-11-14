@@ -21,6 +21,14 @@ export interface RepoTimeouts {
   conflict?: number;
 }
 
+export interface ConflictRegenerateEntry {
+  file: string;
+  run: string;
+}
+
+/** Basenames the built-in helm handling owns. A `conflict_regenerate` entry may not reuse one. */
+export const CONFLICT_REGENERATE_RESERVED = new Set(["Chart.lock", "requirements.lock"]);
+
 export interface RepoSettings {
   automerge: boolean;
   /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
@@ -57,6 +65,12 @@ export interface RepoSettings {
   ignoreConflictsLabel?: string;
   /** Override for the GitHub pickup label in this repository. `undefined` means `jumi`. Gitea ignores it. */
   pickupLabel?: string;
+  /**
+   * Repository lockfile regenerate commands. `undefined` (key absent) means
+   * no repository entries: only the built-in helm locks regenerate. A
+   * present list maps a lock basename to the shell command that rebuilds it.
+   */
+  conflictRegenerate?: ConflictRegenerateEntry[];
   /** Repository mode: full work, reviews only, or everything off. Absent means full. */
   mode: RepoMode;
 }
@@ -90,6 +104,7 @@ export const KNOWN_KEYS = new Set([
   "followup_ignore_logins",
   "ignore_conflicts_label",
   "pickup_label",
+  "conflict_regenerate",
   "mode",
 ]);
 
@@ -159,6 +174,55 @@ function unknownKeyError(key: string, known: readonly string[], prefix = ""): st
 
 type TimeoutsParse = { ok: true; timeouts: RepoTimeouts } | { ok: false; error: string };
 
+type ConflictRegenerateParse = { ok: true; entries: ConflictRegenerateEntry[] } | { ok: false; error: string };
+
+const CONFLICT_REGENERATE_KEYS = ["file", "run"] as const;
+
+function parseConflictRegenerateValue(value: unknown): ConflictRegenerateParse {
+  if (!Array.isArray(value)) return { ok: false, error: `"conflict_regenerate" must be a list of mappings` };
+  const entries: ConflictRegenerateEntry[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < value.length; index++) {
+    const label = `conflict_regenerate[${index}]`;
+    const entry = value[index];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: `"${label}" must be a mapping with exactly "file" and "run"` };
+    }
+    const record = entry as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+      if (!(CONFLICT_REGENERATE_KEYS as readonly string[]).includes(key)) {
+        return { ok: false, error: unknownKeyError(key, CONFLICT_REGENERATE_KEYS, label) };
+      }
+    }
+    for (const key of CONFLICT_REGENERATE_KEYS) {
+      if (!(key in record)) {
+        return { ok: false, error: `"${label}" must have exactly "file" and "run"` };
+      }
+    }
+    const file = record.file;
+    const run = record.run;
+    if (typeof file !== "string" || !file.trim()) {
+      return { ok: false, error: `"${label}.file" must be a non-blank string` };
+    }
+    if (typeof run !== "string" || !run.trim()) {
+      return { ok: false, error: `"${label}.run" must be a non-blank string` };
+    }
+    const name = file.trim();
+    if (name.includes("/")) {
+      return { ok: false, error: `"${label}.file" must be a basename without a slash` };
+    }
+    if (CONFLICT_REGENERATE_RESERVED.has(name)) {
+      return { ok: false, error: `"${label}.file" duplicates a built-in lockfile` };
+    }
+    if (seen.has(name)) {
+      return { ok: false, error: `"${label}.file" duplicates another entry` };
+    }
+    seen.add(name);
+    entries.push({ file: name, run: (run as string).trim() });
+  }
+  return { ok: true, entries };
+}
+
 function parseTimeoutsValue(value: unknown): TimeoutsParse {
   if (value === undefined) return { ok: true, timeouts: {} };
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -217,7 +281,8 @@ function parserErrorMessage(err: unknown): string {
  * whole file invalid. Absent `followup_ignore_logins` means no extra
  * ignores (union with the deployment list). Absent `ignore_conflicts_label`
  * means the deployment value; absent `pickup_label` means `jumi` (Gitea
- * ignores it). `mode` must be
+ * ignores it). Absent `conflict_regenerate` means no repository entries.
+ * `mode` must be
  * `full`, `review-only`, or `off` when present.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
@@ -347,6 +412,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     pickupLabel = record.pickup_label.trim();
   }
+  let conflictRegenerate: ConflictRegenerateEntry[] | undefined;
+  if ("conflict_regenerate" in record && record.conflict_regenerate !== undefined) {
+    const parsed = parseConflictRegenerateValue(record.conflict_regenerate);
+    if (!parsed.ok) return parsed;
+    conflictRegenerate = parsed.entries;
+  }
   let mode: RepoMode = "full";
   if ("mode" in record && record.mode !== undefined) {
     if (typeof record.mode !== "string" || !(REPO_MODES as readonly string[]).includes(record.mode)) {
@@ -372,6 +443,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     followupIgnoreLogins,
     ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
     ...(pickupLabel !== undefined ? { pickupLabel } : {}),
+    ...(conflictRegenerate !== undefined ? { conflictRegenerate } : {}),
     mode,
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
@@ -435,6 +507,7 @@ export type RepoSettingsLoad =
       followupIgnoreLogins?: string[];
       ignoreConflictsLabel?: string;
       pickupLabel?: string;
+      conflictRegenerate?: ConflictRegenerateEntry[];
       mode: RepoMode;
     }
   | { state: "invalid"; error: string };
@@ -529,6 +602,9 @@ export async function loadRepoSettings(
       ? { ignoreConflictsLabel: parsed.settings.ignoreConflictsLabel }
       : {}),
     ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
+    ...(parsed.settings.conflictRegenerate !== undefined
+      ? { conflictRegenerate: parsed.settings.conflictRegenerate }
+      : {}),
     mode: parsed.settings.mode,
   };
 }
