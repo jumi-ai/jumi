@@ -24,6 +24,7 @@ Before editing, turn the task and accepted feedback into observable checks. Fix 
 ## Limits
 
 - Verify once at the end, not after every edit. This skill does not add a test-first mandate or a check after every edit.
+- You may download and install any tool, runtime, package, or dependency you need to prove or verify a change. Install everything under `$TMPDIR`, `$HOME`, or a tool cache directory (for example UV_CACHE_DIR, pip, npm, gradle, or go caches); prefer `$TMPDIR` for downloaded binaries and venvs. Never install into the checkout: no `node_modules`, `.venv`, `vendor`, or build output that would show in `git status` outside the ignored scratch dirs; when a tool wants to write there, point it elsewhere with a venv, prefix, or cache env var, or clean up before finishing. The clean-tree checks for workers still hold. A download that needs a public upstream ref belongs under `$TMPDIR` like any other download; never carry a forge token.
 - Put downloaded tools, venvs, and caches under `$TMPDIR`, never a hard-coded `/tmp/...` path, because `/tmp` may be a small RAM disk.
 - This skill is for implement, follow-up, and conflict jobs. It does not review, approve, or gate a pull request.
 - Repo-specific commands, versions, and deploy facts stay in that repo. This skill carries none of them.
