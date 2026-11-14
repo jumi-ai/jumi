@@ -45,7 +45,7 @@ import {
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
-import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   type HandoffKey,
@@ -458,10 +458,10 @@ async function commitMerge(
 ): Promise<void> {
   const commitEnv = {
     ...env,
-    GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME ?? FORGE_COMMITTER_NAME,
-    GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL ?? FORGE_COMMITTER_EMAIL,
-    GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME ?? FORGE_COMMITTER_NAME,
-    GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL ?? FORGE_COMMITTER_EMAIL,
+    GIT_AUTHOR_NAME: env.GIT_AUTHOR_NAME ?? forgeCommitterName(),
+    GIT_AUTHOR_EMAIL: env.GIT_AUTHOR_EMAIL ?? forgeCommitterEmail(),
+    GIT_COMMITTER_NAME: env.GIT_COMMITTER_NAME ?? forgeCommitterName(),
+    GIT_COMMITTER_EMAIL: env.GIT_COMMITTER_EMAIL ?? forgeCommitterEmail(),
   };
   await git(["commit", "-m", `Merge ${defaultBranch} into ${headRef}`], { cwd: worktree, env: commitEnv });
 }

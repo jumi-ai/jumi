@@ -15,7 +15,6 @@ import {
 export const PHOENIX_OTLP_TIMEOUT_MS = 15_000;
 export const PHOENIX_OTLP_MAX_BYTES = 4 * 1024 * 1024;
 export const PHOENIX_ATTR_CEILING_CHARS = 64 * 1024;
-export const PUBLIC_PHOENIX_HOST = "phoenix.kirmanak.stream";
 const KIND_ATTR = "openinference.span.kind";
 const PROTECTED_ATTRS = new Set([
   KIND_ATTR,
@@ -75,6 +74,11 @@ export function traceExportErrors(): number {
 
 function phoenixEndpoint(): string {
   return process.env.PHOENIX_OTLP_ENDPOINT?.trim() || "";
+}
+
+export function phoenixPublicHost(): string | undefined {
+  const raw = process.env.PHOENIX_PUBLIC_HOST?.trim().toLowerCase();
+  return raw ? raw : undefined;
 }
 
 function noteError(): void {
@@ -158,7 +162,8 @@ function tracesUrl(endpoint: string): URL | undefined {
     const trimmed = endpoint.replace(/\/+$/, "");
     const url = new URL(trimmed.endsWith("/v1/traces") ? trimmed : `${trimmed}/v1/traces`);
     if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    if (url.hostname === PUBLIC_PHOENIX_HOST) return undefined;
+    const publicHost = phoenixPublicHost();
+    if (publicHost && url.hostname.toLowerCase() === publicHost) return undefined;
     return url;
   } catch {
     return undefined;

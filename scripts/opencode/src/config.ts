@@ -248,6 +248,11 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
+  // Deployment-owned identity and tracing knobs; read here so the contract
+  // gate sees the optional keys. Runtime reads them via process.env.
+  void optionalEnv(resolved, "JUMI_GIT_NAME");
+  void optionalEnv(resolved, "JUMI_GIT_EMAIL");
+  void optionalEnv(resolved, "PHOENIX_PUBLIC_HOST");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 15 * 60 * 1000);
   const opencodeTimeoutMaxMs = intEnv(resolved, "OPENCODE_TIMEOUT_MAX_MS", opencodeTimeoutMs);
   const forgeBind = loadForgeBind(resolved, { requireWebhookSecret: role !== "engine" });

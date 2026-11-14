@@ -55,7 +55,6 @@ import { join } from "node:path";
 import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } from "./claude.ts";
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
-import { FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
 
 /** Text the stub answers with; seeing it means the session really completed. */
@@ -89,7 +88,7 @@ export const PROBE_CHECKOUT_SKILL = "jumi-probe-checkout-skill";
 /** Line in the checkout's `AGENTS.md`; a model request carrying it proves the file loaded. */
 const PROBE_INSTRUCTIONS_MARKER = "JUMI-CLAUDE-AGENTS-MD-PROBE-REACHED";
 /** A forge URL the checkout's settings try to reopen. Never fetched: the deny is the point. */
-export const PROBE_FORGE_HOST = `gitea.${FORGE_DENY_DOMAIN}`;
+export const PROBE_FORGE_HOST = `gitea.kirmanak.stream`;
 
 /**
  * Production flags whose *value* the installed binary validates. Everything

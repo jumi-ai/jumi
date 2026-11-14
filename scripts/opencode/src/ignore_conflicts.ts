@@ -1,5 +1,5 @@
 import { hasLabel } from "./assignee.ts";
-import { FORGE_COMMITTER_EMAIL, FORGE_COMMITTER_NAME } from "./forge.ts";
+import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isListedLogin } from "./permissions.ts";
 import type { PullCommit } from "./ports.ts";
 
@@ -54,12 +54,12 @@ export interface JumiCommitExpectation {
 }
 
 function expectedNames(expectation: JumiCommitExpectation): string[] {
-  const names = [FORGE_COMMITTER_NAME, expectation.botUsername, ...(expectation.extraNames ?? [])];
+  const names = [forgeCommitterName(), expectation.botUsername, ...(expectation.extraNames ?? [])];
   return names.filter((name): name is string => typeof name === "string" && name.trim() !== "");
 }
 
 function expectedEmails(expectation: JumiCommitExpectation): string[] {
-  const emails = [FORGE_COMMITTER_EMAIL, ...(expectation.extraEmails ?? [])];
+  const emails = [forgeCommitterEmail(), ...(expectation.extraEmails ?? [])];
   return emails.filter((email): email is string => typeof email === "string" && email.trim() !== "");
 }
 

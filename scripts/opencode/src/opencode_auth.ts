@@ -1,7 +1,6 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-export const DEFAULT_OPENCODE_WELLKNOWN_URL = "https://kirmanak.stream";
 export const OPENCODE_WELLKNOWN_DISABLED = "disabled";
 
 export interface OpenCodeWellKnownAuthOptions {
@@ -15,7 +14,7 @@ export interface OpenCodeWellKnownAuthOptions {
 
 export function parseOpenCodeWellKnownUrl(value: string | undefined): string | undefined {
   const raw = value?.trim() ?? "";
-  if (!raw) return DEFAULT_OPENCODE_WELLKNOWN_URL;
+  if (!raw) return undefined;
   if (raw === OPENCODE_WELLKNOWN_DISABLED) return undefined;
   let parsed: URL;
   try {

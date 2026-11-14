@@ -31,10 +31,9 @@ describe("loadConfig", () => {
     expect(config.botUsername).toBe("jumi");
     expect(config.model).toBe("openai/gpt-5.5");
     expect(config.variant).toBeUndefined();
-    expect(config.opencodeWellKnownUrl).toBe("https://kirmanak.stream");
-    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "" }).opencodeWellKnownUrl).toBe(
-      "https://kirmanak.stream"
-    );
+    expect(config.opencodeWellKnownUrl).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "" }).opencodeWellKnownUrl).toBeUndefined();
+    expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "  " }).opencodeWellKnownUrl).toBeUndefined();
     expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "disabled" }).opencodeWellKnownUrl).toBeUndefined();
     expect(loadConfig({ ...required, OPENCODE_WELLKNOWN_URL: "https://opencode.example/" }).opencodeWellKnownUrl).toBe(
       "https://opencode.example"

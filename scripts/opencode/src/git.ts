@@ -185,7 +185,7 @@ function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRu
   const listOf = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
   env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
     ...existing,
-    permissions: [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv))],
+    permissions: [...listOf(existing.permissions), ...forgePermissions(forgeDenyHost(opts.extraEnv, opts.forgeUrl))],
   });
 }
 
@@ -201,7 +201,7 @@ function openCodeXdgConfigHome(tempRoot: string): string {
 async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Promise<void> {
   const dir = join(openCodeXdgConfigHome(tempRoot), "opencode");
   await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "opencode.json"), forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv)));
+  await writeFile(join(dir, "opencode.json"), forgeOpenCodeGlobalConfig(forgeDenyHost(opts.extraEnv, opts.forgeUrl)));
 }
 
 /**

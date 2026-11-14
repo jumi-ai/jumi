@@ -42,6 +42,8 @@ export interface EngineRunOptions {
   /** Interval for the live per-run log-file quota poll. Defaults to QUOTA_POLL_INTERVAL_MS; 0 disables. */
   quotaPollIntervalMs?: number;
   extraEnv?: Record<string, string>;
+  /** Configured forge URL (`config.giteaUrl`) so the webfetch deny follows config when `extraEnv` has no `GIT_AUTH_HOST`. */
+  forgeUrl?: string;
   abortSignal?: AbortSignal;
   onPid?: (pid: number) => void | Promise<void>;
   logger?: (message: string) => void;

@@ -38,6 +38,8 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_SECRETS_FILE`
 - `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
+- `JUMI_GIT_NAME`
+- `JUMI_GIT_EMAIL`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`
 - `IGNORE_CONFLICTS_LABEL`
@@ -68,6 +70,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `MAX_FOLLOWUP_ROUNDS`
 - `MAX_INCOMPLETE_RETRIES`
 - `PHOENIX_OTLP_ENDPOINT`
+- `PHOENIX_PUBLIC_HOST`
 - `BOARD_PEER_URL`
 - `BOARD_PEER_TOKEN`
 
@@ -124,6 +127,8 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `JUMI_SECRETS_FILE`
 - `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
+- `JUMI_GIT_NAME`
+- `JUMI_GIT_EMAIL`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`
 - `IGNORE_CONFLICTS_LABEL`
@@ -157,6 +162,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `PHOENIX_OTLP_ENDPOINT`
+- `PHOENIX_PUBLIC_HOST`
 - `JUMI_CHECKPOINT_ENABLED`
 - `JUMI_CHECKPOINT_INTERVAL_MS`
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
@@ -278,6 +284,8 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `JUMI_SECRETS_FILE`
 - `JUMI_SECRETS_DIR`
 - `BOT_USERNAME`
+- `JUMI_GIT_NAME`
+- `JUMI_GIT_EMAIL`
 - `FOLLOWUP_IGNORE_LOGINS`
 - `TRUSTED_SENDER_LOGINS`
 - `IGNORE_CONFLICTS_LABEL`
@@ -310,6 +318,7 @@ One-shot Job per ledger row (`#359` creates the Jobs, `#361` replaces the unassi
 - `LEASE_MS`
 - `MAX_JOB_ATTEMPTS`
 - `PHOENIX_OTLP_ENDPOINT`
+- `PHOENIX_PUBLIC_HOST`
 - `JUMI_CHECKPOINT_ENABLED`
 - `JUMI_CHECKPOINT_INTERVAL_MS`
 - `JUMI_CHECKPOINT_MAX_AGE_MS`
@@ -347,3 +356,13 @@ No new env, ports, or volumes. `GET /metrics` sources:
 - Router: `jumi_review_jobs*`, `jumi_webhooks_total`, plus ledger-backed `ai_tokens_total`, `ai_tokens`, `ai_sessions`, `jumi_jobs_completed_total`, `jumi_job_duration_seconds_*`, and `jumi_opencode_exits_total` (from `jumi_run_usage` per-run rows and terminal `review_jobs` rows). Scrape the router for these names.
 - Control: `codex_access_token_seconds_remaining`, `codex_access_token_lifetime_seconds`, `codex_last_refresh_timestamp_seconds`, `codex_login_dead`, `codex_publish_failures_total`, `codex_last_publish_timestamp_seconds`, plus dispatch `jumi_dispatch_jobs_created_total`, `jumi_dispatch_active_jobs{role}`, `jumi_dispatch_never_started_total{role}`, and `jumi_dispatch_errors_total{role,op}`, so a stopped dispatcher is told apart from an idle queue. Alerts use the remaining fraction, not fixed days.
 - Engine/worker: exporter-health gauges only (`ai_token_exporter_*`, `ai_trace_exporter_errors`, `ai_quota_db_schema_errors`). They must not export the same counter names or totals double.
+
+## BREAKING
+
+Homelab defaults moved to deployment config. Set these to keep today's behaviour:
+
+- `JUMI_GIT_EMAIL` (default `jumi@localhost`) and `JUMI_GIT_NAME` (default `jumi`) replace the built-in committer `jumi` / `jumi@kirmanak.stream`. Existing deploy keeps `JUMI_GIT_EMAIL=jumi@kirmanak.stream`.
+- The forge webfetch deny host is derived from the configured forge URL (`config.giteaUrl` host on Gitea, the configured GitHub host on GitHub) instead of the built-in `kirmanak.stream`.
+- Unset `OPENCODE_WELLKNOWN_URL` now disables well-known instead of defaulting to `https://kirmanak.stream`. Existing deploy keeps `OPENCODE_WELLKNOWN_URL=https://kirmanak.stream`.
+- `PHOENIX_PUBLIC_HOST` (unset: no public-host check) replaces the built-in `phoenix.kirmanak.stream` refuse. Existing deploy keeps `PHOENIX_PUBLIC_HOST=phoenix.kirmanak.stream`.
+- `gitops_notes.ts` (built-in `gitea.kirmanak.stream/personal/jumi-(reviewer|worker)` image match) is deleted.

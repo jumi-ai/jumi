@@ -29,12 +29,14 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  FORGE_DENY_DOMAIN,
   forgeOpenCodeConfigContent,
   forgeOpenCodeGlobalConfig,
   forgePermissions,
   isPermissionDenyText,
 } from "./forge_webfetch.ts";
+
+/** Example homelab host for manual probing only; production derives the deny host from config. */
+const PROBE_DENY_DOMAIN = "kirmanak.stream";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
@@ -259,7 +261,7 @@ async function runOpenCode(
         // `skills` roots resolve against it. Same line as the production spawn.
         PWD: workdir,
         OPENCODE_CONFIG: configPath,
-        OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
+        OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(PROBE_DENY_DOMAIN),
         XDG_CONFIG_HOME: join(workdir, "..", "xdg-config"),
         ...extraEnv,
       },
@@ -323,10 +325,10 @@ async function main(): Promise<number> {
     const pluginMarker = join(dir, "repo-plugin-ran");
     await seedRepository(workdir, pluginMarker);
     await mkdir(join(dir, "xdg-config", "opencode"), { recursive: true });
-    await writeFile(join(dir, "xdg-config", "opencode", "opencode.json"), forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN));
+    await writeFile(join(dir, "xdg-config", "opencode", "opencode.json"), forgeOpenCodeGlobalConfig(PROBE_DENY_DOMAIN));
     const configPath = await writeProbeConfig(dir, origin);
 
-    console.log(`Permission rules under test: ${JSON.stringify(forgePermissions(FORGE_DENY_DOMAIN))}`);
+    console.log(`Permission rules under test: ${JSON.stringify(forgePermissions(PROBE_DENY_DOMAIN))}`);
     for (const probe of probeCases(origin)) {
       state.url = probe.url;
       state.reached = false;

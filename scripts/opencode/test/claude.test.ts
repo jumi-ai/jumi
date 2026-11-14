@@ -17,7 +17,7 @@ import { setClaudeTracingPluginDirForTests } from "../src/claude_tracing.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { withEngineChain } from "../src/fallback.ts";
-import { claudeDisallowedTools, FORGE_DENY_DOMAIN } from "../src/forge_webfetch.ts";
+import { claudeDisallowedTools, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { omitClaudeConfigWarning } from "../src/status_description.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
@@ -85,7 +85,12 @@ describe("inspectClaudeUsageLimit", () => {
 
 describe("claudeArgv", () => {
   test("uses -p, user and project setting-sources, allowlist, and never --bare", () => {
-    const args = claudeArgv({ model: "opus", effort: "high", workdir: "/work" });
+    const args = claudeArgv({
+      model: "opus",
+      effort: "high",
+      workdir: "/work",
+      forgeUrl: "https://gitea.example.test",
+    });
     expect(args).toEqual([
       "claude",
       "-p",
@@ -96,7 +101,7 @@ describe("claudeArgv", () => {
       "--allowedTools",
       CLAUDE_ALLOWED_TOOLS,
       "--disallowedTools",
-      claudeDisallowedTools(FORGE_DENY_DOMAIN),
+      claudeDisallowedTools("gitea.example.test"),
       "--output-format",
       CLAUDE_OUTPUT_FORMAT,
       "--verbose",
@@ -120,9 +125,9 @@ describe("claudeArgv", () => {
     // Claude matches `domain:` against the hostname, and `*.host` does not
     // cover the apex, so both rules are needed. Deny outranks --allowedTools,
     // which keeps WebFetch available for public docs.
-    expect(claudeDisallowedTools(FORGE_DENY_DOMAIN).split(",")).toEqual([
-      `WebFetch(domain:${FORGE_DENY_DOMAIN})`,
-      `WebFetch(domain:*.${FORGE_DENY_DOMAIN})`,
+    expect(claudeDisallowedTools("gitea.example.test").split(",")).toEqual([
+      `WebFetch(domain:gitea.example.test)`,
+      `WebFetch(domain:*.gitea.example.test)`,
     ]);
     expect(CLAUDE_ALLOWED_TOOLS.split(",")).toContain("WebFetch");
     expect(claudeArgv({ model: "opus", workdir: "/work" })).toContain("--disallowedTools");
@@ -151,9 +156,16 @@ describe("claudeArgv", () => {
       "WebFetch(domain:gitea.example.com),WebFetch(domain:*.gitea.example.com)"
     );
 
-    // No GIT_AUTH_HOST (reviewer, env-less spawns): the default still applies.
+    // No GIT_AUTH_HOST (reviewer, env-less spawns): the configured forge URL applies.
+    const configured = claudeArgv({
+      model: "opus",
+      workdir: "/work",
+      forgeUrl: "https://gitea.example.test",
+    });
+    expect(configured[configured.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools("gitea.example.test"));
+    // Neither spawn host nor configured URL: no forge deny, only the flag shape.
     const fallback = claudeArgv({ model: "opus", workdir: "/work" });
-    expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(FORGE_DENY_DOMAIN));
+    expect(fallback[fallback.indexOf("--disallowedTools") + 1]).toBe(claudeDisallowedTools(""));
   });
 
   test("names the image-local tracing plugin", () => {
@@ -189,6 +201,7 @@ printf 'HOME=%s OAUTH=%s XDG_CONFIG=%s SECRET=%s ARGS=%s CWD=%s\\n' "$HOME" "$CL
           workdir,
           home: "/data",
           sanitizeEnv: true,
+          forgeUrl: "https://gitea.example.test",
         });
         expect(result.status).toBe("ok");
         expect(result.stdout).toContain("HOME=/data");
@@ -200,7 +213,7 @@ printf 'HOME=%s OAUTH=%s XDG_CONFIG=%s SECRET=%s ARGS=%s CWD=%s\\n' "$HOME" "$CL
         expect(result.stdout).toContain(`-p --setting-sources ${CLAUDE_SETTING_SOURCES}`);
         expect(result.stdout).toContain(`--permission-mode ${CLAUDE_PERMISSION_MODE}`);
         expect(result.stdout).toContain(`--allowedTools ${CLAUDE_ALLOWED_TOOLS}`);
-        expect(result.stdout).toContain(`--disallowedTools ${claudeDisallowedTools(FORGE_DENY_DOMAIN)}`);
+        expect(result.stdout).toContain(`--disallowedTools ${claudeDisallowedTools("gitea.example.test")}`);
         expect(result.stdout).toContain("--model opus --effort high");
         expect(result.stdout).not.toContain("--bare");
         expect(result.stdout).toContain(`CWD=${workdir}`);

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { FORGE_DENY_DOMAIN, forgeDenyHost, forgePermissions } from "../src/forge_webfetch.ts";
+import { forgeDenyHost, forgeHostFromUrl, forgePermissions } from "../src/forge_webfetch.ts";
 import { IMPLEMENT_PROMPT } from "../src/implement.ts";
 
 type Effect = "allow" | "ask" | "deny";
@@ -63,21 +63,22 @@ describe("opencode implement config", () => {
   test("denies webfetch of the forge host for the worker, not just the reviewer", () => {
     // The JSON keeps one star allow; the last-match rules arrive as
     // `permissions` via OPENCODE_CONFIG_CONTENT on every spawn.
-    const rules = webfetchRules(FORGE_DENY_DOMAIN);
-    expect(Object.keys(rules)).toEqual(["*", `*${FORGE_DENY_DOMAIN}*`, "*github.com/search*"]);
+    const host = "gitea.example.test";
+    const rules = webfetchRules(host);
+    expect(Object.keys(rules)).toEqual(["*", `*${host}*`, "*github.com/search*"]);
 
-    expect(lastMatch(rules, `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/issues/79`)).toBe("deny");
-    expect(lastMatch(rules, `https://gitea.${FORGE_DENY_DOMAIN}/api/v1/repos/personal/jumi/pulls`)).toBe("deny");
-    expect(lastMatch(rules, `http://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/actions`)).toBe("deny");
-    expect(lastMatch(rules, `https://${FORGE_DENY_DOMAIN}/swagger`)).toBe("deny");
+    expect(lastMatch(rules, `https://gitea.${host}/personal/jumi/issues/79`)).toBe("deny");
+    expect(lastMatch(rules, `https://gitea.${host}/api/v1/repos/personal/jumi/pulls`)).toBe("deny");
+    expect(lastMatch(rules, `http://gitea.${host}/personal/jumi/actions`)).toBe("deny");
+    expect(lastMatch(rules, `https://${host}/swagger`)).toBe("deny");
     expect(lastMatch(rules, "https://github.com/search?q=foo")).toBe("deny");
 
     expect(lastMatch(rules, "https://docs.gitea.com/installation")).toBe("allow");
     expect(lastMatch(rules, "https://bun.sh/docs/cli/test")).toBe("allow");
 
-    expect(forgePermissions(FORGE_DENY_DOMAIN)).toEqual([
+    expect(forgePermissions(host)).toEqual([
       { action: "webfetch", resource: "*", effect: "allow" },
-      { action: "webfetch", resource: `*${FORGE_DENY_DOMAIN}*`, effect: "deny" },
+      { action: "webfetch", resource: `*${host}*`, effect: "deny" },
       { action: "webfetch", resource: "*github.com/search*", effect: "deny" },
     ]);
   });
@@ -85,10 +86,16 @@ describe("opencode implement config", () => {
   test("denies the configured forge host, not a compile-time one", () => {
     // The GitHub factory hands the child GIT_AUTH_HOST=github.com plus a
     // write-capable token, so the deny follows the spawn, not the default.
+    // The fallback comes from the configured forge URL for spawns without it.
     expect(forgeDenyHost({ GIT_AUTH_HOST: "github.com" })).toBe("github.com");
     expect(forgeDenyHost({ GIT_AUTH_HOST: "gitea.example.com:3000" })).toBe("gitea.example.com");
-    expect(forgeDenyHost({})).toBe(FORGE_DENY_DOMAIN);
-    expect(forgeDenyHost(undefined)).toBe(FORGE_DENY_DOMAIN);
+    expect(forgeDenyHost({}, "https://gitea.example.test")).toBe("gitea.example.test");
+    expect(forgeDenyHost(undefined, "https://gitea.example.test")).toBe("gitea.example.test");
+    expect(forgeDenyHost({ GIT_AUTH_URL: "https://gitea.example.test/" })).toBe("gitea.example.test");
+    expect(forgeDenyHost({})).toBe("");
+    expect(forgeDenyHost(undefined)).toBe("");
+    expect(forgeHostFromUrl("https://gitea.example.test/")).toBe("gitea.example.test");
+    expect(forgeHostFromUrl("https://github.com")).toBe("github.com");
 
     const rules = webfetchRules(forgeDenyHost({ GIT_AUTH_HOST: "github.com" }));
     expect(lastMatch(rules, "https://github.com/kirmanak/jumi/issues/79")).toBe("deny");

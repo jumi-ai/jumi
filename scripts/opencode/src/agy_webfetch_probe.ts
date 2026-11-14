@@ -16,7 +16,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGY_SKIP_PERMISSIONS, ensureAgyForgeDeny } from "./agy.ts";
-import { agyReadUrlDeny, FORGE_DENY_DOMAIN } from "./forge_webfetch.ts";
+import { agyReadUrlDeny } from "./forge_webfetch.ts";
+
+/** Example homelab host for manual probing only; production derives the deny host from config. */
+const PROBE_DENY_DOMAIN = "kirmanak.stream";
 
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
 const DENY_MARK = "Matches user-configured deny rule";
@@ -38,25 +41,25 @@ function probeCases(origin: string): readonly ProbeCase[] {
       name: "unrelated host is fetchable",
       url: `${origin}/docs/upstream/readme`,
       expect: "allow",
-      host: FORGE_DENY_DOMAIN,
+      host: PROBE_DENY_DOMAIN,
     },
     {
       name: "forge host in the path is not a hostname deny",
-      url: `${origin}/gitea.${FORGE_DENY_DOMAIN}/personal/jumi`,
+      url: `${origin}/gitea.${PROBE_DENY_DOMAIN}/personal/jumi`,
       expect: "allow",
-      host: FORGE_DENY_DOMAIN,
+      host: PROBE_DENY_DOMAIN,
     },
     {
       name: "forge host",
-      url: `https://gitea.${FORGE_DENY_DOMAIN}/personal/jumi/pulls/1`,
+      url: `https://gitea.${PROBE_DENY_DOMAIN}/personal/jumi/pulls/1`,
       expect: "deny",
-      host: FORGE_DENY_DOMAIN,
+      host: PROBE_DENY_DOMAIN,
     },
     {
       name: "forge API subdomain",
-      url: `https://api.${FORGE_DENY_DOMAIN}/api/v1/repos/personal/jumi/issues`,
+      url: `https://api.${PROBE_DENY_DOMAIN}/api/v1/repos/personal/jumi/issues`,
       expect: "deny",
-      host: FORGE_DENY_DOMAIN,
+      host: PROBE_DENY_DOMAIN,
     },
     {
       name: "github factory API subdomain",
@@ -302,15 +305,15 @@ async function main(): Promise<number> {
     await Bun.$`git init -q`.cwd(workdir).quiet();
     await seedRepository(workdir);
     const homes = new Map<string, string>();
-    for (const host of [FORGE_DENY_DOMAIN, "github.com"]) {
+    for (const host of [PROBE_DENY_DOMAIN, "github.com"]) {
       const home = join(dir, `home-${host.replaceAll(".", "-")}`);
       await mkdir(home, { recursive: true });
       await writeSettings(home, host);
       homes.set(host, home);
     }
-    const model = await probeModel(homes.get(FORGE_DENY_DOMAIN) ?? "", origin, workdir);
+    const model = await probeModel(homes.get(PROBE_DENY_DOMAIN) ?? "", origin, workdir);
     console.log(
-      `agy model ${model}; deny under test ${agyReadUrlDeny(FORGE_DENY_DOMAIN)} and ${agyReadUrlDeny("github.com")}`
+      `agy model ${model}; deny under test ${agyReadUrlDeny(PROBE_DENY_DOMAIN)} and ${agyReadUrlDeny("github.com")}`
     );
     for (const probe of probeCases(origin)) {
       state.url = probe.url;

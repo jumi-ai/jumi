@@ -305,7 +305,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await seedAgySettings(home);
     // After extraEnv, so a job-supplied HOME is the file the child will load,
     // and a settings file that cannot take the deny fails the spawn closed.
-    await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv));
+    await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv, opts.forgeUrl));
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
     const args = agyArgv(opts, promptArg, conversationId);
     // Shared image skills: review gets the reviewer skill, workers get the

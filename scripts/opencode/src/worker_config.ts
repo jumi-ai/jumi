@@ -158,6 +158,11 @@ export function loadWorkerConfig(env: Env = process.env, opts: { requireWebhookS
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
+  // Deployment-owned identity and tracing knobs; read here so the contract
+  // gate sees the optional keys. Runtime reads them via process.env.
+  void optionalEnv(resolved, "JUMI_GIT_NAME");
+  void optionalEnv(resolved, "JUMI_GIT_EMAIL");
+  void optionalEnv(resolved, "PHOENIX_PUBLIC_HOST");
   const opencodeTimeoutMs = intEnv(resolved, "OPENCODE_TIMEOUT_MS", 4 * 60 * 60 * 1000);
   const followupTimeoutMs = intEnv(resolved, "FOLLOWUP_TIMEOUT_MS", 60 * 60 * 1000);
   const conflictTimeoutMs = intEnv(resolved, "CONFLICT_TIMEOUT_MS", 60 * 60 * 1000);
