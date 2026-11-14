@@ -8,17 +8,18 @@ import {
 } from "./board_device_login.ts";
 import {
   disabledKickWhy,
+  isFailingVerdictRow,
   isImplementKickId,
-  isKickableTerminalState,
+  isKickableReviewRow,
   isKickPath,
   isReopenKickId,
   isStuckKickId,
+  kickReasonOf,
   parseImplementKickBody,
   parseKickBody,
   parseReopenKickBody,
   parseStuckKickBody,
   rawKickIdOf,
-  terminalReasonOf,
 } from "./kick.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
@@ -420,9 +421,10 @@ function requeueMessage(state: string, reason: string): string {
 }
 
 function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): BoardItem {
+  const failing = isFailingVerdictRow(row);
   const item: BoardItem = {
-    reason: `${row.kind} ${row.state}`,
-    message: requeueMessage(row.state, reason),
+    reason: failing ? `${row.kind} failed` : `${row.kind} ${row.state}`,
+    message: requeueMessage(failing ? "failed" : row.state, reason),
     owner: row.owner,
     repo: row.repo,
     number: row.prNumber,
@@ -455,6 +457,14 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
   );
   const inflightJobKeys = new Set(inflight.map((row) => row.jobKey));
+  // PR numbers with any queued/leased work (review, follow-up, or conflict).
+  // A failing-verdict review row hides while a follow-up for the same pull is
+  // in flight: the follow-up is already addressing the verdict.
+  const inflightPullKeys = new Set(
+    inflight
+      .filter((row) => typeof row.prNumber === "number" && Number.isFinite(row.prNumber) && row.prNumber > 0)
+      .map((row) => `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`)
+  );
   // Latest terminal review per pull only: older commits are history, not the current head.
   const latestByPull = new Map<string, ReviewJobRecord>();
   for (const row of terminals) {
@@ -470,8 +480,11 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     if (inflightKeys.has(key)) continue;
     if (closedKeys.has(key)) continue;
     if (inflightJobKeys.has(row.jobKey)) continue;
-    if (!isKickableTerminalState(row.state)) continue;
-    const reason = terminalReasonOf(row);
+    if (!isKickableReviewRow(row)) continue;
+    // A failing-verdict review hides while a follow-up for the same pull is
+    // already queued or running: the follow-up is addressing the verdict.
+    if (isFailingVerdictRow(row) && inflightPullKeys.has(key)) continue;
+    const reason = kickReasonOf(row);
     if (reason === "") continue;
     if (disabledKickWhy(reason)) continue;
     if ((row.headSha ?? "").trim() === "") continue;
