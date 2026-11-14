@@ -41,6 +41,7 @@ import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaCla
 import { stageBaseSkillsForClaude } from "./review_base.ts";
 import { claudeMcpArgs } from "./review_mcp.ts";
 import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
@@ -52,6 +53,13 @@ export const CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Grep,Glob,WebFetch,Ski
 export const CLAUDE_PERMISSION_MODE = "dontAsk";
 /** stream-json keeps per-message usage even when the child is killed before `result`. */
 export const CLAUDE_OUTPUT_FORMAT = "stream-json";
+/**
+ * Tool search is off on every Claude spawn, with and without `JUMI_SEARXNG_URL`:
+ * `WebFetch` (always) and the searxng search tool (when configured) load
+ * upfront into the first request, so the run makes no `ToolSearch` call to
+ * load them. Proved against the pinned binary by `claude_flag_probe.ts`.
+ */
+export const CLAUDE_ENABLE_TOOL_SEARCH = "false";
 
 const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
@@ -68,6 +76,23 @@ const CLAUDE_USAGE_LIMIT_RE =
 export function inspectClaudeCreditExhaustion(text: string | null | undefined): QuotaClass | undefined {
   if (!text || !isCreditBalanceText(text)) return undefined;
   return "hard";
+}
+
+/** Allowed tools for this spawn: the search tool joins only when configured. */
+export function claudeAllowedTools(searxngConfigured: boolean): string {
+  return searxngConfigured ? `${CLAUDE_ALLOWED_TOOLS},${SEARXNG_CLAUDE_TOOL}` : CLAUDE_ALLOWED_TOOLS;
+}
+
+/**
+ * `--mcp-config` JSON registering the searxng server for this spawn, or
+ * undefined when `JUMI_SEARXNG_URL` is not configured (then no MCP config is
+ * generated at all). The JSON travels on the command line, outside the
+ * checkout, and outranks a checkout `.mcp.json` defining its own `searxng`.
+ */
+export function claudeSearxngMcpConfigForSpawn(opts: Pick<EngineRunOptions, "extraEnv">): string | undefined {
+  const baseUrl = searxngUrlFromEnv();
+  if (!baseUrl) return undefined;
+  return claudeSearxngMcpConfig(baseUrl, searxngForgeHost(opts.extraEnv));
 }
 
 export function stripAnsi(str: string): string {
@@ -276,6 +301,9 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
     const env = { ...process.env, TMPDIR: scratchDir, ...tracing } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
     applyClaudeCredentialRule(env, opts, apiKeyMode, keyVarNames);
+    // Tool search stays off even when the parent set it otherwise: WebFetch
+    // (and the searxng tool when configured) must load upfront.
+    env.ENABLE_TOOL_SEARCH = CLAUDE_ENABLE_TOOL_SEARCH;
     return env;
   }
 
@@ -284,6 +312,7 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     TMPDIR: scratchDir,
     DISABLE_AUTOUPDATER: "1",
+    ENABLE_TOOL_SEARCH: CLAUDE_ENABLE_TOOL_SEARCH,
   };
   if (apiKeyMode) {
     const key = resolveClaudeApiKey(opts.authEnv, process.env);
@@ -320,6 +349,8 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
   // After extraEnv, because the scrub is what this has to survive: a sanitized
   // spawn that reaches the model but not Phoenix is an untraced job.
   Object.assign(env, tracing);
+  // After extraEnv too: a job-supplied value must not re-enable tool search.
+  env.ENABLE_TOOL_SEARCH = CLAUDE_ENABLE_TOOL_SEARCH;
   return env;
 }
 
@@ -336,6 +367,7 @@ export function claudeArgv(
   basePrompt?: string,
   reviewMcpConfigPath?: string
 ): string[] {
+  const searxngMcpConfig = claudeSearxngMcpConfigForSpawn(opts);
   const isReview = opts.trace?.kind === "review";
   const args = [
     "claude",
@@ -345,7 +377,7 @@ export function claudeArgv(
     "--permission-mode",
     CLAUDE_PERMISSION_MODE,
     "--allowedTools",
-    CLAUDE_ALLOWED_TOOLS,
+    claudeAllowedTools(searxngMcpConfig !== undefined),
     // Deny beats every allow, so WebFetch stays on the allow-list for public
     // docs while the forge host itself is refused by the binary. The host is
     // this spawn's own `GIT_AUTH_HOST`, so a GitHub-factory child denies
@@ -358,6 +390,9 @@ export function claudeArgv(
     "--model",
     opts.model,
   ];
+  // The searxng server rides the command line, outside the checkout: a
+  // checkout `.mcp.json` defining its own `searxng` does not shadow it.
+  if (searxngMcpConfig !== undefined) args.push("--mcp-config", searxngMcpConfig);
   if (opts.effort) args.push("--effort", opts.effort);
   // Phoenix tracing is an image-local plugin the parent names per spawn.
   const tracingPlugin = claudeTracingPluginDir();

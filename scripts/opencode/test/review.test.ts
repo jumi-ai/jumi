@@ -1810,7 +1810,8 @@ describe("reviewPullRequest", () => {
       expect(prompt).toContain('target_remote_ref="origin/main"');
       expect(prompt).toContain("stable refs like jumi/target and HEAD");
       expect(prompt).toContain("git log --oneline jumi/target..HEAD");
-      expect(prompt).toContain("web search/fetch");
+      expect(prompt).toContain("Use `websearch` to find a URL, then fetch that exact URL with `webfetch`");
+      expect(prompt).toContain("do not construct file or release URLs from memory");
     });
   });
 

@@ -4,12 +4,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  BLOCKED_BY_REJECTED_PROMPT,
-  CONFLICT_PROMPT,
-  FOLLOWUP_PROMPT,
+  buildBlockedByRejectedPrompt,
+  buildConflictPrompt,
+  buildFollowupPrompt,
+  buildImplementPrompt,
+  buildImplementYieldPrompt,
   formatInjectedFilesLine,
-  IMPLEMENT_PROMPT,
-  IMPLEMENT_YIELD_PROMPT,
   listInjectedFiles,
   resolveOpenCodePrompt,
   WORKER_INJECTED_FILES,
@@ -51,7 +51,7 @@ describe("reviewer no re-run", () => {
 describe("no polling loops", () => {
   test("reviewer and worker prompts forbid sleep/until-grep polling loops and name foreground-with-timeout or background-notify", () => {
     const reviewer = reviewerPrompt();
-    for (const prompt of [reviewer, IMPLEMENT_PROMPT, FOLLOWUP_PROMPT, CONFLICT_PROMPT]) {
+    for (const prompt of [reviewer, buildImplementPrompt(), buildFollowupPrompt(), buildConflictPrompt()]) {
       expect(prompt).toContain("sleep");
       expect(prompt).toContain("until");
       expect(prompt).toContain("grep");
@@ -161,11 +161,11 @@ describe("worker injected files", () => {
     }
     await withWorktreeFiles(["JUMI_TASK.md", "JUMI_FEEDBACK.md", "JUMI_CI.md"], async (dir) => {
       const bases = [
-        IMPLEMENT_PROMPT,
-        IMPLEMENT_YIELD_PROMPT,
-        FOLLOWUP_PROMPT,
-        CONFLICT_PROMPT,
-        BLOCKED_BY_REJECTED_PROMPT,
+        buildImplementPrompt(),
+        buildImplementYieldPrompt(),
+        buildFollowupPrompt(),
+        buildConflictPrompt(),
+        buildBlockedByRejectedPrompt(),
       ];
       const lines = new Set<string>();
       for (const base of bases) {

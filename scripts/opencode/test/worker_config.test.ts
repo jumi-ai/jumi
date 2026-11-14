@@ -342,6 +342,25 @@ describe("loadWorkerConfig", () => {
   });
 });
 
+describe("loadWorkerConfig JUMI_SEARXNG_URL", () => {
+  const required = {
+    GITEA_URL: "https://gitea.kirmanak.stream/",
+    GITEA_BOT_TOKEN: "bot-token",
+    GITEA_WEBHOOK_SECRET: "secret",
+  };
+
+  test("unset is unconfigured, http(s) parses, anything else fails naming the variable", () => {
+    expect(loadWorkerConfig(required).searxngUrl).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, JUMI_SEARXNG_URL: "  " }).searxngUrl).toBeUndefined();
+    expect(loadWorkerConfig({ ...required, JUMI_SEARXNG_URL: "https://search.example/" }).searxngUrl).toBe(
+      "https://search.example"
+    );
+    expect(() => loadWorkerConfig({ ...required, JUMI_SEARXNG_URL: "ftp://search.example" })).toThrow(
+      "JUMI_SEARXNG_URL"
+    );
+  });
+});
+
 describe("worker ReviewQueue", () => {
   test("still uses the in-memory queue without DATABASE_URL", async () => {
     const seen: number[] = [];

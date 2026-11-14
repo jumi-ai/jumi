@@ -275,7 +275,14 @@ describe("codex build consumes one effective pin and fails closed", () => {
     expect(dockerfile).toContain(
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz"
     );
-    expect(dockerfile).not.toContain("latest");
+    // The Android cmdline-tools archive is officially named *_latest.zip with a
+    // pinned numeric version, and it installs into cmdline-tools/latest by
+    // layout convention; neither is a floating tag.
+    const urls = [...dockerfile.matchAll(/https:\/\/[^\s"']+/g)].map((m) => m[0]);
+    const floating = urls.filter(
+      (u) => /\/latest/i.test(u) && !u.includes("dl.google.com/android/repository/commandlinetools")
+    );
+    expect(floating).toEqual([]);
     expect(dockerfile).toContain('echo "${codex_sha256}  ${tmp_dir}/codex.tar.gz" | sha256sum -c -');
     expect(dockerfile).toContain('x86_64-unknown-linux-musl"; codex_sha256="${CODEX_SHA256_AMD64}"');
     expect(dockerfile).toContain('aarch64-unknown-linux-musl"; codex_sha256="${CODEX_SHA256_ARM64}"');

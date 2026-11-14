@@ -2340,6 +2340,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      // Written for the first runner in attempt order; `resolveOpenCodePrompt`
+      // rewords the file's guidance per attempt from the actual runner.
+      runnerType: effectiveChain?.[0]?.type,
       ...(repoSetupBlock ? { repoSetupBlock } : {}),
     });
 

@@ -131,6 +131,11 @@ verify_reviewer_runtime() {
     echo "reviewer image must not ship a JVM" >&2
     exit 1
   fi
+  if buildah run "${ctr}" -- sh -c 'test -n "${ANDROID_HOME:-}" || test -n "${ANDROID_SDK_ROOT:-}" || test -e /opt/android-sdk'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "reviewer image must not set ANDROID_HOME" >&2
+    exit 1
+  fi
   if ! buildah run "${ctr}" -- python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "python3 is not CPython 3.13 in reviewer image" >&2
@@ -354,6 +359,16 @@ verify_reviewer_runtime() {
     sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "agy forge read_url deny probe failed against the installed agy binary" >&2
+    exit 1
+  fi
+  # The pinned agy either honors per-spawn MCP servers or it does not. The
+  # probe registers the production searxng server the way runAgy does and has
+  # the installed binary read it back, so an AGY bump that drops MCP support
+  # fails here instead of silently leaving agy without search.
+  if ! buildah run "${ctr}" -- \
+    sh -c 'cd /app/scripts/opencode && timeout 300 bun src/agy_mcp_probe.ts'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "agy MCP probe failed against the installed agy binary" >&2
     exit 1
   fi
   # Jumi loads a repository's `.codex` config on purpose. What keeps web search

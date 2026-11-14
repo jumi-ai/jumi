@@ -71,12 +71,26 @@ export function forgeOpenCodeConfigContent(host: string): string {
  * outrank `permissions` from any source. `policies` apply after agent rules, but
  * a repo policy can lift an inline one, so these go in the global config file,
  * which outranks project files. Written per spawn, as `XDG_CONFIG_HOME` is.
+ *
+ * With `searxng`, native web search is denied for every provider as well: the
+ * permission deny in the inline config is last-match, but a repository agent's
+ * own rules append after it, so the global policy is what holds the deny.
+ * Shape per upstream docs (https://opencode.ai/docs/policies/): `websearch.use`
+ * is a valid policy action whose resource is the search provider ID
+ * (`opencode`, `exa`, `tinyfish`), so `*` denies every native backend. The
+ * `websearch` permission deny beside it covers the query-level check
+ * (https://opencode.ai/docs/permissions/: action `websearch`, resource the
+ * query). Proved live against the installed binary by `webfetch_probe.ts`,
+ * which runs the exact inline config plus this global file and asserts native
+ * search stays denied (even under a hostile checkout re-allow) while
+ * `searxng_search` stays callable.
  */
-export function forgeOpenCodeGlobalConfig(host: string): string {
+export function forgeOpenCodeGlobalConfig(host: string, searxng = false): string {
   return JSON.stringify({
     policies: [
       { action: "tool.use", resource: `webfetch:*${host}*`, effect: "deny" },
       { action: "tool.use", resource: "webfetch:*github.com/search*", effect: "deny" },
+      ...(searxng ? [{ action: "websearch.use", resource: "*", effect: "deny" }] : []),
     ],
   });
 }

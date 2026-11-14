@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { codexArgv } from "../src/codex.ts";
 import {
+  judgeConfigured,
   judgeControl,
   judgeProduction,
   judgeReview,
@@ -12,6 +13,7 @@ import {
   REVIEW_BASE_SKILL,
   REVIEW_HEAD_AGENTS,
   REVIEW_HEAD_SKILL,
+  SEARXNG_DEFERRED_NAMESPACE,
   withoutWebSearchOverride,
 } from "../src/codex_probe.ts";
 
@@ -19,7 +21,7 @@ const request = (tools: Record<string, string>[], marker = "JUMI-CODEX-CONFIG-PR
   JSON.stringify({ instructions: marker, tools });
 const shell = { type: "function", name: "exec_command" };
 const search = { type: "web_search" };
-const report = (bodies: string[]) => ({ bodies, hookRan: true, mcpRan: true });
+const report = (bodies: string[]) => ({ bodies, hookRan: true, mcpRan: true, shadowRan: false });
 const failures = (results: { name: string; ok: boolean }[]) => results.filter((r) => !r.ok).map((r) => r.name);
 
 describe("offeredTools", () => {
@@ -44,12 +46,44 @@ describe("judgeProduction", () => {
   });
 
   test("fails when the checkout did not load", () => {
-    const results = judgeProduction({ bodies: [request([shell, search], "")], hookRan: false, mcpRan: false });
+    const results = judgeProduction({
+      bodies: [request([shell, search], "")],
+      hookRan: false,
+      mcpRan: false,
+      shadowRan: false,
+    });
     expect(failures(results)).toEqual([
       "the checkout's .codex/config.toml loads",
       "the checkout's hook runs",
       "the checkout's MCP server starts",
     ]);
+  });
+});
+
+describe("judgeConfigured", () => {
+  const namespaceBody = (extra = "") => `{"tools": [], "note": "${SEARXNG_DEFERRED_NAMESPACE}${extra}"}`;
+
+  test("passes with search disabled and the spawn's searxng winning", () => {
+    expect(failures(judgeConfigured(report([request([shell]), namespaceBody()])))).toEqual([]);
+  });
+
+  test("fails when native search is offered or the shadow server ran", () => {
+    expect(
+      failures(
+        judgeConfigured({
+          bodies: [request([shell, search]), namespaceBody()],
+          hookRan: true,
+          mcpRan: true,
+          shadowRan: false,
+        })
+      )
+    ).toContain("configured: web_search stays disabled against the checkout's live web_search");
+    expect(
+      failures(
+        judgeConfigured({ bodies: [request([shell]), namespaceBody()], hookRan: true, mcpRan: true, shadowRan: true })
+      )
+    ).toContain("configured: the spawn's searxng server wins over the checkout's searxng server");
+    expect(failures(judgeConfigured(report([])))).toHaveLength(3);
   });
 });
 
@@ -75,7 +109,9 @@ describe("judgeReview", () => {
 
   test("passes with the head blocked and the base skill advertised", () => {
     const bodies = [JSON.stringify({ instructions: REVIEW_BASE_SKILL, tools: [shell, search] })];
-    expect(judgeReview({ bodies, hookRan: false, mcpRan: false }).every((result) => result.ok)).toBe(true);
+    expect(judgeReview({ bodies, hookRan: false, mcpRan: false, shadowRan: false }).every((result) => result.ok)).toBe(
+      true
+    );
   });
 
   test("fails when the head config, instructions, hook, MCP, or skill leaks", () => {
@@ -87,6 +123,7 @@ describe("judgeReview", () => {
       ],
       hookRan: true,
       mcpRan: true,
+      shadowRan: false,
     };
     expect(
       judgeReview(leaked)

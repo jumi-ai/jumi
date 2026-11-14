@@ -29,6 +29,14 @@ import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsIntoWorkdir } from "./review_base.ts";
 import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import {
+  SEARXNG_SERVER_FORGE_HOST_ENV,
+  SEARXNG_SERVER_NAME,
+  SEARXNG_SERVER_URL_ENV,
+  searxngForgeHost,
+  searxngServerPath,
+  searxngUrlFromEnv,
+} from "./searxng.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
 
 /** stream-json keeps per-step usage even when the child is killed before `result`. */
@@ -40,6 +48,9 @@ export const AGY_PRINT_TIMEOUT_MARGIN_MS = 30_000;
 /** Linux MAX_ARG_STRLEN is 128 KiB; longer prompts go through a file pointer. */
 export const AGY_ARGV_PROMPT_MAX_BYTES = 96_000;
 export const AGY_SETTINGS_DIR = join(".gemini", "antigravity-cli");
+/** Where the pinned `agy` keeps MCP servers (`agy mcp add` writes here). */
+export const AGY_MCP_CONFIG_DIR = join(".gemini", "config");
+export const AGY_MCP_CONFIG_FILE = "mcp_config.json";
 /** Only seeded when absent: never overwrite a logged-in settings file. */
 export const AGY_SEED_SETTINGS = { enableTelemetry: false, useG1Credits: false } as const;
 
@@ -164,6 +175,85 @@ export async function ensureAgyForgeDeny(home: string, host: string): Promise<vo
     if (err instanceof EngineFailedError) throw err;
     const reason = err instanceof Error ? err.message : String(err);
     throw new EngineFailedError(`agy spawn refused: cannot install forge read_url deny: ${reason}`, false);
+  }
+}
+
+/**
+ * Register the searxng search server in the MCP config file this spawn's HOME
+ * will load. Existing servers stay: only the `searxng` entry is set. Throws
+ * instead of returning when the entry cannot be installed: the caller must
+ * not spawn a search-claiming run without the search tool.
+ */
+export async function ensureAgyMcpServer(home: string, baseUrl: string, forgeHost: string): Promise<void> {
+  if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the searxng MCP server", false);
+  const dir = join(home, AGY_MCP_CONFIG_DIR);
+  const path = join(dir, AGY_MCP_CONFIG_FILE);
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    let raw: string | undefined;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    const parsed: unknown = raw == null ? {} : JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("agy mcp_config.json is not an object");
+    }
+    const next = { ...(parsed as Record<string, unknown>) };
+    const rawServers = next.mcpServers;
+    if (rawServers != null && (typeof rawServers !== "object" || Array.isArray(rawServers))) {
+      throw new Error("agy mcp_config.json mcpServers is not an object");
+    }
+    const servers = { ...((rawServers as Record<string, unknown> | undefined) ?? {}) };
+    servers[SEARXNG_SERVER_NAME] = {
+      command: "bun",
+      args: [searxngServerPath()],
+      env: { [SEARXNG_SERVER_URL_ENV]: baseUrl, [SEARXNG_SERVER_FORGE_HOST_ENV]: forgeHost },
+    };
+    next.mcpServers = servers;
+    const tmp = join(dir, `.mcp_config.json.${process.pid}.tmp`);
+    await writeFile(tmp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmp, path);
+  } catch (err) {
+    if (err instanceof EngineFailedError) throw err;
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new EngineFailedError(`agy spawn refused: cannot install searxng MCP server: ${reason}`, false);
+  }
+}
+
+/**
+ * Best-effort removal of our searxng entry when no endpoint is configured, so
+ * an unconfigured spawn gains no MCP entry. Never throws: a spawn without
+ * search must not fail on stale config.
+ */
+export async function pruneAgyMcpServer(home: string | undefined): Promise<void> {
+  if (!home) return;
+  try {
+    const path = join(home, AGY_MCP_CONFIG_DIR, AGY_MCP_CONFIG_FILE);
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (err) {
+      if (isEnoent(err)) return;
+      throw err;
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+    const servers = (parsed as Record<string, unknown>).mcpServers;
+    if (!servers || typeof servers !== "object" || Array.isArray(servers)) return;
+    if (!(SEARXNG_SERVER_NAME in (servers as Record<string, unknown>))) return;
+    const next = { ...(servers as Record<string, unknown>) };
+    delete next[SEARXNG_SERVER_NAME];
+    await writeFile(
+      path,
+      `${JSON.stringify({ ...(parsed as Record<string, unknown>), mcpServers: next }, null, 2)}\n`,
+      {
+        mode: 0o600,
+      }
+    );
+  } catch {
+    return;
   }
 }
 
@@ -331,6 +421,15 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // After extraEnv, so a job-supplied HOME is the file the child will load,
     // and a settings file that cannot take the deny fails the spawn closed.
     await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv));
+    // Same HOME, same fail-closed rule: the searxng server is registered in
+    // the per-spawn MCP config when an endpoint is configured, and pruned
+    // otherwise, so a checkout cannot add, replace or shadow the server.
+    const searxngBaseUrl = searxngUrlFromEnv();
+    if (searxngBaseUrl !== undefined) {
+      await ensureAgyMcpServer(home, searxngBaseUrl, searxngForgeHost(opts.extraEnv));
+    } else {
+      await pruneAgyMcpServer(home);
+    }
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
     // Reviews hide the head's `.agents/skills` (Antigravity has no
     // project-config switch) and stage the base branch's skills instead.

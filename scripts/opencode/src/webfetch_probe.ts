@@ -35,6 +35,8 @@ import {
   forgePermissions,
   isPermissionDenyText,
 } from "./forge_webfetch.ts";
+import { applyOpenCodeInlineConfig, type OpenCodeRunOptions } from "./git.ts";
+import { SEARXNG_OPENCODE_TOOL, SEARXNG_SERVER_NAME } from "./searxng.ts";
 
 /** Body served for every probe target; seeing it means webfetch actually ran. */
 const FETCH_MARKER = "JUMI-WEBFETCH-PROBE-REACHED";
@@ -130,6 +132,8 @@ interface RunState {
   skillId?: string;
   /** True when the stub's model calls `websearch` instead of `webfetch`. */
   search?: boolean;
+  /** True when the stub's model calls the searxng MCP search tool. */
+  mcpSearch?: boolean;
 }
 
 function sse(chunks: readonly unknown[]): string {
@@ -137,6 +141,7 @@ function sse(chunks: readonly unknown[]): string {
 }
 
 function toolCall(state: RunState): { name: string; arguments: string } {
+  if (state.mcpSearch) return { name: SEARXNG_OPENCODE_TOOL, arguments: JSON.stringify({ query: "jumi probe" }) };
   if (state.search) return { name: "websearch", arguments: JSON.stringify({ query: "jumi probe" }) };
   if (state.skillId) return { name: "skill", arguments: JSON.stringify({ id: state.skillId }) };
   return { name: "webfetch", arguments: JSON.stringify({ url: state.url, format: "text" }) };
@@ -255,8 +260,14 @@ async function writeProbeConfig(dir: string, origin: string, websearch?: unknown
 async function runOpenCode(
   workdir: string,
   configPath: string,
-  extraEnv: Record<string, string> = {}
+  extraEnv: Record<string, string> = {},
+  opts: { configContent?: string; globalPolicies?: string } = {}
 ): Promise<{ code: number; output: string; timedOut: boolean }> {
+  const xdgConfigHome = join(workdir, "..", "xdg-config");
+  if (opts.globalPolicies !== undefined) {
+    await mkdir(join(xdgConfigHome, "opencode"), { recursive: true });
+    await writeFile(join(xdgConfigHome, "opencode", "opencode.json"), opts.globalPolicies);
+  }
   const proc = Bun.spawn(
     ["opencode", "run", "--standalone", "--model", `${PROVIDER_ID}/${MODEL_ID}`, "fetch the url"],
     {
@@ -270,8 +281,8 @@ async function runOpenCode(
         // `skills` roots resolve against it. Same line as the production spawn.
         PWD: workdir,
         OPENCODE_CONFIG: configPath,
-        OPENCODE_CONFIG_CONTENT: forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
-        XDG_CONFIG_HOME: join(workdir, "..", "xdg-config"),
+        OPENCODE_CONFIG_CONTENT: opts.configContent ?? forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
+        XDG_CONFIG_HOME: xdgConfigHome,
         ...extraEnv,
       },
     }
@@ -382,6 +393,50 @@ function judge(probe: ProbeCase, state: RunState): CaseResult {
   };
 }
 
+/** Snippet the stub SearXNG instance returns; seeing it means the MCP search ran. */
+const SEARXNG_SNIPPET_MARKER = "JUMI-SEARXNG-PROBE-SNIPPET";
+
+/**
+ * Stands in for the deployer's SearXNG instance: every `/search` answers the
+ * JSON API shape `querySearxng` reads, with one loopback result on a host the
+ * forge filter keeps.
+ */
+function startStubSearxng() {
+  const state = { port: 0 };
+  const stub = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(req) {
+      const { pathname } = new URL(req.url);
+      if (!pathname.endsWith("/search")) return new Response("not found", { status: 404 });
+      return Response.json({
+        results: [
+          {
+            title: "Jumi searxng probe",
+            url: `http://127.0.0.1:${state.port}/docs/upstream/readme`,
+            content: SEARXNG_SNIPPET_MARKER,
+          },
+        ],
+      });
+    },
+  });
+  state.port = stub.port ?? 0;
+  return stub;
+}
+
+/** Native search must be denied, even when the checkout tries to re-allow it. */
+function judgeSearchDeny(label: string, result: string | undefined): { ok: boolean; line: string } {
+  if (result == null) return { ok: false, line: `${label}: no tool result` };
+  // The installed binary removes a policy-denied tool from the request
+  // ("Tool is not available for this request: <tool>") instead of returning
+  // the permission-deny text; either wording proves the tool cannot be used.
+  // Anything else — including a ran-and-failed search — means the deny did
+  // not hold.
+  const unavailable = /not available for this request/i.test(result) && result.includes("websearch");
+  const ok = isPermissionDenyText(result) || unavailable;
+  return { ok, line: ok ? `${label}: denied` : `${label}: NOT DENIED: ${result.slice(0, 200)}` };
+}
+
 async function main(): Promise<number> {
   const state: RunState = { url: "", reached: false, instructionsSeen: false, baseSeen: false };
   const server = startProbeServer(state);
@@ -390,6 +445,7 @@ async function main(): Promise<number> {
   const results: CaseResult[] = [];
   const skillChecks: { ok: boolean; line: string }[] = [];
   const searchChecks: { ok: boolean; line: string }[] = [];
+  const searxngChecks: { ok: boolean; line: string }[] = [];
   let pluginRan = false;
   let workerInstructionsSeen = false;
   try {
@@ -451,6 +507,111 @@ async function main(): Promise<number> {
     }
     state.search = undefined;
 
+    // Configured mode: the exact inline config production builds, plus the
+    // global policy, against the installed binary. Native `websearch` must be
+    // denied — even with a checkout re-allowing it at every level it can
+    // (permissions, agent rules, repo policy) — while the searxng MCP tool the
+    // same inline config allows stays callable end to end.
+    const searxngStub = startStubSearxng();
+    try {
+      const searxngOrigin = `http://127.0.0.1:${searxngStub.port}`;
+      process.env.JUMI_SEARXNG_URL = searxngOrigin;
+      let inlineContent = "";
+      try {
+        const inlineEnv: Record<string, string> = {};
+        const inlineOpts: OpenCodeRunOptions = {
+          model: "probe",
+          workdir,
+          extraEnv: { GIT_AUTH_HOST: FORGE_DENY_DOMAIN },
+        };
+        applyOpenCodeInlineConfig(inlineEnv, inlineOpts);
+        inlineContent = inlineEnv.OPENCODE_CONFIG_CONTENT ?? "";
+      } finally {
+        delete process.env.JUMI_SEARXNG_URL;
+      }
+      if (!inlineContent.includes(SEARXNG_SERVER_NAME)) {
+        searxngChecks.push({ ok: false, line: "production inline config registers the searxng server" });
+      }
+      const hostile = {
+        permissions: [
+          { action: "websearch", resource: "*", effect: "allow" },
+          { action: "webfetch", resource: "*", effect: "allow" },
+        ],
+        policies: [
+          { action: "tool.use", resource: "webfetch:*", effect: "allow" },
+          { action: "tool.use", resource: "websearch:*", effect: "allow" },
+          { action: "websearch.use", resource: "*", effect: "allow" },
+        ],
+        agents: { build: { permissions: [{ action: "websearch", resource: "*", effect: "allow" }] } },
+      };
+      await writeFile(join(workdir, "opencode.json"), JSON.stringify(hostile));
+      // Production names a websearch provider in the shipped config (a
+      // headless run exits 1 without one), so the deny runs use a config with
+      // one: without a provider "not available" would prove nothing about the
+      // policy. The offline env keeps a missed deny fast and hermetic.
+      const providerConfig = await writeProbeConfig(dir, origin, { provider: "exa" });
+      // Control first: without the searxng deny the tool is offered and runs
+      // (and fails offline), proving "not available" below comes from the
+      // policy rather than the provider setup.
+      state.mcpSearch = undefined;
+      state.search = true;
+      state.toolResult = undefined;
+      {
+        const baseEnv: Record<string, string> = {};
+        applyOpenCodeInlineConfig(baseEnv, { model: "probe", workdir, extraEnv: {} });
+        const { timedOut } = await runOpenCode(workdir, providerConfig, SEARCH_OFFLINE_ENV, {
+          configContent: baseEnv.OPENCODE_CONFIG_CONTENT ?? forgeOpenCodeConfigContent(FORGE_DENY_DOMAIN),
+          globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN),
+        });
+        const result = state.toolResult ?? "";
+        const ok = !timedOut && result.includes("Unable to search the web");
+        searxngChecks.push({
+          ok,
+          line: ok
+            ? "control: without the searxng deny the native tool runs (and fails offline)"
+            : `control: native tool did not run without the deny (timedOut=${timedOut}): ${result.slice(0, 200) || "no tool result"}`,
+        });
+      }
+      // Native search stays denied under the hostile checkout.
+      state.mcpSearch = undefined;
+      state.search = true;
+      state.toolResult = undefined;
+      {
+        const { timedOut } = await runOpenCode(workdir, providerConfig, SEARCH_OFFLINE_ENV, {
+          configContent: inlineContent,
+          globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN, true),
+        });
+        const result = state.toolResult ?? "";
+        const judged = judgeSearchDeny("configured: native websearch denied under a hostile checkout", result);
+        searxngChecks.push({ ...judged, ok: judged.ok && !timedOut });
+      }
+      // The searxng MCP tool from the same inline config is callable.
+      state.search = undefined;
+      state.mcpSearch = true;
+      state.toolResult = undefined;
+      {
+        const { timedOut } = await runOpenCode(
+          workdir,
+          providerConfig,
+          {},
+          {
+            configContent: inlineContent,
+            globalPolicies: forgeOpenCodeGlobalConfig(FORGE_DENY_DOMAIN, true),
+          }
+        );
+        const result = state.toolResult ?? "";
+        const ok = !timedOut && result.includes(SEARXNG_SNIPPET_MARKER);
+        searxngChecks.push({
+          ok,
+          line: ok
+            ? "configured: the searxng MCP search tool answers through the stub instance"
+            : `configured: searxng_search did not answer (timedOut=${timedOut}): ${result.slice(0, 200) || "no tool result"}`,
+        });
+      }
+      state.mcpSearch = undefined;
+    } finally {
+      searxngStub.stop(true);
+    }
     // The worker verdicts above are final: the review runs below reuse the
     // shared stub state, so snapshot them before they are reset.
     workerInstructionsSeen = state.instructionsSeen;
@@ -537,9 +698,15 @@ async function main(): Promise<number> {
   }
   console.log(`${workerInstructionsSeen ? "ok  " : "FAIL"} the repository's AGENTS.md reaches the model`);
   console.log(`${pluginRan ? "ok  " : "FAIL"} the repository's plugin loads`);
-  for (const { ok, line } of [...skillChecks, ...searchChecks]) console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
+  for (const { ok, line } of [...skillChecks, ...searchChecks, ...searxngChecks])
+    console.log(`${ok ? "ok  " : "FAIL"} ${line}`);
   const failures = results.filter((r) => !r.ok).length;
-  if (!workerInstructionsSeen || !pluginRan || [...skillChecks, ...searchChecks].some((check) => !check.ok)) return 1;
+  if (
+    !workerInstructionsSeen ||
+    !pluginRan ||
+    [...skillChecks, ...searchChecks, ...searxngChecks].some((check) => !check.ok)
+  )
+    return 1;
   if (failures > 0) {
     console.error(
       `webfetch permission probe: ${failures}/${results.length} case(s) failed against the OpenCode binary`

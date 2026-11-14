@@ -53,7 +53,7 @@ import {
 } from "./engine_scratch.ts";
 import type { FollowUpResult } from "./followup.ts";
 import type { ForgeKind } from "./forge.ts";
-import { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
+import { buildBlockedByRejectedPrompt, buildImplementPrompt, buildImplementYieldPrompt } from "./git.ts";
 import { closesIssuePattern, pullRequestClosesIssue, refsIssuePattern, upsertWorkerComment } from "./gitea_issues.ts";
 import {
   type HandoffStore,
@@ -113,7 +113,6 @@ import {
 } from "./workspace.ts";
 
 export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
-export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
 const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
@@ -1262,6 +1261,10 @@ export async function implementIssue(
 
       // Set when the chain refused an incomplete hop, so no child ran at all.
       let hopDeclined = false;
+      // Explicit worker prompts are worded for the first chain runner, but
+      // `resolveOpenCodePrompt` rewords them per attempt from the actual
+      // runner, so a hop runs under its own tool sentences.
+      const firstRunnerType = jobChain?.[0]?.type;
       const runEngine = async (
         label: string,
         kind: "implement" | "follow-up" = "implement",
@@ -1463,13 +1466,17 @@ export async function implementIssue(
       let porcelain = "";
       const customConventions = hasCustomConventions(conventions);
       const implementBasePrompt = (forQueue: boolean): string | undefined => {
-        if (!customConventions) return forQueue ? IMPLEMENT_YIELD_PROMPT : undefined;
-        return withPrConventions(forQueue ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT, conventions, issueNumber);
+        if (!customConventions) return forQueue ? buildImplementYieldPrompt(firstRunnerType) : undefined;
+        return withPrConventions(
+          forQueue ? buildImplementYieldPrompt(firstRunnerType) : buildImplementPrompt(firstRunnerType),
+          conventions,
+          issueNumber
+        );
       };
       const rejectedBasePrompt = (): string =>
         customConventions
-          ? withPrConventions(BLOCKED_BY_REJECTED_PROMPT, conventions, issueNumber)
-          : BLOCKED_BY_REJECTED_PROMPT;
+          ? withPrConventions(buildBlockedByRejectedPrompt(firstRunnerType), conventions, issueNumber)
+          : buildBlockedByRejectedPrompt(firstRunnerType);
       for (;;) {
         const quotaSkip = await runEngine(
           incompleteHopped
@@ -1518,13 +1525,15 @@ export async function implementIssue(
                 "follow-up",
                 customConventions
                   ? withPrConventions(
-                      queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
+                      queue.length > 0
+                        ? buildImplementYieldPrompt(firstRunnerType)
+                        : buildImplementPrompt(firstRunnerType),
                       conventions,
                       issueNumber
                     )
                   : queue.length > 0
-                    ? IMPLEMENT_YIELD_PROMPT
-                    : IMPLEMENT_PROMPT,
+                    ? buildImplementYieldPrompt(firstRunnerType)
+                    : buildImplementPrompt(firstRunnerType),
                 { continueSession: true }
               );
               if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);

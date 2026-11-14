@@ -110,8 +110,6 @@ import {
 import type { IssueJob } from "./types.ts";
 import { type GitRunner, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
-export { CONFLICT_PROMPT } from "./git.ts";
-
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
 

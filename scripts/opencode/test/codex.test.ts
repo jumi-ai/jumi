@@ -7,6 +7,7 @@ import {
   CODEX_APPROVAL,
   CODEX_SANDBOX,
   codexArgv,
+  codexSearxngForSpawn,
   looksLikeCodexAuthDeath,
   REVIEW_ARTIFACT,
   runCodex,
@@ -210,6 +211,48 @@ describe("codexArgv", () => {
     expect(resumed[resumed.indexOf("--model") + 1]).toBe("gpt-6-sol");
     expect(resumed.indexOf("--model")).toBeLessThan(resumeIdx);
     expect(resumed.at(-1)).toBe("-");
+  });
+});
+
+describe("codexSearxng", () => {
+  const originalSearxng = process.env.JUMI_SEARXNG_URL;
+
+  afterEach(() => {
+    if (originalSearxng === undefined) delete process.env.JUMI_SEARXNG_URL;
+    else process.env.JUMI_SEARXNG_URL = originalSearxng;
+  });
+
+  test("unconfigured: native web search stays live, no MCP config", () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    expect(codexSearxngForSpawn({})).toBeUndefined();
+    const args = codexArgv({ model: "gpt-6-sol", workdir: "/w" });
+    expect(args).toContain('web_search="live"');
+    expect(args).not.toContain('web_search="disabled"');
+    expect(args.join("\n")).not.toContain("mcp_servers.searxng");
+    const resumed = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true }, "thread-9");
+    expect(resumed).toContain('web_search="live"');
+    expect(resumed.join("\n")).not.toContain("mcp_servers.searxng");
+  });
+
+  test("configured: first turn and resume register searxng and disable native search", () => {
+    process.env.JUMI_SEARXNG_URL = "https://search.example/";
+    const opts = { model: "gpt-6-sol", workdir: "/w", extraEnv: { GIT_AUTH_HOST: "github.com" } };
+    expect(codexSearxngForSpawn(opts)).toEqual({ baseUrl: "https://search.example", forgeHost: "github.com" });
+    for (const args of [codexArgv(opts), codexArgv({ ...opts, continueSession: true }, "thread-9")]) {
+      expect(args).toContain('web_search="disabled"');
+      expect(args).not.toContain('web_search="live"');
+      const text = args.join("\n");
+      expect(text).toContain('mcp_servers.searxng.command="bun"');
+      expect(text).toContain("mcp_servers.searxng.args=");
+      expect(text).toContain("mcp_servers.searxng.env=");
+      expect(text).toContain("https://search.example");
+      expect(text).toContain("github.com");
+    }
+  });
+
+  test("invalid URL fails the spawn naming the variable", () => {
+    process.env.JUMI_SEARXNG_URL = "notaurl";
+    expect(() => codexArgv({ model: "gpt-6-sol", workdir: "/w" })).toThrow("JUMI_SEARXNG_URL");
   });
 });
 
