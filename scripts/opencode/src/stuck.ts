@@ -268,16 +268,42 @@ export function fingerprintFindingIdentity(markdown: string | null | undefined):
   return hashText(identities.join("\n"));
 }
 
-export function fingerprintPrDiffFromFiles(
-  files: ReadonlyArray<{ filename: string; patch?: string | null | undefined }>
-): string | undefined {
+export interface PrDiffFileInput {
+  filename: string;
+  patch?: string | null | undefined;
+  status?: string | null | undefined;
+  additions?: number | null | undefined;
+  deletions?: number | null | undefined;
+  changes?: number | null | undefined;
+}
+
+export function fingerprintPrDiffFromFiles(files: ReadonlyArray<PrDiffFileInput>): string | undefined {
   if (!files || files.length === 0) return undefined;
-  const parts = [...files]
-    .map((file) => ({ name: (file.filename ?? "").trim(), patch: file.patch ?? "" }))
+  const entries = [...files]
+    .map((file) => ({
+      name: (file.filename ?? "").trim(),
+      // Omitted patch (large/binary files) must not hash like an empty
+      // patch: a diff whose patches are all omitted fails open instead.
+      patch: typeof file.patch === "string" ? file.patch : undefined,
+      status: (file.status ?? "").trim(),
+      additions: typeof file.additions === "number" && Number.isFinite(file.additions) ? file.additions : undefined,
+      deletions: typeof file.deletions === "number" && Number.isFinite(file.deletions) ? file.deletions : undefined,
+      changes: typeof file.changes === "number" && Number.isFinite(file.changes) ? file.changes : undefined,
+    }))
     .filter((file) => file.name)
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    .map((file) => `${file.name}\n${file.patch}`);
-  if (parts.length === 0) return undefined;
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (entries.length === 0) return undefined;
+  if (entries.every((file) => file.patch === undefined)) return undefined;
+  const parts = entries.map((file) =>
+    [
+      file.name,
+      `status=${file.status}`,
+      `additions=${file.additions ?? ""}`,
+      `deletions=${file.deletions ?? ""}`,
+      `changes=${file.changes ?? ""}`,
+      `patch=${file.patch ?? "<no-patch>"}`,
+    ].join("\n")
+  );
   return hashText(parts.join("\n---\n"));
 }
 

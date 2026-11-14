@@ -1369,12 +1369,15 @@ export async function implementFollowUp(
   // three-dot diff, so the diff hash stays stable across them. A real change
   // to the PR diff (or a different finding) changes the combined hash and
   // resets the consecutive count. Fail-open when the diff is unreadable.
+  // The identity covers both the latest review body and unresolved Jumi
+  // inlines: an inline-only repeat has an empty top-level body, so gate on
+  // `hasFeedback` alone and let the helper return undefined when both inputs
+  // are empty.
   const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
   const jumiInlinesForIdentity = unresolvedJumiInlines(pendingItems);
-  const findingIdentityHash =
-    hasFeedback && reviewBodyForIdentity
-      ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
-      : undefined;
+  const findingIdentityHash = hasFeedback
+    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
+    : undefined;
   let prDiffHash: string | undefined;
   if (findingIdentityHash) {
     try {
@@ -1384,7 +1387,16 @@ export async function implementFollowUp(
             owner: string,
             repo: string,
             index: number
-          ) => Promise<ReadonlyArray<{ filename: string; patch?: string | null | undefined }>>;
+          ) => Promise<
+            ReadonlyArray<{
+              filename: string;
+              patch?: string | null | undefined;
+              status?: string | null | undefined;
+              additions?: number | null | undefined;
+              deletions?: number | null | undefined;
+              changes?: number | null | undefined;
+            }>
+          >;
         }
       ).getPRFiles;
       if (typeof getFiles === "function") {

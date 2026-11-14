@@ -285,6 +285,41 @@ describe("same finding repeated", () => {
     expect(fromParts).toBe(fromBody);
   });
 
+  test("inline-only identity works with an empty review body", () => {
+    expect(fingerprintFindingIdentityFromParts("", [])).toBeUndefined();
+    expect(fingerprintFindingIdentityFromParts(undefined, undefined)).toBeUndefined();
+    const inlineOnly = fingerprintFindingIdentityFromParts("", [
+      { path: "src/foo.ts", new_position: 124, body: "🟡 risk: Null check missing for bar." },
+    ]);
+    expect(inlineOnly).toBe(fingerprintFindingIdentity(reviewOne));
+  });
+
+  test("diff metadata changes the hash and all-omitted patches fail open", () => {
+    const base = [{ filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+new" }];
+    const renamed = [{ filename: "src/foo.ts", status: "renamed", patch: "@@ -1 +1 @@\n-old\n+new" }];
+    expect(fingerprintPrDiffFromFiles(renamed)).not.toBe(fingerprintPrDiffFromFiles(base));
+    const grown = [
+      { filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+new", additions: 1, deletions: 1, changes: 2 },
+      { filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+new", additions: 10, deletions: 1, changes: 11 },
+    ];
+    expect(fingerprintPrDiffFromFiles([grown[0]!])).not.toBe(fingerprintPrDiffFromFiles([grown[1]!]));
+    expect(fingerprintPrDiffFromFiles([{ filename: "src/big.bin" }])).toBeUndefined();
+    expect(
+      fingerprintPrDiffFromFiles([{ filename: "src/big.bin" }, { filename: "src/other.bin", patch: null }])
+    ).toBeUndefined();
+    // Omitted patch is not the same as an empty patch.
+    expect(fingerprintPrDiffFromFiles([{ filename: "src/foo.ts", patch: "" }])).not.toBe(
+      fingerprintPrDiffFromFiles([{ filename: "src/foo.ts" }])
+    );
+    // A partially-omitted diff still hashes (only all-omitted fails open).
+    expect(
+      fingerprintPrDiffFromFiles([
+        { filename: "src/foo.ts", patch: "@@ -1 +1 @@\n-old\n+new" },
+        { filename: "src/big.bin" },
+      ])
+    ).toBeTruthy();
+  });
+
   test("same-finding latch maps to an implement-latch sit and shows on the board", async () => {
     const latchReason = sameFindingLatchReasonFromParts(reviewOne, []);
     expect(latchReason.startsWith(SAME_FINDING_STUCK)).toBe(true);
