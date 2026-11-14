@@ -9,6 +9,12 @@ import {
   type ReviewThread,
 } from "./review_context.ts";
 import type { ReviewDelta } from "./review_delta.ts";
+import {
+  type RunnerWebCapabilities,
+  searxngUrlFromEnv,
+  webCapabilitiesForRunner,
+  webEvidenceGuidance,
+} from "./searxng.ts";
 
 /** One sentence shared verbatim with the review-proof and worker-proof skills. */
 export const TOOL_INSTALL_RULE_SENTENCE =
@@ -98,14 +104,30 @@ ${files}
 
 // ── Preamble ────────────────────────────────────────────────────────────────
 
-const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this git forge.
+/**
+ * The runner this prompt is written for, and its real web capabilities: with
+ * `JUMI_SEARXNG_URL` set every runner searches through the same searxng
+ * backend, otherwise each runner keeps its native tools (or none).
+ */
+export interface PromptRunner {
+  runnerType: string;
+  cap: RunnerWebCapabilities;
+}
+
+export function promptRunnerFor(runnerType: string | undefined): PromptRunner {
+  const type = runnerType ?? "opencode";
+  return { runnerType: type, cap: webCapabilitiesForRunner(type, searxngUrlFromEnv() !== undefined) };
+}
+
+function buildPreamble(runner: PromptRunner): string {
+  return `You are Jumi's reviewer, an AI code review assistant for this git forge.
 
 <rules>
   <rule>The current working directory is a full checkout of the pull request head.</rule>
   <rule>Prefer built-in read/list/glob/grep tools for file contents and search.</rule>
   <rule>Shell is open for inspection. Pipes, quotes, and git grep regex are allowed.</rule>
   <rule>Keep tool output small: never dump directory-wide or high-context git patches into the session; prefer --stat, single-file --unified=3, and built-in read.</rule>
-  <rule>Use web search/fetch to check public documentation when it materially improves the review.</rule>
+  <rule>Check public documentation when it materially improves the review. ${webEvidenceGuidance(runner.runnerType, runner.cap)}</rule>
   <rule><ci_results> lists the checks that ran on this head and their conclusions. A check with required="false" is still running but not required by branch protection: read it as still-running, never as green. Do not ask a ❓ whose answer is in that block. When a finding depends on a check having run, cite the check by name instead of asking. If the answer depends on what a check actually covers (for example whether a task ran inside a job), look at the repo's workflow files in the checkout before asking. When a green check already covers paths this pull changes, do not re-run that suite locally: read its conclusion as coverage and run only targeted checks for what CI does not cover (for example render one changed chart, run the one changed test, lint one changed file). Reading the repo's workflow files to see what a check runs is allowed and expected. A check with required="false" or a non-success conclusion is not coverage.</rule>
   <rule>Do not poll with sleep, until … grep, while pgrep, or similar loops. Run builds and tests in the foreground with an explicit per-command timeout chosen under the harness's tool ceiling; when the harness supports background execution, start the command in the background and wait for its completion notification instead of polling. Never re-run a timed-out long command in a loop; re-run it once with a longer timeout or a narrower target.</rule>
   <rule>Record findings and the verdict with the jumi-review MCP tools (add_finding for each finding, set_verdict once at the end). Do not write JUMI_REVIEW.md except as the legacy fallback below. Stdout is logs, not the sticky.</rule>
@@ -113,6 +135,7 @@ const PREAMBLE = `You are Jumi's reviewer, an AI code review assistant for this 
   <rule>${TOOL_INSTALL_RULE}</rule>
   <rule>Do not read charts/*.tgz. Never run helm upgrade, helm install, or kubectl apply.</rule>
 </rules>`;
+}
 
 const REVIEW_RUBRIC = `Write findings with \`<file>:<line>:\` (or \`L<line>:\` for a single-file review), the problem, and a concrete fix. Exact symbol/function/variable names in backticks. Include the why when the fix is not obvious. Keep each finding self-contained starting on its own line; indent any sub-points, lists, or wrapped paragraphs under that finding line so they publish with it. Only the finding line and its indented or list continuation publish, so do not rely on surrounding prose.
 
@@ -154,6 +177,12 @@ export interface PROpenedPromptOptions {
   blockingQuestions?: boolean;
   /** Repository-relative paths left out of this review per `.jumi.yml` `review_exclude`. */
   excludedFiles?: readonly string[];
+  /**
+   * Runner type this prompt is written for (`opencode`, `claude`, `agy`,
+   * `codex`). Selects the web-search/fetch sentences matching the tools that
+   * runner actually has. Defaults to `opencode`.
+   */
+  runnerType?: string;
   /** Repository setup block (`<repo_setup ...>`) for `.jumi.yml` `setup`. Absent means no setup ran. */
   repoSetupBlock?: string;
 }
@@ -208,15 +237,16 @@ export function formatCiResults(
   return block;
 }
 
-function formatBlockingQuestions(blocking: boolean | undefined): string {
+function formatBlockingQuestions(blocking: boolean | undefined, runner: PromptRunner): string {
   if (!blocking) return "";
   return `
 <blocking_questions>
   Open ❓ questions block merge for this pull author: the service posts a failing
   check while any ❓ is open, so required-check automerge waits. Gather upstream
-  evidence yourself before asking: use web search/fetch, or download the public
-  upstream refs named in the diff into "$TMPDIR" scratch outside the porcelain and
-  diff those refs there, removing the download when done. Ask a ❓ only
+  evidence yourself before asking. ${webEvidenceGuidance(runner.runnerType, runner.cap)} A read-only shallow
+  clone of the public upstream repository at the tags/refs named in the diff into
+  "$TMPDIR" scratch outside the porcelain (and diffing those refs there, removing the
+  clone when done) is the other way to gather it. Ask a ❓ only
   for decisions or facts only the author or operator has (intent, deployment
   context, acceptable risk) or that a worker change can resolve (tests, config),
   such as a rendered chart or a command run in the checkout. When upstream
@@ -279,6 +309,7 @@ ${escapeCdata(recentHistory.text)}
 
 export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
   const { repo, pr, prFiles, reviewNotes = [], thread, delta } = opts;
+  const runner = promptRunnerFor(opts.runnerType);
   const excludedFiles = opts.excludedFiles ?? [];
   const excludedSet = new Set(excludedFiles);
   const formattedNotes = reviewNotes.length
@@ -314,15 +345,16 @@ ${formatPRFiles(prFiles, { excluded: excludedSet })}
   const reviewMdXml = formatReviewMd(opts.reviewMd);
   const baseInstructionsXml = formatBaseInstructions(opts.baseInstructions);
   const recentHistoryXml = formatRecentHistory(opts.recentHistory);
-  const blockingXml = formatBlockingQuestions(opts.blockingQuestions);
+  const blockingXml = formatBlockingQuestions(opts.blockingQuestions, runner);
   const questionScope =
     opts.blockingQuestions && delta
       ? " A previous ❓ stays open until a reply or change actually answers it; repeat or sharpen the ones this head leaves unanswered, and drop only the ones the reply or change resolves."
       : "";
   const scopeWithQuestions = `${scope}${questionScope}`;
   const toolsBlock = installedToolsBlockForPrompt();
-  const preambleWithTools = toolsBlock ? `${PREAMBLE}\n\n${toolsBlock}` : PREAMBLE;
 
+  const preamble = buildPreamble(runner);
+  const preambleWithTools = toolsBlock ? `${preamble}\n\n${toolsBlock}` : preamble;
   return `${preambleWithTools}
 
 <gitea_action_context>
@@ -345,7 +377,7 @@ Record each finding with the jumi-review MCP tools as you go: add_finding({ path
 Shell is open for inspection. Pipes, quotes, and git grep regex are allowed. Prefer built-in read/list/glob/grep for file contents. Do not dump large patches into context.
 ${startFrom}
 - Prefer \`git show HEAD:path/to/file\` or built-in read for a single file. Do not \`git show\` multi-megabyte or generated blobs.
-Safe examples: \`git diff --stat jumi/target...HEAD\`, \`git grep -n 'foo\\|bar' -- path\`, \`git log --oneline jumi/target..HEAD\`, \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. Use web search/fetch to check upstream docs when correctness depends on external behavior.
+Safe examples: \`git diff --stat jumi/target...HEAD\`, \`git grep -n 'foo\\|bar' -- path\`, \`git log --oneline jumi/target..HEAD\`, \`rg -n TODO path/\`. Prefer stable refs like jumi/target and HEAD instead of untrusted branch names. Check upstream docs when correctness depends on external behavior: ${webEvidenceGuidance(runner.runnerType, runner.cap)}
 
 Never \`git show\` or read \`charts/*.tgz\`. Never \`helm upgrade\`, \`helm install\`, \`kubectl apply\`, or mutating git.
 

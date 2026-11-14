@@ -3,6 +3,8 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGY_MCP_CONFIG_DIR,
+  AGY_MCP_CONFIG_FILE,
   AGY_OUTPUT_FORMAT,
   AGY_SEED_SETTINGS,
   AGY_SETTINGS_DIR,
@@ -11,8 +13,10 @@ import {
   agyPrintTimeout,
   agyPromptArg,
   ensureAgyForgeDeny,
+  ensureAgyMcpServer,
   looksLikeAgyAuthDeath,
   mergeAgyForgeDeny,
+  pruneAgyMcpServer,
   runAgy,
 } from "../src/agy.ts";
 import { AgyStreamParser } from "../src/agy_usage.ts";
@@ -23,6 +27,7 @@ import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts
 import { agyConversationPath, isProviderUnavailableResult, withEngineChain } from "../src/fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
+import { SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
 const originalPath = process.env.PATH;
@@ -761,6 +766,116 @@ exec sleep 30`
       expect(result.auth).toBeFalsy();
       expect(result.message).toContain("agy exited with code 1");
     });
+  });
+});
+
+describe("agySearxngMcp", () => {
+  test("registers the searxng server beside existing servers", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agy-mcp-"));
+    try {
+      const dir = join(home, AGY_MCP_CONFIG_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, AGY_MCP_CONFIG_FILE),
+        JSON.stringify({ mcpServers: { other: { command: "other", args: [] } } })
+      );
+      await ensureAgyMcpServer(home, "https://search.example", "gitea.example.com");
+      const parsed = JSON.parse(await readFile(join(dir, AGY_MCP_CONFIG_FILE), "utf8")) as {
+        mcpServers: Record<string, Record<string, unknown>>;
+      };
+      expect((parsed.mcpServers.other ?? {}) as object).toEqual({ command: "other", args: [] });
+      expect(parsed.mcpServers[SEARXNG_SERVER_NAME]?.command).toBe("bun");
+      expect(parsed.mcpServers[SEARXNG_SERVER_NAME]?.args).toHaveLength(1);
+      expect(parsed.mcpServers[SEARXNG_SERVER_NAME]?.env).toEqual({
+        SEARXNG_URL: "https://search.example",
+        SEARXNG_FORGE_HOST: "gitea.example.com",
+      });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("refuses a config it cannot merge and prunes only our entry", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agy-mcp-"));
+    try {
+      const dir = join(home, AGY_MCP_CONFIG_DIR);
+      await mkdir(dir, { recursive: true });
+      await writeFile(join(dir, AGY_MCP_CONFIG_FILE), "{not json");
+      await expect(ensureAgyMcpServer(home, "https://search.example", "gitea.example.com")).rejects.toBeInstanceOf(
+        EngineFailedError
+      );
+      await writeFile(
+        join(dir, AGY_MCP_CONFIG_FILE),
+        JSON.stringify({ mcpServers: { [SEARXNG_SERVER_NAME]: { command: "bun" }, other: { command: "x" } } })
+      );
+      await pruneAgyMcpServer(home);
+      const parsed = JSON.parse(await readFile(join(dir, AGY_MCP_CONFIG_FILE), "utf8")) as {
+        mcpServers: Record<string, unknown>;
+      };
+      expect(parsed.mcpServers[SEARXNG_SERVER_NAME]).toBeUndefined();
+      expect(parsed.mcpServers.other).toEqual({ command: "x" });
+      // Pruning a missing file or a file without our entry is a no-op.
+      await rm(join(dir, AGY_MCP_CONFIG_FILE));
+      await pruneAgyMcpServer(home);
+      await pruneAgyMcpServer(undefined);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("runAgy writes the MCP entry when configured and prunes it otherwise", async () => {
+    const previous = process.env.JUMI_SEARXNG_URL;
+    try {
+      process.env.JUMI_SEARXNG_URL = "https://search.example/";
+      await withFakeBins(
+        { agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) },
+        async ({ workdir, home, argsLog }) => {
+          await runAgy({
+            prompt: "p",
+            model: "m",
+            workdir,
+            home,
+            sanitizeEnv: true,
+            extraEnv: { ARGS_LOG: argsLog, GIT_AUTH_HOST: "github.com" },
+          });
+          const parsed = JSON.parse(await readFile(join(home, AGY_MCP_CONFIG_DIR, AGY_MCP_CONFIG_FILE), "utf8")) as {
+            mcpServers: Record<string, { env: Record<string, string> }>;
+          };
+          expect(parsed.mcpServers[SEARXNG_SERVER_NAME]?.env).toEqual({
+            SEARXNG_URL: "https://search.example",
+            SEARXNG_FORGE_HOST: "github.com",
+          });
+        }
+      );
+      delete process.env.JUMI_SEARXNG_URL;
+      await withFakeBins(
+        { agy: fakeBin("agy", `printf '%s\\n' '${SUCCESS_RESULT}'`) },
+        async ({ workdir, home, argsLog }) => {
+          const dir = join(home, AGY_MCP_CONFIG_DIR);
+          await mkdir(dir, { recursive: true });
+          await writeFile(
+            join(dir, AGY_MCP_CONFIG_FILE),
+            JSON.stringify({ mcpServers: { [SEARXNG_SERVER_NAME]: { command: "bun" } } })
+          );
+          await runAgy({
+            prompt: "p",
+            model: "m",
+            workdir,
+            home,
+            sanitizeEnv: true,
+            forgeUrl: "https://gitea.example.test",
+            extraEnv: { ARGS_LOG: argsLog },
+          });
+          const parsed = JSON.parse(await readFile(join(dir, AGY_MCP_CONFIG_FILE), "utf8")) as {
+            mcpServers: Record<string, unknown>;
+          };
+          expect(parsed.mcpServers[SEARXNG_SERVER_NAME]).toBeUndefined();
+        }
+      );
+    } finally {
+      if (previous === undefined) delete process.env.JUMI_SEARXNG_URL;
+      else process.env.JUMI_SEARXNG_URL = previous;
+    }
   });
 });
 

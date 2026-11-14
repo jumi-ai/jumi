@@ -1,24 +1,25 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_metrics.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { withModelHop } from "../src/fallback.ts";
-import { forgeDenyHost, forgeHostFromUrl, forgePermissions } from "../src/forge_webfetch.ts";
+import { forgeOpenCodeGlobalConfig, forgePermissions } from "../src/forge_webfetch.ts";
 import {
-  BLOCKED_BY_REJECTED_PROMPT,
+  buildBlockedByRejectedPrompt,
+  buildConflictPrompt,
+  buildFollowupPrompt,
+  buildImplementPrompt,
+  buildImplementYieldPrompt,
   buildOpenCodeArgs,
-  CONFLICT_PROMPT,
-  FOLLOWUP_PROMPT,
-  IMPLEMENT_PROMPT,
-  IMPLEMENT_YIELD_PROMPT,
   resolveOpenCodePrompt,
   runOpenCode,
 } from "../src/git.ts";
 import { setTraceFetchForTests, traceExportErrors } from "../src/phoenix.ts";
+import { SEARXNG_OPENCODE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
 
@@ -1326,7 +1327,7 @@ cat
           trace: { kind: "implement", owner: "kirmanak", repo: "demo" },
         });
         expect(result.status).toBe("ok");
-        expect(result.stdout).toContain(IMPLEMENT_PROMPT);
+        expect(result.stdout).toContain(buildImplementPrompt());
         expect(result.stdout).toContain("Injected files for this job: JUMI_TASK.md. No others exist.");
       }
     );
@@ -1450,6 +1451,69 @@ cat
       expect(inlineConfig(result.stdout).permissions).toEqual(forgePermissions("github.com"));
       expect(result.stdout).toContain("*github.com*");
     });
+  });
+
+  test("unconfigured: the inline config still allows websearch and registers no MCP server", async () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+      const result = await runOpenCode({
+        prompt: "prompt",
+        model: "model",
+        workdir,
+        sanitizeEnv: true,
+        trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+        extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+      });
+      expect(result.status).toBe("ok");
+      const config = inlineConfig(result.stdout);
+      expect(config.permissions).toEqual(forgePermissions("github.com"));
+      expect(config.mcp).toBeUndefined();
+      const global = JSON.parse(
+        await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
+      ) as { policies: unknown[] };
+      expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com")));
+    });
+  });
+
+  test("configured: the inline config registers searxng and denies native websearch", async () => {
+    process.env.JUMI_SEARXNG_URL = "https://search.example/";
+    try {
+      await withFakeOpenCode(PRINT_INLINE_CONFIG, async (_binDir, workdir) => {
+        const result = await runOpenCode({
+          prompt: "prompt",
+          model: "model",
+          workdir,
+          sanitizeEnv: true,
+          trace: { kind: "review", owner: "kirmanak", repo: "demo" },
+          extraEnv: { GIT_AUTH_HOST: "github.com", GIT_AUTH_TOKEN: "write-capable" },
+        });
+        expect(result.status).toBe("ok");
+        const config = inlineConfig(result.stdout);
+        const permissions = config.permissions as { action: string; resource: string; effect: string }[];
+        // Last-match: the forge deny first, then the native-search deny.
+        expect(permissions).toEqual([
+          ...forgePermissions("github.com"),
+          { action: "websearch", resource: "*", effect: "deny" },
+          { action: SEARXNG_OPENCODE_TOOL, resource: "*", effect: "allow" },
+        ]);
+        const mcp = config.mcp as { servers: Record<string, Record<string, unknown>> };
+        expect(Object.keys(mcp.servers)).toEqual([SEARXNG_SERVER_NAME]);
+        expect(mcp.servers.searxng?.type).toBe("local");
+        expect(mcp.servers.searxng?.command).toEqual(["bun", expect.any(String)]);
+        expect(mcp.servers.searxng?.environment).toEqual({
+          SEARXNG_URL: "https://search.example",
+          SEARXNG_FORGE_HOST: "github.com",
+        });
+        // The global policy holds the deny against a repository agent's own
+        // allow rules, which evaluate after inline permissions.
+        const global = JSON.parse(
+          await readFile(join(workdir, ".jumi-tmp", "xdg-config", "opencode", "opencode.json"), "utf8")
+        ) as { policies: unknown[] };
+        expect(global).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com", true)));
+      });
+    } finally {
+      delete process.env.JUMI_SEARXNG_URL;
+    }
   });
 
   test("keeps the forge webfetch deny when the parent env is inherited", async () => {
@@ -1576,7 +1640,7 @@ describe("opencode binary", () => {
 });
 
 describe("worker prompts", () => {
-  const prompts = [IMPLEMENT_PROMPT, FOLLOWUP_PROMPT, CONFLICT_PROMPT];
+  const prompts = [buildImplementPrompt(), buildFollowupPrompt(), buildConflictPrompt()];
 
   test("keep the child in the worktree on the injected brief", () => {
     for (const prompt of prompts) {
@@ -1584,7 +1648,9 @@ describe("worker prompts", () => {
       expect(prompt).toContain("do not glob **/*");
       expect(prompt).toContain("Do not webfetch this Gitea host");
       expect(prompt).toContain("Do not call tea or the forge API");
-      expect(prompt).toContain("Public upstream docs are fine");
+      expect(prompt).toContain(
+        "Public upstream docs are in reach: Use `websearch` to find a URL, then fetch that exact URL with `webfetch`"
+      );
       expect(prompt).toContain("Grep is ripgrep syntax, not JavaScript");
       expect(prompt).toContain("Ignore .jumi-tmp, including opencode-prompt-*/prompt.txt");
       expect(prompt).toContain("Verify once at the end");
@@ -1593,7 +1659,7 @@ describe("worker prompts", () => {
       expect(prompt).not.toContain("Do not run git");
       expect(prompt).not.toContain("The only Jumi files to read are");
     }
-    expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
+    expect(buildImplementPrompt()).toContain("JUMI_PR.md");
   });
 
   test("workers commit per logical step and never push", () => {
@@ -1606,72 +1672,76 @@ describe("worker prompts", () => {
       expect(prompt).toContain("Do not commit JUMI_*.md sentinels");
       expect(prompt).not.toContain("push as needed");
     }
-    expect(IMPLEMENT_PROMPT).toContain("a small task can be a single commit");
-    expect(IMPLEMENT_PROMPT).toContain("No `wip`");
-    expect(IMPLEMENT_PROMPT).toContain("Do not commit a broken intermediate state");
-    expect(FOLLOWUP_PROMPT).toContain("a small task can be a single commit");
-    expect(CONFLICT_PROMPT).toContain("a small task can be a single commit");
-    expect(CONFLICT_PROMPT).toContain("Keep the merge commit flow");
+    expect(buildImplementPrompt()).toContain("a small task can be a single commit");
+    expect(buildImplementPrompt()).toContain("No `wip`");
+    expect(buildImplementPrompt()).toContain("Do not commit a broken intermediate state");
+    expect(buildFollowupPrompt()).toContain("a small task can be a single commit");
+    expect(buildConflictPrompt()).toContain("a small task can be a single commit");
+    expect(buildConflictPrompt()).toContain("Keep the merge commit flow");
   });
 
   test("conflict stays on the injected conflicted paths", () => {
-    expect(CONFLICT_PROMPT).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
-    expect(CONFLICT_PROMPT).toContain("One adjacent file is allowed only if the resolution truly requires it");
+    const prompt = buildConflictPrompt();
+    expect(prompt).toContain("Resolve only the conflicted paths listed in JUMI_CONFLICT.md");
+    expect(prompt).toContain("One adjacent file is allowed only if the resolution truly requires it");
   });
 
   test("follow-up and conflict must not yield", () => {
-    expect(FOLLOWUP_PROMPT).not.toContain("JUMI_BLOCKED.md");
-    expect(CONFLICT_PROMPT).not.toContain("JUMI_BLOCKED.md");
-    expect(FOLLOWUP_PROMPT).not.toContain("jumi-blocked-by");
-    expect(CONFLICT_PROMPT).not.toContain("jumi-blocked-by");
+    expect(buildFollowupPrompt()).not.toContain("JUMI_BLOCKED.md");
+    expect(buildConflictPrompt()).not.toContain("JUMI_BLOCKED.md");
+    expect(buildFollowupPrompt()).not.toContain("jumi-blocked-by");
+    expect(buildConflictPrompt()).not.toContain("jumi-blocked-by");
   });
 
   test("follow-up judges leftover simplifications and may no-op", () => {
-    expect(FOLLOWUP_PROMPT).toContain("Leftover simplifications");
-    expect(FOLLOWUP_PROMPT).toContain("A clean tree is a valid outcome");
+    const prompt = buildFollowupPrompt();
+    expect(prompt).toContain("Leftover simplifications");
+    expect(prompt).toContain("A clean tree is a valid outcome");
   });
 
   test("follow-up leaves the tree untouched for an upstream-only question with nothing to change", () => {
-    expect(FOLLOWUP_PROMPT).toContain("only asks for an upstream diff");
-    expect(FOLLOWUP_PROMPT).toContain("leave the tree untouched");
-    expect(FOLLOWUP_PROMPT).toContain("so Renovate can still rebase");
+    const prompt = buildFollowupPrompt();
+    expect(prompt).toContain("only asks for an upstream diff");
+    expect(prompt).toContain("leave the tree untouched");
+    expect(prompt).toContain("so Renovate can still rebase");
   });
 
   test("follow-up checks a code-adding suggestion before implementing it", () => {
-    expect(FOLLOWUP_PROMPT).toContain("Check before adding");
-    expect(FOLLOWUP_PROMPT).toContain("does anything call or need it");
-    expect(FOLLOWUP_PROMPT).toContain("does it reach a real path");
-    expect(FOLLOWUP_PROMPT).toContain("smaller fix at the cause");
-    expect(FOLLOWUP_PROMPT).toContain("would add a mechanism the task did not ask for");
-    expect(FOLLOWUP_PROMPT).toContain("reviewer-comments");
-    expect(FOLLOWUP_PROMPT).toContain("callers searched");
-    expect(FOLLOWUP_PROMPT).toContain("two or more rounds");
-    expect(FOLLOWUP_PROMPT).toContain("simpler design would remove the whole class");
-    expect(FOLLOWUP_PROMPT).toContain("still fixed");
-    expect(IMPLEMENT_PROMPT).not.toContain("Check before adding");
-    expect(CONFLICT_PROMPT).not.toContain("Check before adding");
+    const prompt = buildFollowupPrompt();
+    expect(prompt).toContain("Check before adding");
+    expect(prompt).toContain("does anything call or need it");
+    expect(prompt).toContain("does it reach a real path");
+    expect(prompt).toContain("smaller fix at the cause");
+    expect(prompt).toContain("would add a mechanism the task did not ask for");
+    expect(prompt).toContain("reviewer-comments");
+    expect(prompt).toContain("callers searched");
+    expect(prompt).toContain("two or more rounds");
+    expect(prompt).toContain("simpler design would remove the whole class");
+    expect(prompt).toContain("still fixed");
+    expect(buildImplementPrompt()).not.toContain("Check before adding");
+    expect(buildConflictPrompt()).not.toContain("Check before adding");
   });
 
   test("first-run may yield a queue id then stop", () => {
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_QUEUE.md");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_BLOCKED.md");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("<!-- jumi-blocked-by: #N -->");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not commit");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not push");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("Do not implement a guess");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("new abstraction");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("cluster pin");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("live image");
-    expect(BLOCKED_BY_REJECTED_PROMPT.startsWith("blocked-by rejected, implement")).toBe(true);
-    expect(IMPLEMENT_PROMPT).not.toContain("JUMI_BLOCKED.md");
+    expect(buildImplementYieldPrompt()).toContain("JUMI_QUEUE.md");
+    expect(buildImplementYieldPrompt()).toContain("JUMI_BLOCKED.md");
+    expect(buildImplementYieldPrompt()).toContain("<!-- jumi-blocked-by: #N -->");
+    expect(buildImplementYieldPrompt()).toContain("Do not commit");
+    expect(buildImplementYieldPrompt()).toContain("Do not push");
+    expect(buildImplementYieldPrompt()).toContain("Do not implement a guess");
+    expect(buildImplementYieldPrompt()).toContain("new abstraction");
+    expect(buildImplementYieldPrompt()).toContain("cluster pin");
+    expect(buildImplementYieldPrompt()).toContain("live image");
+    expect(buildBlockedByRejectedPrompt().startsWith("blocked-by rejected, implement")).toBe(true);
+    expect(buildImplementPrompt()).not.toContain("JUMI_BLOCKED.md");
   });
 
   test("first-run skip is JUMI_SKIP.md; follow-up and conflict must not skip", () => {
-    expect(IMPLEMENT_PROMPT).toContain("JUMI_SKIP.md");
-    expect(IMPLEMENT_YIELD_PROMPT).toContain("JUMI_SKIP.md");
-    expect(BLOCKED_BY_REJECTED_PROMPT).toContain("JUMI_SKIP.md");
-    expect(FOLLOWUP_PROMPT).not.toContain("JUMI_SKIP.md");
-    expect(CONFLICT_PROMPT).not.toContain("JUMI_SKIP.md");
+    expect(buildImplementPrompt()).toContain("JUMI_SKIP.md");
+    expect(buildImplementYieldPrompt()).toContain("JUMI_SKIP.md");
+    expect(buildBlockedByRejectedPrompt()).toContain("JUMI_SKIP.md");
+    expect(buildFollowupPrompt()).not.toContain("JUMI_SKIP.md");
+    expect(buildConflictPrompt()).not.toContain("JUMI_SKIP.md");
   });
 });
 
@@ -1680,15 +1750,68 @@ describe("resolveOpenCodePrompt", () => {
     expect(await resolveOpenCodePrompt({ prompt: "explicit", model: "m", workdir: "/tmp" })).toBe("explicit");
   });
 
+  test("rewords an explicit worker prompt for the runner that actually runs", async () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    // A hop preserves the prompt string while swapping `type`: the hopped-in
+    // runner must get its own tool sentences, not the first runner's.
+    const codexPrompt = buildImplementPrompt("codex");
+    expect(codexPrompt).toContain("There is no fetch tool");
+    const resolved = await resolveOpenCodePrompt({
+      prompt: codexPrompt,
+      model: "m",
+      workdir: "/tmp",
+      type: "opencode",
+    });
+    expect(resolved).toContain("Use `websearch` to find a URL, then fetch that exact URL with `webfetch`");
+    expect(resolved).not.toContain("There is no fetch tool");
+  });
+
+  test("an explicit worker prompt picks up the deployer setting set after it was built", async () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    const prompt = buildImplementPrompt("opencode");
+    expect(prompt).toContain("Use `websearch`");
+    process.env.JUMI_SEARXNG_URL = "https://search.example/";
+    try {
+      const resolved = await resolveOpenCodePrompt({ prompt, model: "m", workdir: "/tmp", type: "opencode" });
+      expect(resolved).toContain("`searxng_search`");
+      expect(resolved).not.toContain("Use `websearch`");
+    } finally {
+      delete process.env.JUMI_SEARXNG_URL;
+    }
+  });
+
+  test("rewords a hopped review prompt for the runner that actually runs", async () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    const dir = await mkdtemp(join(tmpdir(), "jumi-prompt-hop-"));
+    try {
+      await writeFile(
+        join(dir, "JUMI_TASK.md"),
+        "<gitea_action_context>\nUse `websearch` to find a URL, then fetch that exact URL with `webfetch`; do not construct file or release URLs from memory.\n</gitea_action_context>"
+      );
+      process.env.JUMI_SEARXNG_URL = "https://search.example/";
+      const resolved = await resolveOpenCodePrompt({
+        model: "m",
+        workdir: dir,
+        type: "codex",
+        trace: { kind: "review", owner: "o", repo: "r" },
+      });
+      expect(resolved).toContain("There is no fetch tool");
+      expect(resolved).not.toContain("Use `websearch`");
+    } finally {
+      delete process.env.JUMI_SEARXNG_URL;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("uses workspace files when prompt is omitted", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jumi-prompt-"));
     try {
       await writeFile(join(dir, "JUMI_TASK.md"), "task");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(IMPLEMENT_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildImplementPrompt());
       await writeFile(join(dir, "JUMI_FEEDBACK.md"), "feedback");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(FOLLOWUP_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildFollowupPrompt());
       await writeFile(join(dir, "JUMI_CONFLICT.md"), "conflict");
-      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(CONFLICT_PROMPT);
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildConflictPrompt());
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

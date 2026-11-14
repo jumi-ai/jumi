@@ -29,6 +29,7 @@ import { looksLikeInfraStderr } from "./infra.ts";
 import { parseQuotaResetAtMs, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } from "./review_base.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
+import { codexSearxngArgs, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
 
 export const CODEX_SANDBOX = "danger-full-access";
@@ -44,12 +45,18 @@ const CODEX_USAGE_LIMIT_RE =
 
 // The repository's `.codex` config, hooks, rules, and MCP servers load on every
 // spawn, and a `-c` override outranks them, so what this list pins still holds.
-function codexHardeningArgs(effort: string): string[] {
+function codexHardeningArgs(effort: string, searxng?: { baseUrl: string; forgeHost: string }): string[] {
   return [
     "-c",
     `model_reasoning_effort="${effort}"`,
+    // Native web search is on only while no SearXNG endpoint is configured:
+    // with one, every runner uses the same `searxng` backend instead.
     "-c",
-    'web_search="live"',
+    searxng ? 'web_search="disabled"' : 'web_search="live"',
+    // The searxng MCP server rides per-spawn `-c` overrides, outside the
+    // checkout, so a checkout `.codex` defining its own `searxng` server or
+    // re-enabling native search does not change what the spawn uses.
+    ...(searxng ? codexSearxngArgs(searxng.baseUrl, searxng.forgeHost) : []),
     "-c",
     "features.context_management.experimental_mode=false",
     // `--disable` is not a documented `codex exec` flag (it is a global flag
@@ -84,7 +91,12 @@ function codexHardeningArgs(effort: string): string[] {
   ];
 }
 
-function codexConfigArgs(model: string, effort: string, isReview = false): string[] {
+function codexConfigArgs(
+  model: string,
+  effort: string,
+  searxng?: { baseUrl: string; forgeHost: string },
+  isReview = false
+): string[] {
   return [
     "--json",
     "--color",
@@ -103,7 +115,7 @@ function codexConfigArgs(model: string, effort: string, isReview = false): strin
     ...(isReview ? [] : ["--dangerously-bypass-hook-trust"]),
     "--model",
     model,
-    ...codexHardeningArgs(effort),
+    ...codexHardeningArgs(effort, searxng),
   ];
 }
 
@@ -138,12 +150,22 @@ function codexResumePreArgs(model: string, isReview = false): string[] {
   ];
 }
 
-function codexResumeArgs(effort: string): string[] {
-  return codexHardeningArgs(effort);
+function codexResumeArgs(effort: string, searxng?: { baseUrl: string; forgeHost: string }): string[] {
+  return codexHardeningArgs(effort, searxng);
+}
+
+/** This spawn's SearXNG endpoint, or undefined when not configured. */
+export function codexSearxngForSpawn(
+  opts: Pick<EngineRunOptions, "extraEnv">
+): { baseUrl: string; forgeHost: string } | undefined {
+  const baseUrl = searxngUrlFromEnv();
+  if (!baseUrl) return undefined;
+  return { baseUrl, forgeHost: searxngForgeHost(opts.extraEnv) };
 }
 
 export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
   const effort = opts.effort || CODEX_DEFAULT_EFFORT;
+  const searxng = codexSearxngForSpawn(opts);
   const isReview = opts.trace?.kind === "review";
   if (opts.continueSession && threadId)
     return [
@@ -152,10 +174,10 @@ export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
       ...codexResumePreArgs(opts.model, isReview),
       "resume",
       threadId,
-      ...codexResumeArgs(effort),
+      ...codexResumeArgs(effort, searxng),
       "-",
     ];
-  const flags = codexConfigArgs(opts.model, effort, isReview);
+  const flags = codexConfigArgs(opts.model, effort, searxng, isReview);
   return ["codex", "exec", ...flags, "-"];
 }
 

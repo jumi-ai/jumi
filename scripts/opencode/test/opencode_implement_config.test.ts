@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { forgeDenyHost, forgeHostFromUrl, forgePermissions } from "../src/forge_webfetch.ts";
-import { IMPLEMENT_PROMPT } from "../src/implement.ts";
+import { buildImplementPrompt } from "../src/git.ts";
 
 type Effect = "allow" | "ask" | "deny";
 
@@ -137,19 +137,20 @@ describe("opencode implement config", () => {
 
 describe("implement prompt", () => {
   test("commits per logical step, never pushes, forbids force-push and questions", () => {
-    expect(IMPLEMENT_PROMPT).toContain("Commit at each coherent logical step");
-    expect(IMPLEMENT_PROMPT).toContain("Do not push");
-    expect(IMPLEMENT_PROMPT).toContain("The parent pushes once after this run exits");
-    expect(IMPLEMENT_PROMPT).not.toContain("push as needed");
-    expect(IMPLEMENT_PROMPT).toContain("Do not force-push");
-    expect(IMPLEMENT_PROMPT).toContain("Do not amend or rebase commits already on the remote branch");
-    expect(IMPLEMENT_PROMPT).toContain("Do not ask questions");
-    expect(IMPLEMENT_PROMPT).not.toContain("Do not run git");
-    expect(IMPLEMENT_PROMPT).toContain("JUMI_PR.md");
-    expect(IMPLEMENT_PROMPT).toContain("JUMI_SKIP.md");
-    expect(IMPLEMENT_PROMPT).toContain("Do not open the pull request");
-    expect(IMPLEMENT_PROMPT).toContain("Stay in this clone");
-    expect(IMPLEMENT_PROMPT).toContain("Do not webfetch this Gitea host");
-    expect(IMPLEMENT_PROMPT).toContain("Do not call tea or the forge API");
+    const prompt = buildImplementPrompt();
+    expect(prompt).toContain("Commit at each coherent logical step");
+    expect(prompt).toContain("Do not push");
+    expect(prompt).toContain("The parent pushes once after this run exits");
+    expect(prompt).not.toContain("push as needed");
+    expect(prompt).toContain("Do not force-push");
+    expect(prompt).toContain("Do not amend or rebase commits already on the remote branch");
+    expect(prompt).toContain("Do not ask questions");
+    expect(prompt).not.toContain("Do not run git");
+    expect(prompt).toContain("JUMI_PR.md");
+    expect(prompt).toContain("JUMI_SKIP.md");
+    expect(prompt).toContain("Do not open the pull request");
+    expect(prompt).toContain("Stay in this clone");
+    expect(prompt).toContain("Do not webfetch this Gitea host");
+    expect(prompt).toContain("Do not call tea or the forge API");
   });
 });

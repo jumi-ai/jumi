@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFLICT_PROMPT, FOLLOWUP_PROMPT, IMPLEMENT_PROMPT, resolveOpenCodePrompt } from "../src/git.ts";
+import { buildConflictPrompt, buildFollowupPrompt, buildImplementPrompt, resolveOpenCodePrompt } from "../src/git.ts";
 import { formatInstalledToolsBlock, loadInstalledToolsManifest, withInstalledTools } from "../src/installed_tools.ts";
 import { buildPROpenedPrompt, TOOL_INSTALL_RULE, TOOL_INSTALL_RULE_SENTENCE } from "../src/prompt.ts";
 import { makePR, makeRepo } from "./fixtures.ts";
@@ -41,7 +41,7 @@ describe("shared install rule", () => {
   });
 
   test("implement, follow-up and conflict prompts contain the identical rule text", () => {
-    for (const prompt of [IMPLEMENT_PROMPT, FOLLOWUP_PROMPT, CONFLICT_PROMPT]) {
+    for (const prompt of [buildImplementPrompt(), buildFollowupPrompt(), buildConflictPrompt()]) {
       expect(prompt).toContain(TOOL_INSTALL_RULE_SENTENCE);
       expect(prompt).toContain(TOOL_INSTALL_RULE);
     }

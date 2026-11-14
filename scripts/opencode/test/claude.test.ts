@@ -6,10 +6,13 @@ import { fileURLToPath } from "node:url";
 import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "../src/auth.ts";
 import {
   CLAUDE_ALLOWED_TOOLS,
+  CLAUDE_ENABLE_TOOL_SEARCH,
   CLAUDE_OUTPUT_FORMAT,
   CLAUDE_PERMISSION_MODE,
   CLAUDE_SETTING_SOURCES,
+  claudeAllowedTools,
   claudeArgv,
+  claudeSearxngMcpConfigForSpawn,
   inspectClaudeUsageLimit,
   runClaude,
 } from "../src/claude.ts";
@@ -19,6 +22,7 @@ import { runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { withEngineChain } from "../src/fallback.ts";
 import { claudeDisallowedTools, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
+import { SEARXNG_CLAUDE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { omitClaudeConfigWarning } from "../src/status_description.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 
@@ -181,6 +185,77 @@ describe("claudeArgv", () => {
     // No Phoenix configured: the child runs untraced rather than failing.
     delete process.env.PHOENIX_OTLP_ENDPOINT;
     expect(claudeArgv({ model: "opus", workdir: "/work" })).not.toContain("--plugin-dir");
+  });
+});
+
+describe("claudeSearxng", () => {
+  const originalSearxng = process.env.JUMI_SEARXNG_URL;
+
+  afterEach(() => {
+    if (originalSearxng === undefined) delete process.env.JUMI_SEARXNG_URL;
+    else process.env.JUMI_SEARXNG_URL = originalSearxng;
+  });
+
+  test("unconfigured: no MCP config and no search tool", () => {
+    delete process.env.JUMI_SEARXNG_URL;
+    expect(claudeSearxngMcpConfigForSpawn({})).toBeUndefined();
+    expect(claudeAllowedTools(false)).toBe(CLAUDE_ALLOWED_TOOLS);
+    expect(claudeAllowedTools(false)).not.toContain("WebSearch");
+    const args = claudeArgv({ model: "opus", workdir: "/work" });
+    expect(args).not.toContain("--mcp-config");
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe(CLAUDE_ALLOWED_TOOLS);
+  });
+
+  test("configured: argv registers searxng and allows its tool", () => {
+    process.env.JUMI_SEARXNG_URL = "https://search.example/";
+    const mcp = claudeSearxngMcpConfigForSpawn({ extraEnv: { GIT_AUTH_HOST: "gitea.example.com" } });
+    expect(mcp ?? "").toContain(`"${SEARXNG_SERVER_NAME}"`);
+    const parsed = JSON.parse(mcp ?? "{}") as {
+      mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+    };
+    expect(parsed.mcpServers.searxng.command).toBe("bun");
+    expect(parsed.mcpServers.searxng.args).toHaveLength(1);
+    expect(parsed.mcpServers.searxng.env).toEqual({
+      SEARXNG_URL: "https://search.example",
+      SEARXNG_FORGE_HOST: "gitea.example.com",
+    });
+    expect(claudeAllowedTools(true)).toBe(`${CLAUDE_ALLOWED_TOOLS},${SEARXNG_CLAUDE_TOOL}`);
+    const args = claudeArgv({ model: "opus", workdir: "/work", extraEnv: { GIT_AUTH_HOST: "gitea.example.com" } });
+    expect(args[args.indexOf("--mcp-config") + 1] ?? "").toBe(mcp ?? "");
+    expect(args[args.indexOf("--allowedTools") + 1]).toContain(SEARXNG_CLAUDE_TOOL);
+    // Claude has no native search to disable: WebSearch is never allowed.
+    expect(args[args.indexOf("--allowedTools") + 1]?.split(",")).not.toContain("WebSearch");
+  });
+
+  test("invalid URL fails the spawn naming the variable", () => {
+    process.env.JUMI_SEARXNG_URL = "ftp://search.example";
+    expect(() => claudeArgv({ model: "opus", workdir: "/work" })).toThrow("JUMI_SEARXNG_URL");
+  });
+
+  test("tool search stays off with and without the variable", async () => {
+    for (const url of [undefined, "https://search.example"]) {
+      if (url === undefined) delete process.env.JUMI_SEARXNG_URL;
+      else process.env.JUMI_SEARXNG_URL = url;
+      await withFakeClaude(
+        `#!/bin/sh
+printf 'TOOLSEARCH=%s\\n' "$ENABLE_TOOL_SEARCH"
+`,
+        async (workdir) => {
+          for (const sanitizeEnv of [true, false]) {
+            const result = await runClaude({
+              prompt: "prompt",
+              model: "opus",
+              workdir,
+              sanitizeEnv,
+              extraEnv: sanitizeEnv ? { ENABLE_TOOL_SEARCH: "true" } : undefined,
+            });
+            expect(result.status).toBe("ok");
+            expect(result.stdout).toContain(`TOOLSEARCH=${CLAUDE_ENABLE_TOOL_SEARCH}`);
+            expect(CLAUDE_ENABLE_TOOL_SEARCH).toBe("false");
+          }
+        }
+      );
+    }
   });
 });
 
