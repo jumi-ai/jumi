@@ -74,6 +74,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `PHOENIX_OTLP_ENDPOINT`
 - `BOARD_PEER_URL`
 - `BOARD_PEER_TOKEN`
+- `JUMI_ALLOW_UNSANDBOXED_REVIEWS`
 
 #### required constraints
 - `Antigravity refused unless FORGE=github`

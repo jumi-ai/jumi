@@ -258,6 +258,9 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
   // Owned by the image entrypoint (secrets tmpfs dir); read here so the
   // contract gate sees the optional key.
   void optionalEnv(resolved, SECRETS_DIR_ENV);
+  // Read by the review sandbox gate (`src/review_sandbox.ts`); referenced
+  // here so the contract gate sees the optional key.
+  void optionalEnv(resolved, "JUMI_ALLOW_UNSANDBOXED_REVIEWS");
   // Deployer-only SearXNG endpoint; read here so the contract gate sees the
   // optional key. Unset or blank means "not configured".
   void optionalEnv(resolved, "JUMI_SEARXNG_URL");

@@ -380,6 +380,7 @@ describe("deploy/contract.md", () => {
       "PHOENIX_OTLP_ENDPOINT",
       "BOARD_PEER_URL",
       "BOARD_PEER_TOKEN",
+      "JUMI_ALLOW_UNSANDBOXED_REVIEWS",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);
     expect(parsed.worker.gitOpsEnv).toEqual([

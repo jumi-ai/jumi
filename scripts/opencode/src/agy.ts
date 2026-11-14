@@ -28,6 +28,7 @@ import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsIntoWorkdir } from "./review_base.ts";
+import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import {
   SEARXNG_SERVER_FORGE_HOST_ENV,
   SEARXNG_SERVER_NAME,
@@ -443,9 +444,12 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // cleaned up afterwards so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
     const args = agyArgv(opts, promptArg, conversationId);
+    // Review spawns run confined: the wrapper argv fails closed when
+    // Landlock is unavailable, so pull code never runs unsandboxed.
+    const agySpawnArgv = resolveReviewSpawnSandbox(opts, args, env, log).argv;
     const proc = (() => {
       try {
-        return Bun.spawn(args, {
+        return Bun.spawn(agySpawnArgv, {
           cwd: opts.workdir,
           stdin: "ignore",
           stdout: "pipe",

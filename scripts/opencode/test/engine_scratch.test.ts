@@ -22,15 +22,27 @@ import {
   ensureEngineScratchIgnored,
 } from "../src/engine_scratch.ts";
 import { runOpenCode } from "../src/git.ts";
+import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { type GitAuth, gitOpenCodeChildEnv, workerOpenCodeChildEnv } from "../src/workspace.ts";
 
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
+const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+
+/** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
+const SANDBOX_STUB = `#!/bin/sh
+if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "$1" = "--" ] && shift
+exec "$@"
+`;
 
 afterEach(() => {
   process.env.PATH = originalPath;
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
+  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
 });
 
 function git(cwd: string, args: string[]): string {
@@ -283,6 +295,12 @@ describe("child scratch dir", () => {
       for (const name of ["opencode", "claude", "agy", "codex"]) {
         await chmod(join(binDir, name), 0o755);
       }
+      // Review spawns exec through the sandbox wrapper; the stub keeps the
+      // wrapped path under test without applying real Landlock rules.
+      const stub = join(binDir, "jumi-sandbox-stub");
+      await writeFile(stub, SANDBOX_STUB);
+      await chmod(stub, 0o755);
+      process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
       process.env.PATH = `${binDir}:${originalPath ?? ""}`;
       for (const kind of kinds) {
         for (const runner of runners) {
