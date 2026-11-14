@@ -125,9 +125,19 @@ export function assertRepositoryPolicy(
   return { owner, repo };
 }
 
-export function validateWebhookPayload(payload: GiteaPRPayload, policy: WebhookPolicy): ReviewJob | { skip: string } {
+export function validateWebhookPayload(
+  payload: GiteaPRPayload,
+  policy: WebhookPolicy,
+  opts?: { reviewDrafts?: boolean }
+): ReviewJob | { skip: string } {
   if (!REVIEW_ACTIONS.has(payload.action)) {
     return { skip: `unsupported action ${payload.action}` };
+  }
+  if (!opts?.reviewDrafts) {
+    const pr = payload.pull_request as { draft?: boolean; title?: string };
+    const title = typeof pr.title === "string" ? pr.title : "";
+    const isDraft = pr.draft === true || title.trim().toLowerCase().startsWith("wip:");
+    if (isDraft) return { skip: "draft or WIP pull request" };
   }
 
   const { owner, repo } = assertRepositoryPolicy(payload.repository, policy);
