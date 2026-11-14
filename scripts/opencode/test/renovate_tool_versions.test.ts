@@ -13,6 +13,7 @@ const renovate = JSON.parse(renovateRaw) as {
     matchStrings?: string[];
     datasourceTemplate?: string;
     depNameTemplate?: string;
+    versioningTemplate?: string;
     autoReplaceStringTemplate?: string;
   }[];
   packageRules?: {
@@ -21,6 +22,8 @@ const renovate = JSON.parse(renovateRaw) as {
     matchPackageNames?: string[];
     matchUpdateTypes?: string[];
     allowedVersions?: string;
+    groupName?: string;
+    groupSlug?: string;
     automerge?: boolean;
   }[];
   constraints?: Record<string, string>;
@@ -98,8 +101,14 @@ describe("renovate tool-versions config", () => {
     // yq/uv per-arch checksum managers move with the version like codex.
     const yqManagers = managers?.filter((m) => m.depNameTemplate === "mikefarah/yq");
     const uvManagers = managers?.filter((m) => m.depNameTemplate === "astral-sh/uv");
+    // node-version has no getDigest, so per-arch Node SHAs stay manual:
+    // no node checksum managers exist.
+    const nodeManagers = managers?.filter(
+      (m) => m.depNameTemplate === "node" && m.matchStrings?.[0]?.includes("NODE_")
+    );
     expect(yqManagers?.length).toBe(2);
     expect(uvManagers?.length).toBe(2);
+    expect(nodeManagers?.length).toBe(0);
     for (const m of [...(yqManagers ?? []), ...(uvManagers ?? [])]) {
       expect(m?.datasourceTemplate).toBe("github-release-attachments");
       expect(m?.matchStrings?.length).toBe(1);
@@ -110,6 +119,14 @@ describe("renovate tool-versions config", () => {
     expect(yqManagers?.some((m) => m.matchStrings?.[0]?.includes("YQ_ARM64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_AMD64_TAG"))).toBe(true);
     expect(uvManagers?.some((m) => m.matchStrings?.[0]?.includes("UV_ARM64_TAG"))).toBe(true);
+    // Node per-arch tags/SHAs are manual (see NOTE(node) in tool-versions.env):
+    // no manager may claim a NODE_*_TAG line.
+    for (const m of managers ?? []) {
+      for (const s of m.matchStrings ?? []) {
+        expect(s).not.toContain("NODE_AMD64_TAG");
+        expect(s).not.toContain("NODE_ARM64_TAG");
+      }
+    }
     // Every matchStrings regex must compile (RE2-compatible subset: no lookahead).
     for (const m of managers ?? []) {
       for (const s of m.matchStrings ?? []) {
@@ -131,9 +148,11 @@ describe("renovate tool-versions config", () => {
       "HELM_VERSION=4.3.0",
       "YQ_VERSION=4.54.2",
       "UV_VERSION=0.13.7",
+      "NODE_VERSION=24.22.3",
     ]) {
       const varName = line.split("=")[0];
-      const sample = `# renovate: datasource=github-releases depName=example/${varName}\n${line}`;
+      const datasource = varName === "NODE_VERSION" ? "node-version" : "github-releases";
+      const sample = `# renovate: datasource=${datasource} depName=example/${varName}\n${line}`;
       const found = extractFirst(pattern, sample);
       expect(found?.groups.currentValue).toBe(line.split("=")[1]);
     }
@@ -240,5 +259,104 @@ describe("worker image consumes the full pinned reference", () => {
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS tools/);
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS runtime/);
     expect(toolVersions).toMatch(/^TEMURIN_TAG=21\./m);
+  });
+});
+
+describe("node LTS pin coherence", () => {
+  test("tool-versions.env has NODE_VERSION and both per-arch checksums paired with tags", () => {
+    const version = /^NODE_VERSION=(?<v>[^\s]+)$/m.exec(toolVersions)?.groups?.v;
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(Number(version?.split(".")[0]) % 2).toBe(0);
+    for (const arch of ["AMD64", "ARM64"]) {
+      const tag = new RegExp(`^NODE_${arch}_TAG=(?<t>[^\\s]+)$`, "m").exec(toolVersions)?.groups?.t;
+      const sha = new RegExp(`^NODE_SHA256_${arch}=(?<s>[0-9a-f]{64})$`, "m").exec(toolVersions)?.groups?.s;
+      expect(tag).toBe(version);
+      expect(sha).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(toolVersions).toContain("# renovate: datasource=node-version depName=node\nNODE_VERSION=");
+  });
+
+  test("Dockerfile declares the Node pins as ARG with no default and fails closed", () => {
+    for (const name of ["NODE_VERSION", "NODE_SHA256_AMD64", "NODE_SHA256_ARM64"]) {
+      expect(dockerfile).toMatch(new RegExp(`^ARG ${name}$`, "m"));
+      expect(dockerfile).not.toMatch(new RegExp(`^ARG ${name}=`, "m"));
+    }
+    expect(dockerfile).toContain(': "${NODE_VERSION:?NODE_VERSION build-arg is required}"');
+    expect(dockerfile).toContain(
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"
+    );
+    expect(dockerfile).toContain('echo "${node_sha256}  ${tmp_dir}/node.tar.gz" | sha256sum -c -');
+    expect(dockerfile).toContain('test "$(node --version)" = "v${NODE_VERSION}"');
+    expect(dockerfile).toContain('test "$(node -p "process.versions.bun === undefined")" = "true"');
+    expect(dockerfile).toContain("npm --version");
+    expect(dockerfile).toContain("npx --version");
+    expect(dockerfile).not.toMatch(/link.*node.*[Bb]un|bun.*node/);
+  });
+
+  test("every build path passes the Node pins through", () => {
+    const paths = [
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/jumi-worker-image.yml",
+      ".github/workflows/opencode-checks.yml",
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".gitea/scripts/build-worker-image.sh",
+    ];
+    for (const path of paths) {
+      const text = readFileSync(join(repoRoot, path), "utf8");
+      for (const name of ["NODE_VERSION", "NODE_SHA256_AMD64", "NODE_SHA256_ARM64"]) {
+        expect(text).toContain(name);
+      }
+    }
+    for (const path of [
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/jumi-worker-image.yml",
+      ".github/workflows/opencode-checks.yml",
+    ]) {
+      const text = readFileSync(join(repoRoot, path), "utf8");
+      expect(text).toContain("NODE_VERSION=${{ env.NODE_VERSION }}");
+      expect(text).toContain("NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}");
+      expect(text).toContain("NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+    }
+  });
+
+  test("image CI proves real Node, not the Bun shim, on both images", () => {
+    const paths = [
+      ".github/workflows/jumi-reviewer-image.yml",
+      ".github/workflows/jumi-worker-image.yml",
+      ".github/workflows/opencode-checks.yml",
+      ".gitea/scripts/build-reviewer-image.sh",
+      ".gitea/scripts/build-worker-image.sh",
+    ];
+    for (const path of paths) {
+      const text = readFileSync(join(repoRoot, path), "utf8");
+      expect(text).toContain("process.versions.bun === undefined");
+      expect(text).toContain("npm --version");
+      expect(text).toContain("npx --version");
+      expect(text).toContain("bun --version");
+    }
+  });
+
+  test("renovate tracks Node LTS via node versioning, SHAs stay manual", () => {
+    // node-version has no getDigest, so only NODE_VERSION is automated;
+    // per-arch SHAs follow manually (NOTE(node) in tool-versions.env).
+    const managers = toolManager();
+    const nodeManagers = managers?.filter(
+      (m) => m.depNameTemplate === "node" && m.matchStrings?.[0]?.includes("NODE_")
+    );
+    expect(nodeManagers?.length).toBe(0);
+    const nonDocker = nonDockerManager();
+    const nodeSample = "# renovate: datasource=node-version depName=node\nNODE_VERSION=24.22.3";
+    expect(extractFirst(nonDocker?.matchStrings?.[0] ?? "", nodeSample)?.groups.currentValue).toBe("24.22.3");
+    // LTS stability comes from the node versioning + node-version datasource
+    // (isStable = lts !== false; odd majors pre-27 never go stable, and from
+    // 27 every major becomes stable via the schedule), so no even-major
+    // allowedVersions regex is kept: it would block post-27 LTS majors forever.
+    const rule = renovate.packageRules?.find((r) => r.matchPackageNames?.includes("node"));
+    expect(rule).toBeDefined();
+    expect(rule?.matchDatasources).toContain("node-version");
+    expect(rule?.allowedVersions).toBeUndefined();
+    expect(rule?.groupName).toBe("node");
+    expect(toolVersions).toContain("NOTE(node)");
   });
 });

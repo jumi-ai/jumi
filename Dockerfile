@@ -12,6 +12,9 @@ ARG UV_SHA256_ARM64
 ARG ANDROID_CMDLINE_TOOLS_VERSION
 ARG ANDROID_CMDLINE_TOOLS_SHA256
 ARG ANDROID_SDK_PACKAGES="platform-tools platforms;android-37.0 build-tools;37.0.0 build-tools;36.0.0"
+ARG NODE_VERSION
+ARG NODE_SHA256_AMD64
+ARG NODE_SHA256_ARM64
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
 FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS tools
@@ -115,7 +118,7 @@ RUN set -eu; \
     install -m 755 "${tmp_dir}/bun-${bun_platform}/bun" /usr/local/bin/bun; \
     rm -rf "${tmp_dir}"
 
-FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3c6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS android-sdk
+FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS android-sdk
 
 # Android SDK in its own cache-stable stage: only the pins below affect this
 # layer, never the Jumi sources or the Codex/Claude/opencode versions, so nodes
@@ -177,6 +180,9 @@ ARG YQ_SHA256_ARM64
 ARG UV_VERSION
 ARG UV_SHA256_AMD64
 ARG UV_SHA256_ARM64
+ARG NODE_VERSION
+ARG NODE_SHA256_AMD64
+ARG NODE_SHA256_ARM64
 ARG TARGETARCH
 
 LABEL org.opencontainers.image.source="https://gitea.kirmanak.stream/personal/jumi" \
@@ -225,6 +231,27 @@ RUN set -eu; \
     install -m 755 "${tmp_dir}/uv-${uv_target}/uvx" /usr/local/bin/uvx; \
     rm -rf "${tmp_dir}"
 RUN set -eu; \
+    : "${NODE_VERSION:?NODE_VERSION build-arg is required}"; \
+    : "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 build-arg is required}"; \
+    : "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 build-arg is required}"; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) node_arch="x64"; node_sha256="${NODE_SHA256_AMD64}" ;; \
+      arm64) node_arch="arm64"; node_sha256="${NODE_SHA256_ARM64}" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}"; exit 1 ;; \
+    esac; \
+    case "${node_sha256}" in \
+      *[!0-9a-f]*|"") echo "node sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#node_sha256}" -ne 64 ]; then echo "node sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "${tmp_dir}/node.tar.gz"; \
+    echo "${node_sha256}  ${tmp_dir}/node.tar.gz" | sha256sum -c -; \
+    tar -xzf "${tmp_dir}/node.tar.gz" -C /usr/local --strip-components=1; \
+    rm -rf "${tmp_dir}"; \
+    test "$(command -v node)" = "/usr/local/bin/node"; \
+    test "$(command -v npm)" = "/usr/local/bin/npm"; \
+    test "$(command -v npx)" = "/usr/local/bin/npx"
+RUN set -eu; \
     export UV_PYTHON_INSTALL_DIR=/opt/cpython; \
     /usr/local/bin/uv python install 3.13 --install-dir /opt/cpython --no-bin; \
     case "${TARGETARCH:-amd64}" in \
@@ -250,6 +277,11 @@ RUN git --version \
   && python3 --version \
   && helm version --short \
   && bun --version \
+  && test "$(node --version)" = "v${NODE_VERSION}" \
+  && test "$(node -p "process.versions.bun === undefined")" = "true" \
+  && npm --version \
+  && npx --version \
+  && test "$(command -v node)" = "/usr/local/bin/node" \
   && /usr/local/bin/opencode --version \
   && /usr/local/bin/claude --version \
   && /usr/local/bin/agy --version \

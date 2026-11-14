@@ -37,6 +37,8 @@ describe("allowed_runners parsing", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });
@@ -56,6 +58,8 @@ describe("allowed_runners parsing", () => {
         ignoreConflictsAuthors: [],
         blockingQuestionAuthors: [],
         mode: "full",
+        reviewDrafts: false,
+        reviewBudget: {},
       },
     });
   });

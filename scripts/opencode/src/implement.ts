@@ -70,7 +70,15 @@ import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { applyRepoChain } from "./repo_settings.ts";
+import {
+  applyRepoChain,
+  DEFAULT_COMMIT_MESSAGE_TEMPLATE,
+  DEFAULT_PR_TITLE_TEMPLATE,
+  defaultRepoConventions,
+  loadRepoConventions,
+  type RepoConventions,
+  renderIssueTemplate,
+} from "./repo_settings.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -380,14 +388,15 @@ export async function failProvenanceIntent(
   }
 }
 
-export function issueBranchName(issueNumber: number, title: string): string {
+export function issueBranchName(issueNumber: number, title: string, branchPrefix?: string): string {
+  const prefix = (branchPrefix ?? "jumi").trim() || "jumi";
   const slug =
     title
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
       .slice(0, 40) || "task";
-  return `jumi/issue-${issueNumber}-${slug}`;
+  return `${prefix}/issue-${issueNumber}-${slug}`;
 }
 
 export function issueJobKey(job: {
@@ -489,19 +498,84 @@ export function buildPullRequestBody(
   issueNumber: number,
   fileContents: string | null | undefined,
   runner?: RunnerStamp,
-  secrets: readonly (string | undefined)[] = []
+  secrets: readonly (string | undefined)[] = [],
+  closingKeyword?: string
 ): string {
-  return redactGitSecrets(appendRunnerStamp(pullRequestText(issueNumber, fileContents), runner), secrets);
+  return redactGitSecrets(
+    appendRunnerStamp(pullRequestText(issueNumber, fileContents, closingKeyword), runner),
+    secrets
+  );
 }
 
-function pullRequestText(issueNumber: number, fileContents: string | null | undefined): string {
-  const fallback = `Fixes #${issueNumber}`;
+export function rewriteClosingToRefs(text: string, issueNumber: number): string {
+  // Replace closing-keyword references to the worked issue with a
+  // non-closing `Refs #N` reference. Other issues keep their keywords.
+  const pattern = new RegExp(String.raw`\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#${issueNumber}\b`, "gi");
+  return text.replace(pattern, `Refs #${issueNumber}`);
+}
+
+function pullRequestText(
+  issueNumber: number,
+  fileContents: string | null | undefined,
+  closingKeyword?: string
+): string {
+  const refs = closingKeyword === "refs";
+  const fallback = refs ? `Refs #${issueNumber}` : `Fixes #${issueNumber}`;
   if (fileContents == null) return fallback;
-  const text = parentOwnedProse(fileContents);
+  let text = parentOwnedProse(fileContents);
   if (!text) return fallback;
+  if (refs && closesIssuePattern(issueNumber).test(text)) {
+    text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
+    if (!text) return fallback;
+  }
   if (closesIssuePattern(issueNumber).test(text)) return text;
   if (refsIssuePattern(issueNumber).test(text)) return text;
   return `${text}\n\n${fallback}`;
+}
+
+/** Render the PR title template for one forge issue. Defaults to the issue title verbatim. */
+export function renderPrTitle(template: string | undefined, title: string, issueNumber: number): string {
+  return renderIssueTemplate(template ?? DEFAULT_PR_TITLE_TEMPLATE, title, issueNumber);
+}
+
+/** Render the parent commit message template for one forge issue. */
+export function renderCommitMessage(template: string | undefined, title: string, issueNumber: number): string {
+  return renderIssueTemplate(template ?? DEFAULT_COMMIT_MESSAGE_TEMPLATE, title, issueNumber);
+}
+
+/** Whether conventions differ from today's formats (used to augment the worker prompt). */
+export function hasCustomConventions(conventions: RepoConventions): boolean {
+  const defaults = defaultRepoConventions();
+  return (
+    conventions.branchPrefix !== defaults.branchPrefix ||
+    conventions.prTitle !== defaults.prTitle ||
+    conventions.commitMessage !== defaults.commitMessage ||
+    conventions.closingKeyword !== defaults.closingKeyword
+  );
+}
+
+/**
+ * Augment an implement prompt with the repository's PR conventions. When the
+ * file sets a commit message template, the worker is told the convention so
+ * model commits follow it. With `closing_keyword: refs` the worker is asked
+ * for a non-closing reference instead of a closing keyword. Today's prompt
+ * is byte-identical when all keys are absent.
+ */
+export function withPrConventions(basePrompt: string, conventions: RepoConventions, issueNumber: number): string {
+  const defaults = defaultRepoConventions();
+  const notes: string[] = [];
+  if (conventions.commitMessage !== defaults.commitMessage) {
+    notes.push(
+      `The repository's commit message convention is: \`${conventions.commitMessage}\` (with {title} the issue title and {issue} the issue number ${issueNumber}). Use it for model commits.`
+    );
+  }
+  if (conventions.closingKeyword === "refs") {
+    notes.push(
+      `The repository uses non-closing references: in JUMI_PR.md use \`Refs #${issueNumber}\`, not a closing keyword like \`Fixes #${issueNumber}\`, so the issue stays open after merge.`
+    );
+  }
+  if (notes.length === 0) return basePrompt;
+  return `${basePrompt}\n\nRepository PR conventions:\n- ${notes.join("\n- ")}`;
 }
 
 /** Jumi owns only the text between these markers; the rest of the PR body is left alone. */
@@ -720,7 +794,11 @@ async function implementExternalIssue(
         workdir: worktree,
         home: opts.home,
         sanitizeEnv,
-        extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
+        extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+          owner: loop.owner,
+          repo: loop.repo,
+          logger: log,
+        }),
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
@@ -910,7 +988,14 @@ export async function implementIssue(
       activeOpts = { ...opts, chain: applied.chain, fallbackModel: undefined, fallbackVariant: undefined };
     }
   }
-  const branch = issueBranchName(activeOpts.job.issueNumber, activeOpts.job.title);
+  const conventions: RepoConventions = await loadRepoConventions(
+    opts.api,
+    opts.job.owner,
+    opts.job.repo,
+    opts.job.defaultBranch,
+    log
+  );
+  const branch = issueBranchName(activeOpts.job.issueNumber, activeOpts.job.title, conventions.branchPrefix);
   const claimed = await beginClaimedWorktree({
     ...activeOpts,
     fallbackEngine: registeredEngine,
@@ -920,7 +1005,9 @@ export async function implementIssue(
   const { owner, repo, issueNumber, worktree, barePath, sanitizeEnv, engine, now, forgetClaim } = claimed;
 
   const pulls = await opts.api.listOpenPulls(owner, repo);
-  const jumiCloser = pulls.find((pr) => isJumiCloserForIssue(pr, owner, repo, issueNumber, opts.botUsername));
+  const jumiCloser = pulls.find((pr) =>
+    isJumiCloserForIssue(pr, owner, repo, issueNumber, opts.botUsername, conventions.branchPrefix)
+  );
   if (jumiCloser) {
     await forgetClaim();
     await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
@@ -941,7 +1028,9 @@ export async function implementIssue(
   }
 
   try {
-    const blockers = await checkIssueBlockers(opts.api, owner, repo, issueNumber);
+    const blockers = await checkIssueBlockers(opts.api, owner, repo, issueNumber, {
+      branchPrefix: conventions.branchPrefix,
+    });
     if (blockers.status === "stuck") {
       await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, blockers.reason);
       await forgetClaim();
@@ -991,6 +1080,7 @@ export async function implementIssue(
       botUsername: opts.botUsername,
       body: opts.job.body,
       pulls,
+      branchPrefix: conventions.branchPrefix,
     });
   } catch (err) {
     await forgetClaim();
@@ -1106,7 +1196,11 @@ export async function implementIssue(
           workdir: worktree,
           home: opts.home,
           sanitizeEnv,
-          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, log),
+          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+            owner,
+            repo,
+            logger: log,
+          }),
           timeoutMs: opts.timeoutMs,
           maxOutputBytes: opts.maxOutputBytes,
           reviewLabel: `${owner}/${repo}#${issueNumber}`,
@@ -1272,13 +1366,22 @@ export async function implementIssue(
       let incompleteHopped = false;
       let prFileContents: string | null = null;
       let porcelain = "";
+      const customConventions = hasCustomConventions(conventions);
+      const implementBasePrompt = (forQueue: boolean): string | undefined => {
+        if (!customConventions) return forQueue ? IMPLEMENT_YIELD_PROMPT : undefined;
+        return withPrConventions(forQueue ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT, conventions, issueNumber);
+      };
+      const rejectedBasePrompt = (): string =>
+        customConventions
+          ? withPrConventions(BLOCKED_BY_REJECTED_PROMPT, conventions, issueNumber)
+          : BLOCKED_BY_REJECTED_PROMPT;
       for (;;) {
         const quotaSkip = await runEngine(
           incompleteHopped
             ? `Re-running OpenCode after incomplete implement for ${owner}/${repo}#${issueNumber}`
             : `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
           "implement",
-          queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : undefined,
+          implementBasePrompt(queue.length > 0),
           incompleteHopped ? { hopFromIncomplete: true } : undefined
         );
         if (quotaSkip) return quotaSkip;
@@ -1294,7 +1397,7 @@ export async function implementIssue(
           const quotaRetry = await runEngine(
             `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
             "implement",
-            BLOCKED_BY_REJECTED_PROMPT
+            rejectedBasePrompt()
           );
           if (quotaRetry) return quotaRetry;
           const secondYield = await handleYield(true);
@@ -1318,7 +1421,15 @@ export async function implementIssue(
               const quotaContinued = await runEngine(
                 `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
                 "follow-up",
-                queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
+                customConventions
+                  ? withPrConventions(
+                      queue.length > 0 ? IMPLEMENT_YIELD_PROMPT : IMPLEMENT_PROMPT,
+                      conventions,
+                      issueNumber
+                    )
+                  : queue.length > 0
+                    ? IMPLEMENT_YIELD_PROMPT
+                    : IMPLEMENT_PROMPT,
                 { continueSession: true }
               );
               if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
@@ -1379,7 +1490,7 @@ export async function implementIssue(
         throw new Error("refusing to commit on the default branch");
       }
 
-      await commitIfDirty(loop, porcelain, `Implement #${issueNumber}: ${liveJob.title}`);
+      await commitIfDirty(loop, porcelain, renderCommitMessage(conventions.commitMessage, liveJob.title, issueNumber));
       throwIfAborted(opts.abortSignal);
       if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
         const reason = engineScratchTrackedReason(branch);
@@ -1426,9 +1537,15 @@ export async function implementIssue(
       let pr: Pull;
       try {
         pr = await opts.api.createPullRequest(owner, repo, {
-          title: liveJob.title,
+          title: renderPrTitle(conventions.prTitle, liveJob.title, issueNumber),
           body: wrapJumiPrBody(
-            buildPullRequestBody(issueNumber, prFileContents, runner, workerPublishSecrets(loop.auth.token, jobChain))
+            buildPullRequestBody(
+              issueNumber,
+              prFileContents,
+              runner,
+              workerPublishSecrets(loop.auth.token, jobChain),
+              conventions.closingKeyword
+            )
           ),
           head: branch,
           base: opts.job.defaultBranch,

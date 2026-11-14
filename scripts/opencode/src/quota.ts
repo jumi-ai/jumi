@@ -203,6 +203,33 @@ export function clampQuotaWaitMs(ms: number): number {
   return Math.min(QUOTA_WAIT_MAX_MS, Math.max(QUOTA_WAIT_MIN_MS, ms));
 }
 
+/**
+ * Absolute unix timestamp (ms) at which the provider says the quota resets,
+ * parsed only from what the message actually states: a relative duration
+ * (`retry in 45 minutes`), an explicit epoch/interval, or an ISO/HTTP date in
+ * a retry-after position (all via `parseRetryAfterMs`, except absolute dates,
+ * which that helper's leading-number branch would misread as a delay). A bare
+ * clock time (`resets 5pm`) or a weekday without a date is not parsed — the
+ * day and timezone would be a guess. Returns undefined when the message
+ * carries no reset time.
+ */
+export function parseQuotaResetAtMs(text: string | null | undefined, nowMs = Date.now()): number | undefined {
+  if (!text) return undefined;
+  const iso = /retry[-_\s]*after["'\s:=]+(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i.exec(text);
+  if (iso) {
+    const at = Date.parse(iso[1]!);
+    if (Number.isFinite(at)) return at;
+  }
+  const httpDate = /retry[-_\s]*after["'\s:=]+([A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} [\d:]{8} GMT)/i.exec(text);
+  if (httpDate) {
+    const at = Date.parse(httpDate[1]!);
+    if (Number.isFinite(at)) return at;
+  }
+  const retryAfterMs = parseRetryAfterMs(text, nowMs);
+  if (retryAfterMs == null) return undefined;
+  return nowMs + retryAfterMs;
+}
+
 function quotaHitFromText(text: string): QuotaHit {
   const retryAfterMs = parseRetryAfterMs(text);
   return {

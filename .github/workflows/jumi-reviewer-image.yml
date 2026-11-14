@@ -88,6 +88,9 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            NODE_VERSION=${{ env.NODE_VERSION }}
+            NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
+            NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
@@ -138,6 +141,16 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" claude --version
           docker run --rm "${IMAGE}:${VERSION}" agy --version
           docker run --rm "${IMAGE}:${VERSION}" codex --version
+          docker run --rm "${IMAGE}:${VERSION}" bun --version
+          test "$(docker run --rm "${IMAGE}:${VERSION}" node --version)" = "v${NODE_VERSION}"
+          test "$(docker run --rm "${IMAGE}:${VERSION}" sh -c 'node -p "process.versions.bun === undefined"')" = "true"
+          docker run --rm "${IMAGE}:${VERSION}" npm --version
+          docker run --rm "${IMAGE}:${VERSION}" npx --version
+          test "$(docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v node')" = "/usr/local/bin/node"
+          if docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+            echo "node resolves to the Bun shim in reviewer image" >&2
+            exit 1
+          fi
           docker run --rm "${IMAGE}:${VERSION}" curl --version
           docker run --rm "${IMAGE}:${VERSION}" yq --version
           docker run --rm "${IMAGE}:${VERSION}" uv --version

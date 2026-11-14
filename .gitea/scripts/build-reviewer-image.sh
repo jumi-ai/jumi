@@ -23,6 +23,9 @@ fi
 : "${UV_VERSION:?UV_VERSION is required}"
 : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
+: "${NODE_VERSION:?NODE_VERSION is required}"
+: "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 is required}"
+: "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 is required}"
 
 primary_tag="$1"
 shift
@@ -66,6 +69,9 @@ buildah bud \
   --build-arg "UV_VERSION=${UV_VERSION}" \
   --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
   --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
+  --build-arg "NODE_VERSION=${NODE_VERSION}" \
+  --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
+  --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
   --build-arg "VERSION=${VERSION}" \
   --build-arg "REVISION=${REVISION}" \
   -f Dockerfile \
@@ -129,6 +135,41 @@ verify_reviewer_runtime() {
   if ! buildah run "${ctr}" -- uv --version; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "uv missing in reviewer image" >&2
+    exit 1
+  fi
+  node_version="$(buildah run "${ctr}" -- node --version)" || {
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node missing in reviewer image" >&2
+    exit 1
+  }
+  if [ "${node_version}" != "v${NODE_VERSION}" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node version ${node_version} does not match pinned v${NODE_VERSION}" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'test "$(node -p "process.versions.bun === undefined")" = "true"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node is the Bun shim, not real Node, in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- npm --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "npm missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- npx --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "npx missing in reviewer image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- bun --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "bun missing in reviewer image" >&2
+    exit 1
+  fi
+  if buildah run "${ctr}" -- sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "node resolves to the Bun shim in reviewer image" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- ps --version; then
