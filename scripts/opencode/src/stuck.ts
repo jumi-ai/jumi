@@ -42,6 +42,20 @@ export function isSkipLatchReason(reason: string | null | undefined): boolean {
   return Boolean(reason?.startsWith("stuck:"));
 }
 
+/**
+ * Follow-up round-cap latch. A closer that has used its follow-up rounds
+ * stores `stuck: too many follow-up rounds` as the issue skip latch. A later
+ * conflict wake for the same closing issue must still dispatch to
+ * `implementConflict` (which enforces its own conflict-round cap) instead of
+ * publishing skipped from this latch. Every other `stuck:` latch still
+ * refuses every kind.
+ */
+export const TOO_MANY_FOLLOWUP_ROUNDS_REASON = "stuck: too many follow-up rounds";
+
+export function isTooManyFollowupRoundsReason(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && reason.trim() === TOO_MANY_FOLLOWUP_ROUNDS_REASON;
+}
+
 export function stuckMarker(owner: string, repo: string, index: number): string {
   return `<!-- jumi-stuck:${owner}/${repo}#${index} -->`;
 }

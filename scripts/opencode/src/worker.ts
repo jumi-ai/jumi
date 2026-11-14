@@ -49,7 +49,7 @@ import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
-import { isSkipLatchReason } from "./stuck.ts";
+import { isSkipLatchReason, isTooManyFollowupRoundsReason } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
@@ -723,7 +723,13 @@ export async function processWorkerTick(
     const job = issueJobFromRecord(row);
     const latch = await store.readIssueSkipLatch(job.owner, job.repo, job.issueNumber);
     await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
-    if (isSkipLatchReason(latch.skipReason)) {
+    // A follow-up round-cap latch must not refuse a later conflict wake: the
+    // conflict job still dispatches to `implementConflict`, which enforces
+    // its own round cap. Every other `stuck:` latch still skips every kind.
+    if (
+      isSkipLatchReason(latch.skipReason) &&
+      !(job.mode === "conflict" && isTooManyFollowupRoundsReason(latch.skipReason))
+    ) {
       const published = await store.markPublished(row.id, leasedBy, {
         state: "skipped",
         reason: latch.skipReason ?? undefined,
