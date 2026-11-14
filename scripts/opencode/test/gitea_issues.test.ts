@@ -41,6 +41,27 @@ describe("pullRequestClosesIssue", () => {
     expect(pullRequestClosesIssue({ title: "x", body: "see issue 12" }, 12)).toBe(false);
     expect(pullRequestClosesIssue({ title: "x", body: "Fixes #12", state: "closed" }, 12)).toBe(false);
   });
+
+  test("ignores closing keywords in code spans, fenced blocks, and quotes", () => {
+    const ignored = [
+      "`Fixes #12`",
+      "see `Fixes #12` here",
+      "```\nFixes #12\n```",
+      "```diff\nFixes #12\n```",
+      "~~~\nFixes #12\n~~~",
+      "> Fixes #12",
+      "  > Fixes #12 with context",
+      "&gt; Fixes #12",
+    ];
+    for (const body of ignored) {
+      expect(pullRequestClosesIssue({ title: "x", body }, 12), body).toBe(false);
+      expect(extractClosingIssueNumbers({ title: "x", body }), body).toEqual([]);
+    }
+    // A plain keyword still closes, even alongside ignored text.
+    expect(pullRequestClosesIssue({ title: "x", body: "`Fixes #12`\n\nFixes #12" }, 12)).toBe(true);
+    expect(pullRequestClosesIssue({ title: "x", body: "> Fixes #12\n\nCloses #12" }, 12)).toBe(true);
+    expect(extractClosingIssueNumbers({ title: "x", body: "`Fixes #12`\nFixes #12" })).toEqual([12]);
+  });
 });
 
 describe("extractClosingIssueNumber", () => {

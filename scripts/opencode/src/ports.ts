@@ -336,6 +336,14 @@ export interface Forge extends AttachmentSupport {
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
   /** Commits unique to the pull head (not on the base). Empty when the forge has none. */
   listPullCommits?(owner: string, repo: string, index: number): Promise<PullCommit[]>;
+  /**
+   * Forge-authoritative issues this PR will close on merge. GitHub exposes
+   * them on the pull request (`closingIssuesReferences`); forges without an
+   * equivalent leave this undefined and callers fall back to the shared
+   * closing-keyword parser. Never throws for "unsupported": missing means
+   * "use the parser".
+   */
+  listClosingIssues?(owner: string, repo: string, index: number): Promise<number[]>;
 }
 
 export type ReviewApi = Pick<
@@ -344,6 +352,7 @@ export type ReviewApi = Pick<
   | "getPR"
   | "getPRFiles"
   | "getRepoFile"
+  | "listClosingIssues"
   | "listIssueComments"
   | "findStickyIssueComment"
   | "createIssueComment"
