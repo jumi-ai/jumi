@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -378,6 +379,9 @@ describe("resolveReviewSpawnSandbox", () => {
         expect(plugin).toContain('ctx.tool.hook("execute.before"');
         expect(plugin).toContain('ctx.shell.hook("create.before"');
         expect(plugin).not.toContain("toolInput.command");
+        // Symlink resolution lives in the shipped plugin: the deny predicate
+        // must see through `docs/x -> /tmp` links the pull can commit.
+        expect(plugin).toContain("realpathSync");
         // Setup writes a ready marker after both registrations so the image
         // probe can prove the load (a dropped hook fails instead of passing).
         expect(plugin).toContain(REVIEW_SHELL_PLUGIN_READY_NAME);
@@ -458,19 +462,39 @@ describe("resolveReviewSpawnSandbox", () => {
         const traversal = relative(workdir, tokenFile);
         expect(traversal.startsWith("..")).toBe(true);
         const sibling = `${harnessTemp}-evil`;
+        // Symlink bypass (jumi#550 review): the pull controls the checkout and
+        // can commit `docs/x -> /tmp` to reveal the random suffix, then read
+        // through it. A link to a sibling inside the checkout must stay allowed.
+        const docsDir = join(workdir, "docs");
+        await mkdir(docsDir, { recursive: true });
+        const linkToParent = join(docsDir, "x");
+        await symlink(dirname(harnessTemp), linkToParent);
+        const linkToToken = join(docsDir, "t");
+        await symlink(tokenFile, linkToToken);
+        const linkViaParent = join(linkToParent, `${harnessTemp.split("/").pop()}/review-mcp.json`);
+        const siblingDir = join(workdir, "sibling");
+        await mkdir(siblingDir, { recursive: true });
+        await writeFile(join(siblingDir, "ok.txt"), "ok\n");
+        const linkOk = join(docsDir, "ok");
+        await symlink(siblingDir, linkOk);
 
         // The JS predicate in the shipped OpenCode plugin, graded live.
         const jsSnippet = reviewShellDenyPredicateSnippet("javascript", workdir, denied);
         const jsPredicate = new Function(
+          "realpathSync",
           `${jsSnippet}\nreturn { token: isDenied(${JSON.stringify(
             tokenFile
           )}), ancestor: isDenied("/tmp"), root: isDenied("/"), traversal: isDenied(${JSON.stringify(
             traversal
           )}), checkout: isDenied(${JSON.stringify(workdir)}), sibling: isDenied(${JSON.stringify(
             sibling
-          )}), empty: isDenied("") };`
-        ) as () => Record<string, boolean>;
-        expect(jsPredicate()).toEqual({
+          )}), empty: isDenied(""), linkDir: isDenied(${JSON.stringify(
+            linkToParent
+          )}), linkVia: isDenied(${JSON.stringify(linkViaParent)}), linkFile: isDenied(${JSON.stringify(
+            linkToToken
+          )}), linkOk: isDenied(${JSON.stringify(linkOk)}) };`
+        ) as (realpath: typeof realpathSync) => Record<string, boolean>;
+        expect(jsPredicate(realpathSync)).toEqual({
           token: true,
           ancestor: true,
           root: true,
@@ -478,6 +502,10 @@ describe("resolveReviewSpawnSandbox", () => {
           checkout: false,
           sibling: false,
           empty: false,
+          linkDir: true,
+          linkVia: true,
+          linkFile: true,
+          linkOk: false,
         });
 
         // The Python predicates in the shipped hook scripts, graded live
@@ -509,6 +537,13 @@ describe("resolveReviewSpawnSandbox", () => {
         expect((await runPythonHook(claudeHook, claudeEvent("Read", traversal))).exitCode).toBe(2);
         expect((await runPythonHook(claudeHook, claudeEvent("Grep", workdir))).exitCode).toBe(0);
         expect((await runPythonHook(claudeHook, claudeEvent("Grep", sibling))).exitCode).toBe(0);
+        // Symlink bypass: a link inside the checkout pointing at the denied
+        // temp root or the token file must deny through read and Glob, while a
+        // link to a sibling inside the checkout stays allowed.
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", linkToToken))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", linkToParent))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Read", linkViaParent))).exitCode).toBe(2);
+        expect((await runPythonHook(claudeHook, claudeEvent("Glob", linkOk))).exitCode).toBe(0);
 
         const agyHook = join(scratch, "deny-agy-hook.py");
         await writeFile(agyHook, agyReviewHookScriptCode(input), { mode: 0o700 });
@@ -522,6 +557,9 @@ describe("resolveReviewSpawnSandbox", () => {
         expect(await denyOutcome("list_dir", { directory: "/tmp" })).toContain('"decision": "deny"');
         expect(await denyOutcome("grep_search", { directory: traversal })).toContain('"decision": "deny"');
         expect(await denyOutcome("view_file", { FilePath: workdir })).not.toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: linkToToken })).toContain('"decision": "deny"');
+        expect(await denyOutcome("list_dir", { directory: linkToParent })).toContain('"decision": "deny"');
+        expect(await denyOutcome("view_file", { FilePath: linkOk })).not.toContain('"decision": "deny"');
       } finally {
         await rm(harnessTemp, { recursive: true, force: true });
       }
