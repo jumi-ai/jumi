@@ -72,6 +72,7 @@ import {
 } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { renderLedgerMetrics, setActiveRunUsageRecording } from "./run_usage.ts";
+import { runnerAuthFingerprints } from "./runner_cooldown.ts";
 import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown } from "./shutdown.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
@@ -141,6 +142,11 @@ export interface RunReviewJobExtras {
   jobId?: string;
   breaker?: InfraCircuitBreaker;
   quotaCooldown?: QuotaCooldown;
+  runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore;
+  runnerCooldownConfig?: import("./runner_cooldown.ts").RunnerCooldownConfig;
+  cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
   ciRelistDelayMs?: number;
   /** Lookup budget expired with no checks. Review, and say the repository has no CI. */
   assumeNoCi?: boolean;
@@ -315,6 +321,16 @@ export async function runReviewJob(
       noCiNote,
       previousError: extras.previousError,
       failedRunner: extras.failedRunner,
+      ...(extras.runnerCooldowns ? { runnerCooldowns: extras.runnerCooldowns } : {}),
+      ...((extras.runnerCooldownConfig ?? (config as { runnerCooldown?: unknown }).runnerCooldown)
+        ? {
+            runnerCooldownConfig:
+              extras.runnerCooldownConfig ??
+              (config as { runnerCooldown: import("./runner_cooldown.ts").RunnerCooldownConfig }).runnerCooldown,
+          }
+        : {}),
+      ...(extras.cooldownNowMs ? { cooldownNowMs: extras.cooldownNowMs } : {}),
+      ...(extras.authFingerprints ? { authFingerprints: extras.authFingerprints } : {}),
     });
     logger(`${job.owner}/${job.repo}#${job.prNumber} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     return result;
@@ -853,6 +869,38 @@ export async function processEngineTick(
 ): Promise<"idle" | "processed"> {
   if (extras.abortSignal?.aborted) return "idle";
   const nowMs = extras.now?.() ?? Date.now();
+  // Hydrate process-local runner cooldowns from the persisted copy so a
+  // restart does not resurrect a dead runner. Expired entries are pruned
+  // best-effort; failures never block the queue. Keep the max: a longer
+  // process-local entry is never shortened by an older persisted row, and a
+  // longer persisted row restores verbatim (reason, source, fingerprint).
+  if (extras.runnerCooldowns && typeof store.listRunnerCooldowns === "function") {
+    try {
+      const persisted = await store.listRunnerCooldowns("engine");
+      for (const entry of persisted) {
+        if (entry.untilMs <= nowMs) {
+          await store.clearRunnerCooldown?.("engine", entry.runner).catch(() => undefined);
+          continue;
+        }
+        if (extras.runnerCooldowns.cooldownUntil(entry.runner) < entry.untilMs) {
+          extras.runnerCooldowns.restore(entry.runner, {
+            untilMs: entry.untilMs,
+            reason: (entry.reason as "quota" | "credit" | "auth") ?? "quota",
+            source: (entry.source as "parsed" | "default" | "credential") ?? "default",
+            ...(entry.fingerprint != null ? { fingerprint: entry.fingerprint } : {}),
+          });
+        }
+      }
+    } catch {
+      // Fail-open: process-local cooldowns still skip the dead runner.
+    }
+  }
+  // Current credential fingerprints for auth cooldowns: a rotated credential
+  // (published Codex file, API-key env, Claude OAuth token) clears the auth
+  // cooldown on next check. Best-effort; unreadable files yield undefined and
+  // those runners stay time-only.
+  const authFingerprints =
+    extras.authFingerprints ?? runnerAuthFingerprints(orderedRunners(config), { home: config.home });
   // Injected gates are test seams: when present they own the check, otherwise
   // the ledger gate owns it so fresh processes share the same breaker/cooldown.
   const needsLedger = !extras.breaker || !extras.quotaCooldown;
@@ -971,6 +1019,11 @@ export async function processEngineTick(
       failedRunner: row.resultRunner ?? extras.failedRunner ?? null,
       provenance: extras.provenance ?? store.provenance,
       skipLatches: extras.skipLatches ?? store.skipLatches,
+      runnerCooldownConfig:
+        extras.runnerCooldownConfig ??
+        (effectiveConfig as { runnerCooldown?: RunReviewJobExtras["runnerCooldownConfig"] }).runnerCooldown,
+      cooldownNowMs: extras.cooldownNowMs ?? extras.now,
+      authFingerprints,
       remainingLeaseMs: async () => {
         const current = await store.get(row.id);
         if (current?.leasedUntil == null) return 0;
@@ -1053,6 +1106,12 @@ export async function processEngineTick(
     await handoverFollowUp(store, api, config, row, result, logger);
     if (extras.breaker) extras.breaker.recordModelReached();
     else await store.recordRoleSuccess("engine");
+    if (current?.resultRunner && extras.runnerCooldowns) {
+      extras.runnerCooldowns.clear(current.resultRunner);
+      if (typeof store.clearRunnerCooldown === "function") {
+        await store.clearRunnerCooldown("engine", current.resultRunner).catch(() => undefined);
+      }
+    }
     return "processed";
   } catch (err) {
     const shutdown = Boolean(extras.abortSignal?.aborted);
@@ -1068,6 +1127,22 @@ export async function processEngineTick(
     stopHeartbeat();
     if (!shutdown && !abort.signal.aborted && isQuotaWaitError(err)) {
       const failedRunner = failedRunnerNameForRetry(config, err);
+      // Persist the per-runner cooldown so a restart does not resurrect the
+      // dead runner. The process-local store was already updated in the chain.
+      if (extras.runnerCooldowns && failedRunner && typeof store.recordRunnerCooldown === "function") {
+        const until = extras.runnerCooldowns.cooldownUntil(failedRunner);
+        const entry = extras.runnerCooldowns.entry(failedRunner);
+        if (until > Date.now()) {
+          await store
+            .recordRunnerCooldown("engine", failedRunner, until, entry?.reason, entry?.source, entry?.fingerprint)
+            .catch(() => undefined);
+        }
+      }
+      // QuotaWaitError already encodes the job's effective-chain decision in
+      // throwIfQuotaWait: it only throws when every entry is cooled, with the
+      // earliest cooldown end as the backoff. Rechecking the full configured
+      // chain here (which can include runners excluded from this job) would
+      // defeat that decision with an immediate retry that loops every tick.
       try {
         const ok = await store.requeueInfra(row.id, leasedBy, err.backoffMs, err.marker, undefined, failedRunner);
         const quotaUntil = Date.now() + err.backoffMs;
