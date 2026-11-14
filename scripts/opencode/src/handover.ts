@@ -18,6 +18,7 @@ import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
+import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
@@ -130,6 +131,46 @@ function followUpJobFrom(
   };
 }
 
+/**
+ * Resolve a held suggestion `pending` to `success` when the follow-up cannot
+ * run. The review posted `pending` and consumed the one-hold flag; every
+ * handover skip that leaves no follow-up job must flip the held head back to
+ * `success` with a note, or the merge would wait forever. Never throws.
+ */
+async function resolveHeldSuggestion(
+  store: ReviewJobStore,
+  api: Pick<ReviewApi, "createCommitStatus">,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  headSha: string,
+  markdown: string | null | undefined,
+  reason: string,
+  targetUrl?: string
+): Promise<void> {
+  try {
+    const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
+    if (!hold.consumed) return;
+    const sha =
+      hold.headSha && hold.headSha.toLowerCase() === headSha.toLowerCase() ? headSha : (hold.headSha ?? headSha);
+    let count = hold.count ?? 0;
+    if (!count) {
+      try {
+        const parsed = parseReviewOutput(markdown ?? "");
+        if (!parsed.verdict.incomplete && parsed.verdict.state === "success") {
+          count = trailerSuggestionCount(parsed.verdict.description);
+        }
+      } catch {
+        count = 0;
+      }
+    }
+    if (!count) return;
+    await postSuggestionHoldSuccess(api, owner, repo, sha, suggestionHoldSkippedDescription(count, reason), targetUrl);
+  } catch {
+    // Best-effort: never fail handover on a status post.
+  }
+}
+
 export async function enqueueFollowUpFromReview(
   opts: {
     store: ReviewJobStore;
@@ -142,6 +183,7 @@ export async function enqueueFollowUpFromReview(
       | "findStickyIssueComment"
       | "createIssueComment"
       | "updateIssueComment"
+      | "createCommitStatus"
     >;
     row: ReviewJobRecord;
     published: ReviewResult;
@@ -255,12 +297,34 @@ export async function enqueueFollowUpFromReview(
       "no closing issue",
       opts.logger
     );
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      pr.number,
+      opts.row.headSha,
+      opts.markdown,
+      "unassigned",
+      pr.html_url
+    );
     return logSkip("no closer");
   }
 
   const issueNumber = closer ?? pr.number;
   const issue = foreign ? pr : await opts.api.getIssue(opts.row.owner, opts.row.repo, issueNumber);
   if (!foreign && (issue.state !== "open" || !isIssuePickedUp(issue, effectivePickupPolicy))) {
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      issueNumber,
+      opts.row.headSha,
+      opts.markdown,
+      "unassigned",
+      pr.html_url
+    );
     return logSkip("unassigned");
   }
 
@@ -276,6 +340,17 @@ export async function enqueueFollowUpFromReview(
     !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking) &&
     !policy.followupOnSuggestions
   ) {
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      issueNumber,
+      opts.row.headSha,
+      opts.markdown,
+      "suggestions disabled",
+      pr.html_url
+    );
     return logSkip("suggestions disabled");
   }
 
@@ -288,6 +363,17 @@ export async function enqueueFollowUpFromReview(
       pr.number,
       opts.botUsername,
       TOO_MANY_FOLLOWUP_ROUNDS
+    );
+    await resolveHeldSuggestion(
+      opts.store,
+      opts.api,
+      opts.row.owner,
+      opts.row.repo,
+      issueNumber,
+      opts.row.headSha,
+      opts.markdown,
+      "round cap",
+      pr.html_url
     );
     return logSkip("round cap");
   }
