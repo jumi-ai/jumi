@@ -48,7 +48,15 @@ import {
   QUOTA_POLL_INTERVAL_MS,
   type QuotaHit,
 } from "./quota.ts";
-import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import {
+  assertReviewRunnerSandboxable,
+  ensureSandboxedShellHome,
+  makeReviewHarnessTempRoot,
+  resolveReviewSpawnSandbox,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  writeOpenCodeReviewShellPlugin,
+} from "./review_sandbox.ts";
 import {
   openCodeSearxngServer,
   SEARXNG_OPENCODE_TOOL,
@@ -760,9 +768,13 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
-  const tempRoot = join(opts.workdir, ".jumi-tmp");
+  const isReview = opts.trace?.kind === "review";
+  // Part-2 (jumi#550): review harness files (prompt, MCP token configs, XDG
+  // dirs, session DB) live outside the checkout so sandboxed shells — RW on
+  // the checkout, no /tmp — cannot reach them. Workers keep the old layout.
+  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
-  await ensureChildScratchDir(opts.workdir);
+  const scratchDir = await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "opencode-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");
@@ -804,6 +816,8 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   if (opts.abortSignal?.aborted) {
     const err = new Error("cancelled");
     err.name = "AbortError";
+    await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
 
@@ -879,8 +893,40 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       dbBefore = await pathSizeBytes(dbPath);
     }
     const args = buildOpenCodeArgs(opts);
-    // Review spawns run confined: the wrapper argv fails closed when
+    // Part-2 (jumi#550): the agent runs unsandboxed so it keeps its login and
+    // MCP token; every `bash` tool call is wrapped separately by this
+    // Jumi-owned plugin (outside the checkout). The gate fails closed when
     // Landlock is unavailable, so pull code never runs unsandboxed.
+    if (isReview) {
+      assertReviewRunnerSandboxable("opencode");
+      await ensureSandboxedShellHome(scratchDir);
+      const hookInput = {
+        workdir: opts.workdir,
+        scratchDir,
+        harnessTempDir: tempRoot,
+        ...(home ? { homeDir: home } : {}),
+        gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+        wrapperPath: reviewSandboxWrapperPath(),
+      };
+      const pluginPath = await writeOpenCodeReviewShellPlugin(tempRoot, hookInput);
+      // Register the plugin in the Jumi-owned global config (XDG_CONFIG_HOME
+      // is under the outside harness temp, never the checkout). The checkout
+      // cannot shadow it: project config is disabled for reviews.
+      try {
+        const globalPath = join(tempRoot, "xdg-config", "opencode", "opencode.json");
+        const raw = await readFile(globalPath, "utf8");
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const existing = Array.isArray(parsed.plugin) ? (parsed.plugin as unknown[]) : [];
+        if (!existing.includes(pluginPath)) parsed.plugin = [...existing, pluginPath];
+        await writeFile(globalPath, JSON.stringify(parsed), { mode: 0o600 });
+      } catch (err) {
+        throw new EngineFailedError(
+          `opencode review spawn refused: cannot register shell sandbox plugin: ${err instanceof Error ? err.message : String(err)}`,
+          false
+        );
+      }
+      log(`opencode review shell sandbox: bash wrapped via ${pluginPath}`);
+    }
     const spawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
     const spawnedAt = Date.now();
     const proc = (() => {
@@ -1180,6 +1226,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

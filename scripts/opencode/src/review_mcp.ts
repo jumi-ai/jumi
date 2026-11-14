@@ -3,15 +3,16 @@
  *
  * Listens on a loopback HTTP port (no socket file in the checkout). A random
  * bearer token is minted per spawn and given only to the harness through its
- * MCP config, written under the spawn's temp root — never in the prompt and
- * never in the child environment.
+ * MCP config, written under the outside harness temp root (`/tmp/jumi-review-*`,
+ * never the checkout and never the child environment).
  *
- * Known-open in the single-domain sandbox (see docs/review-sandbox.md): the
- * temp root lives under the RW checkout (`.jumi-tmp`), Landlock has no deny
- * rules, and the loopback server stays reachable from inside the domain, so
- * sandboxed pull code that reads the token file can call this server. The
- * per-tool sandbox follow-up (wrap each shell, not the whole agent) is what
- * would hide it. The server dies with the spawn (`close()`).
+ * Part-2 (jumi#550): the agent is unsandboxed so it can read that config, but
+ * every shell the model runs is Landlocked without the harness temp, without
+ * HOME, and without /tmp, so pull code cannot read the token file to call
+ * this server. The loopback stays reachable (no TCP handling in the wrapper),
+ * but without the token every call is rejected. The verdict store still wins
+ * over the `JUMI_REVIEW.md` fallback file, so a shell that writes the file
+ * cannot change the posted status.
  *
  * The wire format is MCP-style JSON-RPC over HTTP (`POST /mcp`): `initialize`,
  * `tools/list`, and `tools/call`. Plain MCP SDK clients and the small

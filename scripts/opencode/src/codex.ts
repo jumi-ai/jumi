@@ -21,14 +21,27 @@ import {
   type EngineRunOptions,
   redactEngineText,
 } from "./engine.ts";
-import { CHILD_SCRATCH_DIR, ensureChildScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
+import {
+  CHILD_SCRATCH_DIR,
+  childScratchDir,
+  ensureChildScratchDir,
+  ensureEngineScratchIgnored,
+} from "./engine_scratch.ts";
 import { codexThreadPath, codexThreadUsagePath, looksLikeProviderUnavailable } from "./fallback.ts";
 import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { parseQuotaResetAtMs, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } from "./review_base.ts";
-import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
+import {
+  assertReviewRunnerSandboxable,
+  ensureSandboxedShellHome,
+  makeReviewHarnessTempRoot,
+  resolveReviewSpawnSandbox,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  writeCodexReviewShellHooks,
+} from "./review_sandbox.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { codexSearxngArgs, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
@@ -223,7 +236,7 @@ export function buildCodexEnv(
   proxyUrl?: string,
   reviewHome?: string
 ): Record<string, string> {
-  const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
+  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   const base = opts.sanitizeEnv
     ? {
         HOME: opts.home ?? process.env.HOME ?? opts.workdir,
@@ -321,15 +334,13 @@ function cancelled(): Error {
 export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
-  if (opts.reviewMcp && opts.trace?.kind === "review") {
-    log(
-      "codex runner: review MCP server not wired in this release; using JUMI_REVIEW.md fallback (transition, not silent)"
-    );
-  }
   const prompt = await resolveOpenCodePrompt(opts);
-  const tempRoot = join(opts.workdir, ".jumi-tmp");
+  const isReview = opts.trace?.kind === "review";
+  // Review harness files live outside the checkout (jumi#550) so sandboxed
+  // shells cannot reach them; workers keep the old layout.
+  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
-  await ensureChildScratchDir(opts.workdir);
+  const scratchDir = await ensureChildScratchDir(opts.workdir);
 
   const tmpDir = await mkdtemp(join(tempRoot, "codex-prompt-"));
   const tmpPath = join(tmpDir, "prompt.txt");
@@ -342,6 +353,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw cancelled();
   }
 
@@ -371,10 +383,10 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     if (isReview) {
       // Review-only home: the workdir is untrusted, so the head's `.codex`
       // config, hooks, rules, and MCP servers never load. The home lives
-      // under the spawn's temp root (outside the tracked checkout). Auth
-      // still comes from the real HOME: link it in when present so the
-      // review keeps the parent's credential without copying the grant.
-      reviewHome = join(tmpDir, "codex-home");
+      // under the outside harness temp (never the checkout). Auth still comes
+      // from the real HOME: link it in when present so the review keeps the
+      // parent's credential without copying the grant.
+      reviewHome = join(tempRoot, "codex-home");
       await writeCodexReviewHome(reviewHome, opts.workdir);
       try {
         const home = opts.home ?? process.env.HOME ?? opts.workdir;
@@ -391,6 +403,32 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       } catch {
         // Best-effort: API-key and local modes have no HOME auth file.
       }
+      // Parent-owned review verdict server, wired for Codex (part-2): the
+      // HTTP MCP lives in the Jumi-owned CODEX_HOME config, outside the
+      // checkout, so a checkout `.codex` cannot shadow it.
+      if (opts.reviewMcp && reviewHome) {
+        const { appendFile } = await import("node:fs/promises");
+        const home: string = reviewHome;
+        const entry = `\n[mcp_servers.jumi-review]\nurl = ${JSON.stringify(opts.reviewMcp.url)}\nhttp_headers = ${JSON.stringify({ Authorization: `Bearer ${opts.reviewMcp.token}` })}\n`;
+        await appendFile(join(home, "config.toml"), entry).catch(async () => {
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(join(home, "config.toml"), `${entry}\n`).catch(() => undefined);
+        });
+      }
+      // Jumi-owned PreToolUse hook wraps every Bash through the shell
+      // Landlock domain; the agent itself stays unsandboxed.
+      assertReviewRunnerSandboxable("codex");
+      await ensureSandboxedShellHome(scratchDir);
+      if (!reviewHome) throw new EngineFailedError("codex review spawn refused: no review home", false);
+      await writeCodexReviewShellHooks(reviewHome, {
+        workdir: opts.workdir,
+        scratchDir,
+        harnessTempDir: tempRoot,
+        ...(opts.home ? { homeDir: opts.home } : {}),
+        gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+        wrapperPath: reviewSandboxWrapperPath(),
+      });
+      log(`codex review shell sandbox: Bash wrapped via ${reviewHome}/hooks.json`);
       // Base skills replace the head's for the duration of the spawn. The
       // head's `.codex` stays on disk (readable as diff content) but never
       // loads (untrusted above); skills have no trust gate, so they are
@@ -421,8 +459,8 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       }
     }
     const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url, reviewHome);
-    // Review spawns run confined: the wrapper argv fails closed when
-    // Landlock is unavailable, so pull code never runs unsandboxed.
+    // Part-2 (jumi#550): the agent stays unsandboxed; its shells are wrapped
+    // by the Jumi-owned hooks above. The gate fails closed on missing Landlock.
     const codexSpawnArgv = resolveReviewSpawnSandbox(opts, args, codexEnv, log).argv;
     const proc = (() => {
       try {
@@ -600,6 +638,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
