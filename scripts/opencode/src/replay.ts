@@ -21,7 +21,7 @@ import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./re
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
-import { hasPublishedFindings, keepReviewFindingLines, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
+import { hasBlockingFindings, keepReviewFindingLines, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
@@ -1052,9 +1052,11 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           }
           continue;
         }
-        // A failure trailer with no published findings is incomplete, mirroring
-        // the live publisher: the trailer reason is not a finding.
-        if (parsed.verdict.state === "failure" && !hasPublishedFindings(parsed.comment)) {
+        // A failure trailer with no actionable published blocking finding is
+        // incomplete, mirroring the live publisher: the trailer reason is not
+        // a finding, a marker-only line with no location or own body carries
+        // nothing actionable, and 💡/❓ findings never fail the check.
+        if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
           if (extrasUsed >= maxIncompleteRetries) {
             return finish({
               caseId: reviewCase.id,

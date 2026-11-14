@@ -135,18 +135,23 @@ import type { ReviewJob } from "./types.ts";
 import {
   buildFindingsList,
   capSuggestionFindings,
+  countBugFindings,
   countQuestionFindings,
+  countRiskFindings,
+  countSuggestionFindings,
+  describeBlockingReason,
+  describeSuggestionsReason,
   findingFingerprint,
+  hasBlockingFindings,
   hasColonEndingFinding,
-  hasPublishedFindings,
   isBlockingQuestionAuthor,
   keepReviewFindingLines,
   MAX_SUGGESTION_FINDINGS,
   openQuestionDescription,
+  parseCheckLine,
   parseReviewFindings,
   parseReviewOutput,
   stripFindingLines,
-  trailerSuggestionCount,
 } from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
@@ -1573,14 +1578,24 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const singleFilePath = needsSingleFilePath(parsed.comment)
     ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, pr.number, log)
     : undefined;
-  // A failure trailer with no published finding is an incomplete review: the
-  // trailer reason is not a finding, and prose the publisher drops must not
-  // become a blank required-check failure. Success with no findings stays clean.
+  // A failure trailer with no actionable published finding is an incomplete
+  // review: the trailer reason is not a finding, and prose the publisher
+  // drops must not become a blank required-check failure. A failure that
+  // publishes only non-blocking findings (💡/❓) or marker-only lines with
+  // neither a location nor a body of their own is incomplete for the same
+  // reason: a "N blocking" trailer with no open 🔴/🟡 finding would fail the
+  // check with nothing actionable. Success with no findings stays clean.
   if (
     !parsed.verdict.incomplete &&
     parsed.verdict.state === "failure" &&
-    !hasPublishedFindings(parsed.comment, { singleFilePath })
+    !hasBlockingFindings(parsed.comment, { singleFilePath })
   ) {
+    logDiagnostic(log, "review_trailer_counts", {
+      review: reviewLabel,
+      model: parsed.verdict.description,
+      published: "0 blocking",
+      state: "failure",
+    });
     const result: ReviewResult = { status: "skipped", reason: INCOMPLETE_NO_FINDINGS_REASON };
     await upsertStuckText(forgeApi, opts.owner, opts.repo, pr.number, opts.botUsername, INCOMPLETE_REVIEW_STUCK);
     const { state, description } = statusForResult(result);
@@ -1653,10 +1668,43 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     isBlockingQuestionAuthor(pr.user?.login, blockingQuestionAuthors)
       ? countQuestionFindings(comment, { singleFilePath })
       : 0;
+  // Trailer and status counts come from the findings that actually publish,
+  // never from the model's free-text reason: a model that writes "1 blocking"
+  // while the store holds two open bugs (or only a stale summary) would
+  // otherwise fail the check with a count that matches no open finding.
+  const publishedBugs = countBugFindings(comment, { singleFilePath });
+  const publishedRisks = countRiskFindings(comment, { singleFilePath });
+  const publishedSuggestions = countSuggestionFindings(comment, { singleFilePath });
+  const publishedFailureReason = describeBlockingReason(publishedBugs, publishedRisks);
+  const publishedSuccessReason = publishedSuggestions > 0 ? describeSuggestionsReason(publishedSuggestions) : "";
   const effectiveVerdict =
     blockingQuestions > 0
       ? { state: "failure" as const, description: openQuestionDescription(blockingQuestions), incomplete: false }
-      : parsed.verdict;
+      : parsed.verdict.incomplete
+        ? parsed.verdict
+        : parsed.verdict.state === "failure"
+          ? { state: "failure" as const, description: publishedFailureReason, incomplete: false }
+          : {
+              state: "success" as const,
+              description: publishedSuccessReason || "No blocking issues",
+              incomplete: false as const,
+            };
+  if (!parsed.verdict.incomplete && parsed.verdict.description !== effectiveVerdict.description) {
+    logDiagnostic(log, "review_trailer_counts", {
+      review: reviewLabel,
+      model: parsed.verdict.description,
+      published: effectiveVerdict.description,
+      state: effectiveVerdict.state,
+    });
+  }
+  // The published trailer carries the same parent-computed counts. A bare
+  // model trailer (no reason of its own) stays bare; any model-written reason
+  // is replaced so stale counts never publish.
+  const modelReason = parsed.checkLine ? (parseCheckLine(parsed.checkLine)?.reason ?? "") : "";
+  const publishedCheckLine =
+    modelReason.trim() !== ""
+      ? `<!-- jumi-check: ${effectiveVerdict.state}; ${effectiveVerdict.description} -->`
+      : parsed.checkLine;
   if (blockingQuestions > 0) {
     logDiagnostic(log, "review_blocking_questions", {
       review: reviewLabel,
@@ -1671,7 +1719,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       kept_bytes: comment.length,
     });
   }
-  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, parsed.checkLine, opts.resultRunner);
+  const stickyBody = buildCommentBody(marker, opts.expectedHeadSha, comment, publishedCheckLine, opts.resultRunner);
 
   let result: ReviewResult | undefined;
   if (!parsed.verdict.incomplete) {
@@ -1687,7 +1735,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         botUsername: opts.botUsername,
         prAuthor: pr.user?.login,
         event: reviewEventForVerdict(effectiveVerdict.state, pr.user?.login, opts.botUsername),
-        checkLine: parsed.checkLine,
+        checkLine: publishedCheckLine,
         runner: opts.resultRunner,
         singleFilePath,
         log,
@@ -1729,7 +1777,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // today's behavior exactly.
   const holdSuggestionCount =
     !parsed.verdict.incomplete && effectiveVerdict.state === "success" && blockingQuestions === 0
-      ? trailerSuggestionCount(parsed.verdict.description)
+      ? publishedSuggestions
       : 0;
   // One policy helper decides the hold so reviews and tests read the same
   // rule: auto-merge on, deployment switch on, full mode, no opt-out.
@@ -2605,7 +2653,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         gated = `${opts.noCiNote}\n\n${gated}`;
       }
       const parsed = parseReviewOutput(gated);
-      if (parsed.verdict.state === "failure" && !hasPublishedFindings(parsed.comment)) {
+      if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }
       return await publishMarkdownVerdict(gated);
@@ -2783,7 +2831,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             const singleFilePath = needsSingleFilePath(parsedArtifact.comment)
               ? await resolveSingleFilePath(forgeApi, opts.owner, opts.repo, opts.prNumber, log)
               : undefined;
-            blankFailure = !hasPublishedFindings(parsedArtifact.comment, { singleFilePath });
+            blankFailure = !hasBlockingFindings(parsedArtifact.comment, { singleFilePath });
             if (!blankFailure) {
               const keptArtifact = keepReviewFindingLines(parsedArtifact.comment, { singleFilePath });
               if (hasColonEndingFinding(keptArtifact, { singleFilePath })) {

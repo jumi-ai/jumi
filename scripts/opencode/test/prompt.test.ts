@@ -260,6 +260,22 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).not.toContain("<issue ");
   });
 
+  test("a later review tells the model how to treat resolved earlier findings", () => {
+    const first = buildPROpenedPrompt({ repo: makeRepo(), pr: makePR(), prFiles: [] });
+    expect(first).not.toContain("do not record it with add_finding");
+
+    const later = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      delta: { previousSha: "abc123", findings: ["src/a.ts:1: 🔴 bug: stale."], commits: [], files: [] },
+    });
+    expect(later).toContain("JUMI_REVIEW.md replaces the previous review");
+    expect(later).toContain("A previous finding this head fixed is resolved: do not record it with add_finding");
+    expect(later).toContain("do not repeat its severity marker");
+    expect(later).toContain("Only finding lines with markers publish");
+  });
+
   test("steers the reviewer to treat only writer thread XML as product intent", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),

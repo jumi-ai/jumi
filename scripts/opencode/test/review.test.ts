@@ -1086,10 +1086,10 @@ describe("reviewPullRequest", () => {
       expect(final).not.toContain("I'll inspect");
       expect(final).toContain("`src/demo.ts:12`");
       expect(final).toContain("`src/demo.ts:40`");
-      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; 2 blocking -->");
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; 1 blocking, 1 risk -->");
       expect(isJumiReviewFinding({ body: final }, REVIEW_SHA)).toBe(true);
       expect(statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
-      expect(statuses[1].description).toBe("2 blocking");
+      expect(statuses[1].description).toBe("1 blocking, 1 risk");
     });
   });
 
@@ -1281,7 +1281,7 @@ describe("reviewPullRequest", () => {
       });
       expect(result.status).toBe("posted");
       expect(sticky).toBe("");
-      expect(statuses.at(-1)).toMatchObject({ state: "success", description: "No blocking issues" });
+      expect(statuses.at(-1)).toMatchObject({ state: "success", description: "1 suggestion" });
       expect(reviews).toEqual([
         inlineBatch([
           {
@@ -1713,7 +1713,7 @@ describe("reviewPullRequest", () => {
       const posted = bodies.map((body) => JSON.parse(body) as { state?: string; description?: string });
       expect(posted.some((status) => status.state === "pending")).toBe(true);
       const failure = posted.find((status) => status.state === "failure");
-      expect(failure?.description?.endsWith("…")).toBe(true);
+      expect(failure?.description).toBe("1 blocking");
       expect(Array.from(failure?.description ?? "").length).toBeLessThanOrEqual(140);
       expect(failure?.description).not.toBe("blocking ".repeat(30));
     });
@@ -2388,7 +2388,7 @@ optionalEnv(resolved, "DATABASE_URL");
       const final = reviews.at(-1)?.body ?? "";
       expect(final).not.toContain("Looks good");
       expect(final).not.toContain("deploy/contract.md:1:");
-      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; contract env drift -->");
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; 1 risk -->");
       expect(
         reviews.some((review) => review.comments?.some((comment) => comment.body.includes("MAX_FOLLOWUP_ROUNDS")))
       ).toBe(true);
@@ -2399,7 +2399,7 @@ optionalEnv(resolved, "DATABASE_URL");
           runner: DEFAULT_RUNNER_STAMP,
         },
       ]);
-      expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "contract env drift" });
+      expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 risk" });
     });
   });
 
@@ -2465,7 +2465,7 @@ optionalEnv(resolved, "DATABASE_URL");
       expect(reviews.some((review) => review.comments?.some((comment) => comment.body.includes("🟡 risk:")))).toBe(
         true
       );
-      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; contract env drift -->");
+      expect(lastNonEmptyLine(final)).toBe("<!-- jumi-check: failure; 1 risk -->");
       expect(statuses.at(-1)?.state).toBe("failure");
     });
   });
@@ -4234,6 +4234,137 @@ describe("publishReviewResult", () => {
       },
     ]);
     expect((reviews[0] as { body: string }).body).not.toContain("jumi-findings-list");
+  });
+
+  test("a failure with only suggestions is incomplete, not N blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    let posted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 💡 simpler: extract a helper.",
+        "src/bar.ts:7: 💡 simpler: drop the wrapper.",
+        "<!-- jumi-check: failure; 2 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async () => {
+          posted = true;
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no findings" });
+    expect(posted).toBe(false);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.state).toBe("failure");
+    expect(statuses[0]?.description).toBe("Incomplete review: no findings");
+  });
+
+  test("a failure with only questions is incomplete, not N blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    let posted = false;
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ q: is the timeout intentional?",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async () => {
+          posted = true;
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no findings" });
+    expect(posted).toBe(false);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.description).toBe("Incomplete review: no findings");
+  });
+
+  test("a stale summary bullet with a bare marker is incomplete, not 1 blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "- 🔴",
+        "  The earlier deny-predicate finding is fixed and dropped. The remaining symlink variant is reported below as the one blocking finding.",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (review.body) bodies.push(review.body);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "skipped", reason: "Incomplete review: no findings" });
+    expect(bodies).toEqual([]);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ state: "failure", description: "Incomplete review: no findings" });
+  });
+
+  test("a stale model count is replaced by the published findings: two bugs publish 2 blocking", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: [
+        "src/a.ts:2: 🔴 bug: first null deref. Guard it.",
+        "src/a.ts:3: 🔴 bug: second null deref. Guard it.",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (review.body) bodies.push(review.body);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(bodies).toHaveLength(1);
+    expect(lastNonEmptyLine(bodies[0] ?? "")).toBe("<!-- jumi-check: failure; 2 blocking -->");
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "2 blocking" });
+  });
+
+  test("a non-count model reason is replaced by the published findings: one risk publishes 1 risk", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: ["src/a.ts:2: 🟡 risk: race on retry.", "<!-- jumi-check: failure; needs work -->"].join("\n"),
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (review.body) bodies.push(review.body);
+          return { id: 1 };
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(bodies).toHaveLength(1);
+    expect(lastNonEmptyLine(bodies[0] ?? "")).toBe("<!-- jumi-check: failure; 1 risk -->");
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 risk" });
   });
 });
 

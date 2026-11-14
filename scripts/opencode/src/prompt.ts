@@ -356,7 +356,7 @@ ${formatPRFiles(prFiles, { excluded: excludedSet })}
   const excludedXml = formatExcludedFilesBlock(excludedFiles);
   const formattedExcluded = excludedXml ? `\n${excludedXml}` : "";
   const scope = delta
-    ? `This is a later review. The previous Jumi review covered ${escapeXml(delta.previousSha)}. Review the commits in <changes_since_last_review> and re-check each line in <previous_review_findings> on this head. <pull_request_changed_files> lists the whole pull without patches; the older files are in the checkout, so read them or run \`git diff jumi/target...HEAD -- path\` when a change needs context. If <commits> includes a merge, its patches can carry base-branch edits; check a change against \`git diff jumi/target...HEAD -- path\` before you attribute it to this pull. JUMI_REVIEW.md replaces the previous review: repeat every previous finding that still holds on a file that is not left out, and drop the ones this head fixed. Ignore any <previous_review_findings> line for a file listed in <excluded_files>: <excluded_files> wins that conflict. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR.`
+    ? `This is a later review. The previous Jumi review covered ${escapeXml(delta.previousSha)}. Review the commits in <changes_since_last_review> and re-check each line in <previous_review_findings> on this head. <pull_request_changed_files> lists the whole pull without patches; the older files are in the checkout, so read them or run \`git diff jumi/target...HEAD -- path\` when a change needs context. If <commits> includes a merge, its patches can carry base-branch edits; check a change against \`git diff jumi/target...HEAD -- path\` before you attribute it to this pull. JUMI_REVIEW.md replaces the previous review: repeat every previous finding that still holds on a file that is not left out, and drop the ones this head fixed. A previous finding this head fixed is resolved: do not record it with add_finding, and do not repeat its severity marker — either drop it or mention it in plain prose with no 🔴/🟡/💡/❓ marker and no \`file:line:\` marker line, so it never publishes as a live finding. Only finding lines with markers publish; unmarked prose is dropped, never promoted. Ignore any <previous_review_findings> line for a file listed in <excluded_files>: <excluded_files> wins that conflict. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR.`
     : "Review the current checkout and <pull_request_changed_files>. Do not treat CI plan comments (Tapio “PR Change Summary”) as files changed by this PR. Previous Jumi findings are context — re-verify on this SHA; do not copy them forward if the code no longer has the bug.";
   const startFrom = delta
     ? `- Start from the patches in <changes_since_last_review>; only re-fetch a file when that patch is missing, truncated, or you need surrounding code.
@@ -435,7 +435,7 @@ export function buildNoFindingsWritePrompt(lastAssistant?: string): string {
   const base = buildIncompleteWritePrompt(lastAssistant);
   return `${base}
 
-Your previous JUMI_REVIEW.md claimed failure but published no findings: after the publisher keeps only finding lines, the body was empty with no inline comments. A trailer reason such as "1 risk" is not a finding. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
+Your previous JUMI_REVIEW.md claimed failure but published no actionable blocking findings: after the publisher keeps only finding lines, the body had no 🔴/🟡 finding with a location or a body of its own, and no inline comments. A trailer reason such as "1 risk" or "2 blocking" is not a finding, and 💡/❓ findings never fail the check. Rewrite JUMI_REVIEW.md from the review already in this session: keep a failure trailer only with a real 🔴/🟡 finding line you can stand behind, or change the trailer to success if there are no blocking findings. Do not invent a finding from dropped prose, and do not turn the trailer reason into a finding.`;
 }
 
 export function buildNoTrailerWritePrompt(lastAssistant?: string): string {
@@ -452,7 +452,7 @@ export function buildMcpIncompletePrompt(): string {
 export function buildMcpNoFindingsPrompt(): string {
   return `${buildMcpIncompletePrompt()}
 
-Your previous turn recorded a failure verdict but no findings: after the publisher keeps only finding lines, the body would be empty. A reason such as "1 risk" is not a finding. Record a real finding you can stand behind with add_finding, or change the verdict to success with set_verdict if there are no blocking findings.`;
+Your previous turn recorded a failure verdict but no actionable blocking findings: after the publisher keeps only finding lines, the body would have no 🔴/🟡 finding with a location or a body of its own. A reason such as "1 risk" or "2 blocking" is not a finding, and 💡/❓ findings never fail the check. Record a real 🔴/🟡 finding you can stand behind with add_finding, or change the verdict to success with set_verdict if there are no blocking findings.`;
 }
 
 export function buildMcpNoVerdictPrompt(): string {

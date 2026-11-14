@@ -573,6 +573,123 @@ export function countSuggestionFindings(text: string, opts?: { singleFilePath?: 
   return count;
 }
 
+const BLOCKING_MARKER_RE =
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🔴|🟡|(?:bug|risk)\s*:)/iu;
+
+const BUG_MARKER_RE = /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🔴|bug\s*:)/iu;
+
+const RISK_MARKER_RE = /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:🟡|risk\s*:)/iu;
+
+// A location prefix (`<path>:<line>:` or `L<line>:`) on a finding first line.
+const LOCATION_PREFIX_RE = /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)/;
+
+export function isBlockingFindingFirstLine(original: string): boolean {
+  return BLOCKING_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+export function isBugFindingFirstLine(original: string): boolean {
+  return BUG_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+export function isRiskFindingFirstLine(original: string): boolean {
+  return RISK_MARKER_RE.test(stripFindingPrefix(original));
+}
+
+/**
+ * Split a blocking finding first line into its location and its own body:
+ * the text after the severity marker on that same line. A bare `🔴` with
+ * neither a location nor own-body text carries nothing actionable: the
+ * promised detail either never follows (as in the #562 stale summary) or
+ * lives only in prose the publisher cannot stand behind.
+ */
+function blockingLineParts(first: string): { hasLocation: boolean; body: string } {
+  let rest = stripFindingPrefix(first);
+  let hasLocation = false;
+  const loc = LOCATION_PREFIX_RE.exec(rest);
+  if (loc) {
+    hasLocation = true;
+    rest = rest.slice(loc[0].length);
+  }
+  rest = rest.replace(/^(?:\*\*|__)?\s*/, "");
+  const marker = /^(?:🔴|🟡|bug\s*:|risk\s*:)/iu.exec(rest);
+  if (marker) {
+    rest = rest.slice(marker[0].length).trimStart();
+    // A doubled severity word (`🔴 bug:`) is still just the marker.
+    const word = /^(?:bug|risk)\s*:/iu.exec(rest);
+    if (word) rest = rest.slice(word[0].length);
+  }
+  return { hasLocation, body: rest.trim() };
+}
+
+/**
+ * Whether a finding first line is an actionable blocking finding: a `🔴` /
+ * `bug:` (or `🟡` / `risk:`) line that publishes with a location or a body
+ * of its own. Marker-only lines with neither never fail the check.
+ */
+export function isActionableBlockingFirstLine(original: string): boolean {
+  const stripped = stripFindingPrefix(original);
+  if (!BLOCKING_MARKER_RE.test(stripped)) return false;
+  const { hasLocation, body } = blockingLineParts(original);
+  return hasLocation || body !== "";
+}
+
+function countKindBlockingFindings(text: string, kind: "bug" | "risk", opts?: { singleFilePath?: string }): number {
+  const markerRe = kind === "bug" ? BUG_MARKER_RE : RISK_MARKER_RE;
+  const { blocks } = collectFindingBlocks(text, { ...opts, includeBareL: true });
+  let count = 0;
+  for (const block of blocks) {
+    if (block.keepNote) continue;
+    if (!markerRe.test(stripFindingPrefix(block.first))) continue;
+    const { hasLocation, body } = blockingLineParts(block.first);
+    if (hasLocation || body !== "") count++;
+  }
+  return count;
+}
+
+/** Actionable `🔴` / `bug:` findings: marker plus a location or own-body text. */
+export function countBugFindings(text: string, opts?: { singleFilePath?: string }): number {
+  return countKindBlockingFindings(text, "bug", opts);
+}
+
+/** Actionable `🟡` / `risk:` findings: marker plus a location or own-body text. */
+export function countRiskFindings(text: string, opts?: { singleFilePath?: string }): number {
+  return countKindBlockingFindings(text, "risk", opts);
+}
+
+/**
+ * Count the actionable blocking findings in a review body: one per finding
+ * block whose first line carries the `🔴`/`🟡` (or `bug:`/`risk:`) marker
+ * with a location or a body of its own. `💡`/`❓` blocks are ignored, as are
+ * marker-only lines with neither a location nor own-body text. A failure
+ * trailer claiming "N blocking" must match at least one such published
+ * finding; otherwise the check would fail with nothing actionable.
+ */
+export function countBlockingFindings(text: string, opts?: { singleFilePath?: string }): number {
+  return countBugFindings(text, opts) + countRiskFindings(text, opts);
+}
+
+/** Whether the review body publishes at least one actionable blocking (`🔴`/`🟡`) finding. */
+export function hasBlockingFindings(text: string, opts?: { singleFilePath?: string }): boolean {
+  return countBlockingFindings(text, opts) > 0;
+}
+
+/**
+ * Canonical failure reason from the findings that actually publish:
+ * `bug:` findings report as blocking, `risk:` findings as risk. Model-written
+ * counts never reach the status; the publisher logs when they disagree.
+ */
+export function describeBlockingReason(bugs: number, risks: number): string {
+  const parts: string[] = [];
+  if (bugs > 0) parts.push(`${bugs} blocking`);
+  if (risks > 0) parts.push(`${risks} risk${risks === 1 ? "" : "s"}`);
+  return parts.join(", ");
+}
+
+/** Canonical success reason from the suggestions that actually publish. */
+export function describeSuggestionsReason(count: number): string {
+  return `${count} suggestion${count === 1 ? "" : "s"}`;
+}
+
 /** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
 export function formatSuggestionCapNote(dropped: number, cap: number = MAX_SUGGESTION_FINDINGS): string {
   return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${cap}).`;
