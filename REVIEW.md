@@ -96,7 +96,7 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 - On a bump-only PR, report no 💡, because a Jumi commit stops Renovate rebasing that branch (#291).
 - `bun.lock` stays readable by `BUN_VERSION` (#36), Temurin stays on 21 (#15), pins and checksums move together for both architectures (#250), and the OpenCode, Helm, Claude, Bun, and Codex build args have no default version, while `AGY_VERSION` stays pinned in the Dockerfile (#154).
 
-## deploy/contract.md, config.ts, worker_config.ts, release.ts, gitops_notes.ts, .github/workflows/**
+## deploy/contract.md, config.ts, worker_config.ts, release.ts, .github/workflows/**
 
 - Env read through a map, helper, or computed name is still classified in the contract (#71, #72).
 - The contract change matches its semver rules, and each env heading matches what the loader does (#71).
