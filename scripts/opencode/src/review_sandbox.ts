@@ -268,6 +268,11 @@ const REVIEW_ENV_ALLOWED_EXACT = new Set([
   "CODEX_API_KEY",
   "XAI_API_KEY",
   "GIT_CONFIG_COUNT",
+  // Non-secret forge hostname driving the host-scoped webfetch deny
+  // (`child_git_proxy.ts`, `forge_webfetch.ts`); the write-capable token
+  // itself never reaches the child (stripped parent-side) and stays
+  // forbidden below.
+  "GIT_AUTH_HOST",
 ]);
 const REVIEW_ENV_ALLOWED_PREFIXES = ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"] as const;
 /**

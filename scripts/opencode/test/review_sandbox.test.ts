@@ -127,6 +127,7 @@ describe("findReviewEnvViolations", () => {
         OPENCODE_MODEL: "openai/gpt-5.5",
         OPENCODE_DB: "/work/repo/.jumi-tmp/opencode-session.db",
         CLAUDE_CODE_OAUTH_TOKEN: "setup",
+        GIT_AUTH_HOST: "gitea.example",
         GIT_CONFIG_COUNT: "2",
         GIT_CONFIG_KEY_0: "url.http://127.0.0.1:1/.insteadOf",
         GIT_CONFIG_VALUE_0: "https://gitea.example/",
