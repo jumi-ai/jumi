@@ -9,6 +9,9 @@ ARG YQ_SHA256_ARM64
 ARG UV_VERSION
 ARG UV_SHA256_AMD64
 ARG UV_SHA256_ARM64
+ARG ANDROID_CMDLINE_TOOLS_VERSION
+ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG ANDROID_SDK_PACKAGES="platform-tools platforms;android-37.0 build-tools;37.0.0 build-tools;36.0.0"
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
 FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS tools
@@ -111,6 +114,48 @@ RUN set -eu; \
     unzip -q "${tmp_dir}/bun.zip" -d "${tmp_dir}"; \
     install -m 755 "${tmp_dir}/bun-${bun_platform}/bun" /usr/local/bin/bun; \
     rm -rf "${tmp_dir}"
+
+FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3c6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS android-sdk
+
+# Android SDK in its own cache-stable stage: only the pins below affect this
+# layer, never the Jumi sources or the Codex/Claude/opencode versions, so nodes
+# that already hold it do not pull it again on the next Jumi release.
+# cmdline-tools has no baked default: a missing pin fails closed instead of
+# baking a stale SDK. The package list is pinned but overridable via build-arg.
+ARG ANDROID_CMDLINE_TOOLS_VERSION
+ARG ANDROID_CMDLINE_TOOLS_SHA256
+ARG ANDROID_SDK_PACKAGES="platform-tools platforms;android-37.0 build-tools;37.0.0 build-tools;36.0.0"
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl openjdk-17-jre-headless unzip \
+  && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    : "${ANDROID_CMDLINE_TOOLS_VERSION:?ANDROID_CMDLINE_TOOLS_VERSION build-arg is required}"; \
+    : "${ANDROID_CMDLINE_TOOLS_SHA256:?ANDROID_CMDLINE_TOOLS_SHA256 build-arg is required}"; \
+    case "${ANDROID_CMDLINE_TOOLS_SHA256}" in \
+      *[!0-9a-f]*|"") echo "Android cmdline-tools sha256 pin is not 64 lowercase hex"; exit 1 ;; \
+    esac; \
+    if [ "${#ANDROID_CMDLINE_TOOLS_SHA256}" -ne 64 ]; then echo "Android cmdline-tools sha256 pin must be 64 hex chars"; exit 1; fi; \
+    tmp_dir="$(mktemp -d)"; \
+    curl -fsSL --retry 40 --retry-delay 15 --retry-all-errors "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o "${tmp_dir}/cmdtools.zip"; \
+    echo "${ANDROID_CMDLINE_TOOLS_SHA256}  ${tmp_dir}/cmdtools.zip" | sha256sum -c -; \
+    mkdir -p /opt/android-sdk/cmdline-tools; \
+    unzip -q "${tmp_dir}/cmdtools.zip" -d "${tmp_dir}/extracted"; \
+    mkdir -p /opt/android-sdk/cmdline-tools/latest; \
+    cp -a "${tmp_dir}/extracted/cmdline-tools/." /opt/android-sdk/cmdline-tools/latest/; \
+    rm -rf "${tmp_dir}"; \
+    export PATH="/opt/android-sdk/cmdline-tools/latest/bin:${PATH}"; \
+    yes | sdkmanager --licenses; \
+    # shellcheck disable=SC2086
+    sdkmanager ${ANDROID_SDK_PACKAGES}; \
+    yes | sdkmanager --licenses; \
+    test -d /opt/android-sdk/platforms/android-37.0; \
+    test -d /opt/android-sdk/build-tools/37.0.0; \
+    test -n "$(ls -A /opt/android-sdk/licenses)"; \
+    chmod -R a+rX /opt/android-sdk
 
 FROM tools AS build
 
@@ -258,10 +303,14 @@ FROM docker.io/library/eclipse-temurin:${TEMURIN_TAG} AS jdk
 FROM runtime AS worker
 USER root
 COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
+COPY --from=android-sdk /opt/android-sdk /opt/android-sdk
+RUN chmod -R a+rX /opt/android-sdk
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 USER 10001:10001
 ENV JAVA_HOME=/opt/java/openjdk \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
     OPENCODE_CONFIG=/app/.gitea/opencode-implement.json \
     AGENT_INSTANCE=jumi-worker
-ENV PATH="${JAVA_HOME}/bin:${PATH}"
+ENV PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${JAVA_HOME}/bin:${PATH}"
 CMD ["bun", "run", "src/worker_server.ts"]

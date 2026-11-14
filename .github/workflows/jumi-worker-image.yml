@@ -87,6 +87,8 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            ANDROID_CMDLINE_TOOLS_VERSION=${{ env.ANDROID_CMDLINE_TOOLS_VERSION }}
+            ANDROID_CMDLINE_TOOLS_SHA256=${{ env.ANDROID_CMDLINE_TOOLS_SHA256 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
@@ -126,6 +128,23 @@ jobs:
             exit 1
           fi
           echo "Verified worker JDK is Temurin 21"
+
+          android_home="$(docker run --rm "${TEST_TAG}" printenv ANDROID_HOME)"
+          if [ "${android_home}" != "/opt/android-sdk" ]; then
+            echo "Expected ANDROID_HOME=/opt/android-sdk, got ${android_home:-<empty>}" >&2
+            exit 1
+          fi
+          android_root="$(docker run --rm "${TEST_TAG}" printenv ANDROID_SDK_ROOT)"
+          if [ "${android_root}" != "/opt/android-sdk" ]; then
+            echo "Expected ANDROID_SDK_ROOT=/opt/android-sdk, got ${android_root:-<empty>}" >&2
+            exit 1
+          fi
+          echo "Verified Android SDK env: ${android_home}"
+          # Job pods run read-only as uid 10001, so prove the baked SDK is
+          # usable in exactly that shape: no runtime install, no license prompt.
+          docker run --rm --read-only --user 10001:10001 "${TEST_TAG}" \
+            sh -c 'test -d "$ANDROID_HOME/platforms/android-37.0" && test -d "$ANDROID_HOME/build-tools/37.0.0" && test -d "$ANDROID_HOME/build-tools/36.0.0" && test -n "$(ls -A "$ANDROID_HOME/licenses")" && sdkmanager --version'
+          echo "Verified Android SDK is complete for uid 10001 on a read-only root filesystem"
 
           config="$(docker run --rm "${TEST_TAG}" printenv OPENCODE_CONFIG)"
           if [ "${config}" != "/app/.gitea/opencode-implement.json" ]; then
@@ -249,6 +268,8 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            ANDROID_CMDLINE_TOOLS_VERSION=${{ env.ANDROID_CMDLINE_TOOLS_VERSION }}
+            ANDROID_CMDLINE_TOOLS_SHA256=${{ env.ANDROID_CMDLINE_TOOLS_SHA256 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}

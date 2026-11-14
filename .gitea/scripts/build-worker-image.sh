@@ -23,6 +23,8 @@ fi
 : "${UV_VERSION:?UV_VERSION is required}"
 : "${UV_SHA256_AMD64:?UV_SHA256_AMD64 is required}"
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
+: "${ANDROID_CMDLINE_TOOLS_VERSION:?ANDROID_CMDLINE_TOOLS_VERSION is required}"
+: "${ANDROID_CMDLINE_TOOLS_SHA256:?ANDROID_CMDLINE_TOOLS_SHA256 is required}"
 : "${TEMURIN_TAG:?TEMURIN_TAG is required}"
 
 primary_tag="$1"
@@ -67,6 +69,8 @@ buildah bud \
       --build-arg "UV_VERSION=${UV_VERSION}" \
       --build-arg "UV_SHA256_AMD64=${UV_SHA256_AMD64}" \
       --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
+      --build-arg "ANDROID_CMDLINE_TOOLS_VERSION=${ANDROID_CMDLINE_TOOLS_VERSION}" \
+      --build-arg "ANDROID_CMDLINE_TOOLS_SHA256=${ANDROID_CMDLINE_TOOLS_SHA256}" \
       --build-arg "TEMURIN_TAG=${TEMURIN_TAG}" \
       --build-arg "VERSION=${VERSION}" \
       --build-arg "REVISION=${REVISION}" \
@@ -130,7 +134,53 @@ verify_worker_jdk() {
   buildah rm "${ctr}" >/dev/null
 }
 
+verify_worker_android() {
+  local ctr android_home android_root
+  ctr="$(buildah from "${primary_tag}")"
+  if ! android_home="$(buildah run "${ctr}" -- printenv ANDROID_HOME)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "ANDROID_HOME missing in worker image" >&2
+    exit 1
+  fi
+  if [ "${android_home}" != "/opt/android-sdk" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Expected ANDROID_HOME=/opt/android-sdk, got ${android_home:-<empty>}" >&2
+    exit 1
+  fi
+  if ! android_root="$(buildah run "${ctr}" -- printenv ANDROID_SDK_ROOT)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "ANDROID_SDK_ROOT missing in worker image" >&2
+    exit 1
+  fi
+  if [ "${android_root}" != "/opt/android-sdk" ]; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Expected ANDROID_SDK_ROOT=/opt/android-sdk, got ${android_root:-<empty>}" >&2
+    exit 1
+  fi
+  for sdk_dir in platforms/android-37.0 build-tools/37.0.0 build-tools/36.0.0; do
+    if ! buildah run "${ctr}" -- test -d "/opt/android-sdk/${sdk_dir}"; then
+      buildah rm "${ctr}" >/dev/null 2>&1 || true
+      echo "Android SDK dir missing in worker image: ${sdk_dir}" >&2
+      exit 1
+    fi
+  done
+  if ! buildah run "${ctr}" -- sh -c 'test -n "$(ls -A "$ANDROID_HOME/licenses")"'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "Android SDK licenses missing in worker image" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sdkmanager --version; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "sdkmanager missing in worker image" >&2
+    exit 1
+  fi
+  echo "Verified Android SDK: ${android_home}"
+  buildah rm "${ctr}" >/dev/null
+}
+
 verify_worker_jdk
+
+verify_worker_android
 
 verify_worker_skills() {
   local ctr config_json
