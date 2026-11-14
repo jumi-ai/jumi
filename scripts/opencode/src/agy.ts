@@ -331,8 +331,8 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // The forge deny still comes from HOME, so a head settings file that
     // tries to allow the forge back cannot lift it. Base instructions arrive
     // through the prompt the parent built from the base branch.
-    if (opts.trace?.kind === "review") {
-      baseStaging = await stageBaseSkillsIntoWorkdir(opts.workdir, opts.baseInstructionsDir ?? "", log);
+    if (opts.trace?.kind === "review" && opts.baseInstructionsDir) {
+      baseStaging = await stageBaseSkillsIntoWorkdir(opts.workdir, opts.baseInstructionsDir, log);
     }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,

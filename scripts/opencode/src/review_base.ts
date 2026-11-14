@@ -12,7 +12,7 @@ import type { GitRunner } from "./workspace.ts";
  * this helper.
  */
 export const BASE_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
-export const BASE_SKILL_ROOTS = [".claude/skills", ".agents/skills"] as const;
+export const BASE_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/skills"] as const;
 /** Per-file cap, mirroring `MAX_REVIEW_MD_READ_BYTES` in `review_md.ts`. */
 export const MAX_BASE_FILE_BYTES = 1_048_576;
 /** Total budget for staged base instructions, mirroring the review-md budget. */
@@ -98,7 +98,7 @@ async function readBaseBlob(
 
 /**
  * Stage the base branch's `AGENTS.md`, `CLAUDE.md`, and `.claude/skills` /
- * `.agents/skills` trees under `dest` (outside the tracked checkout, e.g.
+ * `.agents/skills` / `.opencode/skills` trees under `dest` (outside the tracked checkout, e.g.
  * under the spawn's `.jumi-tmp`). Returns what was staged; missing files
  * stage nothing, oversize files are skipped, symlinks and submodules are
  * never followed, and no path escapes `dest`.
@@ -176,9 +176,10 @@ export async function stageBaseReviewInstructions(
         truncated = true;
         continue;
       }
-      // Merge both roots into one skills dir keyed by skill path below the
-      // root, so `.claude/skills/foo` and `.agents/skills/foo` collide
-      // instead of shadowing by load order. Later roots win.
+      // Merge all roots into one skills dir keyed by skill path below the
+      // root, so `.claude/skills/foo`, `.agents/skills/foo`, and
+      // `.opencode/skills/foo` collide instead of shadowing by load order.
+      // Later roots win.
       const rel = join("skills", rest);
       if (!insideDest(dest, rel)) continue;
       await mkdir(dirname(join(dest, rel)), { recursive: true });
@@ -209,12 +210,46 @@ export async function readStagedBaseFile(dest: string, name: string): Promise<st
 }
 
 /**
+ * Copy one staged skill entry (`<baseDir>/skills/<name>`) into a runner's
+ * skill dir. This is the one place that defines the staged-skill shape:
+ * directories must contain `SKILL.md`; flat `<name>.md` files (which
+ * OpenCode loads from a skills dir) copy as-is. Runners that only read
+ * directories ignore the flat files, the same as they do in a checkout.
+ * Never follows symlinks. Returns true when something was staged.
+ */
+async function stageSkillEntry(from: string, to: string): Promise<boolean> {
+  const { lstat, readFile, stat, writeFile, mkdir } = await import("node:fs/promises");
+  let info: { isDirectory(): boolean; isFile(): boolean };
+  try {
+    info = await lstat(from);
+  } catch {
+    return false;
+  }
+  try {
+    if (info.isDirectory()) {
+      if (!(await stat(join(from, "SKILL.md"))).isFile()) return false;
+      await copyTree(from, to);
+      return true;
+    }
+    if (info.isFile()) {
+      await mkdir(dirname(to), { recursive: true });
+      await writeFile(to, await readFile(from));
+      return true;
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
  * Stage an already-staged base dir's `skills/` tree as a Claude plugin under
  * `dest`. Returns `dest` to pass as `--plugin-dir`, or undefined when the
  * base has no skills. Never throws.
  */
 export async function stageBaseSkillsForClaude(dest: string, baseDir: string): Promise<string | undefined> {
-  const { readdir, readFile, stat } = await import("node:fs/promises");
+  if (!baseDir) return undefined;
+  const { readdir } = await import("node:fs/promises");
   try {
     const src = join(baseDir, "skills");
     const entries = await readdir(src);
@@ -224,20 +259,7 @@ export async function stageBaseSkillsForClaude(dest: string, baseDir: string): P
     for (const name of skills) {
       const from = join(src, name);
       if (!insideDest(baseDir, join("skills", name))) continue;
-      let info: { isDirectory(): boolean };
-      try {
-        info = await stat(from);
-      } catch {
-        continue;
-      }
-      if (!info.isDirectory()) continue;
-      try {
-        if (!(await stat(join(from, "SKILL.md"))).isFile()) continue;
-      } catch {
-        continue;
-      }
-      await copyTree(from, join(dest, "skills", name));
-      staged += 1;
+      if (await stageSkillEntry(from, join(dest, "skills", name))) staged += 1;
     }
     if (staged === 0) return undefined;
     await mkdir(join(dest, ".claude-plugin"), { recursive: true });
@@ -288,10 +310,11 @@ export interface WorkdirSkillsStaging {
 }
 
 /**
- * Hide the head's `.agents/skills` and `.claude/skills` for a review spawn
- * and stage the base branch's skills (from `baseDir/skills`) into
- * `<workdir>/.agents/skills`. Cleanup removes what was staged and restores
- * the head dirs. Never throws.
+ * Hide the head's `.agents/skills`, `.claude/skills`, and `.opencode/skills`
+ * for a review spawn and stage the base branch's skills (from
+ * `baseDir/skills`) into `<workdir>/.agents/skills`. Cleanup removes what was
+ * staged and restores the head dirs. Never throws. An empty `baseDir` stages
+ * nothing (and never reads a CWD-relative `skills` dir).
  *
  * Files stay on disk under the backup outside the checkout's tracked tree
  * only for the duration of the spawn; the pre-run removal and post-run
@@ -304,7 +327,17 @@ export async function stageBaseSkillsIntoWorkdir(
 ): Promise<WorkdirSkillsStaging> {
   const { lstat, mkdir, readdir, rename, rm } = await import("node:fs/promises");
   const noop: WorkdirSkillsStaging = { cleanup: async () => undefined };
-  const roots = [join(workdir, ".agents", "skills"), join(workdir, ".claude", "skills")];
+  // An empty base dir must never resolve `skills` against the process CWD.
+  if (!baseDir) return noop;
+  // OpenCode's own skills root is hidden here too: the OpenCode runner is
+  // already covered by `OPENCODE_DISABLE_PROJECT_CONFIG=1` (the webfetch
+  // probe review case proves head `.opencode/skills` never loads), but Codex
+  // and Agy share this swap and a future release could scan more roots.
+  const roots = [
+    join(workdir, ".agents", "skills"),
+    join(workdir, ".claude", "skills"),
+    join(workdir, ".opencode", "skills"),
+  ];
   const backups: Array<{ original: string; backup: string }> = [];
   const staged: string[] = [];
   // Always hide the head's skills for a review spawn, even when the base
@@ -345,24 +378,12 @@ export async function stageBaseSkillsIntoWorkdir(
   }
   try {
     const dest = join(workdir, ".agents", "skills");
+    await mkdir(dest, { recursive: true });
     for (const name of skills) {
       if (!name || name === "." || name === ".." || name.startsWith(".")) continue;
       const from = join(baseDir, "skills", name);
-      let isDir = false;
-      try {
-        isDir = (await lstat(from)).isDirectory();
-      } catch {
-        continue;
-      }
-      if (!isDir) continue;
-      try {
-        await mkdir(dest, { recursive: true });
-        await copyTree(from, join(dest, name));
-        staged.push(join(dest, name));
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        log(`[skills] base skill ${name} not staged: ${reason}`);
-      }
+      if (!insideDest(baseDir, join("skills", name))) continue;
+      if (await stageSkillEntry(from, join(dest, name))) staged.push(join(dest, name));
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
