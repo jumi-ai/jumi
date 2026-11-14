@@ -1,7 +1,11 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isAuthFailure } from "./auth.ts";
+import { CLAUDE_CODE_OAUTH_TOKEN_ENV, RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
+import { codexAuthPath, codexPublishedAuthPath } from "./codex_auth.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { EngineFailedError, type EngineResult } from "./engine.ts";
-import { isCreditBalanceText } from "./quota.ts";
+import { isCreditBalanceText, isQuotaError } from "./quota.ts";
 
 export const RUNNER_QUOTA_COOLDOWN_DEFAULT_MS = 60 * 60 * 1000;
 export const RUNNER_QUOTA_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
@@ -94,20 +98,16 @@ export class RunnerCooldownStore {
       untilMs = nowMs + config.quotaMs;
       source = "default";
     }
-    const entry: RunnerCooldownEntry = { untilMs, reason: "quota", source };
-    this.entries.set(name, entry);
-    return entry;
+    return this.keepLater(name, { untilMs, reason: "quota", source });
   }
 
   recordCredit(name: string, input: { nowMs: number; config?: RunnerCooldownConfig }): RunnerCooldownEntry {
     const config = input.config ?? DEFAULT_RUNNER_COOLDOWN_CONFIG;
-    const entry: RunnerCooldownEntry = {
+    return this.keepLater(name, {
       untilMs: input.nowMs + config.creditMs,
       reason: "credit",
       source: "default",
-    };
-    this.entries.set(name, entry);
-    return entry;
+    });
   }
 
   recordAuth(
@@ -115,12 +115,22 @@ export class RunnerCooldownStore {
     input: { nowMs: number; config?: RunnerCooldownConfig; fingerprint?: string }
   ): RunnerCooldownEntry {
     const config = input.config ?? DEFAULT_RUNNER_COOLDOWN_CONFIG;
-    const entry: RunnerCooldownEntry = {
+    return this.keepLater(name, {
       untilMs: input.nowMs + config.authMs,
       reason: "auth",
       source: input.fingerprint !== undefined ? "credential" : "default",
       ...(input.fingerprint !== undefined ? { fingerprint: input.fingerprint } : {}),
-    };
+    });
+  }
+
+  /**
+   * A shorter cooldown never shortens a longer one: a 6 h credit followed by
+   * a 60 min quota keeps the 6 h entry (and its reason/source). The winner is
+   * the entry with the later `untilMs`; ties keep the stored entry.
+   */
+  private keepLater(name: string, entry: RunnerCooldownEntry): RunnerCooldownEntry {
+    const prev = this.entries.get(name);
+    if (prev && prev.untilMs >= entry.untilMs) return prev;
     this.entries.set(name, entry);
     return entry;
   }
@@ -135,6 +145,11 @@ export class RunnerCooldownStore {
 
   restore(name: string, entry: RunnerCooldownEntry): void {
     if (!name || !Number.isFinite(entry.untilMs)) return;
+    // Keep the max: a longer process-local cooldown is never shortened by an
+    // older persisted row, and a longer persisted row replaces a shorter
+    // local one (e.g. after a restart). Ties keep the stored entry.
+    const prev = this.entries.get(name);
+    if (prev && prev.untilMs >= entry.untilMs) return;
     this.entries.set(name, { ...entry });
   }
 
@@ -231,6 +246,11 @@ export function classifyCooldownFailure(input: {
   }
   if (isAuthFailure(err)) return "auth";
   if (isCreditBalanceText(err instanceof Error ? err.message : String(err))) return "credit";
+  // A generic quota error (e.g. a thrown `429` / `rate limit` without an
+  // EngineFailedError wrapper) drives QuotaWaitError/role-wide logic in
+  // quota_wait.ts, so it must cool the runner too. Without this the quota hit
+  // requeues with a backoff but records no per-runner cooldown.
+  if (isQuotaError(err)) return "quota";
   return undefined;
 }
 
@@ -316,4 +336,77 @@ export function logRunnerSkippedCooldown(
     until: new Date(input.untilMs).toISOString(),
     reason: input.reason,
   });
+}
+
+/** Short stable hash of credential material. The value is never logged. */
+export function fingerprintString(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32);
+}
+
+export interface RunnerFingerprintDeps {
+  env?: Record<string, string | undefined>;
+  home?: string;
+  readFile?: (path: string) => string;
+}
+
+function readCredentialFile(path: string | undefined, readFile: (path: string) => string): string | undefined {
+  if (!path) return undefined;
+  try {
+    const raw = readFile(path);
+    if (!raw.trim()) return undefined;
+    return raw;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Current credential fingerprint for one runner, or undefined when the
+ * credential has no stable local reference. Covered sources:
+ * - `api-key` runners: the named env var value (rotating the key changes it).
+ * - `codex` runners: the published auth file content (`CODEX_AUTH_FILE`),
+ *   else the local `~/.codex/auth.json` — a rotated token changes it.
+ * - `claude` subscription runners: `CLAUDE_CODE_OAUTH_TOKEN`.
+ * Other runners are time-only: auth cools them for `authMs` with no
+ * rotation fast-path. Best-effort and sync; unreadable files yield undefined.
+ */
+export function runnerCredentialFingerprint(
+  runner: { type?: string; auth?: string | undefined; authEnv?: string | undefined },
+  deps?: RunnerFingerprintDeps
+): string | undefined {
+  const env = deps?.env ?? process.env;
+  const readFile = deps?.readFile ?? ((path: string) => readFileSync(path, "utf8"));
+  if (runner.auth === RUNNER_AUTH_API_KEY && typeof runner.authEnv === "string" && runner.authEnv) {
+    const value = env[runner.authEnv]?.trim();
+    return value ? `api-key:${fingerprintString(value)}` : undefined;
+  }
+  if (runner.type === "codex") {
+    const published = codexPublishedAuthPath(env);
+    const raw = readCredentialFile(published ?? (deps?.home ? codexAuthPath(deps.home) : undefined), readFile);
+    return raw ? `codex-file:${fingerprintString(raw)}` : undefined;
+  }
+  if (runner.type === "claude") {
+    const token = env[CLAUDE_CODE_OAUTH_TOKEN_ENV]?.trim();
+    return token ? `claude-oauth:${fingerprintString(token)}` : undefined;
+  }
+  return undefined;
+}
+
+/** Current credential fingerprints by runner name. Never throws. */
+export function runnerAuthFingerprints(
+  chain:
+    | readonly { name: string; type?: string; auth?: string | undefined; authEnv?: string | undefined }[]
+    | undefined,
+  deps?: RunnerFingerprintDeps
+): Record<string, string | undefined> {
+  const out: Record<string, string | undefined> = {};
+  for (const runner of chain ?? []) {
+    if (!runner?.name) continue;
+    try {
+      out[runner.name] = runnerCredentialFingerprint(runner, deps);
+    } catch {
+      out[runner.name] = undefined;
+    }
+  }
+  return out;
 }

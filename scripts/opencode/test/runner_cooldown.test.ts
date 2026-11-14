@@ -7,6 +7,8 @@ import {
   DEFAULT_RUNNER_COOLDOWN_CONFIG,
   RunnerCooldownStore,
   recordRunnerCooldownForFailure,
+  runnerAuthFingerprints,
+  runnerCredentialFingerprint,
 } from "../src/runner_cooldown.ts";
 import { type NamedRunner, orderChainForJob, orderChainForRetry, parseRunnersCatalog } from "../src/runners.ts";
 
@@ -215,5 +217,84 @@ describe("runner cooldown", () => {
       nowMs: 0,
     });
     expect(order.map((r) => r.name)[0]).toBe("claude");
+  });
+
+  test("a shorter cooldown never shortens a longer one", () => {
+    const store = new RunnerCooldownStore();
+    const credit = store.recordCredit("codex", { nowMs: 0 });
+    expect(credit.untilMs).toBe(6 * 60 * 60 * 1000);
+    const quota = store.recordQuota("codex", { retryAfterMs: 60 * 60 * 1000, nowMs: 0 });
+    // The 60 min quota entry loses to the 6 h credit entry: same store object kept.
+    expect(quota.untilMs).toBe(6 * 60 * 60 * 1000);
+    expect(quota.reason).toBe("credit");
+    expect(store.isCooled("codex", 60 * 60 * 1000)).toBe(true);
+  });
+
+  test("restore keeps the max of local and persisted entries", () => {
+    const store = new RunnerCooldownStore();
+    store.recordQuota("codex", { retryAfterMs: 60 * 60 * 1000, nowMs: 0 });
+    // An older persisted row must not shrink the local cooldown.
+    store.restore("codex", { untilMs: 5 * 60 * 1000, reason: "quota", source: "parsed" });
+    expect(store.cooldownUntil("codex")).toBe(60 * 60 * 1000);
+    // A longer persisted row (e.g. after a restart) restores verbatim.
+    store.restore("codex", { untilMs: 2 * 60 * 60 * 1000, reason: "credit", source: "default" });
+    const entry = store.entry("codex");
+    expect(entry?.untilMs).toBe(2 * 60 * 60 * 1000);
+    expect(entry?.reason).toBe("credit");
+    expect(entry?.source).toBe("default");
+  });
+
+  test("a generic quota Error without an EngineFailedError wrapper still cools the runner", () => {
+    const store = new RunnerCooldownStore();
+    // Exact live strings (quota.ts QUOTA_ERROR_RE / auth.ts AUTH_STDERR_RE).
+    const quota = recordRunnerCooldownForFailure(store, "codex", {
+      err: new Error("Rate limit exceeded. Please try again later."),
+      nowMs: 0,
+    });
+    expect(quota?.reason).toBe("quota");
+    expect(store.isCooled("codex", 1_000)).toBe(true);
+    const auth = recordRunnerCooldownForFailure(store, "claude", {
+      err: new Error("Failed to authenticate: OAuth session expired and could not be refreshed"),
+      nowMs: 0,
+    });
+    expect(auth?.reason).toBe("auth");
+    const credit = recordRunnerCooldownForFailure(store, "opus", {
+      err: new Error("Credit balance is too low"),
+      nowMs: 0,
+    });
+    expect(credit?.reason).toBe("credit");
+  });
+
+  test("credential fingerprints rotate only when the credential changes", () => {
+    const apiKey: NamedRunner = {
+      name: "key",
+      type: "claude",
+      model: "claude/m",
+      auth: "api-key",
+      authEnv: "FP_TEST_KEY",
+    };
+    const before = runnerCredentialFingerprint(apiKey, { env: { FP_TEST_KEY: "secret-a" } });
+    const same = runnerCredentialFingerprint(apiKey, { env: { FP_TEST_KEY: "secret-a" } });
+    const rotated = runnerCredentialFingerprint(apiKey, { env: { FP_TEST_KEY: "secret-b" } });
+    expect(before).toBeDefined();
+    expect(same).toBe(before);
+    expect(rotated).not.toBe(before);
+    const codexRunner: NamedRunner = { name: "codex", type: "codex", model: "codex/m", effort: "high" };
+    const files: Record<string, string> = { "/pub/auth.json": "token-v1" };
+    const fps = () =>
+      runnerAuthFingerprints([codexRunner], {
+        env: { CODEX_AUTH_FILE: "/pub/auth.json" },
+        readFile: (p) => files[p] ?? "",
+      });
+    const first = fps();
+    files["/pub/auth.json"] = "token-v2";
+    const second = fps();
+    expect(first.codex).toBeDefined();
+    expect(second.codex).not.toBe(first.codex);
+    // A rotated fingerprint clears an auth cooldown immediately.
+    const store = new RunnerCooldownStore();
+    store.recordAuth("codex", { nowMs: 0, fingerprint: first.codex });
+    expect(store.isCooled("codex", 1_000, first.codex)).toBe(true);
+    expect(store.isCooled("codex", 1_000, second.codex)).toBe(false);
   });
 });
