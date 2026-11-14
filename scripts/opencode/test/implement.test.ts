@@ -7,10 +7,9 @@ import { BLOCKED_BY_FILE, BLOCKED_BY_REJECTED_STUCK, QUEUE_FILE } from "../src/d
 import { engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { OpenCodeRunOptions } from "../src/git.ts";
 import {
-  BLOCKED_BY_REJECTED_PROMPT,
+  buildBlockedByRejectedPrompt,
   buildImplementPrompt,
-  IMPLEMENT_PROMPT,
-  IMPLEMENT_YIELD_PROMPT,
+  buildImplementYieldPrompt,
   runOpenCode,
 } from "../src/git.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
@@ -567,7 +566,7 @@ describe("implementIssue", () => {
         },
         logger: () => undefined,
       });
-      expect(prompt).toBe(IMPLEMENT_YIELD_PROMPT);
+      expect(prompt).toBe(buildImplementYieldPrompt());
       expect(result).toEqual({ status: "skipped", reason: "blocked on #196" });
       expect(deps).toEqual([{ owner: "kirmanak", repo: "demo", number: 196 }]);
       expect(events).toEqual(["createIssueDependency", "deleteIssueBranch"]);
@@ -634,8 +633,8 @@ describe("implementIssue", () => {
         logger: () => undefined,
       });
       expect(round).toBe(2);
-      expect(prompts[0]).toBe(IMPLEMENT_YIELD_PROMPT);
-      expect(prompts[1]).toBe(BLOCKED_BY_REJECTED_PROMPT);
+      expect(prompts[0]).toBe(buildImplementYieldPrompt());
+      expect(prompts[1]).toBe(buildBlockedByRejectedPrompt());
       expect(result.status).toBe("pr");
       expect(api.pulls).toHaveLength(1);
       const removeAt = gitCalls.findIndex((args) => args[0] === "worktree" && args[1] === "remove");
@@ -2590,7 +2589,7 @@ describe("implementIssue", () => {
       expect(result.status).toBe("pr");
       expect(kinds).toEqual(["implement", "follow-up"]);
       expect(prompts[0]).toBeUndefined();
-      expect(prompts[1]).toBe(IMPLEMENT_PROMPT);
+      expect(prompts[1]).toBe(buildImplementPrompt());
     });
   });
 

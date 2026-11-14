@@ -183,15 +183,55 @@ When conflicts are resolved and no <<<<<<< markers remain, stop.`;
 }
 
 /**
- * Default-built worker prompts (opencode wording, environment at import).
- * Callers that know the runner use the builders above; `resolveOpenCodePrompt`
- * builds from the actual spawn's runner.
+ * Marker identifying a prompt built by the `build*Prompt` builders below. The
+ * builders are the only source: there are no frozen `*_PROMPT` constants, so a
+ * prompt can never go stale when the deployer setting changes under a
+ * long-lived process. Detection is by content, which is also what lets
+ * `resolveOpenCodePrompt` reword an explicit worker prompt for the runner that
+ * actually runs (a hop preserves the prompt string while swapping `type`).
  */
-export const IMPLEMENT_PROMPT = buildImplementPrompt();
-export const IMPLEMENT_YIELD_PROMPT = buildImplementYieldPrompt();
-export const BLOCKED_BY_REJECTED_PROMPT = buildBlockedByRejectedPrompt();
-export const FOLLOWUP_PROMPT = buildFollowupPrompt();
-export const CONFLICT_PROMPT = buildConflictPrompt();
+const WORKER_PROMPT_MARKER = "Stay in this clone. Start from the parent-injected files";
+
+export function isWorkerPrompt(prompt: string): boolean {
+  return prompt.includes(WORKER_PROMPT_MARKER);
+}
+
+/**
+ * Reword a worker prompt for the runner that actually runs this attempt. Only
+ * the scope line is runner-dependent (reach phrase + evidence guidance); the
+ * rest (commit rules, handoff instruction) is identical for every runner.
+ */
+export function rewordWorkerPromptForRunner(prompt: string, runnerType?: string): string {
+  return prompt.replace(/^Public upstream docs .*$/m, workerScopeLine(runnerType));
+}
+
+/**
+ * Every evidence-guidance sentence any builder can emit, for any runner with
+ * or without the deployer setting. A hopped review prompt carries the first
+ * runner's sentences; swapping every known variant for this attempt's runner
+ * keeps the three review texts (preamble, blocking questions, upstream check)
+ * agreeing with the tools the runner actually has. Enforcement stays per-spawn
+ * exact regardless; this only fixes the wording.
+ */
+function knownGuidanceVariants(): string[] {
+  const variants = new Set<string>();
+  for (const runner of ["opencode", "claude", "agy", "codex", undefined]) {
+    for (const searxng of [false, true]) {
+      variants.add(webEvidenceGuidance(runner, webCapabilitiesForRunner(runner, searxng)));
+    }
+  }
+  return [...variants].sort((a, b) => b.length - a.length);
+}
+
+export function rewordReviewGuidanceForRunner(text: string, runnerType?: string): string {
+  const cap = webCapabilitiesForRunner(runnerType ?? "opencode", searxngUrlFromEnv() !== undefined);
+  const want = webEvidenceGuidance(runnerType, cap);
+  let out = text;
+  for (const variant of knownGuidanceVariants()) {
+    if (variant !== want && out.includes(variant)) out = out.split(variant).join(want);
+  }
+  return out;
+}
 
 async function pathExists(path: string): Promise<boolean> {
   try {
@@ -231,20 +271,14 @@ export function withInjectedFilesLine(base: string, present: readonly string[]):
   return `${base}\n\n${formatInjectedFilesLine(present)}`;
 }
 
-function isWorkerBasePrompt(prompt: string): boolean {
-  return (
-    prompt === IMPLEMENT_PROMPT ||
-    prompt === IMPLEMENT_YIELD_PROMPT ||
-    prompt === FOLLOWUP_PROMPT ||
-    prompt === CONFLICT_PROMPT ||
-    prompt === BLOCKED_BY_REJECTED_PROMPT
-  );
-}
-
 export async function resolveOpenCodePrompt(opts: OpenCodeRunOptions): Promise<string> {
   if (opts.prompt != null) {
-    if (isWorkerBasePrompt(opts.prompt)) {
-      return withInjectedFilesLine(opts.prompt, await listInjectedFiles(opts.workdir));
+    // A worker prompt built for one runner keeps its wording across a hop
+    // while the chain swaps `type`; reword it for the runner that actually
+    // runs this attempt. Anything else (tests, custom prompts) passes through.
+    if (isWorkerPrompt(opts.prompt)) {
+      const reworded = rewordReviewGuidanceForRunner(rewordWorkerPromptForRunner(opts.prompt, opts.type), opts.type);
+      return withInjectedFilesLine(reworded, await listInjectedFiles(opts.workdir));
     }
     return opts.prompt;
   }
@@ -252,7 +286,14 @@ export async function resolveOpenCodePrompt(opts: OpenCodeRunOptions): Promise<s
   // The prompt is worded from the actual spawn's runner: the chain sets
   // `type` per attempt, so a hopped runner gets its own wording too.
   const runnerType = opts.type;
-  if (kind === "review") return await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+  if (kind === "review") {
+    const task = await readFile(join(opts.workdir, "JUMI_TASK.md"), "utf8");
+    // Reviews run from the prompt file the parent wrote for the first runner;
+    // a hop reuses that file, so reword this attempt for its own runner.
+    // Task markdown carries no guidance sentence and passes through untouched.
+    if (task.includes("<gitea_action_context>")) return rewordReviewGuidanceForRunner(task, runnerType);
+    return task;
+  }
   let base: string;
   if (kind === "follow-up") base = buildFollowupPrompt(runnerType);
   else if (kind === "conflict") base = buildConflictPrompt(runnerType);
@@ -271,13 +312,17 @@ function resolveOpenCodeConfigPath(opts: OpenCodeRunOptions): string | undefined
  * Inline config every OpenCode child gets, merged over any job-supplied
  * `OPENCODE_CONFIG_CONTENT` so nothing in the parent env can reopen the deny.
  *
+ * Exported for `webfetch_probe.ts`, which feeds its exact output to the
+ * installed binary: the configured-mode run proves the searxng permission and
+ * policy shapes against the real permission evaluator, not a copy of it.
+ *
  * The forge webfetch deny covers worker runs too: the worker is the one holding
  * a write-capable git token. The denied host is the one this spawn
  * authenticates against (`GIT_AUTH_HOST` from `extraEnv`), so the GitHub factory
  * denies `github.com` rather than the Gitea default. The rules go last because
  * OpenCode permissions are last-match.
  */
-function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRunOptions): void {
+export function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRunOptions): void {
   let existing: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(env.OPENCODE_CONFIG_CONTENT ?? "{}");
@@ -292,7 +337,10 @@ function applyOpenCodeInlineConfig(env: Record<string, string>, opts: OpenCodeRu
   if (searxngBaseUrl !== undefined) {
     // Native web search stays named in the shipped config (a headless run
     // exits 1 without a provider) but is denied here, last-match, so the
-    // spawn uses the searxng server instead.
+    // spawn uses the searxng server instead. The allow names the normalized
+    // `<server>_<tool>` permission action MCP tools match on
+    // (https://opencode.ai/docs/mcp-servers/ "Permissions"); `webfetch_probe.ts`
+    // proves the tool is callable through it against the installed binary.
     permissions.push({ action: "websearch", resource: "*", effect: "deny" });
     permissions.push({ action: SEARXNG_OPENCODE_TOOL, resource: "*", effect: "allow" });
     const existingMcp = mcp && typeof mcp === "object" && !Array.isArray(mcp) ? mcp : {};

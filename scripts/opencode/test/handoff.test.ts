@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CONFLICT_PROMPT, FOLLOWUP_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "../src/git.ts";
+import {
+  buildConflictPrompt,
+  buildFollowupPrompt,
+  buildImplementPrompt,
+  buildImplementYieldPrompt,
+} from "../src/git.ts";
 import {
   capHandoffNote,
   HANDOFF_FILE,
@@ -96,13 +101,14 @@ describe("handoff note", () => {
   });
 
   test("prompts require the handoff and mark the previous note as stale", () => {
-    for (const prompt of [IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT, FOLLOWUP_PROMPT, CONFLICT_PROMPT]) {
+    const prompts = [buildImplementPrompt(), buildImplementYieldPrompt(), buildFollowupPrompt(), buildConflictPrompt()];
+    for (const prompt of prompts) {
       expect(prompt).toContain(HANDOFF_FILE);
       expect(prompt).toContain("Do not commit JUMI_HANDOFF.md");
     }
-    expect(IMPLEMENT_PROMPT).toContain("may be stale");
-    expect(FOLLOWUP_PROMPT).toContain("may be stale");
-    expect(CONFLICT_PROMPT).toContain("may be stale");
+    expect(buildImplementPrompt()).toContain("may be stale");
+    expect(buildFollowupPrompt()).toContain("may be stale");
+    expect(buildConflictPrompt()).toContain("may be stale");
   });
 
   test("kill switch deletes the handoff via the ledger latch clear", async () => {

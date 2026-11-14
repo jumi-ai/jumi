@@ -136,8 +136,6 @@ import {
 } from "./verdict.ts";
 import { workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
-export { FOLLOWUP_PROMPT } from "./git.ts";
-
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
 export const FEEDBACK_MAX_BYTES = 32 * 1024;

@@ -112,7 +112,6 @@ import {
 } from "./workspace.ts";
 
 export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
-export { BLOCKED_BY_REJECTED_PROMPT, IMPLEMENT_PROMPT, IMPLEMENT_YIELD_PROMPT } from "./git.ts";
 
 const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
@@ -1186,8 +1185,9 @@ export async function implementIssue(
 
       // Set when the chain refused an incomplete hop, so no child ran at all.
       let hopDeclined = false;
-      // Explicit worker prompts are worded for the first chain runner; a hop
-      // keeps this wording while the per-spawn tool enforcement stays exact.
+      // Explicit worker prompts are worded for the first chain runner, but
+      // `resolveOpenCodePrompt` rewords them per attempt from the actual
+      // runner, so a hop runs under its own tool sentences.
       const firstRunnerType = jobChain?.[0]?.type;
       const runEngine = async (
         label: string,

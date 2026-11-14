@@ -19,7 +19,7 @@ import {
   withoutEngineTempPorcelain,
 } from "../src/claimed_worktree.ts";
 import { ensureEngineScratchIgnored, ATTACHMENTS_DIR as SCRATCH_ATTACHMENTS_DIR } from "../src/engine_scratch.ts";
-import { IMPLEMENT_PROMPT } from "../src/git.ts";
+import { buildImplementPrompt } from "../src/git.ts";
 
 async function withWorkdir(run: (dir: string) => Promise<void>) {
   const dir = await mkdtemp(join(tmpdir(), "jumi-attachments-"));
@@ -301,7 +301,8 @@ describe("attachments never ship", () => {
   });
 
   test("worker prompt mentions the attachments manifest", () => {
-    expect(IMPLEMENT_PROMPT).toContain("JUMI_ATTACHMENTS.md");
-    expect(IMPLEMENT_PROMPT).toContain(".jumi-attachments/");
+    const prompt = buildImplementPrompt();
+    expect(prompt).toContain("JUMI_ATTACHMENTS.md");
+    expect(prompt).toContain(".jumi-attachments/");
   });
 });
