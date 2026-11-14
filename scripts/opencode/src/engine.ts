@@ -59,6 +59,13 @@ export interface EngineRunOptions {
    * root. Undefined for non-review spawns.
    */
   reviewMcp?: { url: string; token: string };
+  /**
+   * Staged base-branch instructions for `kind === "review"` (outside the
+   * tracked checkout, e.g. under the spawn's `.jumi-tmp`). Workers never set
+   * this. Runners use it to load the base `AGENTS.md`/`CLAUDE.md` and skills
+   * without loading the head's project config.
+   */
+  baseInstructionsDir?: string;
 }
 
 export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";

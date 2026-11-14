@@ -145,7 +145,7 @@ describe("review MCP server", () => {
     };
     expect(cfg.mcpServers["jumi-review"].url).toBe("http://127.0.0.1:9/mcp");
     expect(claudeMcpArgs("/tmp/x.json")).toEqual(["--mcp-config", "/tmp/x.json", "--strict-mcp-config"]);
-    const argv = claudeArgv({ model: "m", workdir: "/w" }, undefined, "/tmp/x.json");
+    const argv = claudeArgv({ model: "m", workdir: "/w" }, undefined, undefined, undefined, "/tmp/x.json");
     expect(argv).toContain("--mcp-config");
     expect(argv).toContain("--strict-mcp-config");
   });

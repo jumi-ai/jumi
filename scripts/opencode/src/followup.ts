@@ -96,7 +96,7 @@ import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
-import { throwIfQuotaWait } from "./quota_wait.ts";
+import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
   effectiveBlockingQuestionAuthors,
@@ -1580,6 +1580,9 @@ export async function implementFollowUp(
             timeoutMs: conflictTimeoutMs,
             openCodeRunner: activeEngine,
             helmRunner: opts.helmRunner,
+            conflictRegenerate: opts.conflictRegenerate,
+            regenRunner: opts.regenRunner,
+            regenTimeoutMs: opts.regenTimeoutMs,
             logger: log,
             abortSignal: opts.abortSignal,
             jobId: opts.jobId ?? opts.job.delivery,
@@ -1599,6 +1602,9 @@ export async function implementFollowUp(
               fallbackModel: opts.fallbackModel,
               chain: jobChain,
               previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
             const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
             await sticky(quotaReason, pr.number);
@@ -1796,8 +1802,22 @@ export async function implementFollowUp(
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(result.message);
+          if (
+            (opts as { runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns &&
+            hasHealthyRunnerForQuota(
+              jobChain,
+              (opts as { runnerCooldowns: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns,
+              (opts as { cooldownNowMs?: () => number }).cooldownNowMs?.() ?? Date.now(),
+              (opts as { authFingerprints?: Record<string, string | undefined> }).authFingerprints
+            )
+          ) {
+            throw new Error(quotaReason);
+          }
           await sticky(quotaReason, pr.number);
           await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1855,6 +1875,9 @@ export async function implementFollowUp(
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1965,6 +1988,9 @@ export async function implementFollowUp(
           fallbackModel: opts.fallbackModel,
           chain: jobChain,
           previousError: opts.previousError,
+          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
         await sticky(quotaReason, pr.number).catch(() => undefined);

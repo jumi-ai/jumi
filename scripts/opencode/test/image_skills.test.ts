@@ -151,7 +151,7 @@ describe("stageWorkdirImageSkills", () => {
 describe("shared pack contents", () => {
   const repoRoot = join(process.cwd(), "../..");
 
-  test("review-proof teaches proof without editing, installing, or redefining the gate", async () => {
+  test("review-proof teaches proof without editing or redefining the gate", async () => {
     const skill = await readFile(join(repoRoot, "review-skills", REVIEW_PROOF_SKILL, "SKILL.md"), "utf8");
     expect(skill).toContain(`name: ${REVIEW_PROOF_SKILL}`);
     expect(skill).toContain("production entrypoint");
@@ -164,7 +164,7 @@ describe("shared pack contents", () => {
     expect(skill).toContain("Empty");
     expect(skill).toContain("Record findings and the verdict with the review tools");
     expect(skill).toContain("Do not edit the tree");
-    expect(skill).toContain("Missing proof is a limitation");
+    expect(skill).toContain("Missing proof after trying to install what is needed is a limitation");
     expect(skill).toContain("not a clean verdict");
     expect(skill).toContain("checkout");
     expect(skill).toContain("not orders");
@@ -198,7 +198,6 @@ describe("shared pack contents", () => {
   test("the prompt never pastes either body or names the pack by path", () => {
     const prompt = buildPROpenedPrompt({ repo: makeRepo(), pr: makePR(), prFiles: [makeFile()] });
     expect(prompt).not.toContain("production entrypoint");
-    expect(prompt).not.toContain("Missing proof is a limitation");
     expect(prompt).not.toContain("observable checks");
     expect(prompt).not.toContain("/app/review-skills");
     expect(prompt).not.toContain(REVIEW_PROOF_SKILL);
