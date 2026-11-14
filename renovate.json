@@ -16,7 +16,7 @@
         "/^\\.gitea\\/tool-versions\\.env$/"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>github-releases|npm) depName=(?<depName>[^\\s]+)\\n[A-Z_]+=(?<currentValue>[^\\s]+)"
+        "# renovate: datasource=(?<datasource>github-releases|npm|node-version) depName=(?<depName>[^\\s]+)\\n[A-Z_]*VERSION=(?<currentValue>[^\\s]+)"
       ]
     },
     {
@@ -115,6 +115,34 @@
       "autoReplaceStringTemplate": "UV_ARM64_TAG={{{newValue}}}\nUV_SHA256_ARM64={{{newDigest}}}"
     },
     {
+      "description": "node amd64 tarball checksum: tag plus its verified sha256 moves with the release via node-version (LTS-aware node versioning, even majors only).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "NODE_AMD64_TAG=(?<currentValue>[^\\s]+)\\nNODE_SHA256_AMD64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "node-version",
+      "depNameTemplate": "node",
+      "versioningTemplate": "node",
+      "autoReplaceStringTemplate": "NODE_AMD64_TAG={{{newValue}}}\nNODE_SHA256_AMD64={{{newDigest}}}"
+    },
+    {
+      "description": "node arm64 tarball checksum: tag plus its verified sha256 moves with the release via node-version (LTS-aware node versioning, even majors only).",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "NODE_ARM64_TAG=(?<currentValue>[^\\s]+)\\nNODE_SHA256_ARM64=(?<currentDigest>[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "node-version",
+      "depNameTemplate": "node",
+      "versioningTemplate": "node",
+      "autoReplaceStringTemplate": "NODE_ARM64_TAG={{{newValue}}}\nNODE_SHA256_ARM64={{{newDigest}}}"
+    },
+    {
       "description": "constraints.bun must move in the same PR as BUN_VERSION, or that PR fails its own tripwire test.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -201,6 +229,18 @@
       "allowedVersions": "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
       "groupName": "uv",
       "groupSlug": "uv"
+    },
+    {
+      "description": "Node LTS only via node-version: even majors, no pre-releases, grouped so version and both tarball checksums move in one update.",
+      "matchDatasources": [
+        "node-version"
+      ],
+      "matchPackageNames": [
+        "node"
+      ],
+      "allowedVersions": "/^[0-9]*[02468]\\.[0-9]+\\.[0-9]+$/",
+      "groupName": "node",
+      "groupSlug": "node"
     },
     {
       "description": "oven-sh/bun tags releases as bun-v1.2.3, which github-releases cannot parse as semver.",
