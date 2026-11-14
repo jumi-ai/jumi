@@ -10,6 +10,7 @@ import {
   offeredTools,
   probeArgv,
   REVIEW_BASE_SKILL,
+  REVIEW_HEAD_AGENTS,
   REVIEW_HEAD_SKILL,
   withoutWebSearchOverride,
 } from "../src/codex_probe.ts";
@@ -77,10 +78,11 @@ describe("judgeReview", () => {
     expect(judgeReview({ bodies, hookRan: false, mcpRan: false }).every((result) => result.ok)).toBe(true);
   });
 
-  test("fails when the head config, hook, MCP, or skill leaks", () => {
+  test("fails when the head config, instructions, hook, MCP, or skill leaks", () => {
     const leaked = {
       bodies: [
         JSON.stringify({ instructions: "JUMI-CODEX-CONFIG-PROBE-REACHED", tools: [shell] }),
+        JSON.stringify({ instructions: REVIEW_HEAD_AGENTS, tools: [shell] }),
         JSON.stringify({ instructions: REVIEW_HEAD_SKILL, tools: [shell] }),
       ],
       hookRan: true,
@@ -92,6 +94,7 @@ describe("judgeReview", () => {
         .map((result) => result.name)
     ).toEqual([
       "review: the head's .codex/config.toml does not load",
+      "review: the head's AGENTS.md does not load",
       "review: the head hook does not run",
       "review: the head MCP server does not start",
       expect.stringContaining("base skill") as unknown as string,

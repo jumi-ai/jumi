@@ -148,6 +148,8 @@ export const REVIEW_BASE_SKILL = "jumi-probe-base-skill";
 const REVIEW_BASE_SKILL_BODY = "JUMI-CODEX-BASE-SKILL-PROBE-BODY";
 export const REVIEW_HEAD_SKILL = "jumi-probe-head-skill";
 const REVIEW_HEAD_SKILL_BODY = "JUMI-CODEX-HEAD-SKILL-PROBE-BODY-should-never-load";
+/** Head `AGENTS.md` marker for the review case: untrusted workdirs must not supply project instructions. */
+export const REVIEW_HEAD_AGENTS = "JUMI-CODEX-HEAD-AGENTS-MD-PROBE-REACHED-should-never-load";
 
 /** The review argv must not bypass hook trust: the workdir is untrusted, so no head hook loads. */
 export function judgeReviewArgv(argv: readonly string[]): CaseResult {
@@ -161,6 +163,7 @@ export function judgeReviewArgv(argv: readonly string[]): CaseResult {
 
 export function judgeReview(run: RunReport): CaseResult[] {
   const headSeen = run.bodies.some((body) => body.includes(INSTRUCTIONS_MARKER));
+  const headAgentsSeen = run.bodies.some((body) => body.includes(REVIEW_HEAD_AGENTS));
   // Skills are advertised by ID; bodies load only on invocation.
   const baseSeen = run.bodies.some((body) => body.includes(REVIEW_BASE_SKILL));
   const headSkillSeen = run.bodies.some(
@@ -174,6 +177,13 @@ export function judgeReview(run: RunReport): CaseResult[] {
       observed: headSeen
         ? "head marker reached a model request"
         : `${run.bodies.length} request(s), head marker absent`,
+    },
+    {
+      name: "review: the head's AGENTS.md does not load",
+      ok: run.bodies.length > 0 && !headAgentsSeen,
+      observed: headAgentsSeen
+        ? "head AGENTS.md reached a model request"
+        : `${run.bodies.length} request(s), head AGENTS.md marker absent`,
     },
     {
       name: "review: the head hook does not run",
@@ -257,12 +267,14 @@ async function runReviewCodex(dir: string, workdir: string): Promise<RunReport> 
   const reviewHome = join(home, "review-codex-home");
   await writeCodexReviewHome(reviewHome, workdir);
   // Head checkout for the review case: the production seed plus a head-only
-  // skill. The base dir holds only the base skill.
+  // skill and a head-only AGENTS.md. The base dir holds only the base skill.
+  // The untrusted review home must keep both head markers out of requests.
   await mkdir(join(workdir, ".agents", "skills", REVIEW_HEAD_SKILL), { recursive: true });
   await writeFile(
     join(workdir, ".agents", "skills", REVIEW_HEAD_SKILL, "SKILL.md"),
     `---\nname: ${REVIEW_HEAD_SKILL}\ndescription: "head skill"\n---\n${REVIEW_HEAD_SKILL_BODY}\n`
   );
+  await writeFile(join(workdir, "AGENTS.md"), `${REVIEW_HEAD_AGENTS}\n`);
   const baseDir = await mkTemp(join(osTmp(), "jumi-codex-review-base-"));
   try {
     await mkdir(join(baseDir, "skills", REVIEW_BASE_SKILL), { recursive: true });

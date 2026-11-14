@@ -62,6 +62,8 @@ const REVIEW_BASE_MARKER = "JUMI-REVIEW-BASE-AGENTS-MD-PROBE-REACHED";
 const REVIEW_BASE_SKILL = "jumi-review-base-skill";
 /** Head-only skill for the review case. */
 const REVIEW_HEAD_SKILL = "jumi-review-head-skill";
+/** Head-only skill under OpenCode's own skills root: project config off must block it too. */
+const REVIEW_HEAD_OPENCODE_SKILL = "jumi-review-head-opencode-skill";
 /** Keeps the search off the network: a failed search must leave the run alive. */
 const SEARCH_OFFLINE_ENV = {
   HTTPS_PROXY: "http://127.0.0.1:9",
@@ -466,6 +468,8 @@ async function main(): Promise<number> {
     await seedRepository(reviewWorkdir, reviewPluginMarker);
     const reviewRanMarker = join(dir, "review-skill-command-ran");
     await seedCheckoutSkill(reviewWorkdir, ".agents/skills", REVIEW_HEAD_SKILL, reviewRanMarker);
+    const reviewOpencodeRanMarker = join(dir, "review-opencode-skill-command-ran");
+    await seedCheckoutSkill(reviewWorkdir, ".opencode/skills", REVIEW_HEAD_OPENCODE_SKILL, reviewOpencodeRanMarker);
     const reviewBase = join(dir, "review-base");
     await mkdir(join(reviewBase, "skills", REVIEW_BASE_SKILL), { recursive: true });
     await writeFile(join(reviewBase, "AGENTS.md"), `${REVIEW_BASE_MARKER}\n`);
@@ -496,6 +500,17 @@ async function main(): Promise<number> {
       reviewChecks.push({
         ok: baseLoaded,
         line: `review: base skill loads (${baseLoaded ? "loaded" : "DID NOT LOAD"})`,
+      });
+    }
+    state.skillId = REVIEW_HEAD_OPENCODE_SKILL;
+    state.toolResult = undefined;
+    {
+      const { timedOut } = await runReviewOpenCode(reviewWorkdir, configPath, reviewBase, join(dir, "xdg-config"));
+      const headLoaded = !timedOut && (state.toolResult ?? "").includes(SKILL_BODY_MARKER);
+      const headRan = await Bun.file(reviewOpencodeRanMarker).exists();
+      reviewChecks.push({
+        ok: !headLoaded && !headRan,
+        line: `review: head .opencode/skills skill does not load and its hook does not run (loaded=${headLoaded}, ran=${headRan})`,
       });
     }
     reviewChecks.push({
