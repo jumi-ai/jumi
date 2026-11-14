@@ -193,8 +193,6 @@ export interface MergeDefaultIntoWorktreeOpts {
   conflictRegenerate?: ConflictRegenerateEntry[];
   /** Injected shell runner for `conflict_regenerate` commands (tests). */
   regenRunner?: ConflictRegenRunner;
-  /** Alias for `regenRunner`. */
-  conflictRegenRunner?: ConflictRegenRunner;
   /** Per-command timeout override for `conflict_regenerate` (tests). */
   regenTimeoutMs?: number;
   logger?: (message: string) => void;
@@ -406,8 +404,6 @@ function isRegenStrippedKey(key: string): boolean {
   if ((CHILD_FORBIDDEN_KEYS as readonly string[]).includes(key)) return true;
   if (CHILD_FORBIDDEN_PREFIXES.some((prefix) => key.startsWith(prefix))) return true;
   if (isChildStrippedKey(key)) return true;
-  if (key.startsWith("GITEA_") || key.startsWith("GITHUB_APP_")) return true;
-  if (key === "GITHUB_WEBHOOK_SECRET" || key === "BOARD_PEER_TOKEN") return true;
   return false;
 }
 
@@ -767,7 +763,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     log,
   });
   const regenByBase = new Map(regenEntries.map((entry) => [entry.file, entry.run]));
-  const regenRunner = opts.regenRunner ?? opts.conflictRegenRunner;
+  const regenRunner = opts.regenRunner;
   const regenTimeoutMs = opts.regenTimeoutMs ?? CONFLICT_REGEN_TIMEOUT_MS;
   const regenFailed = new Set<string>();
   try {
@@ -1282,7 +1278,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           openCodeRunner: activeEngine,
           helmRunner: opts.helmRunner,
           conflictRegenerate: opts.conflictRegenerate,
-          regenRunner: opts.regenRunner ?? opts.conflictRegenRunner,
+          regenRunner: opts.regenRunner,
           regenTimeoutMs: opts.regenTimeoutMs,
           logger: log,
           abortSignal: opts.abortSignal,

@@ -1581,7 +1581,7 @@ export async function implementFollowUp(
             openCodeRunner: activeEngine,
             helmRunner: opts.helmRunner,
             conflictRegenerate: opts.conflictRegenerate,
-            regenRunner: opts.regenRunner ?? opts.conflictRegenRunner,
+            regenRunner: opts.regenRunner,
             regenTimeoutMs: opts.regenTimeoutMs,
             logger: log,
             abortSignal: opts.abortSignal,
