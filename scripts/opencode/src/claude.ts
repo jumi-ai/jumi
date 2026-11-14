@@ -38,8 +38,8 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
-import { claudeMcpArgs } from "./review_mcp.ts";
 import { stageBaseSkillsForClaude } from "./review_base.ts";
+import { claudeMcpArgs } from "./review_mcp.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
