@@ -301,11 +301,12 @@ export interface ReviewSpawnSandbox {
 }
 
 /**
- * Fail-closed sandbox decision for one agent spawn. Non-review and
- * unsanitized spawns pass through untouched. Review spawns are audited
- * (forbidden env fails closed), then wrapped unless the deployer allowlist
- * bypass is set (logged loudly) or Landlock is unavailable (refused with
- * the remediation in the message so the chain fails with one clear line).
+ * Fail-closed sandbox decision for one agent spawn. Non-review spawns pass
+ * through untouched. Review spawns are audited (forbidden env fails closed),
+ * then wrapped unless the deployer allowlist bypass is set (logged loudly)
+ * or Landlock is unavailable (refused with the remediation in the message so
+ * the chain fails with one clear line). A review spawn without sanitized env
+ * is refused instead of running unsandboxed.
  */
 export function resolveReviewSpawnSandbox(
   opts: Pick<EngineRunOptions, "trace" | "sanitizeEnv" | "workdir" | "home" | "model">,
@@ -314,7 +315,10 @@ export function resolveReviewSpawnSandbox(
   log: (message: string) => void = () => undefined,
   env: Record<string, string | undefined> = process.env
 ): ReviewSpawnSandbox {
-  if (opts.trace?.kind !== "review" || !opts.sanitizeEnv) return { argv: [...agentArgv], sandboxed: false };
+  if (opts.trace?.kind !== "review") return { argv: [...agentArgv], sandboxed: false };
+  if (!opts.sanitizeEnv) {
+    throw new EngineFailedError("review spawn refused: sanitizeEnv is required for review spawns", false);
+  }
   const violations = findReviewEnvViolations(childEnv);
   if (violations.length > 0) {
     throw new EngineFailedError(

@@ -244,7 +244,7 @@ describe("resolveAgentBin", () => {
 });
 
 describe("resolveReviewSpawnSandbox", () => {
-  test("non-review and unsanitized spawns pass through untouched", () => {
+  test("non-review spawns pass through untouched, review spawns without sanitizeEnv refuse", () => {
     const agent = ["opencode", "run"];
     expect(
       resolveReviewSpawnSandbox(
@@ -256,6 +256,13 @@ describe("resolveReviewSpawnSandbox", () => {
     expect(
       resolveReviewSpawnSandbox({ sanitizeEnv: false, workdir: "/w", model: "m" }, agent, { PATH: "x" }).argv
     ).toEqual(agent);
+    expect(() =>
+      resolveReviewSpawnSandbox(
+        { trace: { kind: "review", owner: "o", repo: "r" }, sanitizeEnv: false, workdir: "/w", model: "m" },
+        agent,
+        { PATH: "x" }
+      )
+    ).toThrow(/review spawn refused: sanitizeEnv is required for review spawns/);
   });
 
   test("forbidden child env fails the spawn closed", () => {

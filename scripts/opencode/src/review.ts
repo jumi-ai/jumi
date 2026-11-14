@@ -2350,7 +2350,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         variant: opts.variant,
         workdir: opts.workspace,
         home: opts.home,
-        sanitizeEnv: opts.sanitizeOpenCodeEnv,
+        sanitizeEnv: opts.sanitizeOpenCodeEnv ?? true,
         timeoutMs: opts.timeoutMs,
         maxOutputBytes: opts.maxOutputBytes,
         reviewLabel,
