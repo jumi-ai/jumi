@@ -53,6 +53,11 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `timeouts.implement` | integer minutes, at least 1 | `OPENCODE_TIMEOUT_MS` (worker default is 4h) | How long first implementations may run | Ceiling: `OPENCODE_TIMEOUT_MAX_MS`, same rule as `review`. Each kind has its own deployer maximum |
 | `timeouts.followup` | integer minutes, at least 1 | `FOLLOWUP_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long follow-up rounds (`follow-up` jobs) may run | Ceiling: `FOLLOWUP_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
 | `timeouts.conflict` | integer minutes, at least 1 | `CONFLICT_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long conflict resolution may run | Ceiling: `CONFLICT_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
+| `setup` | mapping (see the four rows below) | absent (no setup) | Runs a repository's own preparation command in the job's worktree once per job, after the checkout is ready and before the first engine spawn. Read from the default branch only; a pull request cannot change its own setup. `run` is required; `timeout`, `on_failure`, and `kinds` are optional. Unknown sub-keys, a non-mapping `setup`, a missing or blank `run`, a non-integer or below-1 `timeout`, an unknown `on_failure`, or a blank or unknown `kinds` entry makes the whole file invalid. Exactly one spelling per key (`kinds` entries use the `timeouts` spelling, `followup`); dash and camel spellings are unknown keys rejected with "did you mean" | Timeout is a ceiling against `SETUP_TIMEOUT_MAX_MS` (below); the job's own timeout and queue lease are not extended |
+| `setup.run` | non-blank string | — (required when `setup` is present) | Shell script run from the worktree root with `sh -e`, so a failing line stops it. The command string comes from the default branch, but it runs against the checked-out pull request head (see "Before you set") | No deployer setting |
+| `setup.timeout` | integer minutes, at least 1 | `10` | How long the setup command may run. A failed, timed-out, or dirty setup never counts as a runner exit, never triggers a hop, and never consumes hop budget | Ceiling: `SETUP_TIMEOUT_MAX_MS` (unset defaults to 10 minutes, so a repository can only shorten out of the box); a value above the maximum applies as the maximum |
+| `setup.on_failure` | `"continue"` \| `"fail"` | `"continue"` | `continue` runs the job anyway (the agent prompt carries a `<repo_setup state="failed\|timeout\|dirty">` block with the output tail); `fail` starts no engine (a review posts a `failure` status naming the setup error, a worker job leaves one comment where it was started) | No deployer setting |
+| `setup.kinds` | list of `"review"`, `"implement"`, `"followup"`, `"conflict"` | all four | Which job kinds run setup. Can only narrow; there is no way to run setup on another kind. A blank or unknown entry makes the whole file invalid | No deployer setting |
 
 ## Complete example
 
@@ -106,6 +111,13 @@ timeouts: # whole minutes per kind; absent keys run with the deployment timeout
   implement: 120 # ceiling: OPENCODE_TIMEOUT_MAX_MS
   followup: 60 # controls follow-up jobs; ceiling: FOLLOWUP_TIMEOUT_MAX_MS
   conflict: 60 # ceiling: CONFLICT_TIMEOUT_MAX_MS
+
+setup: # preparation command run once per job before the first engine spawn
+  run: |
+    helm dependency build deploy/chart
+  timeout: 5 # whole minutes, default 10; ceiling: SETUP_TIMEOUT_MAX_MS
+  on_failure: continue # continue (default) | fail
+  kinds: [review, implement, followup, conflict] # default: all four
 ```
 
 ## Recipes
@@ -140,6 +152,18 @@ ci_gate:
   wait: all
 ```
 
+Prepare vendored charts before the review (a Helm chart that depends on a sibling
+library chart through `file://`):
+
+```yaml
+setup:
+  run: |
+    helm dependency build deploy/chart
+  timeout: 5
+  on_failure: continue
+  kinds: [review, implement, followup, conflict]
+```
+
 ## What happens when the file is missing, invalid, or unreadable
 
 "Unreadable" is a failed read (for example a forge error); the parent logs it. Missing
@@ -160,6 +184,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | `mode` | `full` | Reads as `full`, but like any other runner job, no runner job starts while the file is invalid | `full` |
 | CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
+| Setup (`setup`) | No setup: the job runs as today, with no extra log line and no prompt change | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No setup, logged; the job otherwise runs as today |
 
 Two related guards: a pull request that changes `.jumi.yml` never auto-merges through
 Jumi (a schedule Jumi set earlier is cancelled when a Jumi push brings the file into the
@@ -174,6 +199,11 @@ never applied.
   them merge never posts.
 - Do not combine `review_exclude` with `automerge` lightly: a green review does not
   cover left-out files, so a left-out change merges with nobody reading it.
+- Before you set `setup.run`: the command string comes from the default branch, but
+  it runs against the checked-out pull request head, so anything it calls from the
+  tree is pull-request code. The sandbox has no forge token and no model credentials,
+  but egress is open. Prefer commands that only invoke installed tools; don't point
+  `run` at a script a contributor can rewrite unless that's acceptable.
 - Every change to `.jumi.yml` needs a person's merge: a pull request that touches the
   file never auto-merges through Jumi, and turning auto-merge on (or changing any
   later setting) only takes effect once a person has merged it to the default branch.
