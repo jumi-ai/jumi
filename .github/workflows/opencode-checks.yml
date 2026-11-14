@@ -119,6 +119,18 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
+            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
+            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
+            TOFU_VERSION=${{ env.TOFU_VERSION }}
+            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
+            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
+            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
+            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
+            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
+            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
+            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
+            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
             NODE_VERSION=${{ env.NODE_VERSION }}
             NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
             NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
@@ -144,6 +156,10 @@ jobs:
           docker run --rm jumi-reviewer:ci curl --version
           docker run --rm jumi-reviewer:ci yq --version
           docker run --rm jumi-reviewer:ci uv --version
+          docker run --rm jumi-reviewer:ci promtool --version
+          docker run --rm jumi-reviewer:ci kubeconform -v
+          docker run --rm jumi-reviewer:ci tofu version
+          docker run --rm jumi-reviewer:ci kubectl version --client
           docker run --rm jumi-reviewer:ci ps --version
           docker run --rm jumi-reviewer:ci unzip -v
           docker run --rm jumi-reviewer:ci shellcheck --version
@@ -306,6 +322,18 @@ jobs:
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
             ANDROID_CMDLINE_TOOLS_VERSION=${{ env.ANDROID_CMDLINE_TOOLS_VERSION }}
             ANDROID_CMDLINE_TOOLS_SHA256=${{ env.ANDROID_CMDLINE_TOOLS_SHA256 }}
+            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
+            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
+            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
+            TOFU_VERSION=${{ env.TOFU_VERSION }}
+            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
+            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
+            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
+            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
+            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
+            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
+            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
+            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
             NODE_VERSION=${{ env.NODE_VERSION }}
             NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
             NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
@@ -331,6 +359,10 @@ jobs:
           docker run --rm jumi-worker:ci curl --version
           docker run --rm jumi-worker:ci yq --version
           docker run --rm jumi-worker:ci uv --version
+          docker run --rm jumi-worker:ci promtool --version
+          docker run --rm jumi-worker:ci kubeconform -v
+          docker run --rm jumi-worker:ci tofu version
+          docker run --rm jumi-worker:ci kubectl version --client
           docker run --rm jumi-worker:ci ps --version
           docker run --rm jumi-worker:ci unzip -v
           docker run --rm jumi-worker:ci shellcheck --version

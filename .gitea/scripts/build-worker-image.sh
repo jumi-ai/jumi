@@ -25,6 +25,18 @@ fi
 : "${UV_SHA256_ARM64:?UV_SHA256_ARM64 is required}"
 : "${ANDROID_CMDLINE_TOOLS_VERSION:?ANDROID_CMDLINE_TOOLS_VERSION is required}"
 : "${ANDROID_CMDLINE_TOOLS_SHA256:?ANDROID_CMDLINE_TOOLS_SHA256 is required}"
+: "${PROMTOOL_VERSION:?PROMTOOL_VERSION is required}"
+: "${PROMTOOL_SHA256_AMD64:?PROMTOOL_SHA256_AMD64 is required}"
+: "${PROMTOOL_SHA256_ARM64:?PROMTOOL_SHA256_ARM64 is required}"
+: "${TOFU_VERSION:?TOFU_VERSION is required}"
+: "${TOFU_SHA256_AMD64:?TOFU_SHA256_AMD64 is required}"
+: "${TOFU_SHA256_ARM64:?TOFU_SHA256_ARM64 is required}"
+: "${KUBECONFORM_VERSION:?KUBECONFORM_VERSION is required}"
+: "${KUBECONFORM_SHA256_AMD64:?KUBECONFORM_SHA256_AMD64 is required}"
+: "${KUBECONFORM_SHA256_ARM64:?KUBECONFORM_SHA256_ARM64 is required}"
+: "${KUBECTL_VERSION:?KUBECTL_VERSION is required}"
+: "${KUBECTL_SHA256_AMD64:?KUBECTL_SHA256_AMD64 is required}"
+: "${KUBECTL_SHA256_ARM64:?KUBECTL_SHA256_ARM64 is required}"
 : "${NODE_VERSION:?NODE_VERSION is required}"
 : "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 is required}"
 : "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 is required}"
@@ -74,6 +86,18 @@ buildah bud \
       --build-arg "UV_SHA256_ARM64=${UV_SHA256_ARM64}" \
       --build-arg "ANDROID_CMDLINE_TOOLS_VERSION=${ANDROID_CMDLINE_TOOLS_VERSION}" \
       --build-arg "ANDROID_CMDLINE_TOOLS_SHA256=${ANDROID_CMDLINE_TOOLS_SHA256}" \
+      --build-arg "PROMTOOL_VERSION=${PROMTOOL_VERSION}" \
+      --build-arg "PROMTOOL_SHA256_AMD64=${PROMTOOL_SHA256_AMD64}" \
+      --build-arg "PROMTOOL_SHA256_ARM64=${PROMTOOL_SHA256_ARM64}" \
+      --build-arg "TOFU_VERSION=${TOFU_VERSION}" \
+      --build-arg "TOFU_SHA256_AMD64=${TOFU_SHA256_AMD64}" \
+      --build-arg "TOFU_SHA256_ARM64=${TOFU_SHA256_ARM64}" \
+      --build-arg "KUBECONFORM_VERSION=${KUBECONFORM_VERSION}" \
+      --build-arg "KUBECONFORM_SHA256_AMD64=${KUBECONFORM_SHA256_AMD64}" \
+      --build-arg "KUBECONFORM_SHA256_ARM64=${KUBECONFORM_SHA256_ARM64}" \
+      --build-arg "KUBECTL_VERSION=${KUBECTL_VERSION}" \
+      --build-arg "KUBECTL_SHA256_AMD64=${KUBECTL_SHA256_AMD64}" \
+      --build-arg "KUBECTL_SHA256_ARM64=${KUBECTL_SHA256_ARM64}" \
       --build-arg "NODE_VERSION=${NODE_VERSION}" \
       --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
       --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
@@ -228,7 +252,7 @@ verify_worker_skills() {
     echo "codex missing in worker image" >&2
     exit 1
   fi
-  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'ps --version' 'unzip -v' 'shellcheck --version' 'python --version' "python3 -c 'import yaml'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V' 'node --version' 'npm --version' 'npx --version' 'bun --version'; do
+  for tool_cmd in 'curl --version' 'yq --version' 'uv --version' 'promtool --version' 'kubeconform -v' 'tofu version' 'kubectl version --client' 'ps --version' 'unzip -v' 'shellcheck --version' 'python --version' "python3 -c 'import yaml'" 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V' 'node --version' 'npm --version' 'npx --version' 'bun --version'; do
     if ! buildah run "${ctr}" -- sh -c "${tool_cmd}"; then
       buildah rm "${ctr}" >/dev/null 2>&1 || true
       echo "worker CLI smoke failed: ${tool_cmd}" >&2
@@ -330,7 +354,7 @@ verify_worker_skills() {
     echo "xAI child credential is not usable by the installed opencode binary" >&2
     exit 1
   fi
-  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/ps/unzip/shellcheck/python/yaml/offline-3.13), and the xAI child credential"
+  echo "Verified gitea-pull-review skill, claude flags, agy forge read_url deny, opencode debug config, CLI smoke (curl/yq/uv/promtool/kubeconform/tofu/kubectl/ps/unzip/shellcheck/python/yaml/offline-3.13), and the xAI child credential"
   buildah rm "${ctr}" >/dev/null
 }
 
