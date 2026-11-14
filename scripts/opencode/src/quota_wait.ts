@@ -9,7 +9,9 @@ import {
   type QuotaClass,
   QuotaWaitError,
   quotaClassOf,
+  quotaWaitJitterMs,
 } from "./quota.ts";
+import { allRunnersCooled, earliestCooldownEnd, type RunnerCooldownStore } from "./runner_cooldown.ts";
 
 export { isQuotaWaitError, QuotaWaitError } from "./quota.ts";
 
@@ -76,13 +78,15 @@ export function throwIfQuotaWait(input: {
   err?: unknown;
   model: string;
   fallbackModel?: string;
-  chain?: readonly { model: string }[];
+  chain?: readonly { model: string; name?: string }[];
   laterModels?: readonly string[];
   runnerModel?: string;
   hopRefused?: boolean;
   previousError?: string | null;
   nowMs?: number;
   random?: () => number;
+  runnerCooldowns?: RunnerCooldownStore;
+  cooldownFingerprints?: Record<string, string | undefined>;
 }): void {
   const producer = stampedProducerModel(input);
   const later = input.laterModels ?? laterModelsAfter(input.chain, producer, stampedChainIndex(input));
@@ -107,7 +111,63 @@ export function throwIfQuotaWait(input: {
     return;
   }
   if (kind !== "resetting") return;
-  const decision = decideQuotaRetry(input.previousError, input.nowMs ?? Date.now(), retryAfterMs, input.random);
+  const nowMs = input.nowMs ?? Date.now();
+  // When at least one chain entry is outside cooldown, the job must hop (or
+  // start) on the healthy runner instead of requeueing with a 1 h backoff.
+  // For a thrown quota error, rethrow it so the caller retries immediately
+  // (expireLease) instead of parking as skipped. For a stuck result, return
+  // so the caller throws its generic error (also an immediate retry).
+  // Only when every entry is cooled do we requeue, and then with the earliest
+  // cooldown end, not the flat default.
+  if (input.runnerCooldowns && input.chain?.length) {
+    const named = input.chain.filter(
+      (r): r is { model: string; name: string } => typeof (r as { name?: unknown }).name === "string"
+    );
+    if (named.length > 0) {
+      const fingerprints = input.cooldownFingerprints;
+      const cooled = named.filter((r) => input.runnerCooldowns!.isCooled(r.name, nowMs, fingerprints?.[r.name]));
+      if (cooled.length < named.length) {
+        if (input.err) throw input.err;
+        return;
+      }
+      const earliest = earliestCooldownEnd(named, input.runnerCooldowns, nowMs);
+      if (earliest != null) {
+        const decision = decideQuotaRetry(input.previousError, nowMs, retryAfterMs, input.random);
+        if (decision.action === "exhaust") return;
+        const waitMs = Math.max(0, earliest - nowMs);
+        const backoffMs = waitMs + quotaWaitJitterMs(waitMs, input.random ?? Math.random);
+        const quotaErr = new QuotaWaitError({ ...decision, backoffMs });
+        // Stamp the producer so the retry starts after the dead runner instead
+        // of a fresh draw that can re-pick it. QuotaWaitError previously
+        // carried no runner, so failedRunnerNameForRetry returned null.
+        const stamp = input.result?.runner ?? thrownRunner(input.err);
+        if (stamp) (quotaErr as { runner?: unknown }).runner = stamp;
+        const chainIndex = input.result?.chainIndex ?? thrownChainIndex(input.err);
+        if (chainIndex != null) (quotaErr as { chainIndex?: unknown }).chainIndex = chainIndex;
+        throw quotaErr;
+      }
+    }
+  }
+  const decision = decideQuotaRetry(input.previousError, nowMs, retryAfterMs, input.random);
   if (decision.action === "exhaust") return;
-  throw new QuotaWaitError(decision);
+  const quotaErr = new QuotaWaitError(decision);
+  const stamp = input.result?.runner ?? thrownRunner(input.err);
+  if (stamp) (quotaErr as { runner?: unknown }).runner = stamp;
+  const chainIndex = input.result?.chainIndex ?? thrownChainIndex(input.err);
+  if (chainIndex != null) (quotaErr as { chainIndex?: unknown }).chainIndex = chainIndex;
+  throw quotaErr;
+}
+
+export function hasHealthyRunnerForQuota(
+  chain: readonly { model: string; name?: string }[] | undefined,
+  runnerCooldowns: RunnerCooldownStore | undefined,
+  nowMs: number,
+  fingerprints?: Record<string, string | undefined>
+): boolean {
+  if (!chain?.length || !runnerCooldowns) return false;
+  const named = chain.filter(
+    (r): r is { model: string; name: string } => typeof (r as { name?: unknown }).name === "string"
+  );
+  if (named.length === 0) return false;
+  return !allRunnersCooled(named, runnerCooldowns, nowMs, fingerprints);
 }

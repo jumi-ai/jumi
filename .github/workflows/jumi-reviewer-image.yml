@@ -88,6 +88,18 @@ jobs:
             UV_VERSION=${{ env.UV_VERSION }}
             UV_SHA256_AMD64=${{ env.UV_SHA256_AMD64 }}
             UV_SHA256_ARM64=${{ env.UV_SHA256_ARM64 }}
+            PROMTOOL_VERSION=${{ env.PROMTOOL_VERSION }}
+            PROMTOOL_SHA256_AMD64=${{ env.PROMTOOL_SHA256_AMD64 }}
+            PROMTOOL_SHA256_ARM64=${{ env.PROMTOOL_SHA256_ARM64 }}
+            TOFU_VERSION=${{ env.TOFU_VERSION }}
+            TOFU_SHA256_AMD64=${{ env.TOFU_SHA256_AMD64 }}
+            TOFU_SHA256_ARM64=${{ env.TOFU_SHA256_ARM64 }}
+            KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}
+            KUBECONFORM_SHA256_AMD64=${{ env.KUBECONFORM_SHA256_AMD64 }}
+            KUBECONFORM_SHA256_ARM64=${{ env.KUBECONFORM_SHA256_ARM64 }}
+            KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}
+            KUBECTL_SHA256_AMD64=${{ env.KUBECTL_SHA256_AMD64 }}
+            KUBECTL_SHA256_ARM64=${{ env.KUBECTL_SHA256_ARM64 }}
             NODE_VERSION=${{ env.NODE_VERSION }}
             NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
             NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
@@ -150,6 +162,10 @@ jobs:
           docker run --rm "${IMAGE}:${VERSION}" curl --version
           docker run --rm "${IMAGE}:${VERSION}" yq --version
           docker run --rm "${IMAGE}:${VERSION}" uv --version
+          docker run --rm "${IMAGE}:${VERSION}" promtool --version
+          docker run --rm "${IMAGE}:${VERSION}" kubeconform -v
+          docker run --rm "${IMAGE}:${VERSION}" tofu version
+          docker run --rm "${IMAGE}:${VERSION}" kubectl version --client
           docker run --rm "${IMAGE}:${VERSION}" ps --version
           docker run --rm "${IMAGE}:${VERSION}" unzip -v
           docker run --rm "${IMAGE}:${VERSION}" shellcheck --version
