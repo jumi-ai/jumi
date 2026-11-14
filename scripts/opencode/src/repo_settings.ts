@@ -21,6 +21,37 @@ export interface RepoTimeouts {
   conflict?: number;
 }
 
+export const REPO_SETUP_ON_FAILURES = ["continue", "fail"] as const;
+
+export type RepoSetupOnFailure = (typeof REPO_SETUP_ON_FAILURES)[number];
+
+/** Repository setup kinds: the `timeouts` spelling (`followup`, not `follow-up`). */
+export const REPO_SETUP_KINDS = ["review", "implement", "followup", "conflict"] as const;
+export type RepoSetupKind = (typeof REPO_SETUP_KINDS)[number];
+
+/** Known sub-keys of the `setup` mapping. */
+export const SETUP_KEYS = ["run", "timeout", "on_failure", "kinds"] as const;
+
+/** Default per-repository setup timeout: 10 minutes. */
+export const DEFAULT_SETUP_TIMEOUT_MINUTES = 10;
+
+/** Default setup failure policy: run the job anyway. */
+export const DEFAULT_SETUP_ON_FAILURE: RepoSetupOnFailure = "continue";
+
+/** Default setup timeout in milliseconds. */
+export const DEFAULT_SETUP_TIMEOUT_MS = DEFAULT_SETUP_TIMEOUT_MINUTES * 60 * 1000;
+
+export interface RepoSetup {
+  /** Shell script run from the worktree root with `sh -e`. */
+  run: string;
+  /** Whole minutes. Absent means the default. */
+  timeout?: number;
+  /** What to do when setup fails, times out, or leaves a dirty tree. */
+  onFailure: RepoSetupOnFailure;
+  /** Kinds the setup runs on. Absent means all four. */
+  kinds: RepoSetupKind[];
+}
+
 export interface RepoSettings {
   automerge: boolean;
   /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
@@ -73,6 +104,12 @@ export interface RepoSettings {
    * scheduled.
    */
   automergeMethod?: RepoAutomergeMethod;
+  /**
+   * Repository preparation command. `undefined` (key absent) means no setup:
+   * the job runs as today. Present only from the default branch, never from a
+   * pull request head.
+   */
+  setup?: RepoSetup;
 }
 
 export type RepoMode = "full" | "review-only" | "off";
@@ -107,6 +144,7 @@ export const KNOWN_KEYS = new Set([
   "no_automerge_label",
   "allowed_runners",
   "timeouts",
+  "setup",
   "review_exclude",
   "followup_on_suggestions",
   "max_followup_rounds",
@@ -206,6 +244,79 @@ function parseTimeoutsValue(value: unknown): TimeoutsParse {
     (timeouts as Record<string, number>)[key] = minutes;
   }
   return { ok: true, timeouts };
+}
+
+type SetupParse = { ok: true; setup?: RepoSetup } | { ok: false; error: string };
+
+function parseSetupValue(value: unknown): SetupParse {
+  if (value === undefined) return { ok: true };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, error: `"setup" must be a mapping` };
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!(SETUP_KEYS as readonly string[]).includes(key)) {
+      return { ok: false, error: unknownKeyError(key, SETUP_KEYS, "setup") };
+    }
+  }
+  if (!("run" in record) || record.run === undefined) {
+    return { ok: false, error: `"setup.run" must be a non-blank string` };
+  }
+  if (typeof record.run !== "string" || !record.run.trim()) {
+    return { ok: false, error: `"setup.run" must be a non-blank string` };
+  }
+  const run = record.run;
+  let timeout: number | undefined;
+  if ("timeout" in record && record.timeout !== undefined) {
+    const minutes = record.timeout;
+    if (typeof minutes !== "number" || !Number.isInteger(minutes) || minutes < MIN_TIMEOUT_MINUTES) {
+      return { ok: false, error: `"setup.timeout" must be an integer number of minutes >= ${MIN_TIMEOUT_MINUTES}` };
+    }
+    timeout = minutes;
+  }
+  let onFailure: RepoSetupOnFailure = DEFAULT_SETUP_ON_FAILURE;
+  if ("on_failure" in record && record.on_failure !== undefined) {
+    if (
+      typeof record.on_failure !== "string" ||
+      !(REPO_SETUP_ON_FAILURES as readonly string[]).includes(record.on_failure)
+    ) {
+      return { ok: false, error: `"setup.on_failure" must be one of "continue", "fail"` };
+    }
+    onFailure = record.on_failure as RepoSetupOnFailure;
+  }
+  let kinds: RepoSetupKind[] = [...REPO_SETUP_KINDS];
+  if ("kinds" in record && record.kinds !== undefined) {
+    if (!Array.isArray(record.kinds)) {
+      return { ok: false, error: `"setup.kinds" must be a list of job kinds` };
+    }
+    if (record.kinds.length === 0) {
+      return { ok: false, error: `"setup.kinds" must not contain blank entries` };
+    }
+    const parsed: RepoSetupKind[] = [];
+    for (const entry of record.kinds) {
+      if (typeof entry !== "string" || entry.trim() === "") {
+        return { ok: false, error: `"setup.kinds" must not contain blank entries` };
+      }
+      const trimmed = entry.trim();
+      if (!(REPO_SETUP_KINDS as readonly string[]).includes(trimmed)) {
+        return {
+          ok: false,
+          error: `"setup.kinds" must be one of "review", "implement", "followup", "conflict"`,
+        };
+      }
+      if (!parsed.includes(trimmed as RepoSetupKind)) parsed.push(trimmed as RepoSetupKind);
+    }
+    kinds = parsed;
+  }
+  return {
+    ok: true,
+    setup: {
+      run,
+      ...(timeout !== undefined ? { timeout } : {}),
+      onFailure,
+      kinds,
+    },
+  };
 }
 
 type CiGateParse = { ok: true; ciGate?: { wait: CiGateWait } } | { ok: false; error: string };
@@ -426,6 +537,12 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     }
     automergeMethod = record.automerge_method as RepoAutomergeMethod;
   }
+  let setup: RepoSetup | undefined;
+  if ("setup" in record && record.setup !== undefined) {
+    const parsed = parseSetupValue(record.setup);
+    if (!parsed.ok) return parsed;
+    setup = parsed.setup;
+  }
   const settings: RepoSettings = {
     automerge,
     automergeLabel,
@@ -447,6 +564,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     mode,
     ...(ciGate !== undefined ? { ciGate } : {}),
     ...(automergeMethod !== undefined ? { automergeMethod } : {}),
+    ...(setup !== undefined ? { setup } : {}),
   };
   if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
     settings.maxFollowupRounds = record.max_followup_rounds as number;
@@ -497,6 +615,7 @@ export type RepoSettingsLoad =
       automergeLabel: string;
       noAutomergeLabel: string;
       timeouts: RepoTimeouts;
+      setup?: RepoSetup;
       allowedRunners?: string[];
       reviewExclude: string[];
       followupOnSuggestions: boolean;
@@ -547,6 +666,55 @@ export function effectiveTimeoutMsForKind(load: RepoSettingsLoad, kind: string, 
  */
 export function effectiveLeaseMs(configLeaseMs: number, effectiveTimeoutMs: number): number {
   return Math.max(configLeaseMs, effectiveTimeoutMs + TIMEOUT_LEASE_BUFFER_MS);
+}
+
+/** Setup key for a ledger kind: `follow-up` reads `followup`, like `timeouts`. */
+export function setupKeyForKind(kind: string): RepoSetupKind | undefined {
+  const normalized = kind === "follow-up" ? "followup" : kind;
+  if ((REPO_SETUP_KINDS as readonly string[]).includes(normalized)) return normalized as RepoSetupKind;
+  return undefined;
+}
+
+/**
+ * Repository setup for one job kind. Missing, invalid, or absent `setup`
+ * means no setup. A present `setup` whose `kinds` does not include the kind
+ * also means no setup. `kinds` can only narrow: there is no way to run setup
+ * on a kind that is not one of the four.
+ */
+export function setupForKind(load: RepoSettingsLoad, kind: string): RepoSetup | undefined {
+  if (load.state !== "valid" || !load.setup) return undefined;
+  const key = setupKeyForKind(kind);
+  if (!key) return undefined;
+  if (!load.setup.kinds.includes(key)) return undefined;
+  return load.setup;
+}
+
+/** Whether this job kind runs the repository setup. */
+export function setupAppliesToKind(load: RepoSettingsLoad, kind: string): boolean {
+  return setupForKind(load, kind) !== undefined;
+}
+
+/**
+ * Effective setup timeout for one setup. Missing setup runs nothing; the
+ * caller checks `setupForKind` first. A value above the deployer maximum
+ * (`SETUP_TIMEOUT_MAX_MS`, unset defaults to the 10-minute default) applies
+ * as the maximum, so out of the box a repository can only shorten. The job's
+ * own timeout and queue lease are not extended: setup time counts inside them.
+ */
+export function effectiveSetupTimeoutMs(setup: RepoSetup | undefined, maxMs: number): number {
+  const wanted = (setup?.timeout ?? DEFAULT_SETUP_TIMEOUT_MINUTES) * 60 * 1000;
+  const cap = maxMs > 0 ? maxMs : DEFAULT_SETUP_TIMEOUT_MS;
+  return Math.min(wanted, cap);
+}
+
+/** Deployer maximum for `setup.timeout` (`SETUP_TIMEOUT_MAX_MS`). */
+export function resolveSetupTimeoutMaxMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.SETUP_TIMEOUT_MAX_MS?.trim();
+  if (!raw) return DEFAULT_SETUP_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0)
+    throw new Error(`Invalid positive integer for SETUP_TIMEOUT_MAX_MS: ${raw}`);
+  return parsed;
 }
 
 export interface RepoSettingsFileApi {
@@ -608,6 +776,7 @@ export async function loadRepoSettings(
     mode: parsed.settings.mode,
     ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
     ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
+    ...(parsed.settings.setup !== undefined ? { setup: parsed.settings.setup } : {}),
   };
 }
 
