@@ -4935,18 +4935,27 @@ describe("suggestion hold latch", () => {
 
   test("a no-changes round resolves a held pending to success", async () => {
     const { markSuggestionHoldConsumed } = await import("../src/suggestion_hold.ts");
-    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
     await withDirs(async (home, workdir) => {
       const { memorySkipLatchesFor: forHome } = await import("../src/skip_latches.ts");
-      await markSuggestionHoldConsumed(forHome(home), { owner: "kirmanak", repo: "demo", issueNumber: 12 }, "headsha", 2);
+      await markSuggestionHoldConsumed(
+        forHome(home),
+        { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+        "headsha",
+        2
+      );
       const statuses: Array<{ state: string; description?: string }> = [];
       const api = makeApi({
         listIssueComments: async () => [
           makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         ],
         // deno-lint-ignore no-explicit-any
-        ...( {
-          createCommitStatus: async (_owner: string, _repo: string, _sha: string, status: { state: string; description?: string }) => {
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
             statuses.push(status);
             return status;
           },

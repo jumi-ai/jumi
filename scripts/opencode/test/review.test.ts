@@ -24,6 +24,7 @@ import {
   reviewPullRequest,
   skipReasonForPR,
 } from "../src/review.ts";
+import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
@@ -36,7 +37,6 @@ import {
   makeRepo,
   makeUser,
 } from "./fixtures.ts";
-import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);

@@ -9,9 +9,9 @@ import {
   WAITING_ON_MAINTAINER_REASON,
 } from "../src/handover.ts";
 import type { ReviewApi } from "../src/review.ts";
-import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";
+import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import {
   emptyCiMethods,
   makeComment,
@@ -832,7 +832,12 @@ describe("suggestion hold fallback", () => {
     await seedSucceededFollowUps(store, 3);
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    await markSuggestionHoldConsumed(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }, "headsha", 2);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      2
+    );
     const statuses: Array<{ state: string; description?: string }> = [];
     const api = makeApi({
       createCommitStatus: async (_owner, _repo, _sha, status) => {
@@ -858,7 +863,12 @@ describe("suggestion hold fallback", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    await markSuggestionHoldConsumed(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }, "headsha", 1);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
     const statuses: Array<{ state: string; description?: string }> = [];
     const api = makeApi({
       getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
