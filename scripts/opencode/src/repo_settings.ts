@@ -969,13 +969,24 @@ export function effectiveSetupTimeoutMs(setup: RepoSetup | undefined, maxMs: num
   return Math.min(wanted, cap);
 }
 
-/** Deployer maximum for `setup.timeout` (`SETUP_TIMEOUT_MAX_MS`). */
-export function resolveSetupTimeoutMaxMs(env: Record<string, string | undefined> = process.env): number {
+/**
+ * Deployer maximum for `setup.timeout` (`SETUP_TIMEOUT_MAX_MS`, unset
+ * defaults to the 10-minute default). Never throws: a missing or invalid
+ * value degrades to the default with a log line, so a typo never stops a job.
+ * Production always threads the loaded config value through instead; this
+ * direct-env read is the fallback for paths without a config.
+ */
+export function resolveSetupTimeoutMaxMs(
+  env: Record<string, string | undefined> = process.env,
+  log?: (message: string) => void
+): number {
   const raw = env.SETUP_TIMEOUT_MAX_MS?.trim();
   if (!raw) return DEFAULT_SETUP_TIMEOUT_MS;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0)
-    throw new Error(`Invalid positive integer for SETUP_TIMEOUT_MAX_MS: ${raw}`);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    log?.(`Invalid SETUP_TIMEOUT_MAX_MS ${JSON.stringify(raw)}, using default ${DEFAULT_SETUP_TIMEOUT_MS}ms`);
+    return DEFAULT_SETUP_TIMEOUT_MS;
+  }
   return parsed;
 }
 

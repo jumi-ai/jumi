@@ -75,13 +75,11 @@ import {
   DEFAULT_COMMIT_MESSAGE_TEMPLATE,
   DEFAULT_PR_TITLE_TEMPLATE,
   defaultRepoConventions,
-  loadDefaultBranchSettings,
   loadRepoConventions,
   type RepoConventions,
   renderIssueTemplate,
-  setupForKind,
 } from "./repo_settings.ts";
-import { runRepoSetupForJob } from "./repo_setup.ts";
+import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -241,6 +239,10 @@ export interface ImplementOptions extends PickupPolicy {
   timeoutMs?: number;
   followupTimeoutMs?: number;
   conflictTimeoutMs?: number;
+  /** Deployer maximum for repository `setup` runs. Unset falls back to `SETUP_TIMEOUT_MAX_MS`. */
+  setupTimeoutMaxMs?: number;
+  /** Injectable setup script runner (tests stub the shell). Defaults to spawning `sh -e`. */
+  repoSetupRunScript?: RepoSetupRunScript;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
   maxOutputBytes?: number;
@@ -783,58 +785,34 @@ async function implementExternalIssue(
       throwIfAborted(opts.abortSignal);
       let repoSetupBlock: string | undefined;
       {
-        const { load: setupLoad } = await loadDefaultBranchSettings(
-          forge,
-          owner,
-          repo,
-          effectiveJob.defaultBranch || undefined,
-          log
-        );
-        const setupRunner = (
-          opts as unknown as {
-            repoSetupRunScript?: (args: {
-              workdir: string;
-              run: string;
-              timeoutMs: number;
-              env: Record<string, string>;
-            }) => Promise<{
-              status: "ok" | "failed" | "timeout";
-              exitCode?: number | null;
-              output: string;
-              durationMs: number;
-            }>;
-          }
-        ).repoSetupRunScript;
-        const setupResult = await runRepoSetupForJob({
-          workdir: worktree,
+        const setup = await runRepoSetupForKind({
+          api: forge,
           kind: "implement",
-          load: setupLoad,
+          workdir: worktree,
+          defaultBranch: effectiveJob.defaultBranch || undefined,
           auth: loop.auth,
           owner,
           repo,
           home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
           git: loop.runConfiguredGit,
           gitEnv: loop.env,
-          ...(setupRunner ? { runScript: setupRunner } : {}),
+          runScript: opts.repoSetupRunScript,
         });
-        if (setupResult.ran) {
-          repoSetupBlock = setupResult.promptBlock;
-          if (setupResult.state !== "ok") {
-            const onFailure = setupForKind(setupLoad, "implement")?.onFailure ?? "continue";
-            if (onFailure === "fail") {
-              const reason = setupResult.failureReason ?? "repository setup failed";
-              if (typeof briefTracker.postBriefComment === "function") {
-                try {
-                  await briefTracker.postBriefComment(ref, reason);
-                } catch {}
-              }
-              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-                pushLanded: false,
-                logger: log,
-              });
-              return { status: "skipped", reason };
+        if (setup.ran) {
+          repoSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            if (typeof briefTracker.postBriefComment === "function") {
+              try {
+                await briefTracker.postBriefComment(ref, setup.failureReason);
+              } catch {}
             }
+            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+              pushLanded: false,
+              logger: log,
+            });
+            return { status: "skipped", reason: setup.failureReason };
           }
         }
       }
@@ -1208,56 +1186,32 @@ export async function implementIssue(
       throwIfAborted(opts.abortSignal);
       let repoSetupBlock: string | undefined;
       {
-        const { load: setupLoad } = await loadDefaultBranchSettings(
-          opts.api,
-          owner,
-          repo,
-          opts.job.defaultBranch || undefined,
-          log
-        );
-        const setupRunner = (
-          opts as unknown as {
-            repoSetupRunScript?: (args: {
-              workdir: string;
-              run: string;
-              timeoutMs: number;
-              env: Record<string, string>;
-            }) => Promise<{
-              status: "ok" | "failed" | "timeout";
-              exitCode?: number | null;
-              output: string;
-              durationMs: number;
-            }>;
-          }
-        ).repoSetupRunScript;
-        const setupResult = await runRepoSetupForJob({
-          workdir: worktree,
+        const setup = await runRepoSetupForKind({
+          api: opts.api,
           kind: "implement",
-          load: setupLoad,
+          workdir: worktree,
+          defaultBranch: opts.job.defaultBranch || undefined,
           auth: loop.auth,
           owner,
           repo,
           home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
           git: loop.runConfiguredGit,
           gitEnv: loop.env,
-          ...(setupRunner ? { runScript: setupRunner } : {}),
+          runScript: opts.repoSetupRunScript,
         });
-        if (setupResult.ran) {
-          repoSetupBlock = setupResult.promptBlock;
-          if (setupResult.state !== "ok") {
-            const onFailure = setupForKind(setupLoad, "implement")?.onFailure ?? "continue";
-            if (onFailure === "fail") {
-              const reason = setupResult.failureReason ?? "repository setup failed";
-              await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason).catch(
-                () => undefined
-              );
-              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-                pushLanded: false,
-                logger: log,
-              });
-              return { status: "skipped", reason };
-            }
+        if (setup.ran) {
+          repoSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, setup.failureReason).catch(
+              () => undefined
+            );
+            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+              pushLanded: false,
+              logger: log,
+            });
+            return { status: "skipped", reason: setup.failureReason };
           }
         }
       }

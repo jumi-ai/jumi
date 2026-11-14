@@ -14,6 +14,8 @@ import { childScratchDir } from "./engine_scratch.ts";
 import {
   DEFAULT_SETUP_TIMEOUT_MS,
   effectiveSetupTimeoutMs,
+  loadDefaultBranchSettings,
+  type RepoSettingsFileApi,
   type RepoSettingsLoad,
   type RepoSetup,
   resolveSetupTimeoutMaxMs,
@@ -152,6 +154,14 @@ export interface SetupScriptResult {
   output: string;
   durationMs: number;
 }
+
+/** Injectable setup script runner (tests stub the shell). */
+export type RepoSetupRunScript = (opts: {
+  workdir: string;
+  run: string;
+  timeoutMs: number;
+  env: Record<string, string>;
+}) => Promise<SetupScriptResult>;
 
 async function readStreamTail(
   stream: ReadableStream<Uint8Array>,
@@ -331,12 +341,7 @@ export interface RunRepoSetupOpts {
   git: GitRunner;
   gitEnv: Record<string, string | undefined>;
   /** Injectable script runner (tests stub the shell). */
-  runScript?: (opts: {
-    workdir: string;
-    run: string;
-    timeoutMs: number;
-    env: Record<string, string>;
-  }) => Promise<SetupScriptResult>;
+  runScript?: RepoSetupRunScript;
 }
 
 /**
@@ -350,7 +355,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
   const setup: RepoSetup | undefined = setupForKind(opts.load, opts.kind);
   if (!setup) return { ran: false };
   const log = opts.log ?? (() => undefined);
-  const maxMs = opts.timeoutMaxMs ?? resolveSetupTimeoutMaxMs();
+  const maxMs = opts.timeoutMaxMs ?? resolveSetupTimeoutMaxMs(process.env, log);
   const timeoutMs = effectiveSetupTimeoutMs(setup, maxMs);
 
   // The agent's own sandbox, never the parent: start the loopback git proxy
@@ -400,54 +405,79 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
     const runScript = opts.runScript ?? runRepoSetupScript;
     const result = await runScript({ workdir: opts.workdir, run: setup.run, timeoutMs, env });
     const tail = tailBytes(result.output, SETUP_OUTPUT_TAIL_BYTES);
+    const reportFailed = (failureReason: string): RepoSetupOutcome => {
+      logDiagnostic(log, "repo_setup", {
+        kind: opts.kind,
+        state: "failed",
+        exit_code: result.exitCode ?? null,
+        duration_ms: result.durationMs,
+      });
+      for (const line of tail.split("\n")) log(`[repo setup] ${line}`);
+      return {
+        ran: true,
+        state: "failed",
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        tail,
+        promptBlock: formatRepoSetupPromptBlock("failed", { exitCode: result.exitCode, tail }),
+        failureReason,
+      };
+    };
+    // Restore the pre-setup tree and re-check it. Every git error is
+    // redacted first: the `fail` policy publishes the reason to the forge.
+    const restoreWorktree = async (): Promise<string | undefined> => {
+      try {
+        await opts.git(["reset", "--hard"], { cwd: opts.workdir, env: opts.gitEnv });
+        await opts.git(["clean", "-fd"], { cwd: opts.workdir, env: opts.gitEnv });
+        return undefined;
+      } catch (err) {
+        return redactSetupOutput(err instanceof Error ? err.message : String(err));
+      }
+    };
+    const checkPorcelain = async (): Promise<{ porcelain?: string; error?: string }> => {
+      try {
+        const status = await opts.git(["status", "--porcelain"], { cwd: opts.workdir, env: opts.gitEnv });
+        return { porcelain: withoutEngineTempPorcelain(status) };
+      } catch (err) {
+        return { error: redactSetupOutput(err instanceof Error ? err.message : String(err)) };
+      }
+    };
     if (result.status === "ok") {
       // Clean-tree check: gitignored output is allowed; any tracked change or
       // unignored untracked file makes the run dirty.
-      let porcelain = "";
-      try {
-        const status = await opts.git(["status", "--porcelain"], { cwd: opts.workdir, env: opts.gitEnv });
-        porcelain = withoutEngineTempPorcelain(status);
-      } catch (err) {
-        const reason = `repository setup failed: cannot check worktree (${err instanceof Error ? err.message : String(err)})`;
-        logDiagnostic(log, "repo_setup", {
-          kind: opts.kind,
-          state: "failed",
-          exit_code: result.exitCode ?? null,
-          duration_ms: result.durationMs,
-        });
-        for (const line of tail.split("\n")) log(`[repo setup] ${line}`);
-        return {
-          ran: true,
-          state: "failed",
-          exitCode: result.exitCode,
-          durationMs: result.durationMs,
-          tail,
-          promptBlock: formatRepoSetupPromptBlock("failed", { exitCode: result.exitCode, tail }),
-          failureReason: reason,
-        };
-      }
-      if (porcelain) {
-        try {
-          await opts.git(["reset", "--hard"], { cwd: opts.workdir, env: opts.gitEnv });
-          await opts.git(["clean", "-fd"], { cwd: opts.workdir, env: opts.gitEnv });
-        } catch {}
-        const failureReason = setupFailureReason("dirty");
-        logDiagnostic(log, "repo_setup", {
-          kind: opts.kind,
-          state: "dirty",
-          exit_code: result.exitCode ?? null,
-          duration_ms: result.durationMs,
-        });
-        for (const line of tail.split("\n")) log(`[repo setup] ${line}`);
-        return {
-          ran: true,
-          state: "dirty",
-          exitCode: result.exitCode,
-          durationMs: result.durationMs,
-          tail,
-          promptBlock: formatRepoSetupPromptBlock("dirty", { exitCode: result.exitCode, tail }),
-          failureReason,
-        };
+      const check = await checkPorcelain();
+      if (check.error !== undefined || check.porcelain) {
+        // Restore on the status-error path too: the engine must never start
+        // on a tree of unknown state. Re-check after every restore; a failed
+        // restore, a failed re-check, or a still-dirty tree is `failed`, not
+        // `dirty`, so `continue` never starts the engine on an unrestored
+        // tree where `commitIfDirty` could commit setup output.
+        const restoreError = await restoreWorktree();
+        const recheck = await checkPorcelain();
+        if (restoreError !== undefined || recheck.error !== undefined || recheck.porcelain) {
+          const detail = restoreError ?? recheck.error ?? "worktree still dirty after restore";
+          return reportFailed(`repository setup failed: cannot restore worktree (${detail})`);
+        }
+        if (check.porcelain) {
+          const failureReason = setupFailureReason("dirty");
+          logDiagnostic(log, "repo_setup", {
+            kind: opts.kind,
+            state: "dirty",
+            exit_code: result.exitCode ?? null,
+            duration_ms: result.durationMs,
+          });
+          for (const line of tail.split("\n")) log(`[repo setup] ${line}`);
+          return {
+            ran: true,
+            state: "dirty",
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+            tail,
+            promptBlock: formatRepoSetupPromptBlock("dirty", { exitCode: result.exitCode, tail }),
+            failureReason,
+          };
+        }
+        log(`[repo setup] worktree check failed (${check.error}), restored and re-checked clean`);
       }
       logDiagnostic(log, "repo_setup", {
         kind: opts.kind,
@@ -488,4 +518,71 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
   } finally {
     if (closeProxy) await closeProxy().catch(() => undefined);
   }
+}
+
+export interface RepoSetupForKindOpts {
+  api: RepoSettingsFileApi;
+  kind: string;
+  workdir: string;
+  defaultBranch?: string;
+  auth: GitAuth;
+  owner: string;
+  repo: string;
+  home?: string;
+  /** Deployer maximum from the loaded config. Unset falls back to the direct-env read. */
+  timeoutMaxMs?: number;
+  log?: (message: string) => void;
+  git: GitRunner;
+  gitEnv: Record<string, string | undefined>;
+  /** Injectable script runner (tests stub the shell). */
+  runScript?: RepoSetupRunScript;
+}
+
+export interface RepoSetupForKindResult {
+  ran: boolean;
+  promptBlock?: string;
+  /** Set only when setup did not succeed and the `fail` policy applies. */
+  failureReason?: string;
+}
+
+/**
+ * Load the default-branch settings and run the repository setup for one job
+ * kind. Returns `{ran:false}` without a spawn or a log line when there is no
+ * setup, the kind is narrowed out, or the file is missing/unreadable. Never
+ * throws: a setup that did not succeed carries a `failureReason` exactly when
+ * the `fail` policy applies, so each call site only adds its own fail action.
+ */
+export async function runRepoSetupForKind(opts: RepoSetupForKindOpts): Promise<RepoSetupForKindResult> {
+  const { load } = await loadDefaultBranchSettings(
+    opts.api,
+    opts.owner,
+    opts.repo,
+    opts.defaultBranch || undefined,
+    opts.log
+  );
+  const result = await runRepoSetupForJob({
+    workdir: opts.workdir,
+    kind: opts.kind,
+    load,
+    auth: opts.auth,
+    owner: opts.owner,
+    repo: opts.repo,
+    home: opts.home,
+    timeoutMaxMs: opts.timeoutMaxMs,
+    log: opts.log,
+    git: opts.git,
+    gitEnv: opts.gitEnv,
+    runScript: opts.runScript,
+  });
+  if (!result.ran || result.state === "ok") {
+    return result.ran ? { ran: true, promptBlock: result.promptBlock } : { ran: false };
+  }
+  if ((setupForKind(load, opts.kind)?.onFailure ?? "continue") !== "fail") {
+    return { ran: true, promptBlock: result.promptBlock };
+  }
+  return {
+    ran: true,
+    promptBlock: result.promptBlock,
+    failureReason: result.failureReason ?? "repository setup failed",
+  };
 }

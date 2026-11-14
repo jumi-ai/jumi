@@ -85,12 +85,10 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
   effectiveIgnoreConflictsLabel,
-  loadDefaultBranchSettings,
   loadRepoFollowupPolicy,
   loadRepoSettings,
-  setupForKind,
 } from "./repo_settings.ts";
-import { runRepoSetupForJob } from "./repo_setup.ts";
+import { runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -963,51 +961,27 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       };
       let conflictSetupBlock: string | undefined;
       {
-        const { load: setupLoad } = await loadDefaultBranchSettings(
-          opts.api,
-          owner,
-          repo,
-          opts.job.defaultBranch || undefined,
-          log
-        );
-        const setupRunner = (
-          opts as unknown as {
-            repoSetupRunScript?: (args: {
-              workdir: string;
-              run: string;
-              timeoutMs: number;
-              env: Record<string, string>;
-            }) => Promise<{
-              status: "ok" | "failed" | "timeout";
-              exitCode?: number | null;
-              output: string;
-              durationMs: number;
-            }>;
-          }
-        ).repoSetupRunScript;
-        const setupResult = await runRepoSetupForJob({
-          workdir: worktree,
+        const setup = await runRepoSetupForKind({
+          api: opts.api,
           kind: "conflict",
-          load: setupLoad,
+          workdir: worktree,
+          defaultBranch: opts.job.defaultBranch || undefined,
           auth: loop.auth,
           owner,
           repo,
           home: opts.home,
+          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
           git: loop.runConfiguredGit,
           gitEnv: loop.env,
-          ...(setupRunner ? { runScript: setupRunner } : {}),
+          runScript: opts.repoSetupRunScript,
         });
-        if (setupResult.ran) {
-          conflictSetupBlock = setupResult.promptBlock;
-          if (setupResult.state !== "ok") {
-            const onFailure = setupForKind(setupLoad, "conflict")?.onFailure ?? "continue";
-            if (onFailure === "fail") {
-              const reason = setupResult.failureReason ?? "repository setup failed";
-              await sticky(reason, pr.number);
-              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-              return { status: "skipped", reason };
-            }
+        if (setup.ran) {
+          conflictSetupBlock = setup.promptBlock;
+          if (setup.failureReason) {
+            await sticky(setup.failureReason, pr.number);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason: setup.failureReason };
           }
         }
       }

@@ -805,6 +805,7 @@ export async function processWorkerTick(
       handoffs: store.handoffs,
       workdir: effectiveConfig.workdir,
       maxOutputBytes: effectiveConfig.maxOutputBytes,
+      setupTimeoutMaxMs: effectiveConfig.setupTimeoutMaxMs,
       checkpointEnabled: effectiveConfig.checkpointEnabled,
       checkpointIntervalMs: effectiveConfig.checkpointIntervalMs,
       checkpointMaxAgeMs: effectiveConfig.checkpointMaxAgeMs,

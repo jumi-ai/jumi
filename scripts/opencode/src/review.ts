@@ -67,15 +67,13 @@ import {
   effectiveReviewBudget,
   effectiveSuggestionCap,
   isReviewDraftsEnabled,
-  loadDefaultBranchSettings,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
-  setupForKind,
 } from "./repo_settings.ts";
-import { runRepoSetupForJob } from "./repo_setup.ts";
+import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -226,6 +224,10 @@ export interface ReviewOptions {
   skipLatches?: SkipLatchStore;
   sanitizeOpenCodeEnv?: boolean;
   timeoutMs?: number;
+  /** Deployer maximum for repository `setup` runs. Unset falls back to `SETUP_TIMEOUT_MAX_MS`. */
+  setupTimeoutMaxMs?: number;
+  /** Injectable setup script runner (tests stub the shell). Defaults to spawning `sh -e`. */
+  repoSetupRunScript?: RepoSetupRunScript;
   maxFiles?: number;
   maxPatchBytes?: number;
   /** Deployer maxima for the review size budget. Unset each defaults to the deployment value. */
@@ -2126,51 +2128,35 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     let repoSetupBlock: string | undefined;
     {
       const defaultBranchName = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
-      const { load: setupLoad } = await loadDefaultBranchSettings(
-        forgeApi,
-        opts.owner,
-        opts.repo,
-        defaultBranchName || undefined,
-        log
-      );
-      const setupRunner = (
-        opts as unknown as {
-          repoSetupRunScript?: (args: {
-            workdir: string;
-            run: string;
-            timeoutMs: number;
-            env: Record<string, string>;
-          }) => Promise<{
-            status: "ok" | "failed" | "timeout";
-            exitCode?: number | null;
-            output: string;
-            durationMs: number;
-          }>;
-        }
-      ).repoSetupRunScript;
-      const setupResult = await runRepoSetupForJob({
-        workdir: opts.workspace,
+      const setup = await runRepoSetupForKind({
+        api: forgeApi,
         kind: "review",
-        load: setupLoad,
+        workdir: opts.workspace,
+        defaultBranch: defaultBranchName || undefined,
         auth: gitAuth,
         owner: opts.owner,
         repo: opts.repo,
         home: opts.home,
+        timeoutMaxMs: opts.setupTimeoutMaxMs,
         log,
         git,
         gitEnv: gitCmdEnv,
-        ...(setupRunner ? { runScript: setupRunner } : {}),
+        runScript: opts.repoSetupRunScript,
       });
-      if (setupResult.ran) {
-        repoSetupBlock = setupResult.promptBlock;
-        if (setupResult.state !== "ok") {
-          const onFailure = setupForKind(setupLoad, "review")?.onFailure ?? "continue";
-          if (onFailure === "fail") {
-            const reason = setupResult.failureReason ?? "repository setup failed";
-            await opts.persistResult?.({ kind: "skip", reason });
-            await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
-            return { status: "skipped", reason };
-          }
+      if (setup.ran) {
+        repoSetupBlock = setup.promptBlock;
+        if (setup.failureReason) {
+          await opts.persistResult?.({ kind: "skip", reason: setup.failureReason });
+          await postReviewStatus(
+            forgeApi,
+            opts.owner,
+            opts.repo,
+            reviewedHeadSha,
+            "failure",
+            setup.failureReason,
+            pr.html_url
+          );
+          return { status: "skipped", reason: setup.failureReason };
         }
       }
     }
