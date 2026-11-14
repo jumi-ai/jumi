@@ -1496,13 +1496,15 @@ cat "$XDG_CONFIG_HOME/opencode/opencode.json"
       expect(xdg.startsWith("/tmp/jumi-review-")).toBe(true);
       const global = JSON.parse((result.stdout ?? "").slice((result.stdout ?? "").indexOf("\n{"))) as {
         policies: unknown[];
-        plugin?: unknown[];
+        plugins?: unknown[];
       };
       expect(global.policies).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com")).policies);
-      // Jumi-owned shell plugin is registered in the outside global config.
-      expect(Array.isArray(global.plugin)).toBe(true);
-      expect((global.plugin as string[]).length).toBeGreaterThan(0);
-      expect((global.plugin as string[])[0]?.startsWith("/tmp/jumi-review-")).toBe(true);
+      // Jumi-owned shell plugin directory is registered under the V2 `plugins`
+      // (plural) key in the outside global config. V2 ignores the V1 singular
+      // `plugin` key and skips single-file paths.
+      expect(Array.isArray(global.plugins)).toBe(true);
+      expect((global.plugins as string[]).length).toBeGreaterThan(0);
+      expect((global.plugins as string[])[0]?.startsWith("/tmp/jumi-review-")).toBe(true);
     });
   });
 
@@ -1546,10 +1548,10 @@ cat "$XDG_CONFIG_HOME/opencode/opencode.json"
         expect(xdg.startsWith("/tmp/jumi-review-")).toBe(true);
         const global = JSON.parse((result.stdout ?? "").slice((result.stdout ?? "").indexOf("\n{"))) as {
           policies: unknown[];
-          plugin?: unknown[];
+          plugins?: unknown[];
         };
         expect(global.policies).toEqual(JSON.parse(forgeOpenCodeGlobalConfig("github.com", true)).policies);
-        expect(Array.isArray(global.plugin)).toBe(true);
+        expect(Array.isArray(global.plugins)).toBe(true);
       });
     } finally {
       delete process.env.JUMI_SEARXNG_URL;

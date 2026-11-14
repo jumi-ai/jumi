@@ -80,20 +80,32 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
 All wiring is Jumi-owned (never from the checkout). The agent spawns
 unsandboxed; its shells are wrapped separately:
 
-- OpenCode: Jumi-owned `tool.execute.before` plugin for `bash` (generated per
-  spawn under the outside harness temp, registered in the Jumi-owned global
-  `opencode.json`). Rewrites `output.args.command` through the shell wrapper
-  prefix and denies reads of the harness temp / credential files.
+- OpenCode: Jumi-owned V2 plugin (`Plugin.define` with
+  `ctx.tool.hook("execute.before")` for `bash` plus `ctx.shell.hook("create.before")`,
+  generated per spawn as `<outside-temp>/xdg-config/opencode/plugin/jumi-review-shell-sandbox/index.js`
+  and registered as a directory under the V2 `plugins` key of the Jumi-owned
+  global `opencode.json`). The tool hook rewrites `bash` input through the shell
+  wrapper prefix and denies reads of the harness temp / credential files
+  (`read`/`grep`/`glob`); the shell hook rewraps every shell creation and pins
+  HOME/XDG/TMPDIR at scratch while scrubbing provider keys.
 - Claude: Jumi-owned `PreToolUse` hook (`updatedInput` rewrite) in a
-  `--plugin-dir` plugin under the outside harness temp. Same rewrite + deny
-  shape as OpenCode.
+  `--plugin-dir` plugin under the outside harness temp. Same rewrite, and the
+  deny covers `Read`/`Edit`/`Write`/`Grep`/`Glob` so the token is not reachable
+  through file-search tools.
 - Codex: `PreToolUse` hook in `hooks.json` under the review-only `CODEX_HOME`
   (outside harness temp), plus the review MCP server in the same
-  `CODEX_HOME/config.toml`. Same rewrite shape.
+  `CODEX_HOME/config.toml`. Same rewrite shape. Review spawns keep
+  `--dangerously-bypass-hook-trust`: the hook file is fresh every spawn so its
+  hash is never pre-trusted, and non-interactive `codex exec` would otherwise
+  skip it silently; the review home marks the workdir untrusted so the head's
+  project hooks never load either way.
 - Agy: `PreToolUse` hook in the global `~/.gemini/config/hooks.json`
   (Jumi-owned `jumi-review-shell-sandbox` key, restored after the spawn) with
   `overwrite.CommandLine`, plus the review MCP server in the global
-  `mcp_config.json` (same restore). Same rewrite shape.
+  `mcp_config.json` (same restore). The matcher covers `run_command` plus the
+  file/dir tools (`view_file`, `list_dir`, `find_by_name`, `grep_search` and
+  the write tools), so the token-bearing `mcp_config.json` is not readable
+  through `view_file`. Same rewrite shape.
 
 A runner with no Jumi-owned hook refuses instead of running unsandboxed
 (`assertReviewRunnerSandboxable`: one clear line, `review spawn refused:

@@ -363,9 +363,12 @@ describe("resolveReviewSpawnSandbox", () => {
           homeDir: "/data",
           wrapperPath: "/w/review_sandbox.py",
         };
-        // OpenCode plugin rewrites bash and denies harness-temp reads.
+        // OpenCode V2 plugin rewrites bash and denies harness-temp reads.
         const plugin = openCodeReviewShellPluginCode(input);
-        expect(plugin).toContain("tool.execute.before");
+        expect(plugin).toContain("Plugin.define");
+        expect(plugin).toContain('ctx.tool.hook("execute.before"');
+        expect(plugin).toContain('ctx.shell.hook("create.before"');
+        expect(plugin).toContain("jumi-review-shell-sandbox");
         expect(plugin).toContain("/w/review_sandbox.py");
         expect(plugin).toContain(harnessTemp);
         // Claude/Codex hooks rewrite Bash via updatedInput.
@@ -373,18 +376,30 @@ describe("resolveReviewSpawnSandbox", () => {
         const claudeHook = await readFile(join(claudeDir, "hooks", "sandbox-bash.py"), "utf8");
         expect(claudeHook).toContain("updatedInput");
         expect(claudeHook).toContain("/w/review_sandbox.py");
+        // File-search tools are denied too: the agent is unsandboxed, so the
+        // token must not be reachable through Grep/Glob.
+        expect(claudeHook).toContain("Grep");
+        expect(claudeHook).toContain("Glob");
         expect(claudeReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("PreToolUse");
+        expect(claudeReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("Grep");
         expect(codexReviewHooksJson(join(claudeDir, "hooks", "sandbox-bash.py"))).toContain("PreToolUse");
         // Agy hook handles the run_command envelope with overwrite.
         const agyHookPath = await writeAgyReviewShellHook(harnessTemp, input);
         const agyHook = await readFile(agyHookPath, "utf8");
         expect(agyHook).toContain("overwrite");
         expect(agyHook).toContain("/w/review_sandbox.py");
+        // Agy file/dir tools are denied too: view_file would otherwise read
+        // the global mcp_config.json holding the Bearer token.
+        expect(agyHook).toContain("view_file");
         expect(agyReviewHooksJson(agyHookPath)).toContain("run_command");
-        // OpenCode plugin file itself lives outside the checkout.
+        expect(agyReviewHooksJson(agyHookPath)).toContain("view_file");
+        // OpenCode plugin is a directory with index.js at its root (V2 skips
+        // single-file paths), outside the checkout.
         const pluginPath = await writeOpenCodeReviewShellPlugin(harnessTemp, input);
         expect(pluginPath.startsWith(harnessTemp)).toBe(true);
         expect(pluginPath.startsWith(workdir)).toBe(false);
+        const { existsSync: existsSyncPlugin } = await import("node:fs");
+        expect(existsSyncPlugin(join(pluginPath, "index.js"))).toBe(true);
         // Codex hooks live under its review-only CODEX_HOME (also outside).
         const reviewHome = join(harnessTemp, "codex-home");
         const { hooksPath } = await writeCodexReviewShellHooks(reviewHome, input);

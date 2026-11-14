@@ -54,7 +54,11 @@ describe("review isolation", () => {
     }
   });
 
-  test("codex workers bypass hook trust, reviews do not (fresh and resume)", () => {
+  test("codex workers and reviews both bypass hook trust (fresh and resume)", () => {
+    // The review hook is a fresh per-spawn file in a review-only CODEX_HOME,
+    // so its hash is never pre-trusted: without the bypass, non-interactive
+    // `codex exec` silently skips it (fail-open). The review home marks the
+    // workdir untrusted, so the head's project hooks never load either way.
     const worker = codexArgv({ model: "gpt-5.5", workdir: "/work" });
     expect(worker).toContain("--dangerously-bypass-hook-trust");
     const review = codexArgv({
@@ -62,14 +66,14 @@ describe("review isolation", () => {
       workdir: "/work",
       trace: { kind: "review", owner: "o", repo: "r" },
     });
-    expect(review).not.toContain("--dangerously-bypass-hook-trust");
+    expect(review).toContain("--dangerously-bypass-hook-trust");
     const workerResume = codexArgv({ model: "gpt-5.5", workdir: "/work", continueSession: true }, "thread-9");
     expect(workerResume).toContain("--dangerously-bypass-hook-trust");
     const reviewResume = codexArgv(
       { model: "gpt-5.5", workdir: "/work", continueSession: true, trace: { kind: "review", owner: "o", repo: "r" } },
       "thread-9"
     );
-    expect(reviewResume).not.toContain("--dangerously-bypass-hook-trust");
+    expect(reviewResume).toContain("--dangerously-bypass-hook-trust");
   });
 
   test("opencode reviews disable project config, workers do not", async () => {

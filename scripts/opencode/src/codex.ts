@@ -111,6 +111,7 @@ function codexConfigArgs(
   searxng?: { baseUrl: string; forgeHost: string },
   isReview = false
 ): string[] {
+  void isReview;
   return [
     "--json",
     "--color",
@@ -122,11 +123,12 @@ function codexConfigArgs(
     "--sandbox",
     CODEX_SANDBOX,
     "--skip-git-repo-check",
-    // Workers run head hooks with an explicit bypass because nobody is there
-    // to approve trust. Reviews mark the workdir untrusted in a review-only
-    // CODEX_HOME instead, so project hooks never load and there is nothing to
-    // bypass.
-    ...(isReview ? [] : ["--dangerously-bypass-hook-trust"]),
+    // Reviews and workers both bypass hook trust: the review hook is a fresh
+    // per-spawn file in a review-only CODEX_HOME, so its hash is never
+    // pre-trusted and non-interactive `codex exec` would silently skip it
+    // (fail-open). The review home marks the workdir untrusted, so the head's
+    // project hooks never load — the bypass only trusts our user-layer hook.
+    "--dangerously-bypass-hook-trust",
     "--model",
     model,
     ...codexHardeningArgs(effort, searxng),
@@ -138,9 +140,11 @@ function codexConfigArgs(
  * command without `global = true`, so it must appear before the `resume`
  * subcommand — after it the real binary rejects it as an unexpected
  * argument. `--json`, `--skip-git-repo-check`, and `-c` are `global = true`
- * and therefore valid on either side (workers also pass
- * `--dangerously-bypass-hook-trust` there; reviews omit it because the
- * workdir is untrusted and no project hook loads); the globals stay before
+ * and therefore valid on either side (both workers and reviews pass
+ * `--dangerously-bypass-hook-trust` there; the review home marks the workdir
+ * untrusted so the head's project hooks never load, and the bypass only
+ * trusts our fresh per-spawn user-layer hook that would otherwise be skipped
+ * silently); the globals stay before
  * `resume` with `--color` while the
  * `-c` overrides travel after the thread id. `--model` is made global by
  * upstream `mark_exec_global_args()` and is repeated too: `exec resume` takes
@@ -152,13 +156,15 @@ function codexConfigArgs(
  * experimental context management, undoing what turn 1 pinned.
  */
 function codexResumePreArgs(model: string, isReview = false): string[] {
+  void isReview;
   return [
     "--json",
     "--color",
     "never",
     "--skip-git-repo-check",
-    // Same review rule as the fresh spawn: untrusted workdir, no bypass flag.
-    ...(isReview ? [] : ["--dangerously-bypass-hook-trust"]),
+    // Same fail-closed rule as the fresh spawn: the review hook hash is fresh
+    // every spawn, so without the bypass `exec resume` silently skips it.
+    "--dangerously-bypass-hook-trust",
     "--model",
     model,
   ];

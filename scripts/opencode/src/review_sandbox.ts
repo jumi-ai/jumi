@@ -27,7 +27,8 @@ import { childScratchDir } from "./engine_scratch.ts";
  * - Provider keys are scrubbed from shell env via the `env -u` prefix in
  *   `reviewShellWrapperPrefix`, so a shell that prints its env learns nothing.
  * - Per-runner wiring is Jumi-owned (never from the checkout): OpenCode via a
- *   Jumi-owned `tool.execute.before` plugin for `bash`, Claude via a
+ *   Jumi-owned V2 plugin (`Plugin.define` with `ctx.tool.hook("execute.before")`
+ *   for `bash` plus `ctx.shell.hook("create.before")`), Claude via a
  *   Jumi-owned `PreToolUse` hook (`updatedInput` rewrite), Codex/Agy via
  *   their `PreToolUse` equivalents. A runner that cannot be wrapped refuses
  *   instead of running unsandboxed.
@@ -109,9 +110,6 @@ export async function makeReviewHarnessTempRoot(): Promise<string> {
   // shell policy omits `/tmp` so the outside temp stays unreachable.
   return mkdtemp("/tmp/jumi-review-");
 }
-
-/** Prefix (`jumi-review-`) identifying harness temp roots for deny checks. */
-export const REVIEW_HARNESS_TEMP_PREFIX = "jumi-review-";
 
 /** Device paths that also need /dev/null-style writes (tools open O_RDWR). Never grants creation. */
 export const REVIEW_SANDBOX_DEVICE_PATHS: readonly string[] = ["/dev"];
@@ -255,15 +253,6 @@ export function wrapShellCommand(
   env: Record<string, string | undefined> = process.env
 ): string {
   return `${reviewShellWrapperPrefix(rules, input, env)} sh -c ${shellEscape(original)}`;
-}
-
-/** Full wrapper argv for one sandboxed shell (used by tests and the probe). */
-export function reviewShellSandboxArgv(
-  rules: ReviewSandboxRules,
-  shellArgv: readonly string[],
-  wrapperPath?: string
-): string[] {
-  return reviewSandboxArgv(rules, shellArgv, wrapperPath);
 }
 
 /** Absolute path of the wrapper script; overridable for tests. Never a value, only a path. */
@@ -473,7 +462,7 @@ export interface ReviewSpawnSandbox {
  *
  * Part-2 shape (jumi#550): the agent itself runs UNSANDBOXED so it keeps its
  * HOME login and MCP token; every shell the model runs is wrapped separately
- * by Jumi-owned per-runner hooks (OpenCode plugin, Claude/Codex/Agy
+ * by Jumi-owned per-runner hooks (OpenCode V2 plugin, Claude/Codex/Agy
  * PreToolUse) built from `reviewShellSandboxRules` + `wrapShellCommand`.
  * `sandboxed` is therefore always false here — it only reports whether the
  * agent argv itself was wrapped (never, for reviews). Callers set up the
@@ -521,7 +510,7 @@ export const REVIEW_SANDBOXABLE_RUNNERS: readonly string[] = ["opencode", "claud
  * Fail-closed per-runner support check. Every review runner must come through
  * a Jumi-owned hook that wraps its shells; a runner with no hook refuses with
  * one clear line instead of running unsandboxed. All four pinned runners have
- * hooks (OpenCode `tool.execute.before`, Claude/Codex `PreToolUse`
+ * hooks (OpenCode V2 plugin, Claude/Codex `PreToolUse`
  * `updatedInput`, Agy `PreToolUse` `overwrite`); unknown types refuse.
  */
 export function assertReviewRunnerSandboxable(runnerType: string): void {
@@ -541,13 +530,12 @@ export interface ReviewShellHookInput {
   wrapperPath?: string;
 }
 
-/** Rules + prefix inputs derived from one hook input (single place). */
-export function reviewShellHookRules(input: ReviewShellHookInput): ReviewSandboxRules {
-  return reviewShellSandboxRules({ workdir: input.workdir, scratchDir: input.scratchDir, gitDirs: input.gitDirs });
-}
-
 function reviewShellHookPrefix(input: ReviewShellHookInput, env?: Record<string, string | undefined>): string {
-  const rules = reviewShellHookRules(input);
+  const rules = reviewShellSandboxRules({
+    workdir: input.workdir,
+    scratchDir: input.scratchDir,
+    gitDirs: input.gitDirs,
+  });
   return reviewShellWrapperPrefix(
     rules,
     { wrapperPath: input.wrapperPath, sandboxHome: sandboxedShellHome(input.scratchDir), scratchDir: input.scratchDir },
@@ -570,37 +558,81 @@ export function reviewShellDeniedReadPrefixes(input: ReviewShellHookInput): stri
 }
 
 /**
- * OpenCode `tool.execute.before` plugin (Jumi-owned, lives under the harness
- * temp root outside the checkout). Rewrites `bash` commands through the shell
- * wrapper and denies reads of the harness temp / agent credential files.
+ * File-reading tools each runner exposes that the hook must deny on
+ * credential paths. The hook `matcher` strings below are built from these
+ * same lists so the matcher and the script branch cannot drift apart.
+ */
+export const CLAUDE_REVIEW_FILE_TOOLS: readonly string[] = ["Read", "Edit", "Write", "Grep", "Glob"];
+export const AGY_REVIEW_SHELL_TOOL = "run_command";
+export const AGY_REVIEW_FILE_TOOLS: readonly string[] = [
+  "view_file",
+  "list_dir",
+  "find_by_name",
+  "grep_search",
+  "write_to_file",
+  "replace_file_content",
+  "multi_replace_file_content",
+];
+export const OPENCODE_REVIEW_FILE_TOOLS: readonly string[] = ["read", "grep", "glob"];
+
+/** Matcher for the Claude/Codex `PreToolUse` hook: Bash plus every file tool. */
+export function claudeReviewHookMatcher(): string {
+  return ["Bash", ...CLAUDE_REVIEW_FILE_TOOLS].join("|");
+}
+
+/** Matcher for the Agy `PreToolUse` hook: shell plus every file/dir tool. */
+export function agyReviewHookMatcher(): string {
+  return [AGY_REVIEW_SHELL_TOOL, ...AGY_REVIEW_FILE_TOOLS].join("|");
+}
+
+/**
+ * OpenCode V2 plugin (Jumi-owned, lives under the harness temp root outside
+ * the checkout). Registered as a plugin *directory* under the `plugins`
+ * (plural) key: V2 loads `index.js` at the directory root and ignores a
+ * single-file path. Rewrites `bash` through the shell wrapper, wraps every
+ * shell creation, and denies reads of the harness temp / credential files.
  */
 export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
   const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
+  const shellEnv = JSON.stringify(sandboxedShellEnv(input.scratchDir));
+  const scrubKeys = JSON.stringify([...REVIEW_SHELL_SCRUB_KEYS]);
+  const fileTools = JSON.stringify([...OPENCODE_REVIEW_FILE_TOOLS]);
   return `// Jumi-owned review shell sandbox (jumi#550). Loaded from the harness temp root, never the checkout.
-export const ReviewShellSandbox = async () => ({
-  "tool.execute.before": async (toolInput, output) => {
+import { Plugin } from "@opencode/plugin";
+export default Plugin.define({
+  id: "jumi-review-shell-sandbox",
+  async setup(ctx) {
     const deniedPrefixes = ${denied};
     const isDenied = (p) => typeof p === "string" && deniedPrefixes.some((d) => d && (p === d || p.startsWith(d + "/")));
-    const tool = toolInput.tool;
-    if (tool === "bash") {
-      const cmd = output.args?.command;
-      if (typeof cmd === "string" && cmd.length > 0) {
-        const prefix = ${JSON.stringify(prefix)};
-        const escaped = "'" + cmd.replace(/'/g, "'\\\\''") + "'";
-        output.args = { ...output.args, command: prefix + " sh -c " + escaped };
+    const prefix = ${JSON.stringify(prefix)};
+    const shellEnv = ${shellEnv};
+    const scrubKeys = ${scrubKeys};
+    const fileTools = ${fileTools};
+    const escape = (cmd) => "'" + cmd.replace(/'/g, "'\\\\''") + "'";
+    await ctx.tool.hook("execute.before", (event) => {
+      const tool = event.tool;
+      const toolInput = event.input ?? {};
+      if (tool === "bash") {
+        const cmd = toolInput.command;
+        if (typeof cmd === "string" && cmd.length > 0) {
+          toolInput.command = prefix + " sh -c " + escape(cmd);
+        }
+        return;
       }
-      return;
-    }
-    if (tool === "read") {
-      const p = output.args?.filePath ?? output.args?.path;
-      if (isDenied(p)) throw new Error("Blocked: review sandbox denies reads of agent credentials");
-      return;
-    }
-    if (tool === "grep" || tool === "glob") {
-      const p = output.args?.path;
-      if (isDenied(p)) throw new Error("Blocked: review sandbox denies search outside the checkout");
-    }
+      if (typeof tool === "string" && fileTools.includes(tool)) {
+        const p = toolInput.filePath ?? toolInput.path;
+        if (isDenied(p)) throw new Error("Blocked: review sandbox denies reads of agent credentials");
+      }
+    });
+    await ctx.shell.hook("create.before", (event) => {
+      const cmd = event.command;
+      if (typeof cmd === "string" && cmd.length > 0) {
+        event.command = prefix + " sh -c " + escape(cmd);
+      }
+      for (const [key, value] of Object.entries(shellEnv)) event.env[key] = value;
+      for (const key of scrubKeys) delete event.env[key];
+    });
   },
 });
 `;
@@ -616,6 +648,7 @@ export const ReviewShellSandbox = async () => ({
 export function claudeReviewHookScriptCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
   const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
+  const fileTools = `(${[...CLAUDE_REVIEW_FILE_TOOLS].map((tool) => JSON.stringify(tool)).join(", ")})`;
   return `#!/usr/bin/env python3
 """Jumi-owned review shell sandbox hook (jumi#550). Rewrites Bash through Landlock, denies credential reads."""
 import json
@@ -643,7 +676,7 @@ def main():
             new_input["command"] = PREFIX + " sh -c '" + cmd.replace("'", "'\\\\''") + "'"
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": new_input}}))
         sys.exit(0)
-    if tool in ("Read", "Edit", "Write"):
+    if tool in ${fileTools}:
         path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if is_denied(path):
             print("Blocked: review sandbox denies reads of agent credentials", file=sys.stderr)
@@ -663,7 +696,7 @@ export function claudeReviewHooksJson(hookCommand: string): string {
       hooks: {
         PreToolUse: [
           {
-            matcher: "Bash|Read|Edit|Write",
+            matcher: claudeReviewHookMatcher(),
             hooks: [{ type: "command", command: hookCommand, timeout: 10 }],
           },
         ],
@@ -691,7 +724,7 @@ export function agyReviewHooksJson(hookCommand: string): string {
       "jumi-review-shell-sandbox": {
         PreToolUse: [
           {
-            matcher: "run_command|write_to_file|replace_file_content|multi_replace_file_content",
+            matcher: agyReviewHookMatcher(),
             hooks: [{ type: "command", command: hookCommand, timeout: 10 }],
           },
         ],
@@ -710,6 +743,8 @@ export function agyReviewHooksJson(hookCommand: string): string {
 export function agyReviewHookScriptCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
   const denied = JSON.stringify(reviewShellDeniedReadPrefixes(input));
+  const fileTools = `(${[...AGY_REVIEW_FILE_TOOLS].map((tool) => JSON.stringify(tool)).join(", ")})`;
+  const shellTool = JSON.stringify(AGY_REVIEW_SHELL_TOOL);
   return `#!/usr/bin/env python3
 """Jumi-owned review shell sandbox hook for Agy (jumi#550). Handles the Agy toolCall envelope."""
 import json
@@ -731,14 +766,14 @@ def main():
     call = event.get("toolCall") or {}
     name = call.get("name", "") or event.get("tool_name", "")
     args = call.get("args") or event.get("tool_input") or {}
-    if name == "run_command":
+    if name == ${shellTool}:
         cmd = args.get("CommandLine", "") or args.get("command", "")
         if isinstance(cmd, str) and cmd:
             wrapped = PREFIX + " sh -c '" + cmd.replace("'", "'\\\\''") + "'"
             print(json.dumps({"decision": "allow", "overwrite": {"CommandLine": wrapped}}))
         sys.exit(0)
-    if name in ("write_to_file", "replace_file_content", "multi_replace_file_content", "Read", "Edit", "Write"):
-        path = args.get("FilePath", "") or args.get("file_path", "") or args.get("path", "")
+    if name in ${fileTools}:
+        path = args.get("FilePath", "") or args.get("file_path", "") or args.get("path", "") or args.get("directory", "") or args.get("Directory", "")
         if is_denied(path):
             print(json.dumps({"decision": "deny", "reason": "Blocked: review sandbox denies reads of agent credentials"}))
             sys.exit(0)
@@ -753,18 +788,17 @@ def main():
             new_input["command"] = PREFIX + " sh -c '" + cmd.replace("'", "'\\\\''") + "'"
             print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": new_input}}))
         sys.exit(0)
+    if tool in ("Read", "Edit", "Write", "Grep", "Glob"):
+        path = tool_input.get("file_path", "") or tool_input.get("path", "")
+        if is_denied(path):
+            print("Blocked: review sandbox denies reads of agent credentials", file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
     sys.exit(0)
 
 if __name__ == "__main__":
     main()
 `;
-}
-
-/** Fake-runner red-team helper: grade that a wrapped shell cannot read `secretPath`. */
-export function reviewRedTeamSecretDenied(secretPath: string, observed: string): boolean {
-  if (!observed) return false;
-  if (observed.includes(secretPath) && /parent-secret|secret-token/.test(observed)) return false;
-  return /Permission denied|Blocked|denied/i.test(observed);
 }
 
 /** Create the sandbox HOME tree under scratch (writable for tools). */
@@ -785,11 +819,13 @@ export async function writeOpenCodeReviewShellPlugin(
 ): Promise<string> {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const xdgConfig = join(harnessTempDir, "xdg-config", "opencode");
-  const pluginDir = join(xdgConfig, "plugin");
+  // V2 loads a plugin *directory* (a single-file path is skipped): the
+  // directory below is registered under the `plugins` (plural) key and V2
+  // loads `index.js` at its root.
+  const pluginDir = join(xdgConfig, "plugin", "jumi-review-shell-sandbox");
   await mkdir(pluginDir, { recursive: true });
-  const pluginPath = join(pluginDir, "jumi-review-shell-sandbox.js");
-  await writeFile(pluginPath, openCodeReviewShellPluginCode(input), { mode: 0o600 });
-  return pluginPath;
+  await writeFile(join(pluginDir, "index.js"), openCodeReviewShellPluginCode(input), { mode: 0o600 });
+  return pluginDir;
 }
 
 /** Write the Claude review shell hook plugin dir under the harness temp (Jumi-owned). */

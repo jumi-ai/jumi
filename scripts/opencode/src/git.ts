@@ -912,16 +912,18 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
         wrapperPath: reviewSandboxWrapperPath(),
       };
-      const pluginPath = await writeOpenCodeReviewShellPlugin(tempRoot, hookInput);
-      // Register the plugin in the Jumi-owned global config (XDG_CONFIG_HOME
-      // is under the outside harness temp, never the checkout). The checkout
-      // cannot shadow it: project config is disabled for reviews.
+      const pluginDir = await writeOpenCodeReviewShellPlugin(tempRoot, hookInput);
+      // Register the plugin directory in the Jumi-owned global config
+      // (XDG_CONFIG_HOME is under the outside harness temp, never the
+      // checkout). V2 requires the `plugins` (plural) key and a directory:
+      // a single-file path is skipped. The checkout cannot shadow it:
+      // project config is disabled for reviews.
       try {
         const globalPath = join(tempRoot, "xdg-config", "opencode", "opencode.json");
         const raw = await readFile(globalPath, "utf8");
         const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const existing = Array.isArray(parsed.plugin) ? (parsed.plugin as unknown[]) : [];
-        if (!existing.includes(pluginPath)) parsed.plugin = [...existing, pluginPath];
+        const existing = Array.isArray(parsed.plugins) ? (parsed.plugins as unknown[]) : [];
+        if (!existing.includes(pluginDir)) parsed.plugins = [...existing, pluginDir];
         await writeFile(globalPath, JSON.stringify(parsed), { mode: 0o600 });
       } catch (err) {
         throw new EngineFailedError(
@@ -929,7 +931,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           false
         );
       }
-      log(`opencode review shell sandbox: bash wrapped via ${pluginPath}`);
+      log(`opencode review shell sandbox: bash wrapped via ${pluginDir}/index.js`);
     }
     const spawnArgv = resolveReviewSpawnSandbox(opts, args, childEnv, log).argv;
     const spawnedAt = Date.now();

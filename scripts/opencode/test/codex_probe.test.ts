@@ -102,9 +102,10 @@ describe("judgeReview", () => {
     workdir: "/work",
     trace: { kind: "review", owner: "o", repo: "r" },
   });
-  test("review argv drops the hook-trust bypass workers need", () => {
+  test("review argv keeps the hook-trust bypass so the fresh hook is not skipped", () => {
     expect(judgeReviewArgv(reviewArgv).ok).toBe(true);
-    expect(judgeReviewArgv(codexArgv({ prompt: "", model: "gpt-5.5", workdir: "/work" })).ok).toBe(false);
+    expect(judgeReviewArgv(codexArgv({ prompt: "", model: "gpt-5.5", workdir: "/work" })).ok).toBe(true);
+    expect(judgeReviewArgv(["codex", "exec", "--skip-git-repo-check", "-"]).ok).toBe(false);
   });
 
   test("passes with the head blocked and the base skill advertised", () => {
