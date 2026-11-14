@@ -27,6 +27,7 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { parseQuotaResetAtMs, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } from "./review_base.ts";
 import { resolveReviewSpawnSandbox } from "./review_sandbox.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
@@ -84,7 +85,7 @@ function codexHardeningArgs(effort: string): string[] {
   ];
 }
 
-function codexConfigArgs(model: string, effort: string): string[] {
+function codexConfigArgs(model: string, effort: string, isReview = false): string[] {
   return [
     "--json",
     "--color",
@@ -96,8 +97,11 @@ function codexConfigArgs(model: string, effort: string): string[] {
     "--sandbox",
     CODEX_SANDBOX,
     "--skip-git-repo-check",
-    // Hooks otherwise wait for a trust approval nobody is there to give.
-    "--dangerously-bypass-hook-trust",
+    // Workers run head hooks with an explicit bypass because nobody is there
+    // to approve trust. Reviews mark the workdir untrusted in a review-only
+    // CODEX_HOME instead, so project hooks never load and there is nothing to
+    // bypass.
+    ...(isReview ? [] : ["--dangerously-bypass-hook-trust"]),
     "--model",
     model,
     ...codexHardeningArgs(effort),
@@ -108,9 +112,11 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * Flags for `codex exec resume <id>`. `--color` is declared on the `exec`
  * command without `global = true`, so it must appear before the `resume`
  * subcommand — after it the real binary rejects it as an unexpected
- * argument. `--json`, `--skip-git-repo-check`,
- * `--dangerously-bypass-hook-trust`, and `-c` are `global = true` and therefore valid
- * on either side; the globals stay before `resume` with `--color` while the
+ * argument. `--json`, `--skip-git-repo-check`, and `-c` are `global = true`
+ * and therefore valid on either side (workers also pass
+ * `--dangerously-bypass-hook-trust` there; reviews omit it because the
+ * workdir is untrusted and no project hook loads); the globals stay before
+ * `resume` with `--color` while the
  * `-c` overrides travel after the thread id. `--model` is made global by
  * upstream `mark_exec_global_args()` and is repeated too: `exec resume` takes
  * the model from this invocation's config, not from the stored thread, so
@@ -120,14 +126,14 @@ function codexConfigArgs(model: string, effort: string): string[] {
  * otherwise turn 2+ would silently turn web search back off and re-enable
  * experimental context management, undoing what turn 1 pinned.
  */
-function codexResumePreArgs(model: string): string[] {
+function codexResumePreArgs(model: string, isReview = false): string[] {
   return [
     "--json",
     "--color",
     "never",
     "--skip-git-repo-check",
-    // Hooks otherwise wait for a trust approval nobody is there to give.
-    "--dangerously-bypass-hook-trust",
+    // Same review rule as the fresh spawn: untrusted workdir, no bypass flag.
+    ...(isReview ? [] : ["--dangerously-bypass-hook-trust"]),
     "--model",
     model,
   ];
@@ -139,9 +145,18 @@ function codexResumeArgs(effort: string): string[] {
 
 export function codexArgv(opts: EngineRunOptions, threadId?: string): string[] {
   const effort = opts.effort || CODEX_DEFAULT_EFFORT;
+  const isReview = opts.trace?.kind === "review";
   if (opts.continueSession && threadId)
-    return ["codex", "exec", ...codexResumePreArgs(opts.model), "resume", threadId, ...codexResumeArgs(effort), "-"];
-  const flags = codexConfigArgs(opts.model, effort);
+    return [
+      "codex",
+      "exec",
+      ...codexResumePreArgs(opts.model, isReview),
+      "resume",
+      threadId,
+      ...codexResumeArgs(effort),
+      "-",
+    ];
+  const flags = codexConfigArgs(opts.model, effort, isReview);
   return ["codex", "exec", ...flags, "-"];
 }
 
@@ -180,7 +195,12 @@ function redactApiKeys(text: string): string {
   return out;
 }
 
-export function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
+export function buildCodexEnv(
+  opts: EngineRunOptions,
+  tempRoot: string,
+  proxyUrl?: string,
+  reviewHome?: string
+): Record<string, string> {
   const scratchDir = join(tempRoot, CHILD_SCRATCH_DIR);
   const base = opts.sanitizeEnv
     ? {
@@ -212,7 +232,11 @@ export function buildCodexEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl
     );
   }
   delete env.XDG_CONFIG_HOME;
-  delete env.CODEX_HOME;
+  // Reviews run with a review-only CODEX_HOME that marks the workdir
+  // untrusted, so the head's `.codex` config, hooks, rules, and MCP servers
+  // never load. Workers keep the inherited HOME behavior (no override).
+  if (reviewHome) env.CODEX_HOME = reviewHome;
+  else delete env.CODEX_HOME;
   for (const key of API_KEY_ENV) {
     const value = process.env[key];
     if (value) env[key] = value;
@@ -285,7 +309,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   await writeFile(tmpPath, prompt);
   const startedAtMs = Date.now();
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
+  let baseStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
+  let reviewHome: string | undefined;
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
@@ -314,6 +340,38 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       });
       throw new EngineFailedError(authMessage, false, { auth: true });
     }
+    const isReview = opts.trace?.kind === "review";
+    if (isReview) {
+      // Review-only home: the workdir is untrusted, so the head's `.codex`
+      // config, hooks, rules, and MCP servers never load. The home lives
+      // under the spawn's temp root (outside the tracked checkout). Auth
+      // still comes from the real HOME: link it in when present so the
+      // review keeps the parent's credential without copying the grant.
+      reviewHome = join(tmpDir, "codex-home");
+      await writeCodexReviewHome(reviewHome, opts.workdir);
+      try {
+        const home = opts.home ?? process.env.HOME ?? opts.workdir;
+        const authSrc = join(home, ".codex", "auth.json");
+        const authDst = join(reviewHome, "auth.json");
+        const { readlink, symlink } = await import("node:fs/promises");
+        const target = await readlink(authSrc).catch(() => undefined);
+        if (target) await symlink(target, authDst).catch(() => undefined);
+        else {
+          const { readFile, writeFile } = await import("node:fs/promises");
+          const raw = await readFile(authSrc, "utf8").catch(() => undefined);
+          if (raw) await writeFile(authDst, raw, { mode: 0o600 }).catch(() => undefined);
+        }
+      } catch {
+        // Best-effort: API-key and local modes have no HOME auth file.
+      }
+      // Base skills replace the head's for the duration of the spawn. The
+      // head's `.codex` stays on disk (readable as diff content) but never
+      // loads (untrusted above); skills have no trust gate, so they are
+      // hidden here and restored on cleanup.
+      if (opts.baseInstructionsDir) {
+        baseStaging = await stageBaseSkillsIntoWorkdir(opts.workdir, opts.baseInstructionsDir, log);
+      }
+    }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` Codex scans,
     // cleaned up before return so the tree stays clean.
@@ -335,7 +393,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         throw new EngineFailedError("codex spawn refused: git token present but no credential proxy available", true);
       }
     }
-    const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url);
+    const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url, reviewHome);
     // Review spawns run confined: the wrapper argv fails closed when
     // Landlock is unavailable, so pull code never runs unsandboxed.
     const codexSpawnArgv = resolveReviewSpawnSandbox(opts, args, codexEnv, log).argv;
@@ -512,6 +570,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     throw err;
   } finally {
     await imageStaging?.cleanup().catch(() => undefined);
+    await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }

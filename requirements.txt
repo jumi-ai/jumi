@@ -1,0 +1,5 @@
+# Python packages baked into the reviewer/worker images for CPython 3.13.
+# Renovate's pip manager keeps these pinned (==); the Dockerfile installs
+# them with `uv pip install --system --break-system-packages --python <3.13> -r requirements.txt`.
+pytest==9.2.0
+PyYAML==6.0.3
