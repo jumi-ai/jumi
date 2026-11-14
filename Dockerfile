@@ -433,7 +433,7 @@ COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 # The reviewer manifest above is inherited from `runtime`; the worker appends
 # the JDK so its `<installed_tools>` block also names java.
 RUN set -eu; \
-  printf 'java %s\n' "$(java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
+  printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   cat /app/installed-tools.txt; \
   test -s /app/installed-tools.txt
 USER 10001:10001
