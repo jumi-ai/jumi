@@ -106,6 +106,6 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 ## forge_webfetch.ts, child_git_proxy.ts, opencode-*.json, attachments.ts
 
 - Each runner's forge-host deny is proven against its installed binary, including subagents and agent-level overrides where the runner has them (#112, #135, #325).
-- Checkouts are trusted, so their hooks, plugins, skills, and config load on every runner. A repository still cannot lift the forge-host deny.
+- Checkouts are trusted for workers, so their hooks, plugins, skills, and config load on every worker runner. A repository still cannot lift the forge-host deny. Reviews are the exception: they load config and instructions from the base branch only, so the head never configures its reviewer.
 - The child environment holds no forge credential (#314).
 - Parent credentials go only to the configured forge origin, and count and byte caps hold at the exact limit (#315).

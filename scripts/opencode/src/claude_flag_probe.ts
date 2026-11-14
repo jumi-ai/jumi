@@ -177,6 +177,8 @@ interface StubState {
   toolCall?: { name: string; input: Record<string, unknown> };
   /** A model request carried the marker from the checkout's `AGENTS.md`. */
   instructionsSeen: boolean;
+  /** A model request carried the review base marker (`REVIEW_BASE_MARKER`). */
+  baseSeen: boolean;
 }
 
 function sse(events: readonly { event: string; data: unknown }[]): string {
@@ -211,6 +213,7 @@ function startStubAnthropic(state: StubState) {
       // text turn.
       const body = await req.text();
       if (body.includes(PROBE_INSTRUCTIONS_MARKER)) state.instructionsSeen = true;
+      if (body.includes(REVIEW_BASE_MARKER)) state.baseSeen = true;
       const call = body.includes('"tool_result"') ? undefined : state.toolCall;
       const block = call
         ? { type: "tool_use", id: "toolu_jumi_probe", name: call.name, input: {} }
@@ -320,6 +323,85 @@ async function seedCheckoutProbe(home: string, workdir: string): Promise<void> {
   );
 }
 
+/** Base-branch marker for the review case: the head marker must never reach a review. */
+export const REVIEW_BASE_MARKER = "JUMI-CLAUDE-BASE-AGENTS-MD-PROBE-REACHED";
+/** Base-branch skill for the review case: the head skill must not load, this one must. */
+export const REVIEW_BASE_SKILL = "jumi-probe-base-skill";
+/** Head-only skill for the review case. */
+export const REVIEW_HEAD_SKILL = "jumi-probe-head-skill";
+/** Head hook marker: a `Stop` hook in the head's settings that must never run on a review. */
+export const REVIEW_HOOK_MARKER = "jumi-claude-review-hook-ran";
+
+/** A review checkout: head AGENTS.md, head skill, and a head Stop hook. */
+async function seedReviewCheckout(workdir: string, dir: string): Promise<void> {
+  await mkdir(join(workdir, ".claude", "skills", REVIEW_HEAD_SKILL), { recursive: true });
+  await writeFile(
+    join(workdir, ".claude", "skills", REVIEW_HEAD_SKILL, "SKILL.md"),
+    `---\nname: ${REVIEW_HEAD_SKILL}\ndescription: "head skill"\n---\nHead skill body.\n`
+  );
+  await writeFile(join(workdir, "AGENTS.md"), `${PROBE_INSTRUCTIONS_MARKER}\n`);
+  await writeFile(
+    join(workdir, ".claude", "settings.json"),
+    JSON.stringify({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: `touch ${join(dir, REVIEW_HOOK_MARKER)}` }] }] },
+    })
+  );
+}
+
+/** The staged base dir for the review case: base AGENTS.md plus one base skill. */
+async function seedReviewBase(dir: string): Promise<string> {
+  const base = join(dir, "review-base");
+  await mkdir(join(base, "skills", REVIEW_BASE_SKILL), { recursive: true });
+  await writeFile(
+    join(base, "skills", REVIEW_BASE_SKILL, "SKILL.md"),
+    `---\nname: ${REVIEW_BASE_SKILL}\ndescription: "base skill"\n---\nBase skill body.\n`
+  );
+  await writeFile(join(base, "AGENTS.md"), `${REVIEW_BASE_MARKER}\n`);
+  return base;
+}
+
+export interface ReviewJudgment {
+  readonly headSeen: boolean;
+  readonly baseSeen: boolean;
+  readonly skills: readonly string[];
+  readonly hookRan: boolean;
+}
+
+/** Review isolation: head config never loads, base instructions and skills do. */
+export function judgeReview(judgment: ReviewJudgment): CaseResult[] {
+  return [
+    {
+      name: "review: the head's AGENTS.md does not reach the model",
+      ok: !judgment.headSeen,
+      observed: judgment.headSeen ? "HEAD MARKER LEAKED into a model request" : "head marker absent",
+    },
+    {
+      name: "review: the base AGENTS.md reaches the model",
+      ok: judgment.baseSeen,
+      observed: judgment.baseSeen ? "base marker seen in a model request" : "no model request carried the base marker",
+    },
+    {
+      name: "review: the head skill is not discoverable",
+      ok: !judgment.skills.includes(REVIEW_HEAD_SKILL),
+      observed: judgment.skills.includes(REVIEW_HEAD_SKILL)
+        ? "head skill listed"
+        : `skills: ${judgment.skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "review: the base skill is discoverable",
+      ok: judgment.skills.some((skill) => skill === REVIEW_BASE_SKILL || skill.endsWith(`:${REVIEW_BASE_SKILL}`)),
+      observed: judgment.skills.some((skill) => skill === REVIEW_BASE_SKILL || skill.endsWith(`:${REVIEW_BASE_SKILL}`))
+        ? REVIEW_BASE_SKILL
+        : `skills: ${judgment.skills.join(", ") || "<none>"}`,
+    },
+    {
+      name: "review: the head Stop hook does not run",
+      ok: !judgment.hookRan,
+      observed: judgment.hookRan ? "head hook RAN" : "did not run",
+    },
+  ];
+}
+
 /** Keyed on the binary's own refusal: an offline fetch fails too, without proving any deny. */
 export function judgeForgeDeny(run: RunResult): CaseResult {
   const refusal = `denied access to domain:${PROBE_FORGE_HOST}`;
@@ -329,6 +411,24 @@ export function judgeForgeDeny(run: RunResult): CaseResult {
     ok,
     observed: ok ? refusal : `no refusal for ${PROBE_FORGE_HOST}: ${run.stdout.slice(-300)}`,
   };
+}
+
+/** Skill ids the binary reported in the init event of a run. */
+export function reviewInitSkills(run: RunResult): string[] {
+  for (const line of run.stdout.split("\n")) {
+    if (!line.trim().startsWith("{")) continue;
+    try {
+      const event = JSON.parse(line) as {
+        type?: unknown;
+        subtype?: unknown;
+        skills?: unknown;
+      };
+      if (event.type === "system" && event.subtype === "init" && Array.isArray(event.skills)) {
+        return event.skills.map((skill) => String(skill));
+      }
+    } catch {}
+  }
+  return [];
 }
 
 /** The `Skill` tool reported it loaded the checkout skill. */
@@ -554,7 +654,7 @@ export function judgeEffortLevel(level: string, argv: readonly string[], run: Ru
 }
 
 async function main(): Promise<number> {
-  const state: StubState = { paths: [], instructionsSeen: false };
+  const state: StubState = { paths: [], instructionsSeen: false, baseSeen: false };
   const server = startStubAnthropic(state);
   const origin = `http://127.0.0.1:${server.port}`;
   const spans: CapturedSpan[] = [];
@@ -629,6 +729,55 @@ async function main(): Promise<number> {
       const swapped = withFlagValue(argv, entry.flag, bad);
       const run = await runClaudeArgv(swapped, origin, home, workdir);
       results.push(judgeNegativeRun(entry, bad, run));
+    }
+
+    // Review case: the head must not configure its reviewer. The review
+    // checkout carries a head marker, a head skill, and a head Stop hook;
+    // the staged base dir carries a different marker and one base skill.
+    // The review argv (setting-sources user + base plugin + base prompt)
+    // must show the base and hide the head.
+    const reviewDir = await mkdtemp(join(tmpdir(), "jumi-claude-probe-review-"));
+    const reviewWorkdir = join(reviewDir, "work");
+    await mkdir(reviewWorkdir, { recursive: true });
+    try {
+      await seedReviewCheckout(reviewWorkdir, reviewDir);
+      const reviewBase = await seedReviewBase(reviewDir);
+      const { stageBaseSkillsForClaude } = await import("./review_base.ts");
+      const { claudeReviewBasePrompt } = await import("./claude.ts");
+      const reviewBasePlugin = await stageBaseSkillsForClaude(join(reviewDir, "base-skills"), reviewBase);
+      const reviewBasePrompt = await claudeReviewBasePrompt(reviewBase);
+      const reviewArgv = claudeArgv(
+        {
+          model: PROBE_MODEL,
+          effort: PROBE_EFFORT,
+          workdir: reviewWorkdir,
+          trace: { kind: "review", owner: "kirmanak", repo: "jumi" },
+        },
+        undefined,
+        reviewBasePlugin,
+        reviewBasePrompt ?? undefined
+      );
+      if (!reviewArgv.includes("--append-system-prompt") || !reviewArgv.includes("--plugin-dir")) {
+        results.push({
+          name: "review argv carries the base plugin and base instructions",
+          ok: false,
+          observed: reviewArgv.join(" "),
+        });
+      }
+      state.instructionsSeen = false;
+      state.baseSeen = false;
+      state.toolCall = undefined;
+      const reviewRun = await runClaudeArgv(reviewArgv, origin, home, reviewWorkdir, tracing);
+      results.push(
+        ...judgeReview({
+          headSeen: state.instructionsSeen,
+          baseSeen: state.baseSeen,
+          skills: reviewInitSkills(reviewRun),
+          hookRan: await Bun.file(join(reviewDir, REVIEW_HOOK_MARKER)).exists(),
+        })
+      );
+    } finally {
+      await rm(reviewDir, { recursive: true, force: true });
     }
   } finally {
     server.stop(true);

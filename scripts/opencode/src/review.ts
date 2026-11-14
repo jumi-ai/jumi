@@ -51,7 +51,7 @@ import {
 } from "./prompt.ts";
 import type { ProvenanceLookup, ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, isQuotaWaitError, quotaStuckReasonForText } from "./quota.ts";
-import { throwIfQuotaWait } from "./quota_wait.ts";
+import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import {
   CONTRACT_PATH,
   contractEnvIssues,
@@ -73,6 +73,7 @@ import {
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
 } from "./repo_settings.ts";
+import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -84,6 +85,7 @@ import {
   type ReviewSuggestionCounts,
   runnerLabelForStamp,
 } from "./review_suggestions.ts";
+import type { RunnerCooldownConfig, RunnerCooldownStore } from "./runner_cooldown.ts";
 import {
   appendRunnerStamp,
   describeAttemptOrder,
@@ -266,6 +268,14 @@ export interface ReviewOptions {
    * the random source; `ordered` keeps configured order.
    */
   failedRunner?: string | null;
+  /** Per-runner cooldowns: cooled runners are skipped for fresh picks. */
+  runnerCooldowns?: RunnerCooldownStore;
+  /** Durations for per-runner cooldowns. */
+  runnerCooldownConfig?: RunnerCooldownConfig;
+  /** Injectable clock for cooldown tests. */
+  cooldownNowMs?: () => number;
+  /** Current credential fingerprints by runner name; clears auth cooldowns on rotation. */
+  authFingerprints?: Record<string, string | undefined>;
 }
 
 export type PersistReviewResult =
@@ -1860,13 +1870,28 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   // Opt-in random-start distribution: exclusions first, then uniformly pick a
   // start from the eligible chain and rotate. A retry after a runner failure
   // starts on the next runner instead of drawing again. Continuations and
-  // artifact-recovery calls reuse this order via the engine wrapper.
+  // artifact-recovery calls reuse this order via the engine wrapper. Cooled
+  // runners are excluded before the pick so a dead runner is not rediscovered.
   const runnerSelection = resolveRunnerSelection({ selection: opts.runnerSelection ?? undefined });
+  const cooldownOrdering = opts.runnerCooldowns
+    ? {
+        cooldowns: opts.runnerCooldowns,
+        nowMs: opts.cooldownNowMs?.() ?? Date.now(),
+        logger: log,
+        ...(opts.authFingerprints ? { fingerprints: opts.authFingerprints } : {}),
+      }
+    : undefined;
   if (effectiveChain && effectiveChain.length > 1) {
     const rotated = opts.failedRunner
-      ? orderChainForRetry(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random, opts.failedRunner)
-      : orderChainForJob(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random);
-    if (rotated.length === effectiveChain.length) {
+      ? orderChainForRetry(
+          effectiveChain,
+          runnerSelection,
+          opts.runnerRandom ?? Math.random,
+          opts.failedRunner,
+          cooldownOrdering
+        )
+      : orderChainForJob(effectiveChain, runnerSelection, opts.runnerRandom ?? Math.random, cooldownOrdering);
+    if (rotated.length === effectiveChain.length || (cooldownOrdering && rotated.length > 0)) {
       logDiagnostic(log, "runner_selection", {
         review: `${repoFullName}#${pr.number}`,
         head: reviewedHeadSha,
@@ -1876,6 +1901,14 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       });
     }
     effectiveChain = rotated;
+  } else if (effectiveChain && cooldownOrdering && effectiveChain.length > 0) {
+    const filtered = orderChainForJob(
+      effectiveChain,
+      runnerSelection,
+      opts.runnerRandom ?? Math.random,
+      cooldownOrdering
+    );
+    if (filtered.length !== effectiveChain.length) effectiveChain = filtered;
   }
 
   const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
@@ -1889,6 +1922,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     remainingLeaseMs: opts.remainingLeaseMs,
     extendLease: opts.extendLease,
     logger: log,
+    ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+    ...(opts.runnerCooldownConfig ? { runnerCooldownConfig: opts.runnerCooldownConfig } : {}),
+    ...(opts.cooldownNowMs ? { cooldownNowMs: opts.cooldownNowMs } : {}),
+    ...(opts.authFingerprints ? { authFingerprints: opts.authFingerprints } : {}),
   });
 
   await postReviewStatus(
@@ -2207,6 +2244,40 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       log
     );
 
+    // Base-branch instructions and skills. The head never configures its
+    // reviewer: AGENTS.md/CLAUDE.md and both skill roots come from the base
+    // commit via read-only git and are staged outside the tracked checkout
+    // (under the spawn's `.jumi-tmp`). Runners load that copy through their
+    // own project-off switches; the head's copies stay on disk as diff
+    // content only.
+    const baseInstructionsDir = join(opts.workspace, ".jumi-tmp", "base-instructions");
+    let baseInstructions: { text: string; truncated: boolean } | undefined;
+    try {
+      const staged = await stageBaseReviewInstructions(
+        { git, cwd: opts.workspace, env: gitCmdEnv, baseRef: pr.base.sha },
+        baseInstructionsDir,
+        { maxBytes: opts.maxReviewMdBytes ?? DEFAULT_MAX_REVIEW_MD_BYTES }
+      );
+      const parts: string[] = [];
+      for (const name of ["AGENTS.md", "CLAUDE.md"] as const) {
+        const text = await readStagedBaseFile(baseInstructionsDir, name);
+        if (text?.trim()) parts.push(text.trim());
+      }
+      if (parts.length > 0) {
+        const text = parts.join("\n\n");
+        baseInstructions = { text, truncated: staged.truncated };
+      }
+      logDiagnostic(log, "review_base", {
+        review: reviewLabel,
+        files: staged.files.length,
+        skills: staged.skills.length,
+        bytes: staged.bytes,
+        truncated: staged.truncated,
+      });
+    } catch (err) {
+      log(`base instructions unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const prompt = buildPROpenedPrompt({
       repo: repoInfo,
       pr,
@@ -2216,6 +2287,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       thread: fitted.thread,
       delta,
       reviewMd,
+      ...(baseInstructions ? { baseInstructions } : {}),
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
@@ -2264,6 +2336,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         logger: log,
         abortSignal: opts.abortSignal,
         ...(extra?.continueSession ? { continueSession: true } : {}),
+        // Staged base-branch instructions for the runners' project-off
+        // switches (outside the tracked checkout). Workers never set this.
+        baseInstructionsDir,
         trace: {
           kind: "review",
           owner: opts.owner,
@@ -2286,6 +2361,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           fallbackModel: effectiveFallbackModel,
           chain: effectiveChain,
           previousError: opts.previousError,
+          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(engineResult.message);
         if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
@@ -2500,14 +2578,31 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       // quota (including credit exhaustion, which never waits) falls through
       // to the day-long skip below.
       // The eligible chain keeps exclusions through the wait-budget decision:
-      // an excluded author family is never a later model.
+      // an excluded author family is never a later model. When a healthy
+      // runner remains outside cooldown, do not park: rethrow so the queue
+      // retries immediately on the next runner instead of idling for an hour.
       throwIfQuotaWait({
         err,
         model: opts.model,
         fallbackModel: effectiveFallbackModel,
         chain: effectiveChain,
         previousError: opts.previousError,
+        ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+        ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+        ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
       });
+      if (opts.runnerCooldowns && effectiveChain?.length) {
+        if (
+          hasHealthyRunnerForQuota(
+            effectiveChain,
+            opts.runnerCooldowns,
+            opts.cooldownNowMs?.() ?? Date.now(),
+            opts.authFingerprints
+          )
+        ) {
+          throw err;
+        }
+      }
       const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         await markReviewQuotaStuckState(

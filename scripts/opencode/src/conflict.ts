@@ -1018,6 +1018,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
           await sticky(quotaReason, pr.number);
@@ -1125,6 +1128,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 fallbackModel: opts.fallbackModel,
                 chain: jobChain,
                 previousError: opts.previousError,
+                ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+                ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+                ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
               });
               const quotaReason = quotaStuckReasonForText(continued.message);
               await sticky(quotaReason, pr.number);
@@ -1144,6 +1150,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             fallbackModel: opts.fallbackModel,
             chain: jobChain,
             previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
@@ -1254,6 +1263,9 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           fallbackModel: opts.fallbackModel,
           chain: jobChain,
           previousError: opts.previousError,
+          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
         const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
         await sticky(quotaReason, pr.number).catch(() => undefined);

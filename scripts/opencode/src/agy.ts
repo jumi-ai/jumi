@@ -27,6 +27,7 @@ import { resolveOpenCodePrompt } from "./git.ts";
 import { stageWorkdirImageSkills } from "./image_skills.ts";
 import { looksLikeInfraStderr, looksLikeProviderUnavailable } from "./infra.ts";
 import { QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
+import { stageBaseSkillsIntoWorkdir } from "./review_base.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
 
 /** stream-json keeps per-step usage even when the child is killed before `result`. */
@@ -286,6 +287,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const tmpDir = await mkdtemp(join(tempRoot, "agy-prompt-"));
   const startedAtMs = Date.now();
   let imageStaging: { cleanup: () => Promise<void> } | undefined;
+  let baseStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
 
   if (opts.abortSignal?.aborted) {
@@ -324,11 +326,19 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     // and a settings file that cannot take the deny fails the spawn closed.
     await ensureAgyForgeDeny(home, forgeDenyHost(opts.extraEnv, opts.forgeUrl));
     const conversationId = opts.continueSession ? await readConversationId(opts.workdir) : undefined;
-    const args = agyArgv(opts, promptArg, conversationId);
+    // Reviews hide the head's `.agents/skills` (Antigravity has no
+    // project-config switch) and stage the base branch's skills instead.
+    // The forge deny still comes from HOME, so a head settings file that
+    // tries to allow the forge back cannot lift it. Base instructions arrive
+    // through the prompt the parent built from the base branch.
+    if (opts.trace?.kind === "review" && opts.baseInstructionsDir) {
+      baseStaging = await stageBaseSkillsIntoWorkdir(opts.workdir, opts.baseInstructionsDir, log);
+    }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` the CLI scans,
     // cleaned up afterwards so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
+    const args = agyArgv(opts, promptArg, conversationId);
     const proc = (() => {
       try {
         return Bun.spawn(args, {
@@ -510,6 +520,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     throw err;
   } finally {
     await imageStaging?.cleanup().catch(() => undefined);
+    await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
