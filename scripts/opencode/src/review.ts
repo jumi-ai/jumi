@@ -64,12 +64,15 @@ import type { CiGateWait } from "./repo_settings.ts";
 import {
   applyRepoChain,
   compileReviewExcludePatterns,
+  loadDefaultBranchSettings,
   loadEffectiveBlockingQuestionAuthors,
   loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
+  setupForKind,
 } from "./repo_settings.ts";
+import { runRepoSetupForJob } from "./repo_setup.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -1958,6 +1961,61 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       GIT_TERMINAL_PROMPT: "0",
     };
 
+    // Repository preparation step (`.jumi.yml` `setup`, default branch only).
+    // Once per job, after the checkout is ready and before the first engine
+    // spawn. Skipped reviews never reach here, so no setup runs for them.
+    let repoSetupBlock: string | undefined;
+    {
+      const defaultBranchName = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+      const { load: setupLoad } = await loadDefaultBranchSettings(
+        forgeApi,
+        opts.owner,
+        opts.repo,
+        defaultBranchName || undefined,
+        log
+      );
+      const setupRunner = (
+        opts as unknown as {
+          repoSetupRunScript?: (args: {
+            workdir: string;
+            run: string;
+            timeoutMs: number;
+            env: Record<string, string>;
+          }) => Promise<{
+            status: "ok" | "failed" | "timeout";
+            exitCode?: number | null;
+            output: string;
+            durationMs: number;
+          }>;
+        }
+      ).repoSetupRunScript;
+      const setupResult = await runRepoSetupForJob({
+        workdir: opts.workspace,
+        kind: "review",
+        load: setupLoad,
+        auth: gitAuth,
+        owner: opts.owner,
+        repo: opts.repo,
+        home: opts.home,
+        log,
+        git,
+        gitEnv: gitCmdEnv,
+        ...(setupRunner ? { runScript: setupRunner } : {}),
+      });
+      if (setupResult.ran) {
+        repoSetupBlock = setupResult.promptBlock;
+        if (setupResult.state !== "ok") {
+          const onFailure = setupForKind(setupLoad, "review")?.onFailure ?? "continue";
+          if (onFailure === "fail") {
+            const reason = setupResult.failureReason ?? "repository setup failed";
+            await opts.persistResult?.({ kind: "skip", reason });
+            await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
+            return { status: "skipped", reason };
+          }
+        }
+      }
+    }
+
     let delta: ReviewDelta | undefined;
     let scopeNotes = fileNotes;
     if (previousReview) {
@@ -2096,6 +2154,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       recentHistory,
       blockingQuestions: isBlockingQuestionAuthor(pr.user?.login, effectiveBlockingAuthors),
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      ...(repoSetupBlock ? { repoSetupBlock } : {}),
     });
 
     logDiagnostic(log, "review_prompt", {

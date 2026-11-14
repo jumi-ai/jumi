@@ -136,6 +136,8 @@ export interface PROpenedPromptOptions {
   blockingQuestions?: boolean;
   /** Repository-relative paths left out of this review per `.jumi.yml` `review_exclude`. */
   excludedFiles?: readonly string[];
+  /** Repository setup block (`<repo_setup ...>`) for `.jumi.yml` `setup`. Absent means no setup ran. */
+  repoSetupBlock?: string;
 }
 
 /** Hard cap for the `<ci_results>` block: at most 50 checks and 4 KiB. */
@@ -255,6 +257,7 @@ export function buildPROpenedPrompt(opts: PROpenedPromptOptions): string {
     ? formatCiResults(opts.ciResults.headSha, opts.ciResults.checks, opts.ciResults.pendingOptional)
     : "";
   const formattedCi = ciBlock ? `\n${ciBlock}` : "";
+  const formattedSetup = opts.repoSetupBlock ? `\n${opts.repoSetupBlock}` : "";
   const commentsXml = formatPrCommentsXml(thread?.comments ?? []);
   const pullReviewsXml = formatPullReviewsXml(thread?.pullReviews ?? []);
   const reviewCommentsXml = formatReviewCommentsXml(thread?.reviewComments ?? []);
@@ -296,7 +299,7 @@ ${formatPRFiles(prFiles, { excluded: excludedSet })}
     <title>${escapeXml(pr.title)}</title>
     <body>${escapeXml(pr.body ?? "")}</body>
 ${commentsXml ? `${commentsXml}\n` : ""}${pullReviewsXml ? `${pullReviewsXml}\n` : ""}${reviewCommentsXml ? `${reviewCommentsXml}\n` : ""}${changedFilesXml}
-  </pull_request>${deltaXml}${formattedExcluded}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}${formattedCi}
+  </pull_request>${deltaXml}${formattedExcluded}${linkedXml ? `\n${linkedXml}` : ""}${formattedNotes}${formattedCi}${formattedSetup}
 </gitea_action_context>
 ${reviewMdXml}${recentHistoryXml}${blockingXml}
 

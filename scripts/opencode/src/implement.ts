@@ -70,7 +70,8 @@ import type { Forge, IssueApi, Pull, Tracker } from "./ports.ts";
 import { normalizeForge, ProvenanceCollector, type ProvenanceStore } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import { applyRepoChain } from "./repo_settings.ts";
+import { applyRepoChain, loadDefaultBranchSettings, setupForKind } from "./repo_settings.ts";
+import { runRepoSetupForJob } from "./repo_setup.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -699,7 +700,67 @@ async function implementExternalIssue(
       }
       await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
       throwIfAborted(opts.abortSignal);
-      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(effectiveJob));
+      let repoSetupBlock: string | undefined;
+      {
+        const { load: setupLoad } = await loadDefaultBranchSettings(
+          forge,
+          owner,
+          repo,
+          effectiveJob.defaultBranch || undefined,
+          log
+        );
+        const setupRunner = (
+          opts as unknown as {
+            repoSetupRunScript?: (args: {
+              workdir: string;
+              run: string;
+              timeoutMs: number;
+              env: Record<string, string>;
+            }) => Promise<{
+              status: "ok" | "failed" | "timeout";
+              exitCode?: number | null;
+              output: string;
+              durationMs: number;
+            }>;
+          }
+        ).repoSetupRunScript;
+        const setupResult = await runRepoSetupForJob({
+          workdir: worktree,
+          kind: "implement",
+          load: setupLoad,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          ...(setupRunner ? { runScript: setupRunner } : {}),
+        });
+        if (setupResult.ran) {
+          repoSetupBlock = setupResult.promptBlock;
+          if (setupResult.state !== "ok") {
+            const onFailure = setupForKind(setupLoad, "implement")?.onFailure ?? "continue";
+            if (onFailure === "fail") {
+              const reason = setupResult.failureReason ?? "repository setup failed";
+              if (typeof briefTracker.postBriefComment === "function") {
+                try {
+                  await briefTracker.postBriefComment(ref, reason);
+                } catch {}
+              }
+              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+                pushLanded: false,
+                logger: log,
+              });
+              return { status: "skipped", reason };
+            }
+          }
+        }
+      }
+      const externalTaskMarkdown = repoSetupBlock
+        ? `${buildTaskMarkdown(effectiveJob)}\n${repoSetupBlock}\n`
+        : buildTaskMarkdown(effectiveJob);
+      await writeFile(join(worktree, "JUMI_TASK.md"), externalTaskMarkdown);
       await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
       await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
       // External briefs have no stable issue number (issueNumber is always 0),
@@ -1048,6 +1109,61 @@ export async function implementIssue(
       await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
       throwIfAborted(opts.abortSignal);
+      let repoSetupBlock: string | undefined;
+      {
+        const { load: setupLoad } = await loadDefaultBranchSettings(
+          opts.api,
+          owner,
+          repo,
+          opts.job.defaultBranch || undefined,
+          log
+        );
+        const setupRunner = (
+          opts as unknown as {
+            repoSetupRunScript?: (args: {
+              workdir: string;
+              run: string;
+              timeoutMs: number;
+              env: Record<string, string>;
+            }) => Promise<{
+              status: "ok" | "failed" | "timeout";
+              exitCode?: number | null;
+              output: string;
+              durationMs: number;
+            }>;
+          }
+        ).repoSetupRunScript;
+        const setupResult = await runRepoSetupForJob({
+          workdir: worktree,
+          kind: "implement",
+          load: setupLoad,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          ...(setupRunner ? { runScript: setupRunner } : {}),
+        });
+        if (setupResult.ran) {
+          repoSetupBlock = setupResult.promptBlock;
+          if (setupResult.state !== "ok") {
+            const onFailure = setupForKind(setupLoad, "implement")?.onFailure ?? "continue";
+            if (onFailure === "fail") {
+              const reason = setupResult.failureReason ?? "repository setup failed";
+              await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, reason).catch(
+                () => undefined
+              );
+              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+                pushLanded: false,
+                logger: log,
+              });
+              return { status: "skipped", reason };
+            }
+          }
+        }
+      }
       const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
       const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
       const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
@@ -1057,7 +1173,8 @@ export async function implementIssue(
         await writeHandoffToWorktree(worktree, injectedHandoff);
       };
       const writeTaskFiles = async (job: IssueJob) => {
-        await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(job));
+        const taskMarkdown = repoSetupBlock ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n` : buildTaskMarkdown(job);
+        await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
         if (queue.length > 0) {
           await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
         } else {

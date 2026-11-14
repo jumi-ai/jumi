@@ -85,9 +85,12 @@ import { throwIfQuotaWait } from "./quota_wait.ts";
 import {
   applyRepoChain,
   effectiveIgnoreConflictsLabel,
+  loadDefaultBranchSettings,
   loadRepoFollowupPolicy,
   loadRepoSettings,
+  setupForKind,
 } from "./repo_settings.ts";
+import { runRepoSetupForJob } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -179,6 +182,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   /** Stored previous-round note; saved from the worktree before sentinels are stripped. */
   handoffStore?: HandoffStore;
   handoffKey?: HandoffKey;
+  /** Repository setup block (`<repo_setup ...>`) to append to `JUMI_TASK.md`. */
+  repoSetupBlock?: string;
   /** Called with the runner that ran, before any engine failure is thrown. */
   onRunner?: (runner: RunnerStamp, chainIndex?: number) => void;
 }
@@ -558,7 +563,10 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   }
   if (remaining.length > 0) {
     throwIfAborted(opts.abortSignal);
-    await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(opts.job));
+    const mergeTaskMarkdown = opts.repoSetupBlock
+      ? `${buildTaskMarkdown(opts.job)}\n${opts.repoSetupBlock}\n`
+      : buildTaskMarkdown(opts.job);
+    await writeFile(join(worktree, "JUMI_TASK.md"), mergeTaskMarkdown);
     await writeFile(
       join(worktree, "JUMI_CONFLICT.md"),
       await buildConflictMarkdown({
@@ -938,6 +946,56 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         body: currentIssue.body ?? "",
         htmlUrl: currentIssue.html_url,
       };
+      let conflictSetupBlock: string | undefined;
+      {
+        const { load: setupLoad } = await loadDefaultBranchSettings(
+          opts.api,
+          owner,
+          repo,
+          opts.job.defaultBranch || undefined,
+          log
+        );
+        const setupRunner = (
+          opts as unknown as {
+            repoSetupRunScript?: (args: {
+              workdir: string;
+              run: string;
+              timeoutMs: number;
+              env: Record<string, string>;
+            }) => Promise<{
+              status: "ok" | "failed" | "timeout";
+              exitCode?: number | null;
+              output: string;
+              durationMs: number;
+            }>;
+          }
+        ).repoSetupRunScript;
+        const setupResult = await runRepoSetupForJob({
+          workdir: worktree,
+          kind: "conflict",
+          load: setupLoad,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          ...(setupRunner ? { runScript: setupRunner } : {}),
+        });
+        if (setupResult.ran) {
+          conflictSetupBlock = setupResult.promptBlock;
+          if (setupResult.state !== "ok") {
+            const onFailure = setupForKind(setupLoad, "conflict")?.onFailure ?? "continue";
+            if (onFailure === "fail") {
+              const reason = setupResult.failureReason ?? "repository setup failed";
+              await sticky(reason, pr.number);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "skipped", reason };
+            }
+          }
+        }
+      }
       let ciMarkdown: string | undefined;
       try {
         const ci = await inspectCi({
@@ -986,6 +1044,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           jobId: opts.jobId ?? opts.job.delivery,
           handoffStore,
           handoffKey,
+          ...(conflictSetupBlock ? { repoSetupBlock: conflictSetupBlock } : {}),
           onPid: loop.engineOnPid(opts.onPid),
           onRunner: (r) => {
             runner = r;
@@ -1043,10 +1102,10 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           closerPrNumber: pr.number,
           continueOpenCode: async (issue) => {
             throwIfAborted(opts.abortSignal);
-            await writeFile(
-              join(worktree, "JUMI_TASK.md"),
-              buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))
-            );
+            const continuedTaskMarkdown = conflictSetupBlock
+              ? `${buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))}\n${conflictSetupBlock}\n`
+              : buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api));
+            await writeFile(join(worktree, "JUMI_TASK.md"), continuedTaskMarkdown);
             await stageIssueAttachments({
               api: opts.api,
               owner,

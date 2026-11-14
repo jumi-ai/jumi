@@ -107,8 +107,11 @@ import {
   effectiveIgnoreConflictsLabel,
   effectiveTrustedSenderLogins,
   isSuggestionFollowupEnabled,
+  loadDefaultBranchSettings,
   loadRepoSettings,
+  setupForKind,
 } from "./repo_settings.ts";
+import { runRepoSetupForJob } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -1531,6 +1534,56 @@ export async function implementFollowUp(
         body: currentIssue.body ?? "",
         htmlUrl: currentIssue.html_url,
       };
+      let followupSetupBlock: string | undefined;
+      {
+        const { load: setupLoad } = await loadDefaultBranchSettings(
+          opts.api,
+          owner,
+          repo,
+          opts.job.defaultBranch || undefined,
+          log
+        );
+        const setupRunner = (
+          opts as unknown as {
+            repoSetupRunScript?: (args: {
+              workdir: string;
+              run: string;
+              timeoutMs: number;
+              env: Record<string, string>;
+            }) => Promise<{
+              status: "ok" | "failed" | "timeout";
+              exitCode?: number | null;
+              output: string;
+              durationMs: number;
+            }>;
+          }
+        ).repoSetupRunScript;
+        const setupResult = await runRepoSetupForJob({
+          workdir: worktree,
+          kind: "followup",
+          load: setupLoad,
+          auth: loop.auth,
+          owner,
+          repo,
+          home: opts.home,
+          log,
+          git: loop.runConfiguredGit,
+          gitEnv: loop.env,
+          ...(setupRunner ? { runScript: setupRunner } : {}),
+        });
+        if (setupResult.ran) {
+          followupSetupBlock = setupResult.promptBlock;
+          if (setupResult.state !== "ok") {
+            const onFailure = setupForKind(setupLoad, "followup")?.onFailure ?? "continue";
+            if (onFailure === "fail") {
+              const reason = setupResult.failureReason ?? "repository setup failed";
+              await sticky(reason, pr.number);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "skipped", reason };
+            }
+          }
+        }
+      }
       let mergeResult: MergeDefaultResult;
       if (leftToAuthor) {
         mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
@@ -1562,6 +1615,7 @@ export async function implementFollowUp(
             ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
             handoffStore,
             handoffKey,
+            ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
             onPid: loop.engineOnPid(opts.onPid),
             onRunner: (r) => {
               runner = r;
@@ -1623,7 +1677,10 @@ export async function implementFollowUp(
       }
 
       throwIfAborted(opts.abortSignal);
-      await writeFile(join(worktree, "JUMI_TASK.md"), buildTaskMarkdown(taskJob));
+      const followupTaskMarkdown = followupSetupBlock
+        ? `${buildTaskMarkdown(taskJob)}\n${followupSetupBlock}\n`
+        : buildTaskMarkdown(taskJob);
+      await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
       // Parent-staged inputs for the follow-up child: the issue's attachments
       // as well as any on the PR. Parent credentials only; the child has no
       // forge read access.
