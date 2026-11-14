@@ -136,7 +136,11 @@ import {
 import type { IssueJob, ReviewJob } from "./types.ts";
 import {
   blockingOpenQuestionCount,
+  countMaintainerQuestionFindings,
+  countQuestionFindings,
   isBlockingQuestionAuthor,
+  isMaintainerOnlyTrailerText,
+  isMaintainerQuestionInline,
   isQuestionInline,
   parseCheckLine,
   trailerSuggestionCount,
@@ -749,6 +753,80 @@ function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
   return items.jumiInlines.filter(isUnresolvedInline);
 }
 
+/**
+ * A Jumi pull review whose only open questions are maintainer-only:
+ * a complete success trailer with zero suggestions, every body `❓` marked
+ * `❓ maintainer:`, and every open question inline for that review marked
+ * `❓ maintainer:`. At least one question (body or inline) must remain;
+ * failures and suggestion trailers never count.
+ */
+function isMaintainerOnlyPullReview(
+  review: PullReview,
+  allJumiInlines: readonly InlineComment[],
+  botUsername?: string
+): boolean {
+  const body = review.body ?? review.content ?? "";
+  const trailer = lastCheckTrailer(body);
+  if (trailer?.state !== "success") return false;
+  if (trailerSuggestionCount(trailer.reason) !== 0) return false;
+  const bodyQuestions = countQuestionFindings(body);
+  const bodyMaintainers = countMaintainerQuestionFindings(body);
+  if (bodyQuestions !== bodyMaintainers) return false;
+  const inlines = allJumiInlines.filter(
+    (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === review.id
+  );
+  let inlineQuestions = 0;
+  for (const inline of inlines) {
+    if (!isBlockingQuestionInline(inline, botUsername)) continue;
+    inlineQuestions++;
+    if (!isMaintainerQuestionInline(inline.path, inline.body)) return false;
+  }
+  if (bodyQuestions + inlineQuestions === 0) return false;
+  return true;
+}
+
+/**
+ * Whether every unhandled item is a maintainer-only `❓`: no unhandled
+ * human comments, inlines, or reviews, and every unhandled Jumi finding
+ * is maintainer-only. Then the worker must not start a round only to
+ * answer it; the board keeps the PR visible as waiting on a maintainer.
+ */
+function onlyMaintainerQuestionsPending(
+  items: FollowUpItems,
+  state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">,
+  botUsername: string
+): boolean {
+  const handledComments = new Set(state.handledCommentIds);
+  const handledReviews = new Set(state.handledReviewIds);
+  const handledFindings = new Set(
+    state.handledReviewFindings.map((finding) => reviewFindingKey(finding.id, finding.sha))
+  );
+  // Human feedback always needs the worker.
+  if (items.inlines.some((comment) => !handledComments.has(comment.id))) return false;
+  if (items.reviews.some((review) => !handledReviews.has(review.id))) return false;
+  let foundMaintainer = false;
+  for (const comment of items.comments) {
+    const finding = reviewFindingFromComment(comment);
+    if (!finding) {
+      if (!handledComments.has(comment.id)) return false;
+      continue;
+    }
+    if (handledFindings.has(reviewFindingKey(finding.id, finding.sha))) continue;
+    if (!isMaintainerOnlyTrailerText(comment.body)) return false;
+    foundMaintainer = true;
+  }
+  for (const review of items.jumiFindingReviews ?? []) {
+    const finding = reviewFindingFromReview(review);
+    const unhandled = finding
+      ? !handledFindings.has(reviewFindingKey(finding.id, finding.sha))
+      : !handledReviews.has(review.id);
+    if (!unhandled) continue;
+    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername)) return false;
+    foundMaintainer = true;
+  }
+  return foundMaintainer;
+}
+
 function earlierJumiReviews(items: FollowUpItems, lastReview?: Comment): Comment[] {
   const skip = lastReview?.id;
   const out: Comment[] = [];
@@ -871,6 +949,10 @@ export async function needsFollowUp(opts: {
     effectiveTrusted
   );
   if (!hasUnhandledFollowUpItems(items, state)) return false;
+  // Maintainer-only ❓ needs a human (forge action or scope decision), not
+  // a worker round: filing/closing another issue, labels/assignment, or
+  // "ship part 1 now or keep going" cannot be answered from the branch.
+  if (onlyMaintainerQuestionsPending(items, state, opts.botUsername)) return false;
   if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
     return false;
   }
@@ -1213,6 +1295,11 @@ export async function implementFollowUp(
   const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
   const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
   let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
+  // Maintainer-only ❓ is answered on the forge, not from the branch: never
+  // start a worker round only for it.
+  if (hasFeedback && onlyMaintainerQuestionsPending(pendingItems, state, opts.botUsername)) {
+    hasFeedback = false;
+  }
   let requiredContexts: readonly string[] | undefined;
   if (ciGateWaitUpFront !== "all" && ciGateWaitUpFront !== "none") {
     requiredContexts = await resolveRequiredCiContexts(opts.api, {

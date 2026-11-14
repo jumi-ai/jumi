@@ -168,9 +168,15 @@ describe("operator board read API", () => {
     await store.sits.remember("kirmanak", "demo", 31, "ci-not-completed");
     await store.sits.remember("kirmanak", "demo", 32, "draft-wip");
     await store.sits.remember("kirmanak", "demo", 33, "repo-mutex");
+    await store.sits.remember("kirmanak", "demo", 34, "waiting-maintainer");
     const groups = await buildBoardGroups(store);
     expect(groups.needs_kick).toHaveLength(0);
-    expect(groups.sitting.map((item) => item.reason).sort()).toEqual(["ci-not-completed", "draft-wip", "repo-mutex"]);
+    expect(groups.sitting.map((item) => item.reason).sort()).toEqual([
+      "ci-not-completed",
+      "draft-wip",
+      "repo-mutex",
+      "waiting-maintainer",
+    ]);
     for (const item of groups.sitting) {
       expect(item.kick).toBeUndefined();
       expect(typeof item.message).toBe("string");
@@ -178,6 +184,8 @@ describe("operator board read API", () => {
     const mutex = groups.sitting.find((item) => item.reason === "repo-mutex");
     expect(mutex?.message?.toLowerCase()).toContain("already working on this pull");
     expect(mutex?.message?.toLowerCase()).not.toContain("locked");
+    const waiting = groups.sitting.find((item) => item.reason === "waiting-maintainer");
+    expect(waiting?.message?.toLowerCase()).toContain("waiting on a maintainer");
   });
 
   test("sit duplicating an in-progress row is hidden, not a second problem", async () => {
