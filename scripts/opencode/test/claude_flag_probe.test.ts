@@ -10,11 +10,15 @@ import {
   judgeEffortLevel,
   judgeForgeDeny,
   judgeNegativeRun,
+  judgeReview,
   nonsenseValue,
   PROBE_CHECKOUT_SKILL,
   PROBE_FLEET_SKILL,
   PROBE_FORGE_HOST,
   pinnedFlagValues,
+  REVIEW_BASE_SKILL,
+  REVIEW_HEAD_SKILL,
+  reviewInitSkills,
   withFlagValue,
 } from "../src/claude_flag_probe.ts";
 import { CLAUDE_EFFORT_LEVELS } from "../src/runners.ts";
@@ -263,5 +267,28 @@ describe("judgeCheckoutContext", () => {
     expect(ok(judgeCheckoutContext(run(both, []), true))[3]).toBe(false);
     const failed = { type: "user", tool_use_result: { success: false, commandName: PROBE_CHECKOUT_SKILL } };
     expect(ok(judgeCheckoutContext(run(both, [failed]), true))[3]).toBe(false);
+  });
+});
+
+describe("judgeReview", () => {
+  const base = [`shared:${REVIEW_BASE_SKILL}`, "other"];
+  const good = { headSeen: false, baseSeen: true, skills: base, hookRan: false };
+
+  test("passes with the base shown and the head hidden", () => {
+    expect(judgeReview(good).every((result) => result.ok)).toBe(true);
+    expect(
+      reviewInitSkills({
+        code: 0,
+        stdout: `${JSON.stringify({ type: "system", subtype: "init", skills: base })}\n`,
+        stderr: "",
+        timedOut: false,
+      })
+    ).toEqual(base);
+  });
+
+  test("fails when the head marker, head skill, or head hook leaks", () => {
+    const leaked = { headSeen: true, baseSeen: false, skills: [REVIEW_HEAD_SKILL], hookRan: true };
+    expect(judgeReview(leaked).every((result) => result.ok)).toBe(false);
+    expect(judgeReview({ ...good, skills: [REVIEW_HEAD_SKILL] }).some((result) => !result.ok)).toBe(true);
   });
 });
