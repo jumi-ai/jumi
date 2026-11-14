@@ -254,6 +254,36 @@ export async function writeFollowUpLatch(
   await store.put(key, { followup: state });
 }
 
+/**
+ * Resolve a held suggestion `pending` on a path with no `pr` snapshot yet
+ * (before the pull is fetched). Reads the latch itself; a no-op without a
+ * consumed hold. Never throws.
+ */
+async function resolveHeldFromLatch(
+  api: HoldStatusApi,
+  latches: SkipLatchStore,
+  latchKey: SkipLatchKey,
+  fallback: { owner: string; repo: string; headSha: string },
+  kind: "completed" | "skipped",
+  reason?: string
+): Promise<void> {
+  try {
+    const hold = (await readFollowUpLatch(latches, latchKey)).suggestionHold;
+    if (!hold?.consumed) return;
+    const count = hold.count ?? 0;
+    if (!count) return;
+    const sha = hold.headSha ?? fallback.headSha;
+    if (!sha) return;
+    const description =
+      kind === "completed"
+        ? suggestionHoldCompletedDescription(count)
+        : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
+    await postSuggestionHoldSuccess(api, fallback.owner, fallback.repo, sha, description);
+  } catch {
+    // Best-effort.
+  }
+}
+
 export async function readFollowUpState(path: string): Promise<FollowUpState> {
   const latch = skipLatchStoreFromPath(path);
   if (!latch) return emptyFollowUpState();
@@ -1262,7 +1292,22 @@ export async function implementFollowUp(
     });
 
   const assigned = await recheckAssignedAndOpen(claimed, opts);
-  if (assigned) return assigned;
+  if (assigned) {
+    // Unassigned/closed (cancelled) and issue-load failures (skipped) end the
+    // job here with no waiter left: the worker tick has no backstop for these
+    // results, so resolve the held `pending` before leaving. The live-claim
+    // early result above intentionally does NOT resolve: the claim holder is
+    // still running and will settle the hold itself.
+    await resolveHeldFromLatch(
+      opts.api as unknown as HoldStatusApi,
+      latches,
+      latchKey,
+      { owner, repo, headSha: opts.job.headSha ?? "" },
+      "skipped",
+      assigned.status === "cancelled" ? "job cancelled" : assigned.reason
+    );
+    return assigned;
+  }
 
   const { loadRepoConventions: loadFollowupConventions, defaultRepoConventions: defaultFollowupConventions } =
     await import("./repo_settings.ts");
@@ -1280,6 +1325,14 @@ export async function implementFollowUp(
     followupPrefix
   );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
+    await resolveHeldFromLatch(
+      opts.api as unknown as HoldStatusApi,
+      latches,
+      latchKey,
+      { owner, repo, headSha: opts.job.headSha ?? "" },
+      "skipped",
+      "no open jumi closing PR"
+    );
     await forgetClaim();
     return { status: "skipped", reason: "no open jumi closing PR" };
   }
@@ -1297,13 +1350,6 @@ export async function implementFollowUp(
     effectiveBlocking,
     policy.followupOnSuggestions
   );
-
-  const branch = pr.head.ref;
-  claim.branch = branch;
-  if (!branch || branch === opts.job.defaultBranch) {
-    await forgetClaim();
-    return { status: "skipped", reason: "refusing to follow up on the default branch" };
-  }
 
   const state = await readFollowUpLatch(latches, latchKey);
   // Resolve a held suggestion `pending` to `success` when this round will not
@@ -1329,6 +1375,14 @@ export async function implementFollowUp(
       // Best-effort.
     }
   };
+
+  const branch = pr.head.ref;
+  claim.branch = branch;
+  if (!branch || branch === opts.job.defaultBranch) {
+    await resolveHeld("skipped", "default branch");
+    await forgetClaim();
+    return { status: "skipped", reason: "refusing to follow up on the default branch" };
+  }
   const pendingItems = await collectFollowUpItems(
     opts.api,
     owner,
@@ -1398,6 +1452,7 @@ export async function implementFollowUp(
     (opts.job.trigger?.reviewId !== undefined && state.handledReviewIds.includes(opts.job.trigger.reviewId))
   ) {
     if (!ciWake) {
+      await resolveHeld("skipped", "comment already handled");
       await forgetClaim();
       return { status: "skipped", reason: "comment already handled" };
     }
@@ -1452,6 +1507,7 @@ export async function implementFollowUp(
   }
   if (!hasFeedback) {
     if (ci.pending) {
+      await resolveHeld("skipped", "CI still pending");
       await forgetClaim();
       return { status: "skipped", reason: "CI still pending" };
     }

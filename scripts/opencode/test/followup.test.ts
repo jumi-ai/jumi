@@ -4988,4 +4988,330 @@ describe("suggestion hold latch", () => {
       expect(statuses[0]?.description).toContain("follow-up completed");
     });
   });
+
+  test("an already-handled trigger resolves a held pending to success", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "abc",
+        handledCommentIds: [55],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+        suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
+      });
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "comment already handled" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("comment already handled");
+    });
+  });
+
+  test("CI still pending resolves a held pending to success", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+        suggestionHold: { consumed: true, headSha: "headsha", count: 1 },
+      });
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [
+          { id: 1, context: "build", status: "failure" },
+          { id: 2, context: "test", status: "pending" },
+        ],
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+        sleep: async () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "CI still pending" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("CI still pending");
+    });
+  });
+
+  test("an unassigned issue (cancelled) resolves a held pending to success", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+        suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
+      });
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        getIssue: async () => makeIssue({ state: "closed" }),
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "cancelled" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("job cancelled");
+    });
+  });
+
+  test("no open jumi closing PR resolves a held pending to success", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+        suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
+      });
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "no open jumi closing PR" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("no open jumi closing PR");
+    });
+  });
+
+  test("default-branch refusal resolves a held pending to success", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 1,
+        lastHeadSha: "abc",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: "2026-05-23T00:00:00Z",
+        suggestionHold: { consumed: true, headSha: "headsha", count: 1 },
+      });
+      const base = jumiPr();
+      const pr = { ...base, head: { ...base.head, ref: "main" } };
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        listOpenPulls: async () => [pr],
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "refusing to follow up on the default branch" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("default branch");
+    });
+  });
+
+  test("an in-loop skip (issue closed after OpenCode) resolves a held pending to success", async () => {
+    const { markSuggestionHoldConsumed } = await import("../src/suggestion_hold.ts");
+    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
+    await withDirs(async (home, workdir) => {
+      await markSuggestionHoldConsumed(
+        memorySkipLatchesFor(home),
+        { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+        "headsha",
+        2
+      );
+      let gets = 0;
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const api = makeApi({
+        getIssue: async () => {
+          gets++;
+          return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
+        },
+        // deno-lint-ignore no-explicit-any
+        ...({
+          createCommitStatus: async (
+            _owner: string,
+            _repo: string,
+            _sha: string,
+            status: { state: string; description?: string }
+          ) => {
+            statuses.push(status);
+            return status;
+          },
+        } as unknown as Record<string, unknown>),
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "issue is closed" });
+      expect(statuses).toHaveLength(1);
+      expect(statuses[0]).toMatchObject({ state: "success" });
+      expect(statuses[0]?.description).toContain("follow-up skipped");
+    });
+  });
 });
