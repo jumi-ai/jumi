@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runAgy } from "../src/agy.ts";
 import { runClaude } from "../src/claude.ts";
@@ -260,7 +260,12 @@ describe("review sandbox red-team (real wrapper)", () => {
       const scratch = join(checkout, ".jumi-tmp", "scratch");
       const { mkdir } = await import("node:fs/promises");
       await mkdir(scratch, { recursive: true });
-      const secret = join(tmpdir(), `sandbox-secret-${process.pid}`);
+      // The secret must live outside every allowed path: `/tmp` is a
+      // read-only sandbox path, so a secret sibling under tmpdir() stays
+      // readable wherever tmpdir() is /tmp (e.g. GitHub Actions). HOME is
+      // never in this test's rules (homeDir is undefined), so it is denied.
+      const secretDir = await mkdtemp(join(homedir(), "sandbox-secret-"));
+      const secret = join(secretDir, "secret");
       await writeFile(secret, "parent-secret-value", { mode: 0o600 });
       try {
         const rules = reviewSandboxRules({ workdir: checkout, scratchDir: scratch });
@@ -297,7 +302,7 @@ describe("review sandbox red-team (real wrapper)", () => {
         expect(leaked.out).not.toContain("JUMI_");
         expect(leaked.out).not.toContain("MCP");
       } finally {
-        await rm(secret, { force: true });
+        await rm(secretDir, { recursive: true, force: true });
       }
     } finally {
       await rm(checkout, { recursive: true, force: true });
