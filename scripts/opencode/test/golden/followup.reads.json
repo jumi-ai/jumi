@@ -1,0 +1,1596 @@
+{
+  "followup.test.ts::1": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "followup.test.ts::10": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::100": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::101": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::102": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::103": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::104": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::105": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::106": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::107": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::108": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::109": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "followup.test.ts::11": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::110": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::111": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::112": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::113": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::114": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listActionJobs": 4,
+      "listCheckRuns": 2,
+      "listCommitStatuses": 2,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::115": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1
+    }
+  },
+  "followup.test.ts::116": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "followup.test.ts::117": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "followup.test.ts::118": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::12": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::13": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::14": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::15": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::16": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::17": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::18": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::19": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::2": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::20": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::21": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::22": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::23": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::24": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::25": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::26": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::27": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::28": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::29": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::3": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 2,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::30": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::31": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::32": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::33": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::34": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::35": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::36": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::37": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::38": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::39": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::4": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 2,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::40": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::41": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::42": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::43": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::44": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::45": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::46": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::47": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::48": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::49": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::5": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::50": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::51": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::52": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::53": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::54": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::55": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::56": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::57": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::58": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::59": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::6": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::60": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::61": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::62": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::63": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::64": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::65": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getCollaboratorPermission": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::66": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::67": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::68": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::69": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::7": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::70": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getActionJobLogs": 1,
+      "getIssue": 1,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::71": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 2,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::72": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 2,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::73": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::74": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 2,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::75": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::76": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 2,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::77": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::78": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getIssue": 1,
+      "listActionJobs": 4,
+      "listCheckRuns": 2,
+      "listCommitStatuses": 2,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::79": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getBranch": 1,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::8": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "getPR": 2,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::80": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 2,
+      "getIssue": 3,
+      "listActionJobs": 4,
+      "listCheckRuns": 2,
+      "listCommitStatuses": 2,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::81": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getActionJobLogs": 1,
+      "getIssue": 1,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::82": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getActionJobLogs": 1,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::83": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::84": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::85": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::86": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::87": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::88": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::89": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::9": {
+    "name": "implementFollowUp",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getCollaboratorPermission": 2,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 2,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::90": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::91": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::92": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::93": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::94": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::95": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::96": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::97": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::98": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "followup.test.ts::99": {
+    "name": "needsFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  }
+}

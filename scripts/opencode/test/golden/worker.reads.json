@@ -1,0 +1,465 @@
+{
+  "worker.test.ts::1": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getPR": 1,
+      "getRepo": 1,
+      "getRepoFile": 1
+    }
+  },
+  "worker.test.ts::10": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::11": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::12": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::13": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::14": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::15": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::16": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::17": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::18": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::19": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::2": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::20": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::21": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::22": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::23": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::24": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::25": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::26": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::27": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::28": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::29": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::3": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::30": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::31": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::32": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::33": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::34": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::35": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::36": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::37": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::38": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::39": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::4": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::40": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::41": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::42": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::43": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::44": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::45": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::46": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::47": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "getPR": 2,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::48": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::49": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::5": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::50": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::51": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::52": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "getPR": 2,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::53": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::54": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 2,
+      "getCollaboratorPermission": 1,
+      "getIssue": 2,
+      "getPR": 2,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::55": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getRepo": 1,
+      "listIssueDependencies": 2,
+      "listOpenPulls": 1,
+      "listRepoIssues": 1
+    }
+  },
+  "worker.test.ts::56": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::57": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::58": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::59": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::6": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::60": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::61": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::62": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::63": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::64": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::65": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::66": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::67": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::68": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::7": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::8": {
+    "name": "processWorkerTick",
+    "reads": {}
+  },
+  "worker.test.ts::9": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  }
+}

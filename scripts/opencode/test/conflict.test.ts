@@ -5,12 +5,16 @@ import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
 import {
   CONFLICT_TIMEOUT_MS,
-  implementConflict,
   readConflictState,
+  implementConflict as realImplementConflict,
   shouldIncrementRound,
   shouldResetConflictRound,
   writeConflictState,
 } from "../src/conflict.ts";
+import { traced } from "./golden/trace.ts";
+
+const implementConflict = traced("implementConflict", realImplementConflict);
+
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { handoffKey, MemoryHandoffStore } from "../src/handoff.ts";

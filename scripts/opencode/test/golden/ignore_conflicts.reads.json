@@ -1,0 +1,18 @@
+{
+  "ignore_conflicts.test.ts::1": {
+    "name": "needsConflict",
+    "reads": {}
+  },
+  "ignore_conflicts.test.ts::2": {
+    "name": "needsConflict",
+    "reads": {}
+  },
+  "ignore_conflicts.test.ts::3": {
+    "name": "needsConflict",
+    "reads": {}
+  },
+  "ignore_conflicts.test.ts::4": {
+    "name": "needsConflict",
+    "reads": {}
+  }
+}

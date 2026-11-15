@@ -1,0 +1,89 @@
+{
+  "pickup.test.ts::1": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 4,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::2": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getRepo": 4,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::3": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getActionJobLogs": 1,
+      "getRepo": 4,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::4": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getRepo": 4,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::5": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getCollaboratorPermission": 1,
+      "getRepo": 4,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::6": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getRepo": 4,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  },
+  "pickup.test.ts::7": {
+    "name": "classifyCloserWork",
+    "reads": {
+      "getRepo": 4,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
+    }
+  }
+}

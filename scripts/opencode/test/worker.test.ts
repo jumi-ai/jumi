@@ -29,7 +29,15 @@ import {
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { isQuotaStuck, readStuckLatch, readStuckState, writeStuckState } from "../src/stuck.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
-import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
+import {
+  handleIssueCancel,
+  processWorkerTick as realProcessWorkerTick,
+  reclaimExpiredWorkerJobs,
+} from "../src/worker.ts";
+import { traced } from "./golden/trace.ts";
+
+const processWorkerTick = traced("processWorkerTick", realProcessWorkerTick);
+
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import {

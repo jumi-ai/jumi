@@ -1,0 +1,1414 @@
+{
+  "handover.test.ts::1": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "Please fix tests\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::10": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::11": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::12": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::13": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::14": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::15": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::16": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::17": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "no-closer"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::18": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 7,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::19": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 7,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::2": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "Please fix tests\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::20": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::21": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "drop the helper\n<!-- jumi-check: success; 2 suggestions -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::22": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "ok\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::23": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "no trailer",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::24": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::25": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::26": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::27": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "waiting-maintainer"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::28": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: round cap)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 2 suggestions -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::29": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "1 suggestion (follow-up skipped: unassigned)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 1 suggestion -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::3": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::30": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: mode restricted)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 2 suggestions -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::31": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "1 suggestion (follow-up skipped: head moved)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: 💡 simpler: x\n<!-- jumi-check: success; 1 suggestion -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::4": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::5": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::6": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::7": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "updated",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::8": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          7,
+          "<!-- jumi-stuck:kirmanak/demo#7 -->\nstuck: too many follow-up rounds"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::9": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  }
+}
