@@ -542,6 +542,52 @@ export function rewriteClosingToRefs(text: string, issueNumber: number): string 
   return result + text.slice(last);
 }
 
+/**
+ * Whether `text` carries an explicit list of remaining Done items. A bare
+ * `Refs #N` with none of these markers is treated as finished work: the
+ * parent publishes it with the closing keyword instead of a non-closing
+ * reference. Markers are intentionally narrow (unchecked boxes and
+ * remaining/TODO/follow-up wording) so "Partial work." alone does not count;
+ * the worker must name what is left.
+ */
+export function hasRemainingWorkList(text: string): boolean {
+  const visible = visibleClosingText(text);
+  if (/^\s*(?:[-*]|\d+[.)])\s*\[ \]/m.test(visible)) return true;
+  return (
+    /remaining/i.test(visible) ||
+    /what's left|what is left|things? left/i.test(visible) ||
+    /left to do/i.test(visible) ||
+    /still (to do|needs?|missing|open|remaining)/i.test(visible) ||
+    /\btodo\b/i.test(visible) ||
+    /\bnot (done|finished|complete|yet)\b/i.test(visible) ||
+    /follow-?ups?/i.test(visible)
+  );
+}
+
+export function rewriteRefsToClosing(text: string, issueNumber: number): string {
+  // Replace visible non-closing references to the worked issue (`Refs #N`,
+  // `Part of #N`, `Progress toward(s) #N`, `Related to #N`) with a closing
+  // `Fixes #N` reference. Other issues keep their wording. Code spans,
+  // fenced blocks, and quotes never close on the forge, so like the
+  // closing-to-refs direction they are left untouched.
+  const pattern = new RegExp(
+    String.raw`\b(?:refs?|part of|progress towards?|related to)\s*:?\s*#${issueNumber}\b`,
+    "gi"
+  );
+  let result = "";
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index ?? 0;
+    const matched = match[0];
+    if (!isVisibleClosingMatch(text, start, matched.length)) continue;
+    result += text.slice(last, start);
+    result += `Fixes #${issueNumber}`;
+    last = start + matched.length;
+  }
+  if (last === 0) return text;
+  return result + text.slice(last);
+}
+
 function pullRequestText(
   issueNumber: number,
   fileContents: string | null | undefined,
@@ -556,8 +602,24 @@ function pullRequestText(
     text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
     if (!text) return fallback;
   }
+  if (refs) {
+    if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
+    if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
+    return `${text}\n\n${fallback}`;
+  }
+  // Default (`closes`) mode: a closing keyword always stays. A non-closing
+  // `Refs #N` stays only with an explicit remaining-work list; a bare Refs
+  // is finished work, so the parent publishes the closing keyword. This
+  // keeps a worker-written bare `Refs #N` from reaching a merged PR without
+  // a closing reference.
   if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
-  if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
+  if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) {
+    if (hasRemainingWorkList(text)) return text;
+    const rewritten = parentOwnedProse(rewriteRefsToClosing(text, issueNumber));
+    if (!rewritten) return fallback;
+    if (closesIssuePattern(issueNumber).test(visibleClosingText(rewritten))) return rewritten;
+    return `${text}\n\n${fallback}`;
+  }
   return `${text}\n\n${fallback}`;
 }
 

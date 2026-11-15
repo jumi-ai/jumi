@@ -159,9 +159,19 @@ describe("buildPullRequestBody", () => {
     expect(buildPullRequestBody(12, "Fixed #12")).toBe("Fixed #12");
   });
 
-  test("keeps an existing Refs #n instead of appending Fixes #n", () => {
-    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12")).toBe("Caches categories.\n\nRefs #12");
-    expect(buildPullRequestBody(12, "Refs #12")).toBe("Refs #12");
+  test("keeps a Refs #n with an explicit remaining-work list", () => {
+    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12\n\nRemaining:\n- one more case")).toBe(
+      "Caches categories.\n\nRefs #12\n\nRemaining:\n- one more case"
+    );
+    expect(buildPullRequestBody(12, "Refs #12\n\nTODO: backfill test")).toBe("Refs #12\n\nTODO: backfill test");
+    expect(buildPullRequestBody(12, "Refs #12\n\n- [ ] backfill test")).toBe("Refs #12\n\n- [ ] backfill test");
+  });
+
+  test("rewrites a bare Refs #n without a remaining-work list to the closing keyword", () => {
+    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12")).toBe("Caches categories.\n\nFixes #12");
+    expect(buildPullRequestBody(12, "Refs #12")).toBe("Fixes #12");
+    expect(buildPullRequestBody(12, "Partial work.\n\nRefs #12")).toBe("Partial work.\n\nFixes #12");
+    expect(buildPullRequestBody(12, "`Refs #12`")).toBe("`Refs #12`\n\nFixes #12");
   });
 
   test("still appends Fixes #n when a different issue is mentioned", () => {
