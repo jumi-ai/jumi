@@ -27,13 +27,17 @@ import {
   isCheckHandled,
   jobMatchesCheck,
   latestStatuses,
-  needsCiFollowUp,
+  needsCiFollowUp as realNeedsCiFollowUp,
   recordCiHandled,
   resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
   summarizeCiChecks,
 } from "../src/ci.ts";
+import { traced } from "./golden/trace.ts";
+
+const needsCiFollowUp = traced("needsCiFollowUp", realNeedsCiFollowUp);
+
 import { followUpStatePath } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";

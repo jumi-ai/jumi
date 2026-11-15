@@ -1,0 +1,1774 @@
+{
+  "worker.test.ts::1": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi worker jobs are turned off in this repository's settings (`.jumi.yml` `mode: review-only`). Reviews still run; assigning or labelling will not start work."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "method": "markPublished",
+        "reason": "repository mode is review-only",
+        "seam": "ledger",
+        "seq": 1,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "abc123",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: mode restricted)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/19"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::10": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "newsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 127,
+        "seam": "ledger",
+        "seq": 0
+      },
+      {
+        "method": "markPublished",
+        "reason": "PR head changed from oldsha to newsha",
+        "seam": "ledger",
+        "seq": 2,
+        "state": "skipped"
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::11": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-a"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::12": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-b"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::13": {
+    "claimExists": null,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "ci": {},
+          "conflict": {},
+          "followup": {},
+          "stuck": {}
+        },
+        "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstopped"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::14": {
+    "claimExists": null,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "ci": {},
+          "conflict": {},
+          "followup": {},
+          "stuck": {}
+        },
+        "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstopped"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-holder"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::15": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::16": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::17": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-2"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::18": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-3"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::19": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::2": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "no-changes",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "no-changes"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::20": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::21": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::22": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::23": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::24": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "blocked on #196",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::25": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "assigned PR is the job for this repo",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::26": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "no-changes",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "no-changes"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::27": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 3
+      },
+      {
+        "headSha": "newsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "conflict",
+        "prNumber": 3,
+        "seam": "ledger",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::28": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 3
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "conflict",
+        "prNumber": 127,
+        "seam": "ledger",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::29": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 3
+      },
+      {
+        "headSha": "next",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "conflict",
+        "prNumber": 127,
+        "seam": "ledger",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::3": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "no-changes",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "no-changes"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::30": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::31": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::32": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::33": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::34": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::35": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::36": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::37": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::38": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::39": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::4": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::40": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::41": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::42": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::43": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::44": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::45": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "Jumi failed: infra/spawn",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "failed"
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::46": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::47": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          {
+            "base": "main",
+            "body": "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->",
+            "head": "jumi/issue-12-fix-the-thing",
+            "title": "Fix the thing"
+          }
+        ],
+        "method": "createPullRequest",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nOpened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 3,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::48": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::49": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::5": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-a"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::50": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::51": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: usage limit exceeded\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [],
+            "quota": {
+              "reason": "stuck: usage limit exceeded",
+              "updatedAt": "<iso>"
+            },
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "issueNumber": 12,
+        "method": "setIssueSkipReason",
+        "owner": "kirmanak",
+        "reason": "stuck: usage limit exceeded",
+        "repo": "demo",
+        "seam": "ledger",
+        "seq": 3
+      },
+      {
+        "method": "markPublished",
+        "reason": "stuck: usage limit exceeded",
+        "seam": "ledger",
+        "seq": 4,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 5
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 6
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::52": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          {
+            "base": "main",
+            "body": "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · anthropic/claude-sonnet-4-6_\n<!-- jumi-pr-body:end -->",
+            "head": "jumi/issue-12-fix-the-thing",
+            "title": "Fix the thing"
+          }
+        ],
+        "method": "createPullRequest",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nOpened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n_Jumi · opencode · anthropic/claude-sonnet-4-6_"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 3,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::53": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::54": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          {
+            "base": "main",
+            "body": "<!-- jumi-pr-body:start -->\nFixes #12\n\n_Jumi · opencode · anthropic/claude-sonnet-4-6_\n<!-- jumi-pr-body:end -->",
+            "head": "jumi/issue-12-fix-the-thing",
+            "title": "Fix the thing"
+          }
+        ],
+        "method": "createPullRequest",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nOpened https://gitea.kirmanak.stream/kirmanak/demo/pulls/3\n\n_Jumi · opencode · anthropic/claude-sonnet-4-6_"
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 3,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::55": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          9,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is implementing this issue."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::56": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::57": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::58": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::59": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::6": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-b"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::60": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::61": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::62": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::63": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::64": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::65": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "reason": "stuck: cannot resolve conflicts",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::66": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::67": {
+    "claimExists": null,
+    "effects": [
+      {
+        "issueNumber": 12,
+        "method": "setIssueSkipReason",
+        "owner": "kirmanak",
+        "reason": "stuck: repeated error",
+        "repo": "demo",
+        "seam": "ledger",
+        "seq": 0
+      },
+      {
+        "method": "markPublished",
+        "reason": "stuck: repeated error",
+        "seam": "ledger",
+        "seq": 1,
+        "state": "skipped"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::68": {
+    "claimExists": null,
+    "effects": [
+      {
+        "issueNumber": 12,
+        "method": "setIssueSkipReason",
+        "owner": "kirmanak",
+        "reason": "stuck: cannot resolve conflicts",
+        "repo": "demo",
+        "seam": "ledger",
+        "seq": 0
+      },
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 1,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12,
+          "implement-latch"
+        ],
+        "op": "remember",
+        "seam": "sits",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-1"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::7": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-a"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  },
+  "worker.test.ts::8": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-b"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "idle"
+  },
+  "worker.test.ts::9": {
+    "claimExists": null,
+    "effects": [
+      {
+        "method": "markPublished",
+        "seam": "ledger",
+        "seq": 0,
+        "state": "succeeded"
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "botUsername": "jumi",
+      "leasedBy": "worker-b"
+    },
+    "latchAfter": null,
+    "latchBefore": null,
+    "name": "processWorkerTick",
+    "result": "processed"
+  }
+}

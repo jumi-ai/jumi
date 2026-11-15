@@ -22,17 +22,22 @@ import {
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
-  implementFollowUp,
   isBlockingQuestionInline,
   isJumiPullReviewFinding,
   isJumiReviewFinding,
-  needsFollowUp,
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
   pickLatestJumiReview,
   readFollowUpState,
+  implementFollowUp as realImplementFollowUp,
+  needsFollowUp as realNeedsFollowUp,
   writeFollowUpState,
 } from "../src/followup.ts";
+import { traced } from "./golden/trace.ts";
+
+const implementFollowUp = traced("implementFollowUp", realImplementFollowUp);
+const needsFollowUp = traced("needsFollowUp", realNeedsFollowUp);
+
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { PR_BODY_FENCE_END, PR_BODY_FENCE_START } from "../src/implement.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";

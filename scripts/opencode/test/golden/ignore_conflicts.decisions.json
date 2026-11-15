@@ -1,0 +1,138 @@
+{
+  "ignore_conflicts.test.ts::1": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 50,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "renovate/all-digest",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 50,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsConflict",
+    "result": false
+  },
+  "ignore_conflicts.test.ts::2": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 50,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "renovate/all-digest",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 50,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsConflict",
+    "result": true
+  },
+  "ignore_conflicts.test.ts::3": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 50,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "renovate/all-digest",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 55,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsConflict",
+    "result": false
+  },
+  "ignore_conflicts.test.ts::4": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 50,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "renovate/all-digest",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 55,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsConflict",
+    "result": true
+  }
+}

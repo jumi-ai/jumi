@@ -1,0 +1,2189 @@
+{
+  "conflict.test.ts::1": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "no open jumi closing PR",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::10": {
+    "claimExists": true,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nrefusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-tmp, which holds provider auth and session transcripts\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "refusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-tmp, which holds provider auth and session transcripts",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::11": {
+    "claimExists": true,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nrefusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-attachments, which holds parent-staged issue inputs\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "refusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-attachments, which holds parent-staged issue inputs",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::12": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127
+        ],
+        "method": "closePullRequest",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nClosing this PR because the issue was closed."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "issue is closed",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::13": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::14": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::15": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::16": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: cannot resolve conflicts\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::17": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: usage limit exceeded\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [],
+            "quota": {
+              "reason": "stuck: usage limit exceeded",
+              "updatedAt": "<iso>"
+            },
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [],
+        "quota": {
+          "reason": "stuck: usage limit exceeded",
+          "updatedAt": "<iso>"
+        },
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::18": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: cannot resolve conflicts\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::19": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::2": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::20": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::21": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::22": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: cannot resolve conflicts (5/5 conflict rounds) — run a stuck kick to retry"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "def",
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 5,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "def",
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 5,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::23": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "oldbase",
+        "lastHeadSha": "oldhead",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::24": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: cannot resolve conflicts (3/3 conflict rounds) — run a stuck kick to retry"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "def",
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "def",
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::25": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: repeated error"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          },
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          },
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          },
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          },
+          {
+            "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::26": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "same head and base already attempted",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::27": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "remote already contains default",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::28": {
+    "claimExists": true,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "cancelled"
+    }
+  },
+  "conflict.test.ts::29": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: clone failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "663320ec67a3e1bf7b9f2d3ea045ef559fb384e89f0ad71256ddda1427ede993",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "663320ec67a3e1bf7b9f2d3ea045ef559fb384e89f0ad71256ddda1427ede993",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "clone failed"
+    }
+  },
+  "conflict.test.ts::3": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::30": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: fetch failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "e2c73a8fd237575c7c6136742e8bd90cbeffb2ef724fd3e1b49aadc6b3d2c766",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "e2c73a8fd237575c7c6136742e8bd90cbeffb2ef724fd3e1b49aadc6b3d2c766",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "fetch failed"
+    }
+  },
+  "conflict.test.ts::31": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: not ancestor\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "fb21b7c0611753b1f3c520f17e8fc8872e7c6fccba262998a951791534e5aa18",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "fb21b7c0611753b1f3c520f17e8fc8872e7c6fccba262998a951791534e5aa18",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "not ancestor"
+    }
+  },
+  "conflict.test.ts::32": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: opencode crashed (tried opencode:openai/gpt-5.5; no hop)\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "opencode crashed"
+    }
+  },
+  "conflict.test.ts::33": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nstuck: cannot resolve conflicts"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "stuck"
+    }
+  },
+  "conflict.test.ts::34": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::35": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::36": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nrefusing to open a pull request: jumi/issue-12-fix-the-thing tracks JUMI_HANDOFF.md, which holds parent-injected task state and must not be committed\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "refusing to open a pull request: jumi/issue-12-fix-the-thing tracks JUMI_HANDOFF.md, which holds parent-injected task state and must not be committed",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::37": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::4": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::5": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::6": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::7": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed merge of main."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "conflict.test.ts::8": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nrefusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-tmp, which holds provider auth and session transcripts\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "refusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-tmp, which holds provider auth and session transcripts",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::9": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nrefusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-attachments, which holds parent-staged issue inputs\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "refusing to open a pull request: jumi/issue-12-fix-the-thing tracks .jumi-attachments, which holds parent-staged issue inputs",
+      "status": "skipped"
+    }
+  }
+}

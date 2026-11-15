@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { hasLabel } from "../src/assignee.ts";
 import { sitMessage } from "../src/board.ts";
 import { loadConfig } from "../src/config.ts";
-import { needsConflict } from "../src/conflict.ts";
+import { needsConflict as realNeedsConflict } from "../src/conflict.ts";
+import { traced } from "./golden/trace.ts";
+
+const needsConflict = traced("needsConflict", realNeedsConflict);
+
 import { DEFAULT_FORGE_COMMITTER_EMAIL, DEFAULT_FORGE_COMMITTER_NAME } from "../src/forge.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import {

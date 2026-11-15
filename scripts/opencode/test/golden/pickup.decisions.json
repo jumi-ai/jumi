@@ -1,0 +1,235 @@
+{
+  "pickup.test.ts::1": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork",
+    "result": "follow-up"
+  },
+  "pickup.test.ts::2": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork",
+    "result": "follow-up"
+  },
+  "pickup.test.ts::3": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork",
+    "result": "follow-up"
+  },
+  "pickup.test.ts::4": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork",
+    "result": "conflict"
+  },
+  "pickup.test.ts::5": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "mergeable": false,
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork",
+    "result": "follow-up"
+  },
+  "pickup.test.ts::6": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "mergeable": null,
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork"
+  },
+  "pickup.test.ts::7": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "mergeable": true,
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "classifyCloserWork"
+  }
+}
