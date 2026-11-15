@@ -62,6 +62,14 @@ export interface EngineRunOptions {
    */
   reviewMcp?: { url: string; token: string };
   /**
+   * Parent-owned per-spawn worker MCP server. The harness registers it for
+   * worker-kind spawns (implement, follow-up, conflict) so the model reports
+   * `no_changes` and future worker tools through MCP instead of sentinel
+   * files. The token rides only in the harness MCP config under the spawn
+   * temp root, never in the child environment. Undefined for review spawns.
+   */
+  workerMcp?: { url: string; token: string };
+  /**
    * Staged base-branch instructions for `kind === "review"` (outside the
    * tracked checkout, e.g. under the spawn's `.jumi-tmp`). Workers never set
    * this. Runners use it to load the base `AGENTS.md`/`CLAUDE.md` and skills

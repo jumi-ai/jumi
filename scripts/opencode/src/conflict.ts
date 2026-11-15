@@ -208,6 +208,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   repoSetupBlock?: string;
   /** Called with the runner that ran, before any engine failure is thrown. */
   onRunner?: (runner: RunnerStamp, chainIndex?: number) => void;
+  /** Parent-owned worker MCP server for conflict spawns (tool wiring only). */
+  workerMcp?: { url: string; token: string };
 }
 
 function logDefault(message: string) {
@@ -879,6 +881,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         sha: headSha,
         jobId: opts.jobId ?? opts.job.delivery,
       },
+      ...(opts.workerMcp ? { workerMcp: opts.workerMcp } : {}),
       logger: log,
       abortSignal: opts.abortSignal,
       onPid: opts.onPid,

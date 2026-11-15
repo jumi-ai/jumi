@@ -252,21 +252,45 @@ export async function probeReviewMcpInit(url: string, token: string): Promise<bo
 }
 
 // ── Runner MCP configs ─────────────────────────────────────────────────────
+// Shared shapes for the parent-owned MCP servers. The review (`jumi-review`)
+// and worker (`jumi-worker`) servers share the same wire shape; only the
+// server name differs, so per-runner helpers take the name and the two
+// servers delegate instead of copying the shape per runner.
 
 /** OpenCode MCP entry merged into the per-spawn global `opencode.json`. */
-export function openCodeReviewMcpEntry(url: string, token: string): Record<string, unknown> {
+export function openCodeMcpEntry(url: string, token: string): Record<string, unknown> {
   return { type: "remote", url, headers: { Authorization: `Bearer ${token}` } };
 }
 
-/** Claude `--mcp-config` file content. `--strict-mcp-config` keeps the repo's `.mcp.json` from shadowing it. */
-export function claudeReviewMcpConfig(url: string, token: string): string {
+/** OpenCode MCP entry for the review server. */
+export function openCodeReviewMcpEntry(url: string, token: string): Record<string, unknown> {
+  return openCodeMcpEntry(url, token);
+}
+
+/** Claude `--mcp-config` file content for one server name. */
+export function claudeMcpConfigFor(serverName: string, url: string, token: string): string {
   return `${JSON.stringify(
-    { mcpServers: { "jumi-review": { type: "http", url, headers: { Authorization: `Bearer ${token}` } } } },
+    { mcpServers: { [serverName]: { type: "http", url, headers: { Authorization: `Bearer ${token}` } } } },
     null,
     2
   )}\n`;
 }
 
+/** Claude `--mcp-config` file content. `--strict-mcp-config` keeps the repo's `.mcp.json` from shadowing it. */
+export function claudeReviewMcpConfig(url: string, token: string): string {
+  return claudeMcpConfigFor("jumi-review", url, token);
+}
+
 export function claudeMcpArgs(configPath: string): string[] {
   return ["--mcp-config", configPath, "--strict-mcp-config"];
+}
+
+/** Codex `config.toml` snippet registering one MCP server. Real TOML: parsed with `Bun.TOML.parse` in tests. */
+export function codexMcpTomlEntry(serverName: string, url: string, token: string): string {
+  return `\n[mcp_servers.${serverName}]\nurl = ${JSON.stringify(url)}\nhttp_headers = { Authorization = ${JSON.stringify(`Bearer ${token}`)} }\n`;
+}
+
+/** Agy `mcp_config.json` server value for one MCP server. */
+export function agyMcpServerEntry(url: string, token: string): Record<string, unknown> {
+  return { serverUrl: url, headers: { Authorization: `Bearer ${token}` } };
 }

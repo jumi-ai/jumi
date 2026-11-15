@@ -176,6 +176,7 @@ export function buildFollowupPrompt(runnerType?: string): string {
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
+A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).
 ${PR_DESCRIPTION_RULE}
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
@@ -426,6 +427,9 @@ async function seedForgePolicy(tempRoot: string, opts: OpenCodeRunOptions): Prom
   if (opts.reviewMcp && opts.trace?.kind === "review") {
     const { openCodeReviewMcpEntry } = await import("./review_mcp.ts");
     base.mcp = { "jumi-review": openCodeReviewMcpEntry(opts.reviewMcp.url, opts.reviewMcp.token) };
+  } else if (opts.workerMcp && opts.trace?.kind !== "review") {
+    const { openCodeWorkerMcpEntry } = await import("./worker_mcp.ts");
+    base.mcp = { "jumi-worker": openCodeWorkerMcpEntry(opts.workerMcp.url, opts.workerMcp.token) };
   }
   await writeFile(join(dir, "opencode.json"), JSON.stringify(base), { mode: 0o600 });
 }
@@ -763,10 +767,17 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
   await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const isReview = opts.trace?.kind === "review";
+  const hasWorkerMcp = !!opts.workerMcp && !isReview;
+  const ownsOutsideTemp = isReview || hasWorkerMcp;
   // Part-2 (jumi#550): review harness files (prompt, MCP token configs, XDG
   // dirs, session DB) live outside the checkout so sandboxed shells — RW on
-  // the checkout, no /tmp — cannot reach them. Workers keep the old layout.
-  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
+  // the checkout, no /tmp — cannot reach them. Worker MCP configs live outside
+  // too (`/tmp/jumi-worker-*`); other worker files keep the old layout.
+  const tempRoot = isReview
+    ? await makeReviewHarnessTempRoot()
+    : hasWorkerMcp
+      ? await (await import("./worker_mcp.ts")).makeWorkerHarnessTempRoot()
+      : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
   const scratchDir = await ensureChildScratchDir(opts.workdir);
 
@@ -811,7 +822,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     const err = new Error("cancelled");
     err.name = "AbortError";
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
 
@@ -1220,7 +1231,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
