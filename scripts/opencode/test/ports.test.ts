@@ -6,7 +6,6 @@ import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import { EngineFailedError, resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge, Tracker } from "../src/forge.ts";
-import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import {
   createForge,
   createGiteaForge,
@@ -16,6 +15,7 @@ import {
   forgeCommitterEmail,
   forgeCommitterName,
 } from "../src/forge.ts";
+import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import { openCodeEngine, runOpenCode } from "../src/git.ts";
 import { workerMarker } from "../src/gitea_issues.ts";
 import { GithubAPI } from "../src/github_api.ts";
