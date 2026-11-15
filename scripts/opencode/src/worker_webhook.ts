@@ -25,12 +25,6 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
-import {
-  effectiveFollowupIgnoreLogins,
-  effectiveIgnoreConflictsLabel,
-  effectiveTrustedSenderLogins,
-  loadRepoSettings,
-} from "./repo_settings.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
@@ -42,6 +36,7 @@ import {
 } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
+import { resolveRepoPolicy } from "./repo_policy.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {
@@ -79,23 +74,33 @@ export async function effectiveWorkerPolicyForRepo(
 ): Promise<WorkerWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
   if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
-  try {
-    const settings = await loadRepoSettings(api, owner, repo, branch);
-    if (settings.state !== "valid") {
-      if (settings.state === "invalid")
-        log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${settings.error}`);
-      return basePolicy;
-    }
-    return {
-      ...basePolicy,
-      trustedSenderLogins: effectiveTrustedSenderLogins(basePolicy.trustedSenderLogins, settings),
-      followupIgnoreLogins: effectiveFollowupIgnoreLogins(basePolicy.followupIgnoreLogins, settings),
-      ignoreConflictsLabel: effectiveIgnoreConflictsLabel(basePolicy.ignoreConflictsLabel, settings),
-    };
-  } catch (err) {
-    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${errorMessage(err)}`);
+  const policy = await resolveRepoPolicy(
+    { api, owner, repo, ref: branch },
+    {
+      trustedSenderLogins: basePolicy.trustedSenderLogins,
+      followupIgnoreLogins: basePolicy.followupIgnoreLogins,
+      ignoreConflictsLabel: basePolicy.ignoreConflictsLabel,
+      blockingQuestionAuthors: undefined,
+      maxFollowupRounds: 0,
+      maxConflictRounds: 0,
+    },
+    { onUnreadable: "fallback" }
+  );
+  if (policy.status === "invalid") {
+    log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
     return basePolicy;
   }
+  if (policy.status === "unreadable") {
+    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
+    return basePolicy;
+  }
+  if (policy.status !== "ok") return basePolicy;
+  return {
+    ...basePolicy,
+    trustedSenderLogins: policy.trustedSenderLogins,
+    followupIgnoreLogins: policy.followupIgnoreLogins,
+    ignoreConflictsLabel: policy.ignoreConflictsLabel,
+  };
 }
 
 export interface WorkerWebhookQueue {
