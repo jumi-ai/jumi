@@ -139,3 +139,7 @@ export function forgeRequestError(input: {
 export function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
 }
+
+export function isForbiddenError(err: unknown): boolean {
+  return err instanceof Error && /→ 403\b/.test(err.message);
+}

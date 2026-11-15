@@ -1475,6 +1475,52 @@ describe("GithubAPI automerge gate", () => {
     expect(branch.requiredContexts).toEqual([]);
   });
 
+  test("reads required checks from branch rules when classic protection 403s without Administration", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes("/protection/required_status_checks")) {
+        return new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+      }
+      if (target.includes("/rules/branches/")) {
+        return Response.json([
+          {
+            type: "required_status_checks",
+            parameters: {
+              required_status_checks: [
+                { context: "jumi/opencode-review" },
+                { context: "checks" },
+                { context: "image-build" },
+                { context: "worker-image-build" },
+              ],
+            },
+          },
+        ]);
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const branch = await api().getBranch("owner", "repo", "main");
+    expect(branch.enableStatusCheck).toBe(true);
+    expect(branch.requiredContexts).toEqual([
+      "jumi/opencode-review",
+      "checks",
+      "image-build",
+      "worker-image-build",
+    ]);
+  });
+
+  test("throws when classic 403s and branch rules are unreadable", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes("/protection/required_status_checks")) {
+        return new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+      }
+      return new Response("nope", { status: 403 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().getBranch("owner", "repo", "main")).rejects.toThrow("→ 403");
+  });
+
   test("throws when neither classic nor rules are readable", async () => {
     globalThis.fetch = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
 
