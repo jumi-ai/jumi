@@ -15,6 +15,7 @@ import {
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import type { ForgeKind } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
 import { githubInstallationFromPayload } from "./github_auth.ts";
 import {
@@ -177,7 +178,7 @@ export function pickupPolicyForForge(
   botUsername: string,
   pickupLabel?: string
 ): PickupPolicy {
-  if (forge !== "github") return { botUsername };
+  if (!forgeCapabilities(forge).pickupLabelApplies) return { botUsername };
   const label = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
   if (label.toLowerCase() === JUMI_LABEL) return { botUsername, isPickedUp: hasJumiLabel };
   return { botUsername, isPickedUp: (issue) => hasLabel(issue, label) };

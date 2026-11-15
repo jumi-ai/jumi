@@ -246,8 +246,7 @@ export interface AttachmentSupport {
   downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
 }
 
-/** One label history entry from the forge timeline/events API (Gitea or GitHub shape). */
-export interface IssueTimelineEvent {
+/** One label history entry from the forge timeline/events API (Gitea or GitHub shape). */ export interface IssueTimelineEvent {
   /** Gitea `type` or GitHub `event`, e.g. `label`, `labeled`, `unlabeled`. */
   type?: string;
   event?: string;
@@ -259,7 +258,10 @@ export interface IssueTimelineEvent {
 }
 
 /** Forge: clone + PR + sticky + status (git host identity). */
+import type { ForgeCapabilities } from "./forge_capabilities.ts";
 export interface Forge extends AttachmentSupport {
+  /** Declared forge capabilities (merge strategy, markers, schedule semantics). */
+  readonly capabilities: ForgeCapabilities;
   getRepo(owner: string, repo: string): Promise<Repo>;
   getPR(owner: string, repo: string, index: number): Promise<Pull>;
   listOpenPulls(owner: string, repo: string): Promise<Pull[]>;

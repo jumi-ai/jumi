@@ -1,3 +1,4 @@
+import { FORGE_CAPABILITIES } from "../../src/forge_capabilities.ts";
 import type {
   ActionJob,
   AttachmentMeta,
@@ -144,6 +145,7 @@ export function makeForgeApi(overrides: Partial<Forge> = {}): ForgeFake<Forge> {
     calls.push({ method, args });
   };
   const defaults: Forge = {
+    capabilities: FORGE_CAPABILITIES.gitea,
     getRepo: async (...args) => {
       record("getRepo", args);
       return neutralRepo();

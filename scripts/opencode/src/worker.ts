@@ -16,6 +16,7 @@ import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { type HandoffStore, handoffsFor } from "./handoff.ts";
@@ -203,7 +204,7 @@ export function createIssueQueue(
           ...pickupPolicyForForge(
             config.forge,
             config.botUsername,
-            config.forge === "github" ? effectivePickupLabel(localSettingsLoad) : undefined
+            forgeCapabilities(config.forge).pickupLabelApplies ? effectivePickupLabel(localSettingsLoad) : undefined
           ),
           followupIgnoreLogins: effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, localSettingsLoad),
           trustedSenderLogins: effectiveTrustedSenderLogins(config.trustedSenderLogins, localSettingsLoad),
@@ -685,7 +686,9 @@ export async function processWorkerTick(
   const repoTrusted = effectiveTrustedSenderLogins(config.trustedSenderLogins, tickSettingsLoad);
   const repoFollowupIgnore = effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, tickSettingsLoad);
   const repoIgnoreLabel = effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, tickSettingsLoad);
-  const repoPickup = config.forge === "github" ? effectivePickupLabel(tickSettingsLoad) : undefined;
+  const repoPickup = forgeCapabilities(config.forge).pickupLabelApplies
+    ? effectivePickupLabel(tickSettingsLoad)
+    : undefined;
   const effectiveConfig =
     effectiveImplementMs === config.opencodeTimeoutMs &&
     effectiveFollowupMs === config.followupTimeoutMs &&
@@ -694,7 +697,7 @@ export async function processWorkerTick(
     repoTrusted === config.trustedSenderLogins &&
     repoFollowupIgnore === config.followupIgnoreLogins &&
     repoIgnoreLabel === config.ignoreConflictsLabel &&
-    (config.forge !== "github" || repoPickup === undefined || repoPickup === "jumi")
+    (!forgeCapabilities(config.forge).pickupLabelApplies || repoPickup === undefined || repoPickup === "jumi")
       ? config
       : {
           ...config,
