@@ -531,6 +531,40 @@ printf '%s\\n' '${turn({ output_tokens: 1 })}'`
     });
   });
 
+  test("reviewMcp bootstrap writes valid TOML with the bearer token", async () => {
+    const token = 'tok"en\\with-quotes';
+    const url = "http://127.0.0.1:1/mcp";
+    await withFakeBins(
+      {
+        codex: fakeBin("codex", `cp "$CODEX_HOME/config.toml" "$SNAPSHOT"\nprintf '%s\\n' '${AGENT}'`),
+      },
+      async ({ workdir, home, argsLog }) => {
+        const snapshot = join(home, "config-snapshot.toml");
+        await writeFile(join(workdir, REVIEW_ARTIFACT), "# findings\n");
+        const result = await runCodex({
+          type: "codex",
+          prompt: "p",
+          model: "gpt-6-sol",
+          workdir,
+          home,
+          sanitizeEnv: true,
+          extraEnv: { ARGS_LOG: argsLog, SNAPSHOT: snapshot },
+          trace: { kind: "review", owner: "o", repo: "r" },
+          reviewMcp: { url, token },
+        });
+        expect(result.status).toBe("ok");
+        const raw = await readFile(snapshot, "utf8");
+        // The entry must be real TOML: the old object form
+        // (`http_headers = {"Authorization":...}`) fails to parse.
+        const parsed = Bun.TOML.parse(raw) as {
+          mcp_servers?: Record<string, { url?: unknown; http_headers?: Record<string, unknown> }>;
+        };
+        expect(parsed.mcp_servers?.["jumi-review"]?.url).toBe(url);
+        expect(parsed.mcp_servers?.["jumi-review"]?.http_headers?.Authorization).toBe(`Bearer ${token}`);
+      }
+    );
+  });
+
   test("implement clean tree is still success", async () => {
     await withFakeBins({ codex: fakeBin("codex", `printf '%s\\n' '${AGENT}'`) }, async ({ workdir, home, argsLog }) => {
       const result = await runCodex({
