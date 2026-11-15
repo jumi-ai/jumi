@@ -8,11 +8,17 @@
  * through MCP-style JSON-RPC over HTTP (`POST /mcp`): `initialize`,
  * `tools/list`, and `tools/call`.
  *
- * Today the only tool is `no_changes(reason)` for follow-up rounds that leave
- * the tree clean. The parent reads the small result store after the run and
- * posts `no follow-up changes: <reason>` (sanitized like verdict text); when
- * the model never calls the tool the parent fails open with the old bare
- * message plus `(no reason given)`.
+ * Tools:
+ * - `no_changes(reason)`: follow-up rounds that leave the tree clean;
+ * - `set_pr_body(markdown)`: PR description (same Refs/Fixes rules as the
+ *   parent prompt);
+ * - `skip(reason)`: implement has nothing to change;
+ * - `blocked_on(ref, reason)`: cross-repo ref like `owner/repo#N` (or `#N`
+ *   for this repo), feeding the dependency/blocked path;
+ * - `set_handoff(notes)`: notes for the next round, size-capped, never secrets.
+ *
+ * The parent reads the small result store after the run and prefers the tool
+ * value over the legacy `JUMI_*.md` file fallback for one transition period.
  */
 
 import { randomBytes } from "node:crypto";
@@ -21,12 +27,24 @@ import { sanitizeCheckReason } from "./verdict.ts";
 
 export const WORKER_MCP_SERVER_NAME = "jumi-worker";
 
-export const WORKER_MCP_TOOL_NAMES = ["no_changes"] as const;
+export const WORKER_MCP_TOOL_NAMES = ["no_changes", "set_pr_body", "skip", "blocked_on", "set_handoff"] as const;
 
 export type WorkerMcpToolName = (typeof WORKER_MCP_TOOL_NAMES)[number];
 
 /** Longest accepted `no_changes` reason (chars, after trim). */
 export const MAX_WORKER_NO_CHANGES_REASON_CHARS = 500;
+
+/** Longest accepted `set_pr_body` markdown (chars, after trim). Mirrors the parent prose cap. */
+export const MAX_WORKER_PR_BODY_CHARS = 8000;
+
+/** Longest accepted `skip` reason (chars, after trim). Mirrors the parent prose cap. */
+export const MAX_WORKER_SKIP_REASON_CHARS = 8000;
+
+/** Longest accepted `blocked_on` reason (chars, after trim). */
+export const MAX_WORKER_BLOCKED_REASON_CHARS = 2000;
+
+/** Handoff cap lives in `handoff.ts` (16 KiB); the tool stores the capped head. */
+export const WORKER_HANDOFF_MAX_BYTES = 16 * 1024;
 
 export function randomWorkerMcpToken(): string {
   return randomBytes(32).toString("hex");
@@ -79,12 +97,107 @@ export function validateNoChangesReason(reason: unknown): { ok: true; reason: st
   return { ok: true, reason: trimmed };
 }
 
+export function validatePrBody(markdown: unknown): { ok: true; markdown: string } | { ok: false; error: string } {
+  if (typeof markdown !== "string") return { ok: false, error: "markdown is required" };
+  const trimmed = markdown.replaceAll("\0", "").trim();
+  if (!trimmed) return { ok: false, error: "markdown is required" };
+  if (trimmed.length > MAX_WORKER_PR_BODY_CHARS) {
+    return { ok: false, error: `markdown is too long (max ${MAX_WORKER_PR_BODY_CHARS} chars)` };
+  }
+  return { ok: true, markdown: trimmed };
+}
+
+export function validateSkipReason(reason: unknown): { ok: true; reason: string } | { ok: false; error: string } {
+  if (typeof reason !== "string") return { ok: false, error: "reason is required" };
+  const trimmed = reason.replaceAll("\0", "").trim();
+  if (!trimmed) return { ok: false, error: "reason is required" };
+  if (trimmed.length > MAX_WORKER_SKIP_REASON_CHARS) {
+    return { ok: false, error: `reason is too long (max ${MAX_WORKER_SKIP_REASON_CHARS} chars)` };
+  }
+  return { ok: true, reason: trimmed };
+}
+
+export interface WorkerBlockedOnRef {
+  owner?: string;
+  repo?: string;
+  number: number;
+  canonical: string;
+}
+
+const BLOCKED_ON_REF_RE = /^(?:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)|#(\d+))$/;
+
+export function parseBlockedOnRef(
+  ref: unknown,
+  homeOwner?: string,
+  homeRepo?: string
+): { ok: true; ref: WorkerBlockedOnRef } | { ok: false; error: string } {
+  if (typeof ref !== "string") return { ok: false, error: "ref is required like owner/repo#N or #N" };
+  const trimmed = ref.trim();
+  const match = trimmed.match(BLOCKED_ON_REF_RE);
+  if (!match) return { ok: false, error: "ref must look like owner/repo#N or #N" };
+  if (match[1] != null && match[2] != null && match[3] != null) {
+    const number = Number(match[3]);
+    if (!Number.isSafeInteger(number) || number <= 0) return { ok: false, error: "ref number must be positive" };
+    return {
+      ok: true,
+      ref: { owner: match[1], repo: match[2], number, canonical: `${match[1]}/${match[2]}#${number}` },
+    };
+  }
+  const number = Number(match[4]);
+  if (!Number.isSafeInteger(number) || number <= 0) return { ok: false, error: "ref number must be positive" };
+  if (homeOwner && homeRepo) {
+    return {
+      ok: true,
+      ref: { owner: homeOwner, repo: homeRepo, number, canonical: `${homeOwner}/${homeRepo}#${number}` },
+    };
+  }
+  return { ok: true, ref: { number, canonical: `#${number}` } };
+}
+
+export function validateBlockedOn(
+  input: { ref?: unknown; reason?: unknown },
+  home?: { owner: string; repo: string }
+): { ok: true; ref: WorkerBlockedOnRef; reason: string } | { ok: false; error: string } {
+  const parsed = parseBlockedOnRef(input.ref, home?.owner, home?.repo);
+  if (!parsed.ok) return parsed;
+  if (typeof input.reason !== "string") return { ok: false, error: "reason is required" };
+  const reason = input.reason.replaceAll("\0", "").trim();
+  if (!reason) return { ok: false, error: "reason is required" };
+  if (reason.length > MAX_WORKER_BLOCKED_REASON_CHARS) {
+    return { ok: false, error: `reason is too long (max ${MAX_WORKER_BLOCKED_REASON_CHARS} chars)` };
+  }
+  return { ok: true, ref: parsed.ref, reason };
+}
+
+export function validateHandoffNotes(notes: unknown): { ok: true; notes: string } | { ok: false; error: string } {
+  if (typeof notes !== "string") return { ok: false, error: "notes are required" };
+  const trimmed = notes.replaceAll("\0", "").trim();
+  if (!trimmed) return { ok: false, error: "notes are required" };
+  const bytes = new TextEncoder().encode(trimmed).byteLength;
+  if (bytes > WORKER_HANDOFF_MAX_BYTES) {
+    return { ok: false, error: `notes are too long (max ${WORKER_HANDOFF_MAX_BYTES} bytes)` };
+  }
+  return { ok: true, notes: trimmed };
+}
+
+export interface WorkerBlockedOn {
+  ref: string;
+  reason: string;
+  owner?: string;
+  repo?: string;
+  number: number;
+}
+
 /**
  * Small result store the parent reads after the run. One store lives for one
- * spawn and dies with it. Last `no_changes` call wins.
+ * spawn and dies with it. Last call per tool wins.
  */
 export class WorkerResultStore {
   private reason?: string;
+  private prBody?: string;
+  private skipReason?: string;
+  private blockedOn?: WorkerBlockedOn;
+  private handoff?: string;
   private closed = false;
 
   get isClosed(): boolean {
@@ -110,6 +223,86 @@ export class WorkerResultStore {
   hasNoChanges(): boolean {
     return this.reason !== undefined;
   }
+
+  setPrBody(input: { markdown?: unknown }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validatePrBody(input.markdown);
+    if (!validated.ok) return validated;
+    this.prBody = validated.markdown;
+    return { ok: true };
+  }
+
+  getPrBody(): string | undefined {
+    return this.prBody ? `${this.prBody}` : undefined;
+  }
+
+  hasPrBody(): boolean {
+    return this.prBody !== undefined;
+  }
+
+  setSkip(input: { reason?: unknown }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validateSkipReason(input.reason);
+    if (!validated.ok) return validated;
+    this.skipReason = validated.reason;
+    return { ok: true };
+  }
+
+  getSkipReason(): string | undefined {
+    return this.skipReason ? `${this.skipReason}` : undefined;
+  }
+
+  hasSkip(): boolean {
+    return this.skipReason !== undefined;
+  }
+
+  setBlockedOn(input: { ref?: unknown; reason?: unknown }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validateBlockedOn(input);
+    if (!validated.ok) return validated;
+    this.blockedOn = {
+      ref: validated.ref.canonical,
+      reason: validated.reason,
+      ...(validated.ref.owner ? { owner: validated.ref.owner } : {}),
+      ...(validated.ref.repo ? { repo: validated.ref.repo } : {}),
+      number: validated.ref.number,
+    };
+    return { ok: true };
+  }
+
+  getBlockedOn(): WorkerBlockedOn | undefined {
+    return this.blockedOn ? { ...this.blockedOn } : undefined;
+  }
+
+  hasBlockedOn(): boolean {
+    return this.blockedOn !== undefined;
+  }
+
+  setHandoff(input: { notes?: unknown }): { ok: true } | { ok: false; error: string } {
+    if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
+    const validated = validateHandoffNotes(input.notes);
+    if (!validated.ok) return validated;
+    this.handoff = validated.notes;
+    return { ok: true };
+  }
+
+  getHandoff(): string | undefined {
+    return this.handoff ? `${this.handoff}` : undefined;
+  }
+
+  hasHandoff(): boolean {
+    return this.handoff !== undefined;
+  }
+
+  hasAnything(): boolean {
+    return (
+      this.reason !== undefined ||
+      this.prBody !== undefined ||
+      this.skipReason !== undefined ||
+      this.blockedOn !== undefined ||
+      this.handoff !== undefined
+    );
+  }
 }
 
 function toolSchemas(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
@@ -124,6 +317,45 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
         required: ["reason"],
       },
     },
+    {
+      name: "set_pr_body",
+      description:
+        "Record the pull-request description. If the change does not meet the issue Done condition, use Refs #N and list what is left, not a closing keyword like Fixes #N. A bare Refs #N with no remaining-work list is treated as finished.",
+      inputSchema: {
+        type: "object",
+        properties: { markdown: { type: "string" } },
+        required: ["markdown"],
+      },
+    },
+    {
+      name: "skip",
+      description: "Record that this implement round has nothing to change, with the reason. Last call wins.",
+      inputSchema: {
+        type: "object",
+        properties: { reason: { type: "string" } },
+        required: ["reason"],
+      },
+    },
+    {
+      name: "blocked_on",
+      description:
+        "Record that this implement round is blocked on another issue: ref like owner/repo#N (or #N for this repo) plus the reason. Feeds the dependency/blocked path. Last call wins.",
+      inputSchema: {
+        type: "object",
+        properties: { ref: { type: "string" }, reason: { type: "string" } },
+        required: ["ref", "reason"],
+      },
+    },
+    {
+      name: "set_handoff",
+      description:
+        "Record notes for the next round: key files and why they matter, commands that built and tested, workarounds, what is left or risky. Size-capped, never include secrets.",
+      inputSchema: {
+        type: "object",
+        properties: { notes: { type: "string" } },
+        required: ["notes"],
+      },
+    },
   ];
 }
 
@@ -134,6 +366,22 @@ function callTool(
 ): { ok: boolean; text: string } {
   if (name === "no_changes") {
     const result = store.setNoChanges({ reason: args.reason });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+  }
+  if (name === "set_pr_body") {
+    const result = store.setPrBody({ markdown: args.markdown });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+  }
+  if (name === "skip") {
+    const result = store.setSkip({ reason: args.reason });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+  }
+  if (name === "blocked_on") {
+    const result = store.setBlockedOn({ ref: args.ref, reason: args.reason });
+    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+  }
+  if (name === "set_handoff") {
+    const result = store.setHandoff({ notes: args.notes });
     return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
   }
   return { ok: false, text: `unknown tool: ${name}` };
@@ -200,6 +448,31 @@ export async function startWorkerMcpServer(opts: {
     },
   });
   return { url: `http://127.0.0.1:${server.port}/mcp`, token, close: () => server.stop(true) };
+}
+
+/** Where a worker result came from: tool store first, file fallback for one transition period. */
+export type WorkerResultSource = "tool" | "file fallback" | "missing";
+
+/**
+ * Prefer the tool value; otherwise use the file fallback. Logs which path was
+ * used so the file fallback can be removed later.
+ */
+export function preferWorkerTool(
+  name: "pr_body" | "skip" | "blocked_on" | "handoff" | "no_changes",
+  toolValue: string | null | undefined,
+  fileValue: string | null | undefined,
+  log?: (message: string) => void
+): { value: string | null; source: WorkerResultSource } {
+  if (toolValue != null && toolValue !== "") {
+    log?.(`worker result: ${name} from tool`);
+    return { value: toolValue, source: "tool" };
+  }
+  if (fileValue != null && fileValue !== "") {
+    log?.(`worker result: ${name} from file fallback`);
+    return { value: fileValue, source: "file fallback" };
+  }
+  log?.(`worker result: ${name} missing`);
+  return { value: null, source: "missing" };
 }
 
 /** Minimal JSON-RPC client for tests and per-runner probes. */

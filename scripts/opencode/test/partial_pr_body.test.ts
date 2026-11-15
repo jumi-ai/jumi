@@ -95,11 +95,12 @@ describe("partial work stays non-closing only with a remaining-work list", () =>
 });
 
 describe("worker prompts describe the PR body and partial work", () => {
-  test("implement and follow-up prompts name JUMI_PR.md as the PR description", () => {
+  test("implement and follow-up prompts name set_pr_body as the PR description", () => {
     for (const prompt of [buildImplementPrompt(), buildImplementYieldPrompt(), buildFollowupPrompt()]) {
-      expect(prompt).toContain("JUMI_PR.md is the pull-request description");
+      expect(prompt).toContain("set_pr_body");
       expect(prompt).toContain("Refs #N");
       expect(prompt).toContain("Done condition");
+      expect(prompt).not.toContain("JUMI_PR.md is the pull-request description");
     }
   });
 });
