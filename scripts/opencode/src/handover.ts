@@ -8,17 +8,13 @@ import { resolveRepoPolicy } from "./repo_policy.ts";
 import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
+import type { ReviewRecord } from "./review_verdict_store.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
 import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import {
-  blockingOpenQuestionCount,
-  isMaintainerOnlyTrailerText,
-  parseReviewOutput,
-  trailerSuggestionCount,
-} from "./verdict.ts";
+import { reviewVerdictView } from "./verdict.ts";
 
 export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
 
@@ -32,37 +28,39 @@ export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";
  * trailers still hand over; a mixed review (maintainer plus worker-answerable
  * questions) also still hands over.
  */
-export function isMaintainerOnlyTrailer(markdown: string | null | undefined): boolean {
-  return isMaintainerOnlyTrailerText(markdown);
+export function isMaintainerOnlyTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
+  return reviewVerdictView({ markdown, record }).isMaintainerOnly;
 }
 
-export function isCurrentHeadFailureTrailer(markdown: string | null | undefined): boolean {
-  if (!markdown) return false;
-  const parsed = parseReviewOutput(markdown);
-  return !parsed.verdict.incomplete && parsed.verdict.state === "failure";
+export function isCurrentHeadFailureTrailer(
+  markdown: string | null | undefined,
+  record?: ReviewRecord | null
+): boolean {
+  const view = reviewVerdictView({ markdown, record });
+  return !view.incomplete && view.state === "failure";
 }
 
-export function isLeftoverSimplificationTrailer(markdown: string | null | undefined): boolean {
-  if (!markdown) return false;
-  const parsed = parseReviewOutput(markdown);
-  return (
-    !parsed.verdict.incomplete &&
-    parsed.verdict.state === "success" &&
-    trailerSuggestionCount(parsed.verdict.description) > 0
-  );
+export function isLeftoverSimplificationTrailer(
+  markdown: string | null | undefined,
+  record?: ReviewRecord | null
+): boolean {
+  const view = reviewVerdictView({ markdown, record });
+  return !view.incomplete && view.state === "success" && view.suggestionCount > 0;
 }
 
 export function isBlockingQuestionTrailer(
   markdown: string | null | undefined,
   prAuthorLogin: string | undefined | null,
-  blockingAuthors: readonly string[] | undefined | null
+  blockingAuthors: readonly string[] | undefined | null,
+  record?: ReviewRecord | null
 ): boolean {
-  return blockingOpenQuestionCount(markdown, prAuthorLogin, blockingAuthors) > 0;
+  return reviewVerdictView({ markdown, record }).blockingQuestionCount(prAuthorLogin, blockingAuthors) > 0;
 }
 
 export function shouldHandoverFollowUp(opts: {
   published: ReviewResult;
   markdown?: string | null;
+  record?: ReviewRecord | null;
   prAuthor?: string | undefined | null;
   blockingQuestionAuthors?: readonly string[] | undefined | null;
 }): boolean {
@@ -70,26 +68,27 @@ export function shouldHandoverFollowUp(opts: {
   // A maintainer-only ❓ never starts a worker round on its own: the worker
   // has no way to file/close another issue, change labels or assignment, or
   // decide scope. Mixed reviews still hand over for the worker-answerable part.
-  if (isMaintainerOnlyTrailer(opts.markdown)) return false;
+  if (isMaintainerOnlyTrailer(opts.markdown, opts.record)) return false;
   return (
-    isCurrentHeadFailureTrailer(opts.markdown) ||
-    isLeftoverSimplificationTrailer(opts.markdown) ||
-    isBlockingQuestionTrailer(opts.markdown, opts.prAuthor, opts.blockingQuestionAuthors)
+    isCurrentHeadFailureTrailer(opts.markdown, opts.record) ||
+    isLeftoverSimplificationTrailer(opts.markdown, opts.record) ||
+    isBlockingQuestionTrailer(opts.markdown, opts.prAuthor, opts.blockingQuestionAuthors, opts.record)
   );
 }
 
 function persistInsertSkipReason(
   markdown: string | null | undefined,
   prAuthorLogin?: string | undefined | null,
-  blockingAuthors?: readonly string[] | undefined | null
+  blockingAuthors?: readonly string[] | undefined | null,
+  record?: ReviewRecord | null
 ): string | undefined {
-  if (!markdown) return "incomplete";
-  const parsed = parseReviewOutput(markdown);
-  if (parsed.verdict.incomplete) return "incomplete";
-  if (parsed.verdict.state === "failure") return undefined;
-  if (parsed.verdict.state === "success") {
-    if (trailerSuggestionCount(parsed.verdict.description) > 0) return undefined;
-    if (blockingOpenQuestionCount(markdown, prAuthorLogin, blockingAuthors) > 0) return undefined;
+  if (!markdown && !record) return "incomplete";
+  const view = reviewVerdictView({ markdown, record });
+  if (view.incomplete) return "incomplete";
+  if (view.state === "failure") return undefined;
+  if (view.state === "success") {
+    if (view.suggestionCount > 0) return undefined;
+    if (view.blockingQuestionCount(prAuthorLogin, blockingAuthors) > 0) return undefined;
     return "success trailer";
   }
   return "incomplete";
@@ -139,7 +138,8 @@ async function resolveHeldSuggestion(
   headSha: string,
   markdown: string | null | undefined,
   reason: string,
-  targetUrl?: string
+  targetUrl?: string,
+  record?: ReviewRecord | null
 ): Promise<void> {
   try {
     const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
@@ -149,9 +149,9 @@ async function resolveHeldSuggestion(
     let count = hold.count ?? 0;
     if (!count) {
       try {
-        const parsed = parseReviewOutput(markdown ?? "");
-        if (!parsed.verdict.incomplete && parsed.verdict.state === "success") {
-          count = trailerSuggestionCount(parsed.verdict.description);
+        const view = reviewVerdictView({ markdown, record });
+        if (!view.incomplete && view.state === "success") {
+          count = view.suggestionCount;
         }
       } catch {
         count = 0;
@@ -194,10 +194,14 @@ export async function enqueueFollowUpFromReview(
 
   if (opts.published.status !== "posted" && opts.published.status !== "updated") return undefined;
 
+  // The row's typed verdict when the persisted markdown is byte-identical to
+  // the store's `toMarkdown()`; absent for old rows and modified markdown.
+  const record = opts.row.resultJson ?? null;
+
   // Maintainer-only ❓: the worker cannot file/close another issue, change
   // labels or assignment, or decide scope, so no round starts. The board
   // keeps the PR visible as waiting on a maintainer answer instead.
-  if (isMaintainerOnlyTrailer(opts.markdown)) {
+  if (isMaintainerOnlyTrailer(opts.markdown, record)) {
     await rememberSitBestEffort(
       opts.store.sits,
       opts.row.owner,
@@ -214,7 +218,7 @@ export async function enqueueFollowUpFromReview(
   // trailer needs the PR author plus the effective blocking list (deployer
   // plus the repository's default-branch file) to decide whether opt-in
   // blocking questions keep the follow-up alive.
-  const earlySkip = persistInsertSkipReason(opts.markdown);
+  const earlySkip = persistInsertSkipReason(opts.markdown, undefined, undefined, record);
   if (earlySkip && earlySkip !== "success trailer") return logSkip(earlySkip);
 
   // One default-branch read covers the restricted-mode gate, the follow-up
@@ -290,7 +294,8 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "head moved",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("head moved");
   }
@@ -304,13 +309,14 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "mode restricted",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("repository mode is restricted");
   }
 
   if (earlySkip === "success trailer") {
-    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking);
+    const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking, record);
     if (trailerSkip) return logSkip(trailerSkip);
   }
 
@@ -337,7 +343,8 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "unassigned",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("no closer");
   }
@@ -354,7 +361,8 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "unassigned",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("unassigned");
   }
@@ -366,9 +374,9 @@ export async function enqueueFollowUpFromReview(
   // conflicts run as today; a person asking still follows via the webhook
   // path, which never reaches this handover.
   if (
-    isLeftoverSimplificationTrailer(opts.markdown) &&
-    !isCurrentHeadFailureTrailer(opts.markdown) &&
-    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking) &&
+    isLeftoverSimplificationTrailer(opts.markdown, record) &&
+    !isCurrentHeadFailureTrailer(opts.markdown, record) &&
+    !isBlockingQuestionTrailer(opts.markdown, pr.user?.login, effectiveBlocking, record) &&
     !policy.followupOnSuggestions
   ) {
     await resolveHeldSuggestion(
@@ -380,7 +388,8 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "suggestions disabled",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("suggestions disabled");
   }
@@ -404,12 +413,13 @@ export async function enqueueFollowUpFromReview(
       opts.row.headSha,
       opts.markdown,
       "round cap",
-      pr.html_url
+      pr.html_url,
+      record
     );
     return logSkip("round cap");
   }
 
-  const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown) ? "review-suggestions" : "review-failure";
+  const triggerEvent = isLeftoverSimplificationTrailer(opts.markdown, record) ? "review-suggestions" : "review-failure";
   return opts.store.enqueueIssue(
     followUpJobFrom(opts.row.owner, opts.row.repo, issue, pr, repo, `${triggerEvent}-${opts.row.id}`, triggerEvent)
   );

@@ -1,4 +1,5 @@
 import type { CheckState } from "./ports.ts";
+import type { ReviewRecord } from "./review_verdict_store.ts";
 
 export interface ReviewVerdict {
   state: Extract<CheckState, "success" | "failure">;
@@ -888,4 +889,114 @@ export function blockingOpenQuestionCount(
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
   return countQuestionFindings(parsed.comment, opts);
+}
+
+/** Input to {@link reviewVerdictView}: the stored text plus the row's typed record, when it has one. */
+export interface ReviewVerdictViewInput {
+  markdown: string | null | undefined;
+  record?: ReviewRecord | null;
+}
+
+/**
+ * What a finished-review-row consumer needs from the verdict. Either backed
+ * by the ledger row's `resultJson` or, for rows without one, by the stored
+ * text — both spellings agree on stored markdown (see
+ * `test/verdict_view_equivalence.test.ts`).
+ */
+export interface ReviewVerdictView {
+  incomplete: boolean;
+  state: "success" | "failure";
+  description: string;
+  /** From the trailer reason (`trailerSuggestionCount`), never `record.counts`. */
+  suggestionCount: number;
+  isMaintainerOnly: boolean;
+  blockingQuestionCount(
+    prAuthorLogin: string | undefined | null,
+    blockingAuthors: readonly string[] | undefined | null,
+    opts?: { singleFilePath?: string }
+  ): number;
+}
+
+function isUsableReviewRecord(record: ReviewRecord | null | undefined): record is ReviewRecord {
+  if (!record || typeof record !== "object") return false;
+  if (record.version !== 1) return false;
+  if (record.state !== "success" && record.state !== "failure" && record.state !== "incomplete") return false;
+  if (record.reason !== undefined && typeof record.reason !== "string") return false;
+  const counts = record.counts;
+  if (!counts || typeof counts !== "object") return false;
+  return (
+    Number.isSafeInteger(counts.bug) &&
+    (counts.bug as number) >= 0 &&
+    Number.isSafeInteger(counts.risk) &&
+    (counts.risk as number) >= 0 &&
+    Number.isSafeInteger(counts.question) &&
+    (counts.question as number) >= 0 &&
+    Number.isSafeInteger(counts.suggestion) &&
+    (counts.suggestion as number) >= 0
+  );
+}
+
+/**
+ * Verdict state and description for a usable record, mirroring what the text
+ * parser reads back from the store's `toMarkdown()`: the sanitized reason
+ * with the same success/failure defaults. A record with no verdict still has
+ * a failure trailer (`Incomplete review: no verdict`) which the text parser
+ * reads as a complete failure, never as incomplete — mirror that exactly so
+ * row consumers keep today's skip/kick behavior.
+ */
+function descriptionFromRecord(record: ReviewRecord): { state: "success" | "failure"; description: string } {
+  if (record.state === "success" || record.state === "failure") {
+    const safe = sanitizeCheckReason(record.reason ?? "");
+    return {
+      state: record.state,
+      description: safe || (record.state === "success" ? "No blocking issues" : "Review requested changes"),
+    };
+  }
+  return { state: "failure", description: "Incomplete review: no verdict" };
+}
+
+/**
+ * Ledger-row verdict view: with a usable record the answers come from the
+ * record (suggestion count via `trailerSuggestionCount` on the record reason,
+ * question counts via `record.counts`); without one the existing text
+ * functions run unchanged. A corrupt record falls back to the text path.
+ * Never changes the text path's result.
+ */
+export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictView {
+  const record = isUsableReviewRecord(input.record) ? input.record : undefined;
+  if (!record) {
+    const parsed = parseReviewOutput(input.markdown ?? "");
+    const description = parsed.verdict.description;
+    return {
+      incomplete: parsed.verdict.incomplete,
+      state: parsed.verdict.state,
+      description,
+      suggestionCount: trailerSuggestionCount(description),
+      isMaintainerOnly: isMaintainerOnlyTrailerText(input.markdown),
+      blockingQuestionCount: (prAuthorLogin, blockingAuthors, opts) =>
+        blockingOpenQuestionCount(input.markdown, prAuthorLogin, blockingAuthors, opts),
+    };
+  }
+  const base = descriptionFromRecord(record);
+  const suggestionCount = trailerSuggestionCount(base.description);
+  return {
+    incomplete: false,
+    state: base.state,
+    description: base.description,
+    suggestionCount,
+    // The store has no maintainer severity and `toMarkdown()` never emits the
+    // `❓ maintainer:` marker, so the text parser always finds zero maintainer
+    // questions on stored markdown: always false here, matching the text path.
+    isMaintainerOnly: false,
+    blockingQuestionCount: (prAuthorLogin, blockingAuthors, opts) => {
+      // Single-file scoping can only be answered from text; no row consumer
+      // passes it, but stay on the parser when one does.
+      if (opts?.singleFilePath) {
+        return blockingOpenQuestionCount(input.markdown, prAuthorLogin, blockingAuthors, opts);
+      }
+      if (!isBlockingQuestionAuthor(prAuthorLogin, blockingAuthors)) return 0;
+      if (base.state !== "success") return 0;
+      return record.counts.question;
+    },
+  };
 }
