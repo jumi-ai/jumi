@@ -92,7 +92,7 @@ export async function shouldEnqueuePushConflicts(
   try {
     const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
     if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
-      const loaded = await loadRepoSettings(api as never, owner, repo, payload.repository.default_branch);
+      const loaded = await loadRepoSettings(api, owner, repo, payload.repository.default_branch);
       ignoreLabel = effectiveIgnoreConflictsLabel(policy.ignoreConflictsLabel, loaded);
     }
   } catch {

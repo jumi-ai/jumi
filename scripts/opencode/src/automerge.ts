@@ -41,6 +41,25 @@ type AutomergeApi = Pick<
 > &
   Partial<Pick<Forge, "getPRFiles" | "getRepoFile" | "cancelAutoMerge" | "listIssueTimeline">>;
 
+/**
+ * Whether a (possibly partial) webhook forge client has every method the
+ * label-change path requires. Missing methods fail closed with
+ * `{action:"none"}`, the same result as the old `try/catch` around a
+ * missing method. Both adapters and the shared forge fake satisfy the full
+ * port; a partial mailbox fails here instead of throwing later.
+ */
+function isFullAutomergeApi(api: Partial<AutomergeApi>): api is AutomergeApi {
+  return (
+    typeof api.getPR === "function" &&
+    typeof api.getRepo === "function" &&
+    typeof api.findStickyIssueComment === "function" &&
+    typeof api.createIssueComment === "function" &&
+    typeof api.updateIssueComment === "function" &&
+    typeof api.getIssue === "function" &&
+    typeof api.getCollaboratorPermission === "function"
+  );
+}
+
 export type AutomergeLabelList = ReadonlyArray<string | { name?: string }>;
 
 /**
@@ -1482,7 +1501,7 @@ export function automergeLabelEventAction(
  * own copy event is ignored by the caller. Never throws.
  */
 export async function handleAutomergeLabelChange(opts: {
-  api: AutomergeApi;
+  api: Partial<AutomergeApi>;
   forgeKind: ForgeKind;
   owner: string;
   repo: string;
@@ -1496,9 +1515,19 @@ export async function handleAutomergeLabelChange(opts: {
   log?: (message: string) => void;
 }): Promise<{ action: "scheduled" | "cancelled" | "none" }> {
   const log = opts.log ?? (() => undefined);
+  const api = opts.api;
+  // Fail-closed when the caller holds a partial forge client (webhook
+  // mailbox): missing required methods mean no schedule, same as the
+  // `try/catch` around a missing method returning `none` today.
+  if (!isFullAutomergeApi(api)) {
+    log(
+      `automerge label change skipped for ${opts.owner}/${opts.repo}#${opts.prNumber}: forge client missing required methods`
+    );
+    return { action: "none" };
+  }
   let prLabels: AutomergeLabelList = [];
   try {
-    const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+    const pr = await api.getPR(opts.owner, opts.repo, opts.prNumber);
     if (pr.merged || pr.state !== "open") return { action: "none" };
     prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
   } catch (err) {
@@ -1513,7 +1542,7 @@ export async function handleAutomergeLabelChange(opts: {
     // blocks, leave one sticky note saying the deployer has to act.
     const gate = !listed ? ("not-listed" as const) : ("disabled" as const);
     const res = await maybeNoteDeploymentBlocked({
-      api: opts.api,
+      api,
       owner: opts.owner,
       repo: opts.repo,
       prNumber: opts.prNumber,
@@ -1529,14 +1558,14 @@ export async function handleAutomergeLabelChange(opts: {
   }
   let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.baseBranch);
+    settings = await loadRepoSettings(api, opts.owner, opts.repo, opts.baseBranch);
   } catch (err) {
     log(`automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { action: "none" };
   }
   if (settings.state === "invalid") {
     await postAutomergeNote(
-      opts.api,
+      api,
       opts.owner,
       opts.repo,
       opts.prNumber,
@@ -1548,9 +1577,9 @@ export async function handleAutomergeLabelChange(opts: {
   const names = resolveLabelNames(settings);
   const decision = automergeLabelEventAction(prLabels, settings);
   if (decision.conflict) {
-    await cancelAutomergeSchedule(opts.api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
+    await cancelAutomergeSchedule(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
     await postAutomergeNote(
-      opts.api,
+      api,
       opts.owner,
       opts.repo,
       opts.prNumber,
@@ -1562,11 +1591,11 @@ export async function handleAutomergeLabelChange(opts: {
   if (decision.action === "cancel") {
     // No-automerge label, or the label was removed and the file does not opt in:
     // cancel anything scheduled.
-    await cancelAutomergeSchedule(opts.api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
+    await cancelAutomergeSchedule(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
     return { action: "cancelled" };
   }
   const result = await scheduleAutomergeForPr({
-    api: opts.api,
+    api,
     forgeKind: opts.forgeKind,
     owner: opts.owner,
     repo: opts.repo,

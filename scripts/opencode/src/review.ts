@@ -5,13 +5,11 @@ import {
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
   type CiCheckSummary,
-  type CiGateResolverApi,
   type CiInspection,
   inspectCi,
   isCiLookupRetryMarker,
   isCiWaitMarker,
   JUMI_REVIEW_CONTEXT,
-  type RequiredCiResolver,
   resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
@@ -937,7 +935,7 @@ export async function inspectOtherChecks(
   let wait = opts.wait;
   if (wait === undefined) {
     try {
-      const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+      const gate = await resolveCiGate(opts.api, {
         owner: opts.owner,
         repo: opts.repo,
         prNumber: opts.prNumber,
@@ -951,7 +949,7 @@ export async function inspectOtherChecks(
       wait = "required";
     }
   } else if (wait !== "all" && wait !== "none" && requiredContexts === undefined && resolveBranch) {
-    requiredContexts = await resolveRequiredCiContexts(opts.api as unknown as RequiredCiResolver, {
+    requiredContexts = await resolveRequiredCiContexts(opts.api, {
       owner: opts.owner,
       repo: opts.repo,
       prNumber: opts.prNumber,
@@ -997,7 +995,7 @@ export async function skipReasonForOtherChecks(
     let requiredContexts = opts.requiredContexts;
     if (wait === undefined) {
       try {
-        const gate = await resolveCiGate(opts.api as unknown as CiGateResolverApi, {
+        const gate = await resolveCiGate(opts.api, {
           owner: opts.owner,
           repo: opts.repo,
           prNumber: opts.prNumber,
@@ -1930,7 +1928,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     let ci: CiInspection;
     let ciWait: CiGateWait = "required";
     try {
-      const gate = await resolveCiGate(forgeApi as unknown as CiGateResolverApi, {
+      const gate = await resolveCiGate(forgeApi, {
         owner: opts.owner,
         repo: opts.repo,
         prNumber: opts.prNumber,

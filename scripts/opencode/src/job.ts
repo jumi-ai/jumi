@@ -427,7 +427,7 @@ async function main(): Promise<void> {
       jobId: jobId!,
       engineConfig,
       workerConfig,
-      api: api as unknown as ReviewApi & IssueApi,
+      api,
       logger,
       abortSignal: abort.signal,
     });

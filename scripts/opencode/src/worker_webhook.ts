@@ -401,7 +401,7 @@ export async function cancelLedgerWorkerJobs(opts: {
     });
     if (hold.consumed && hold.count && hold.headSha) {
       await postSuggestionHoldSuccess(
-        opts.api as HoldStatusApi,
+        opts.api,
         opts.owner,
         opts.repo,
         hold.headSha,
@@ -451,7 +451,7 @@ export async function handleWorkerWebhookEvent(
             ...policy,
             forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
           },
-          api: deps.api as never,
+          api: deps.api,
           log: logger,
         });
         if (handled.handled) return json(202, { queued: false, reason: handled.reason });
@@ -477,7 +477,7 @@ export async function handleWorkerWebhookEvent(
           return skipped("repository not allowed", logger);
         }
         const decision = await shouldEnqueueTakeoverForOpenedPull({
-          api: (deps.api ?? {}) as never,
+          api: deps.api ?? {},
           forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
           owner,
           repo,

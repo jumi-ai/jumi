@@ -61,11 +61,11 @@ export type TakeoverFileApi = {
 };
 
 export type TakeoverTrustApi = {
-  getCollaboratorPermission(
+  getCollaboratorPermission?: (
     owner: string,
     repo: string,
     username: string
-  ): Promise<import("./ports.ts").CollaboratorPermission>;
+  ) => Promise<import("./ports.ts").CollaboratorPermission>;
 };
 
 export type TakeoverMarkerApi = {
@@ -130,7 +130,7 @@ async function loadTakeoverRepoPolicy(
   try {
     const branch = typeof defaultBranch === "string" ? defaultBranch.trim() : "";
     if (!branch || !api || typeof api.getRepoFile !== "function") return fallback;
-    const loaded = await loadRepoSettings(api as never, owner, repo, branch);
+    const loaded = await loadRepoSettings(api, owner, repo, branch);
     if (loaded.state !== "valid") {
       return preloadedAuthors === undefined ? { ...fallback, authors: [] } : fallback;
     }

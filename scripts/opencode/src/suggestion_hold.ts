@@ -1,4 +1,5 @@
 import { JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import type { IssueApi } from "./ports.ts";
 import type { SkipLatchKey, SkipLatchStore } from "./skip_latches.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
@@ -80,9 +81,19 @@ export interface HoldStatusApi {
   ): Promise<unknown>;
 }
 
+/**
+ * Narrow port for the one status write the hold needs. The extra optional
+ * `getIssue` exists only so `IssueApi` holders satisfy the weak-type check
+ * (an `IssueApi` has no `createCommitStatus`); it is never read here. Both
+ * adapters and the shared forge fake satisfy it, and a missing
+ * `createCommitStatus` is an explicit no-op with the same runtime result as
+ * the old `try/catch` around a missing method.
+ */
+export type HoldStatusPort = Partial<HoldStatusApi> & Partial<Pick<IssueApi, "getIssue">>;
+
 /** Resolve a held `pending` to `success` with a note. Never throws. */
 export async function postSuggestionHoldSuccess(
-  api: HoldStatusApi,
+  api: HoldStatusPort,
   owner: string,
   repo: string,
   headSha: string,
@@ -90,7 +101,9 @@ export async function postSuggestionHoldSuccess(
   targetUrl?: string
 ): Promise<void> {
   try {
-    await api.createCommitStatus(owner, repo, headSha, {
+    const create = api.createCommitStatus;
+    if (typeof create !== "function") return;
+    await create.call(api, owner, repo, headSha, {
       state: "success",
       context: JUMI_REVIEW_CONTEXT,
       description: holdStatusDescription(description),
