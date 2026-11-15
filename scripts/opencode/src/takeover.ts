@@ -1,3 +1,4 @@
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
 import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
 import { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } from "./repo_settings.ts";
@@ -330,7 +331,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
     return { takeover: false, refused: true };
   }
   try {
-    if (input.forgeKind === "github") {
+    if (forgeCapabilities(input.forgeKind).takeoverMarker === "label") {
       const label = input.api.addIssueLabel;
       if (typeof label === "function") {
         await label.call(input.api, input.owner, input.repo, input.prNumber, pickupLabel);

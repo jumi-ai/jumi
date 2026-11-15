@@ -6,6 +6,7 @@ import { GiteaAPI } from "../src/api.ts";
 import type { Engine, EngineRunOptions } from "../src/engine.ts";
 import { EngineFailedError, resolveEngine, throwIfEngineFailed } from "../src/engine.ts";
 import type { Forge, Tracker } from "../src/forge.ts";
+import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import {
   createForge,
   createGiteaForge,
@@ -59,6 +60,7 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
   const pulls: Array<{ title: string; body: string; head: string; base: string }> = [];
   const statuses: Array<{ sha: string; state: string; context?: string; description?: string }> = [];
   const defaults: Tracker & Forge = {
+    capabilities: FORGE_CAPABILITIES.gitea,
     getRepo: async () => makeRepo(),
     getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
     getPR: async () => makePR(),
@@ -154,6 +156,7 @@ describe("Engine, Tracker, and Forge ports", () => {
       createIssueDependency: async () => undefined,
     };
     const forge: Forge = {
+      capabilities: FORGE_CAPABILITIES.gitea,
       getRepo: async () => makeRepo(),
       getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
       getPR: async () => makePR(),

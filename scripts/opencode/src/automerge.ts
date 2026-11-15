@@ -2,6 +2,7 @@ import { branchRequiresReviewCheck, JUMI_REVIEW_CONTEXT } from "./ci.ts";
 import type { ClaimedLoop } from "./claimed_worktree.ts";
 import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { senderCanSteer } from "./permissions.ts";
 import type { Forge, IssueApi, IssueTimelineEvent } from "./ports.ts";
 import {
@@ -74,8 +75,6 @@ export function isAutomergeRepo(owner: string, repo: string, list: readonly stri
   }
   return false;
 }
-
-const GITEA_MERGE_STYLES = new Set(["merge", "rebase", "rebase-merge", "squash", "fast-forward-only"]);
 
 export function githubMergeMethodForRepo(repo: {
   allowMergeCommit?: boolean;
@@ -953,51 +952,41 @@ async function checkAutomergeGates(
 
   try {
     const repoInfo = await api.getRepo(owner, repo);
+    const policy = forgeCapabilities(forge).mergePolicy;
     const configured = settings.state === "valid" ? settings.automergeMethod : undefined;
     if (configured !== undefined) {
-      if (forge === "github") {
-        if (repoInfo.allowAutoMerge === false) {
-          return {
-            ok: false,
-            note: `Jumi did not schedule auto-merge on this pull request: auto-merge is disabled on this repository. A person needs to merge once reviews and CI are green.`,
-          };
-        }
-        const method = githubMergeMethodForConfiguredRepo(repoInfo, configured);
-        if (!method) {
-          return { ok: false, note: automergeMethodNotAllowedNote(configured) };
-        }
-        return { ok: true, mergeMethod: method };
-      }
-      const method = giteaMergeMethodForConfiguredRepo(repoInfo, configured);
-      if (!method) {
-        return { ok: false, note: automergeMethodNotAllowedNote(configured) };
-      }
-      return { ok: true, mergeMethod: method };
-    }
-    if (forge === "github") {
-      if (repoInfo.allowAutoMerge === false) {
+      if (policy.isAutoMergeDisabled(repoInfo)) {
         return {
           ok: false,
           note: `Jumi did not schedule auto-merge on this pull request: auto-merge is disabled on this repository. A person needs to merge once reviews and CI are green.`,
         };
       }
-      const method = githubMergeMethodForRepo(repoInfo);
+      const method = policy.methodForConfiguredRepo(repoInfo, configured);
       if (!method) {
+        return { ok: false, note: automergeMethodNotAllowedNote(configured) };
+      }
+      return { ok: true, mergeMethod: method };
+    }
+    if (policy.isAutoMergeDisabled(repoInfo)) {
+      return {
+        ok: false,
+        note: `Jumi did not schedule auto-merge on this pull request: auto-merge is disabled on this repository. A person needs to merge once reviews and CI are green.`,
+      };
+    }
+    const fallback = policy.defaultMethod(repoInfo);
+    if (!fallback.ok) {
+      if (fallback.reason === "no-method") {
         return {
           ok: false,
           note: `Jumi did not schedule auto-merge on this pull request: the repository allows no merge method. A person needs to merge once reviews and CI are green.`,
         };
       }
-      return { ok: true, mergeMethod: method };
-    }
-    const style = repoInfo.defaultMergeStyle || "merge";
-    if (!GITEA_MERGE_STYLES.has(style)) {
       return {
         ok: false,
         note: `Jumi did not schedule auto-merge on this pull request: the repository's default merge style is unknown. A person needs to merge once reviews and CI are green.`,
       };
     }
-    return { ok: true, mergeMethod: style };
+    return { ok: true, mergeMethod: fallback.mergeMethod };
   } catch (err) {
     log(`automerge repo unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return {
@@ -1129,12 +1118,12 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   // GitHub exposes a readable schedule state: a pull that never had a
   // schedule (person-cancelled or never scheduled) stays silent without any
   // further forge calls.
-  if (input.forgeKind === "github" && !input.wasScheduled) return;
+  if (forgeCapabilities(input.forgeKind).readableAutoMergeSchedule && !input.wasScheduled) return;
   const files = await loadPrFiles(noteApi, input.owner, input.repo, input.prNumber, log);
   // Unreadable pull files fail closed: neither cancel nor restore.
   if (files === undefined) return;
   if (prTouchesRepoSettings(files)) {
-    if (input.forgeKind === "github") {
+    if (forgeCapabilities(input.forgeKind).readableAutoMergeSchedule) {
       await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
       await postAutomergeNote(
         noteApi,
@@ -1169,7 +1158,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     }
     return;
   }
-  if (input.forgeKind !== "github") {
+  if (!forgeCapabilities(input.forgeKind).supportsAutoMergeRestore) {
     // Gitea never restores, but a push that brings a left-out file — or a
     // `no_automerge`/conflict label state — into the pull still cancels a
     // schedule Jumi set earlier. Like the settings file, the cancel result
@@ -1421,7 +1410,7 @@ export async function readAutomergeScheduled(
   automergeRepos: readonly string[] | undefined
 ): Promise<boolean> {
   if (!isAutomergeRepo(owner, repo, automergeRepos)) return false;
-  if (forgeKind !== "github") return false;
+  if (!forgeCapabilities(forgeKind).readableAutoMergeSchedule) return false;
   try {
     const pr = await api.getPR(owner, repo, prNumber);
     if (pr.merged || pr.state !== "open") return false;
