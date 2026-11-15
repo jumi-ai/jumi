@@ -55,7 +55,7 @@ async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
 describe("GitHub git clone/push", () => {
   test("mints installation token before clone and push, embeds x-access-token, and uses bot identity", async () => {
     await withDirs(async (home, workdir) => {
-      const tokens = ["ghs_clone", "ghs_push"];
+      const tokens = ["ghs_clone", "ghs_push", "ghs_checkpoint_delete"];
       const auths: GitAuth[] = [];
       const logs: string[] = [];
       const gitCalls: Array<{ args: string[]; env: Record<string, string | undefined> }> = [];
@@ -103,9 +103,10 @@ describe("GitHub git clone/push", () => {
       });
 
       expect(result.status).toBe("pr");
-      expect(auths).toHaveLength(2);
+      expect(auths).toHaveLength(3);
       expect(auths[0]?.token).toBe("ghs_clone");
       expect(auths[1]?.token).toBe("ghs_push");
+      expect(auths[2]?.token).toBe("ghs_checkpoint_delete");
       const clone = gitCalls.find((call) => call.args[0] === "clone");
       expect(clone?.args).toEqual([
         "clone",
@@ -117,6 +118,9 @@ describe("GitHub git clone/push", () => {
       const push = gitCalls.find((call) => call.args[0] === "push");
       expect(push?.args).toEqual(["push", "-u", "origin", "jumi/issue-12-fix-the-thing"]);
       expect(push?.env.GIT_AUTH_TOKEN).toBe("ghs_push");
+      const checkpointDelete = gitCalls.find((call) => call.args[0] === "push" && call.args[2] === ":refs/jumi/wip/12");
+      expect(checkpointDelete?.args).toEqual(["push", "origin", ":refs/jumi/wip/12"]);
+      expect(checkpointDelete?.env.GIT_AUTH_TOKEN).toBe("ghs_checkpoint_delete");
       const commit = gitCalls.find((call) => call.args[0] === "commit");
       expect(commit?.env.GIT_AUTHOR_NAME).toBe("kirmanak-jumi[bot]");
       expect(commit?.env.GIT_AUTHOR_EMAIL).toBe("198765+kirmanak-jumi[bot]@users.noreply.github.com");
@@ -127,6 +131,7 @@ describe("GitHub git clone/push", () => {
       expect(extraEnv?.GITHUB_APP_PRIVATE_KEY).toBeUndefined();
       expect(logs.join("\n")).not.toContain("ghs_clone");
       expect(logs.join("\n")).not.toContain("ghs_push");
+      expect(logs.join("\n")).not.toContain("ghs_checkpoint_delete");
       expect(extraEnv).not.toHaveProperty("GITHUB_APP_PRIVATE_KEY");
     });
   });

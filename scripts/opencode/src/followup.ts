@@ -6,11 +6,10 @@ import {
   beginCheckpointing,
   checkpointRefForJob,
   DEFAULT_CHECKPOINT_INTERVAL_MS,
-  DEFAULT_CHECKPOINT_MAX_AGE_MS,
   deleteCheckpointForIssueViaForge,
-  deleteCheckpointRefViaForge,
+  deleteCheckpointRef,
   restoreCheckpoint,
-  sweepStaleCheckpoints,
+  sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
 import {
   buildCiMarkdown,
@@ -1861,11 +1860,14 @@ export async function implementFollowUp(
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpoints(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS,
+      await sweepCheckpointsBestEffort(loop, {
+        maxAgeMs: opts.checkpointMaxAgeMs,
+        api: opts.api,
+        owner,
+        repo,
         log,
         exclude: followUpCheckpoint ? [followUpCheckpoint.ref] : undefined,
-      }).catch(() => undefined);
+      });
       const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
@@ -2356,7 +2358,7 @@ export async function implementFollowUp(
         throw err;
       }
       if (followUpCheckpoint) {
-        await deleteCheckpointRefViaForge(opts.api, owner, repo, followUpCheckpoint.ref, { log });
+        await deleteCheckpointRef(loop, followUpCheckpoint.ref, { log }).catch(() => undefined);
       }
       throwIfAborted(opts.abortSignal);
       await persistConflictAttempt(mergeResult);

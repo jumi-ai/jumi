@@ -286,6 +286,10 @@ function isNotFoundError(err: unknown): boolean {
   return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
+function isUnsupportedRefDeleteError(err: unknown): boolean {
+  return err instanceof Error && /→ (405|501)\b/.test(err.message);
+}
+
 function isActionsDisabledError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   if (/rate limit/i.test(err.message)) return false;
@@ -578,11 +582,13 @@ export class GiteaAPI {
   }
 
   /**
-   * Best-effort delete of a git ref (checkpoint hidden refs). A missing ref is
-   * not an error. Gitea and GitHub both accept `DELETE
-   * /repos/{owner}/{repo}/git/refs/{ref}` with the `refs/` prefix stripped;
-   * an endpoint that does not know the ref namespace surfaces as 404 and is
-   * swallowed the same way.
+   * Best-effort delete of a git ref (checkpoint hidden refs). GitHub accepts
+   * `DELETE /repos/{owner}/{repo}/git/refs/{ref}` with the `refs/` prefix
+   * stripped. Gitea has no DELETE endpoint for arbitrary git refs (its API
+   * only offers `GET` on `/git/refs` and `/git/refs/{ref}`), so a Gitea
+   * delete surfaces as 405/501 and is swallowed like a missing ref. A
+   * missing ref (404, GitHub 422) is not an error so close/merge cleanup
+   * stays idempotent.
    */
   async deleteGitRef(owner: string, repo: string, ref: string): Promise<void> {
     const short = ref.startsWith("refs/") ? ref.slice("refs/".length) : ref;
@@ -590,7 +596,7 @@ export class GiteaAPI {
     try {
       await this.del<unknown>(`/repos/${this.repoPath(owner, repo)}/git/refs/${short}`);
     } catch (err) {
-      if (isNotFoundError(err)) return;
+      if (isNotFoundError(err) || isUnsupportedRefDeleteError(err)) return;
       throw err;
     }
   }
