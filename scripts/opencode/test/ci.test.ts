@@ -180,13 +180,34 @@ describe("infraFlakeReason", () => {
     expect(classifyInfraFlake(log)).toContain("Helm");
   });
 
-  test("failing bun test does not hide a later job step flake", () => {
+  test("failing bun test takes precedence over a later job step flake", () => {
     const log = [
       "(fail) adds numbers [0.03ms]",
       "helm: values.schema.json remote schema 429 Too Many Requests",
       "##[error]Process completed with exit code 1.",
     ].join("\n");
-    expect(classifyInfraFlake(log)).toContain("Helm");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+  });
+
+  test("split schema and timeout across fail lines is not a flake", () => {
+    const log = ["(fail) loads values.schema.json defaults", "(fail) retry gives up after timeout"].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+  });
+
+  test("real test failure next to GitHub 140.82 timeout is not a flake", () => {
+    const log = [
+      "(fail) adds numbers",
+      "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+  });
+
+  test("failing test title carrying an infra signature is not a flake", () => {
+    const log = [
+      "error: expect(received).toBe(expected)",
+      "(fail) infraFlakeReason > detects Helm remote-schema 429",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
   });
 
   test("true positives still match from unprefixed signatures plus actions error", () => {
