@@ -76,9 +76,13 @@ export async function classifyCloserWork(opts: {
       branch.trim() &&
       typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function"
     ) {
-      const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
-      const loaded = await loadRepoSettings(opts.api as never, opts.owner, opts.repo, branch.trim());
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+      const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+      const policy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: branch.trim() },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
     }
   } catch {
     // Fail-open to the deployment value.
@@ -226,9 +230,13 @@ export async function conflictJobIfUnmergeable(
   let effectiveIgnoreLabel = opts?.ignoreConflictsLabel;
   try {
     if (job.defaultBranch?.trim() && typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
-      const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
-      const loaded = await loadRepoSettings(api as never, job.owner, job.repo, job.defaultBranch.trim());
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts?.ignoreConflictsLabel, loaded);
+      const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+      const policy = await resolveRepoPolicy(
+        { api, owner: job.owner, repo: job.repo, ref: job.defaultBranch.trim() },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: opts?.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
     }
   } catch {
     // Fail-open to the deployment value.

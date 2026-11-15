@@ -10,13 +10,13 @@ import {
   DEFAULT_AUTOMERGE_LABEL,
   DEFAULT_NO_AUTOMERGE_LABEL,
   effectiveTrustedSenderLogins,
-  loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
   type RepoSettingsLoad,
   repoMode,
 } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -480,10 +480,14 @@ export async function scheduleAutomergeForNewPr(
   let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
   let effectiveTrusted = input.trustedSenderLogins;
   try {
-    const settings = await loadRepoSettings(api, input.owner, input.repo, input.baseBranch);
-    if (settings.state === "valid") {
-      names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
-      effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, settings);
+    const policy = await resolveRepoPolicy(
+      { api, owner: input.owner, repo: input.repo, ref: input.baseBranch },
+      fallbackPolicyDeployment({ trustedSenderLogins: input.trustedSenderLogins }),
+      { onUnreadable: "throw" }
+    );
+    if (policy.status === "ok") {
+      names = { automergeLabel: policy.automergeLabel, noAutomergeLabel: policy.noAutomergeLabel };
+      effectiveTrusted = policy.trustedSenderLogins;
     }
   } catch (err) {
     log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
@@ -596,15 +600,15 @@ async function maybeNoteDeploymentBlocked(opts: {
   gate: "disabled" | "not-listed";
 }): Promise<{ posted: boolean }> {
   const { api, owner, repo, prNumber, baseBranch, botUsername, log, gate } = opts;
-  let settings: RepoSettingsLoad | undefined;
-  try {
-    settings = await loadRepoSettings(api, owner, repo, baseBranch);
-  } catch {
-    settings = undefined;
-  }
+  const policy = await resolveRepoPolicy(
+    { api, owner, repo, ref: baseBranch },
+    fallbackPolicyDeployment({ trustedSenderLogins: opts.trustedSenderLogins }),
+    { onUnreadable: "fallback" }
+  ).catch(() => undefined);
+  const settings: RepoSettingsLoad | undefined = policy?.load;
   const names =
-    settings?.state === "valid"
-      ? { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel }
+    policy !== undefined && policy.status === "ok"
+      ? { automergeLabel: policy.automergeLabel, noAutomergeLabel: policy.noAutomergeLabel }
       : { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
   const labels = await loadPrLabels(api, owner, repo, prNumber, opts.prLabelsPrefetch, log);
   if (labels === undefined) {
@@ -631,10 +635,7 @@ async function maybeNoteDeploymentBlocked(opts: {
     return { posted: true };
   }
   if (!hasLabelCaseInsensitive(labels, names.automergeLabel)) return { posted: false };
-  const effectiveTrusted =
-    settings !== undefined
-      ? effectiveTrustedSenderLogins(opts.trustedSenderLogins, settings)
-      : opts.trustedSenderLogins;
+  const effectiveTrusted = policy?.trustedSenderLogins ?? opts.trustedSenderLogins;
   const verdict = await isAutomergeLabelAdmitted({
     api,
     owner,
@@ -727,7 +728,13 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
 
   let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(api, input.owner, input.repo, input.baseBranch);
+    settings = (
+      await resolveRepoPolicy(
+        { api, owner: input.owner, repo: input.repo, ref: input.baseBranch },
+        fallbackPolicyDeployment({ trustedSenderLogins: input.trustedSenderLogins }),
+        { onUnreadable: "throw" }
+      )
+    ).load;
   } catch (err) {
     log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     await postAutomergeNote(
@@ -1162,7 +1169,13 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     }
     let settings: RepoSettingsLoad | undefined;
     try {
-      settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
+      settings = (
+        await resolveRepoPolicy(
+          { api: noteApi, owner: input.owner, repo: input.repo, ref: defaultBranch },
+          fallbackPolicyDeployment({ trustedSenderLogins: input.trustedSenderLogins }),
+          { onUnreadable: "throw" }
+        )
+      ).load;
     } catch (err) {
       log(`automerge settings unreadable for ${input.owner}/${input.repo}: ${errorMessage(err)}`);
       return;
@@ -1238,7 +1251,13 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     typeof fetchedRepo.default_branch === "string" && fetchedRepo.default_branch ? fetchedRepo.default_branch : "main";
   let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
+    settings = (
+      await resolveRepoPolicy(
+        { api: noteApi, owner: input.owner, repo: input.repo, ref: defaultBranch },
+        fallbackPolicyDeployment({ trustedSenderLogins: input.trustedSenderLogins }),
+        { onUnreadable: "throw" }
+      )
+    ).load;
   } catch (err) {
     log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     return;
@@ -1529,7 +1548,13 @@ export async function handleAutomergeLabelChange(opts: {
   }
   let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.baseBranch);
+    settings = (
+      await resolveRepoPolicy(
+        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: opts.baseBranch },
+        fallbackPolicyDeployment({ trustedSenderLogins: opts.trustedSenderLogins }),
+        { onUnreadable: "throw" }
+      )
+    ).load;
   } catch (err) {
     log(`automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { action: "none" };

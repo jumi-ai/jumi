@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
-import { type CiGateWait, DEFAULT_CI_GATE_WAIT, effectiveCiGateWait, loadRepoSettings } from "./repo_settings.ts";
+import { type CiGateWait, DEFAULT_CI_GATE_WAIT } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -978,11 +979,15 @@ export async function resolveCiGate(
   }
   if (settingsRef && typeof api.getRepoFile === "function") {
     try {
-      const load = await loadRepoSettings(api, opts.owner, opts.repo, settingsRef);
-      if (load.state === "invalid") {
-        opts.log?.(`ci gate settings invalid for ${opts.owner}/${opts.repo}@${settingsRef}: ${load.error}`);
+      const policy = await resolveRepoPolicy(
+        { api, owner: opts.owner, repo: opts.repo, ref: settingsRef },
+        fallbackPolicyDeployment(),
+        { onUnreadable: "throw" }
+      );
+      if (policy.status === "invalid") {
+        opts.log?.(`ci gate settings invalid for ${opts.owner}/${opts.repo}@${settingsRef}: ${policy.error}`);
       } else {
-        wait = effectiveCiGateWait(load);
+        wait = policy.ciGateWait;
       }
     } catch (err) {
       opts.log?.(`ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${errorMessage(err)}`);

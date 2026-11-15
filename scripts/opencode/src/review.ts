@@ -75,12 +75,12 @@ import {
   isSuggestionFollowupEnabled,
   isSuggestionHoldEnabled,
   loadEffectiveBlockingQuestionAuthors,
-  loadRepoSettings,
   partitionReviewExcludedFiles,
   prTouchesRepoSettings,
   REPO_SETTINGS_PATH,
   type RepoSettingsLoad,
 } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
@@ -1309,9 +1309,15 @@ export async function invalidHeadSettingsFailure(opts: {
     touches = prTouchesRepoSettings(files);
   }
   if (!touches) return undefined;
-  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
+  let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.headSha);
+    settings = (
+      await resolveRepoPolicy(
+        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: opts.headSha },
+        fallbackPolicyDeployment(),
+        { onUnreadable: "throw" }
+      )
+    ).load;
   } catch (err) {
     opts.log(`settings head unreadable for ${opts.owner}/${opts.repo}@${opts.headSha}: ${errorMessage(err)}`);
     return undefined;
@@ -1392,9 +1398,15 @@ export async function loadReviewExcludeMatchers(opts: {
 }): Promise<RegExp[]> {
   const ref = (opts.defaultBranch ?? "").trim();
   if (!ref) return [];
-  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
+  let settings: RepoSettingsLoad;
   try {
-    settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, ref);
+    settings = (
+      await resolveRepoPolicy(
+        { api: opts.api, owner: opts.owner, repo: opts.repo, ref },
+        fallbackPolicyDeployment(),
+        { onUnreadable: "throw" }
+      )
+    ).load;
   } catch (err) {
     opts.log(`review excludes unreadable for ${opts.owner}/${opts.repo}@${ref}: ${errorMessage(err)}`);
     return [];
@@ -1434,7 +1446,13 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
         log
       );
       try {
-        const settingsLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, defaultBranch);
+        const settingsLoad = (
+          await resolveRepoPolicy(
+            { api: forgeApi, owner: opts.owner, repo: opts.repo, ref: defaultBranch },
+            fallbackPolicyDeployment(),
+            { onUnreadable: "throw" }
+          )
+        ).load;
         settingsForHold = settingsLoad;
         if (settingsLoad.state === "valid") {
           suggestionCap = effectiveSuggestionCap(settingsLoad, MAX_SUGGESTION_FINDINGS);
@@ -1850,12 +1868,18 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   // `.jumi.yml` `review_drafts: true`. Fail-open to today's skip so an
   // unreadable file never reviews a draft by accident. Worker eligibility
   // stays draft-excluded elsewhere, so only this review gate opens.
-  let repoBudgetLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
+  let repoBudgetLoad: RepoSettingsLoad | undefined;
   {
     const branch = (defaultBranch ?? "").trim();
     if (branch) {
       try {
-        repoBudgetLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, branch);
+        repoBudgetLoad = (
+          await resolveRepoPolicy(
+            { api: forgeApi, owner: opts.owner, repo: opts.repo, ref: branch },
+            fallbackPolicyDeployment(),
+            { onUnreadable: "throw" }
+          )
+        ).load;
       } catch (err) {
         log(`review settings unreadable for ${repoFullName}@${branch}: ${errorMessage(err)}`);
         repoBudgetLoad = undefined;

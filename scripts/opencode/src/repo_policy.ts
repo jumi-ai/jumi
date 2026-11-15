@@ -1,5 +1,8 @@
 import {
   type CiGateWait,
+  type ConflictRegenerateEntry,
+  DEFAULT_AUTOMERGE_LABEL,
+  DEFAULT_NO_AUTOMERGE_LABEL,
   effectiveBlockingQuestionAuthors,
   effectiveCiGateWait,
   effectiveConflictRounds,
@@ -8,18 +11,22 @@ import {
   effectiveIgnoreConflictsLabel,
   effectivePickupLabel,
   effectiveTrustedSenderLogins,
+  isReviewDraftsEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type RepoMode,
-  type RepoSettingsFileApi,
   type RepoSettingsLoad,
   repoMode,
 } from "./repo_settings.ts";
+import type { Forge } from "./ports.ts";
 import { errorMessage } from "./util/error.ts";
+
+/** Forge file read accepted by the resolver (the only forge surface it touches). */
+export type RepoPolicyFileApi = Pick<Forge, "getRepoFile">;
 
 /** Who and where to read the default-branch `.jumi.yml` for. */
 export interface RepoPolicyContext {
-  api: RepoSettingsFileApi | undefined;
+  api: RepoPolicyFileApi | undefined;
   owner: string;
   repo: string;
   /** Preferred ref; falls back to `defaultBranch` when absent. */
@@ -54,6 +61,13 @@ export interface RepoPolicy {
   pickupLabel: string;
   ciGateWait: CiGateWait;
   mode: RepoMode;
+  automergeLabel: string;
+  noAutomergeLabel: string;
+  reviewExclude: string[];
+  reviewDrafts: boolean;
+  takeoverAuthors: string[];
+  ignoreConflictsAuthors: string[];
+  conflictRegenerate: ConflictRegenerateEntry[];
 }
 
 export interface ResolveRepoPolicyOptions {
@@ -62,11 +76,31 @@ export interface ResolveRepoPolicyOptions {
   reuse?: RepoPolicy | undefined;
 }
 
+/**
+ * Deployment baseline for call sites that only read repository-authored
+ * fields (labels, globs, author lists): every deployer list unset and both
+ * caps zero. Callers that need a real deployer value spread it on top, so a
+ * new `loadRepoSettings` reader becomes one `resolveRepoPolicy` call plus the
+ * fields it actually consumes.
+ */
+export function fallbackPolicyDeployment(overrides?: Partial<RepoPolicyDeployment>): RepoPolicyDeployment {
+  return {
+    trustedSenderLogins: undefined,
+    followupIgnoreLogins: undefined,
+    ignoreConflictsLabel: undefined,
+    blockingQuestionAuthors: undefined,
+    maxFollowupRounds: 0,
+    maxConflictRounds: 0,
+    ...overrides,
+  };
+}
+
 /** Pure derivation from an already-loaded settings file. Reuses the existing `effective*` helpers. */
 export function deriveRepoPolicy(
   load: RepoSettingsLoad,
   deployment: RepoPolicyDeployment
 ): Omit<RepoPolicy, "load" | "status" | "error"> {
+  const valid = load.state === "valid";
   return {
     trustedSenderLogins: effectiveTrustedSenderLogins(deployment.trustedSenderLogins, load),
     followupIgnoreLogins: effectiveFollowupIgnoreLogins(deployment.followupIgnoreLogins, load),
@@ -78,6 +112,13 @@ export function deriveRepoPolicy(
     pickupLabel: effectivePickupLabel(load),
     ciGateWait: effectiveCiGateWait(load),
     mode: repoMode(load),
+    automergeLabel: valid ? load.automergeLabel : DEFAULT_AUTOMERGE_LABEL,
+    noAutomergeLabel: valid ? load.noAutomergeLabel : DEFAULT_NO_AUTOMERGE_LABEL,
+    reviewExclude: valid ? [...load.reviewExclude] : [],
+    reviewDrafts: isReviewDraftsEnabled(load),
+    takeoverAuthors: valid ? [...(load.takeoverAuthors ?? [])] : [],
+    ignoreConflictsAuthors: valid ? [...(load.ignoreConflictsAuthors ?? [])] : [],
+    conflictRegenerate: valid ? [...(load.conflictRegenerate ?? [])] : [],
   };
 }
 
