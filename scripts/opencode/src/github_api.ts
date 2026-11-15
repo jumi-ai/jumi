@@ -1,4 +1,4 @@
-import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
+import { forgeRequestError, isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
@@ -845,7 +845,8 @@ export class GithubAPI {
   /**
    * Required status checks the App can read for the fail-closed auto-merge
    * gate. Reads classic protection first; classic 404s on ruleset-managed
-   * branches, so fall back to the active branch rules
+   * branches (and 403s when the App lacks the Administration permission
+   * those branches require), so fall back to the active branch rules
    * (`GET /repos/{owner}/{repo}/rules/branches/{branch}`) and collect the
    * `required_status_checks` contexts there. Readable rules without a
    * required-checks rule report `enableStatusCheck: false`. Throws when
@@ -865,7 +866,7 @@ export class GithubAPI {
       ];
       return { protected: true, enableStatusCheck: true, requiredContexts };
     } catch (err) {
-      if (!isNotFoundError(err)) throw err;
+      if (!isNotFoundError(err) && !isForbiddenError(err)) throw err;
       return this.getBranchFromRules(owner, repo, branch, err);
     }
   }
