@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -26,69 +26,19 @@ import { EngineFailedError } from "../src/engine.ts";
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { agyConversationPath, isProviderUnavailableResult, withEngineChain } from "../src/fallback.ts";
 import { agyReadUrlDeny, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
-import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
-
-const originalPath = process.env.PATH;
-const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
+import { fakeBin, withFakeBins } from "./harness/bins.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 afterEach(() => {
   resetControlMetricsForTests();
   resetTokenMetricsForTests();
-  process.env.PATH = originalPath;
-  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
-  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
 });
 
-interface FakeEnv {
-  workdir: string;
-  home: string;
-  argsLog: string;
-}
-
 /** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
-const SANDBOX_STUB = `#!/bin/sh
-if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
-while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
-[ "$1" = "--" ] && shift
-exec "$@"
-`;
-
 /** Fake binaries append one line of argv per call to `$ARGS_LOG`. */
-async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), "fake-agy-"));
-  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-agy-work-")));
-  const home = await mkdtemp(join(tmpdir(), "fake-agy-home-"));
-  try {
-    for (const [name, script] of Object.entries(bins)) {
-      const bin = join(dir, name);
-      await writeFile(bin, script);
-      await chmod(bin, 0o755);
-    }
-    // Review spawns exec through the sandbox wrapper; the stub keeps the
-    // wrapped path under test without applying real Landlock rules.
-    const stub = join(dir, "jumi-sandbox-stub");
-    await writeFile(stub, SANDBOX_STUB);
-    await chmod(stub, 0o755);
-    process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
-    process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run({ workdir, home, argsLog: join(dir, "args.log") });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
-}
-
-function fakeBin(name: string, body: string): string {
-  return `#!/bin/sh
-printf '${name} %s\\n' "$*" >> "$ARGS_LOG"
-${body}
-`;
-}
-
 async function argLines(argsLog: string): Promise<string[]> {
   try {
     return (await readFile(argsLog, "utf8")).trim().split("\n").filter(Boolean);
@@ -140,15 +90,12 @@ describe("mergeAgyForgeDeny", () => {
   });
 
   test("refuses a deny list it cannot merge", async () => {
-    const home = await mkdtemp(join(tmpdir(), "agy-deny-"));
-    try {
+    await withWorkspace(async (home) => {
       const dir = join(home, AGY_SETTINGS_DIR);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, "settings.json"), JSON.stringify({ permissions: { deny: "read_url(*)" } }));
       await expect(ensureAgyForgeDeny(home, "gitea.example.test")).rejects.toBeInstanceOf(EngineFailedError);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -789,8 +736,7 @@ exec sleep 30`
 
 describe("agySearxngMcp", () => {
   test("registers the searxng server beside existing servers", async () => {
-    const home = await mkdtemp(join(tmpdir(), "agy-mcp-"));
-    try {
+    await withWorkspace(async (home) => {
       const dir = join(home, AGY_MCP_CONFIG_DIR);
       await mkdir(dir, { recursive: true });
       await writeFile(
@@ -808,14 +754,11 @@ describe("agySearxngMcp", () => {
         SEARXNG_URL: "https://search.example",
         SEARXNG_FORGE_HOST: "gitea.example.com",
       });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("refuses a config it cannot merge and prunes only our entry", async () => {
-    const home = await mkdtemp(join(tmpdir(), "agy-mcp-"));
-    try {
+    await withWorkspace(async (home) => {
       const dir = join(home, AGY_MCP_CONFIG_DIR);
       await mkdir(dir, { recursive: true });
       await writeFile(join(dir, AGY_MCP_CONFIG_FILE), "{not json");
@@ -836,9 +779,7 @@ describe("agySearxngMcp", () => {
       await rm(join(dir, AGY_MCP_CONFIG_FILE));
       await pruneAgyMcpServer(home);
       await pruneAgyMcpServer(undefined);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("runAgy writes the MCP entry when configured and prunes it otherwise", async () => {

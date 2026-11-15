@@ -3,7 +3,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IssueApi } from "../src/gitea_issues.ts";
-import { classifyCloserWork, conflictJobIfUnmergeable, isJumiCloserForIssue } from "../src/pickup.ts";
+import {
+  conflictJobIfUnmergeable,
+  isJumiCloserForIssue,
+  classifyCloserWork as realClassifyCloserWork,
+} from "../src/pickup.ts";
+import { traced } from "./golden/trace.ts";
+
+const classifyCloserWork = traced("classifyCloserWork", realClassifyCloserWork);
+
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 

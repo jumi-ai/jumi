@@ -22,17 +22,22 @@ import {
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
-  implementFollowUp,
   isBlockingQuestionInline,
   isJumiPullReviewFinding,
   isJumiReviewFinding,
-  needsFollowUp,
   parsePrHeadChangedReason,
   pickLatestJumiFinding,
   pickLatestJumiReview,
   readFollowUpState,
+  implementFollowUp as realImplementFollowUp,
+  needsFollowUp as realNeedsFollowUp,
   writeFollowUpState,
 } from "../src/followup.ts";
+import { traced } from "./golden/trace.ts";
+
+const implementFollowUp = traced("implementFollowUp", realImplementFollowUp);
+const needsFollowUp = traced("needsFollowUp", realNeedsFollowUp);
+
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { PR_BODY_FENCE_END, PR_BODY_FENCE_START } from "../src/implement.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
@@ -42,6 +47,7 @@ import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { withDirs } from "./harness/temp.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -113,17 +119,6 @@ function followupApi(
     ...overrides,
   });
   return Object.assign(fake, { comments, pulls, commentIndexes });
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-fu-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-fu-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 function followUpJob(overrides: Parameters<typeof makeIssueJob>[0] = {}) {

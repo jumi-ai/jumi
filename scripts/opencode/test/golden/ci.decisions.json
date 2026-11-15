@@ -1,0 +1,100 @@
+{
+  "ci.test.ts::1": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "repo": "demo",
+      "sha": "headsha"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsCiFollowUp",
+    "result": true
+  },
+  "ci.test.ts::2": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "repo": "jumi",
+      "sha": "headsha"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsCiFollowUp",
+    "result": false
+  },
+  "ci.test.ts::3": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "repo": "demo",
+      "sha": "headsha"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "old",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "old",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsCiFollowUp",
+    "result": true
+  }
+}

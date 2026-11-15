@@ -45,6 +45,7 @@ import {
   writeCodexReviewShellHooks,
   writeOpenCodeReviewShellPlugin,
 } from "../src/review_sandbox.ts";
+import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
 const originalWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 const originalAllow = process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV];
@@ -96,8 +97,7 @@ describe("reviewSandboxRules", () => {
 
 describe("resolveWorktreeGitDirsSync", () => {
   test("resolves both the worktree gitdir and the commondir behind a .git file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
-    try {
+    await withWorkspace(async (dir) => {
       const gitdir = join(dir, "wt");
       const common = join(dir, "common");
       await writeFile(join(dir, ".git"), `gitdir: ./wt\n`);
@@ -106,33 +106,25 @@ describe("resolveWorktreeGitDirsSync", () => {
       await writeFile(join(gitdir, "commondir"), "../common\n");
       await mkdir(common, { recursive: true });
       expect(resolveWorktreeGitDirsSync(dir)).toEqual([gitdir, common]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("resolves just the gitdir when there is no commondir", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
-    try {
+    await withWorkspace(async (dir) => {
       const gitdir = join(dir, "wt");
       await writeFile(join(dir, ".git"), `gitdir: ./wt\n`);
       const { mkdir } = await import("node:fs/promises");
       await mkdir(join(gitdir), { recursive: true });
       expect(resolveWorktreeGitDirsSync(dir)).toEqual([gitdir]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("returns [] for a normal .git directory", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbox-gitdir-"));
-    try {
+    await withWorkspace(async (dir) => {
       const { mkdir } = await import("node:fs/promises");
       await mkdir(join(dir, ".git"), { recursive: true });
       expect(resolveWorktreeGitDirsSync(dir)).toEqual([]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -251,16 +243,13 @@ describe("resolveAgentBin", () => {
   });
 
   test("PATH order wins: the first executable entry is the one", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "sandbox-which-"));
-    try {
+    await withWorkspace(async (dir) => {
       await writeFile(join(dir, "jumi-which-probe"), "#!/bin/sh\necho fake\n");
       await chmod(join(dir, "jumi-which-probe"), 0o755);
       expect(findOnPath("jumi-which-probe", `${dir}:/usr/bin:/bin`)).toBe(join(dir, "jumi-which-probe"));
       expect(findOnPath("jumi-which-probe", "/usr/bin:/bin")).toBeUndefined();
       expect(resolveAgentBin(["jumi-which-probe"], { PATH: `${dir}:/usr/bin` })[0]).toBe(join(dir, "jumi-which-probe"));
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -356,8 +345,7 @@ describe("resolveReviewSpawnSandbox", () => {
   });
 
   test("per-runner hooks are Jumi-owned code that wrap shells and deny credential reads", async () => {
-    const workdir = await mkdtemp(join(tmpdir(), "sandbox-hook-"));
-    try {
+    await withWorkspace(async (workdir) => {
       const scratch = join(workdir, ".jumi-tmp", "scratch");
       const { mkdir } = await import("node:fs/promises");
       await mkdir(scratch, { recursive: true });
@@ -435,14 +423,11 @@ describe("resolveReviewSpawnSandbox", () => {
       } finally {
         await rm(harnessTemp, { recursive: true, force: true });
       }
-    } finally {
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("hook deny predicates block ancestors, exact paths, and relative traversal", async () => {
-    const workdir = await mkdtemp(join(tmpdir(), "sandbox-deny-"));
-    try {
+    await withWorkspace(async (workdir) => {
       const scratch = join(workdir, ".jumi-tmp", "scratch");
       const { mkdir } = await import("node:fs/promises");
       await mkdir(scratch, { recursive: true });
@@ -563,9 +548,7 @@ describe("resolveReviewSpawnSandbox", () => {
       } finally {
         await rm(harnessTemp, { recursive: true, force: true });
       }
-    } finally {
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("allowUnsandboxedReviews is opt-in only", () => {
@@ -583,8 +566,7 @@ describe("review sandbox red-team (real wrapper)", () => {
       expect(live.reason ?? "").toMatch(/Landlock|executable/);
       return;
     }
-    const checkout = await mkdtemp(join(tmpdir(), "sandbox-red-"));
-    try {
+    await withWorkspace(async (checkout) => {
       const scratch = join(checkout, ".jumi-tmp", "scratch");
       const { mkdir } = await import("node:fs/promises");
       await mkdir(scratch, { recursive: true });
@@ -670,17 +652,13 @@ describe("review sandbox red-team (real wrapper)", () => {
         await rm(harnessTemp, { recursive: true, force: true }).catch(() => undefined);
         await rm(secretDir, { recursive: true, force: true });
       }
-    } finally {
-      await rm(checkout, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("review engine sandbox wiring", () => {
   test("every engine refuses a review spawn when Landlock is unavailable", async () => {
-    const workdir = await mkdtemp(join(tmpdir(), "sandbox-wire-"));
-    const home = await mkdtemp(join(tmpdir(), "sandbox-wire-home-"));
-    try {
+    await withTempDirs(["jumi-tmp-", "jumi-tmp-"], async (workdir, home) => {
       const refuse = { available: false as const, reason: "unit-test probe says no Landlock" };
       setReviewSandboxProbeForTests(refuse);
       // Reviewer spawns always carry the forge host (repo_setup sets
@@ -710,10 +688,7 @@ describe("review engine sandbox wiring", () => {
         expect(caught).toBeInstanceOf(EngineFailedError);
         expect((caught as EngineFailedError).message).toContain("review spawn refused");
       }
-    } finally {
-      await rm(workdir, { recursive: true, force: true });
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("every engine sets up per-shell hooks and leaves the agent unsandboxed", async () => {
@@ -723,9 +698,9 @@ describe("review engine sandbox wiring", () => {
     // Fake agent binaries (Jumi-owned PATH dir, never the checkout): each
     // prints what its runner parses as success. The agent itself is never
     // wrapped; the per-shell hooks are what the test grades.
-    const fakeBin = join(dir, "bin");
+    const fakeBinDir = join(dir, "bin");
     const { mkdir } = await import("node:fs/promises");
-    await mkdir(fakeBin, { recursive: true });
+    await mkdir(fakeBinDir, { recursive: true });
     const fake = {
       opencode: `#!/bin/sh\nprintf 'ok\\n'`,
       claude: `#!/bin/sh\nprintf 'ok\\n'`,
@@ -733,8 +708,8 @@ describe("review engine sandbox wiring", () => {
       agy: `#!/bin/sh\nprintf '{"event":"result","status":"SUCCESS","response":"done"}\\n'`,
     };
     for (const [name, body] of Object.entries(fake)) {
-      await writeFile(join(fakeBin, name), `${body}\n`);
-      await chmod(join(fakeBin, name), 0o755);
+      await writeFile(join(fakeBinDir, name), `${body}\n`);
+      await chmod(join(fakeBinDir, name), 0o755);
     }
     // Fake wrapper for the --check probe only; the agent argv never uses it.
     const seen = join(dir, "seen.log");
@@ -751,7 +726,7 @@ exec "$@"
       await writeFile(join(dir, "jumi-sandbox-stub"), stub);
       await chmod(join(dir, "jumi-sandbox-stub"), 0o755);
       process.env[REVIEW_SANDBOX_WRAPPER_ENV] = join(dir, "jumi-sandbox-stub");
-      process.env.PATH = `${fakeBin}:${originalPath ?? "/usr/bin:/bin"}`;
+      process.env.PATH = `${fakeBinDir}:${originalPath ?? "/usr/bin:/bin"}`;
       // Same forge-host seeding as the refusal test: reviewer spawns always
       // carry GIT_AUTH_HOST, and agy's forge-deny setup needs it before the
       // sandbox gate is reached.

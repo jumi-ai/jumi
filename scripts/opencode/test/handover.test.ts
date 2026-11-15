@@ -2,12 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { buildBoardGroups } from "../src/board.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import {
-  enqueueFollowUpFromReview,
   isMaintainerOnlyTrailer,
+  enqueueFollowUpFromReview as realEnqueueFollowUpFromReview,
   shouldHandoverFollowUp,
   TOO_MANY_FOLLOWUP_ROUNDS,
   WAITING_ON_MAINTAINER_REASON,
 } from "../src/handover.ts";
+import { traced } from "./golden/trace.ts";
+
+const enqueueFollowUpFromReview = traced("enqueueFollowUpFromReview", realEnqueueFollowUpFromReview);
+
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";

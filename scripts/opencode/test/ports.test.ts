@@ -33,6 +33,7 @@ import {
   makePR,
   makeRepo,
 } from "./fixtures.ts";
+import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -107,17 +108,6 @@ function makeFakeForge(overrides: Partial<Tracker & Forge> = {}): (Tracker & For
     },
   };
   return { ...defaults, ...overrides, comments, reviews, pulls, statuses };
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-ports-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-ports-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 describe("Engine, Tracker, and Forge ports", () => {
@@ -320,8 +310,7 @@ describe("Engine, Tracker, and Forge ports", () => {
   });
 
   test("review publishes pull-review writeup+trailer+status from the artifact, not engine stdout", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-ports-review-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const sha = "d90b7289701097dae3ffa3dc0ccdc348be552697";
       const forge = makeFakeForge({
         getPR: async () => makePR({ head: makeBranch({ sha }) }),
@@ -370,9 +359,7 @@ describe("Engine, Tracker, and Forge ports", () => {
         { state: "pending", context: "jumi/opencode-review" },
         { state: "success", context: "jumi/opencode-review" },
       ]);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 
   test("implement fail-closes on engine timeout and does not open a PR", async () => {
@@ -406,8 +393,7 @@ describe("Engine, Tracker, and Forge ports", () => {
   });
 
   test("review fail-closes on engine exit and does not treat stdout as success", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-ports-review-exit-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const sha = "d90b7289701097dae3ffa3dc0ccdc348be552697";
       const forge = makeFakeForge({
         getPR: async () => makePR({ head: makeBranch({ sha }) }),
@@ -440,8 +426,6 @@ describe("Engine, Tracker, and Forge ports", () => {
       expect(forge.comments).toHaveLength(0);
       expect(forge.statuses.map((status) => status.state)).toEqual(["pending", "failure"]);
       expect(forge.statuses.at(-1)?.description).toContain("opencode exited with code 7");
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 });

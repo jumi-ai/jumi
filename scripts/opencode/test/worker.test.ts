@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import {
   claimFilePath,
   conflictStatePath,
@@ -29,18 +27,19 @@ import {
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { isQuotaStuck, readStuckLatch, readStuckState, writeStuckState } from "../src/stuck.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
-import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
+import {
+  handleIssueCancel,
+  processWorkerTick as realProcessWorkerTick,
+  reclaimExpiredWorkerJobs,
+} from "../src/worker.ts";
+import { traced } from "./golden/trace.ts";
+
+const processWorkerTick = traced("processWorkerTick", realProcessWorkerTick);
+
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
-import {
-  makeComment,
-  makeIssue,
-  makeIssueJob,
-  makePR,
-  makeRepo,
-  makeWorkerConfig,
-  stripGitConfigArgs,
-} from "./fixtures.ts";
+import { makeComment, makeIssueJob, makePR, makeRepo, makeWorkerConfig, stripGitConfigArgs } from "./fixtures.ts";
+import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 function waitUntilAborted(signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -71,20 +70,16 @@ function workerApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: st
 
 describe("handleIssueCancel", () => {
   test("does not overwrite a leftover sticky after finished work", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const api = workerApi();
       const result = await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(result).toEqual({ key: "kirmanak/demo#12", cancelled: true });
       expect(api.comments).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("deletes a terminal claim without posting stopped", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const path = claimFilePath(home, "kirmanak", "demo", 12);
       await writeClaim(path, {
         pid: 0,
@@ -100,14 +95,11 @@ describe("handleIssueCancel", () => {
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(await readClaim(path)).toBeUndefined();
       expect(api.comments).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("posts stopped when a non-terminal claim exists", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
         pid: 0,
         startedAt: "2026-05-23T00:00:00Z",
@@ -121,14 +113,11 @@ describe("handleIssueCancel", () => {
       const api = workerApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(api.comments.at(-1)).toContain("stopped");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("ledger cancel marks a leased row instead of killing an unrelated claim pid", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const child = Bun.spawn(["sleep", "30"]);
       await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
         pid: child.pid,
@@ -165,14 +154,11 @@ describe("handleIssueCancel", () => {
       expect(api.comments).toEqual([]);
       child.kill();
       await child.exited;
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("clears the shared skip latch so another ordinal can recover", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-latch-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
       await store.enqueueIssue(makeIssueJob());
@@ -195,14 +181,11 @@ describe("handleIssueCancel", () => {
       expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
       await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("resolves a held pending to success before wiping the latch", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-hold-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await markSuggestionHoldConsumed(
         store.skipLatches,
@@ -228,14 +211,11 @@ describe("handleIssueCancel", () => {
       expect(statuses[0]).toMatchObject({ sha: "headsha", state: "success" });
       expect(statuses[0]?.description).toContain("unassigned");
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("kills recorded pid and marks leased rows for the tick to settle", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const child = Bun.spawn(["sleep", "30"]);
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
@@ -254,9 +234,7 @@ describe("handleIssueCancel", () => {
       await child.exited;
       expect(child.exitCode === 0).toBe(false);
       expect(api.comments).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -508,8 +486,7 @@ describe("processWorkerTick", () => {
   });
 
   test("same-replica unassign aborts the holder without waiting for heartbeat", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const aborts = new Map<string, AbortController>();
@@ -543,14 +520,11 @@ describe("processWorkerTick", () => {
       );
       expect(await tick).toBe("processed");
       expect(store.rows[0]?.state).toBe("cancelled");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("unassign on another replica aborts the holder via failed heartbeat", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const child = Bun.spawn(["sleep", "30"]);
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
@@ -595,9 +569,7 @@ describe("processWorkerTick", () => {
       expect(store.rows[0]?.state).toBe("cancelled");
       await child.exited;
       expect(child.exitCode === 0).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("already-aborted tick does not lease", async () => {
@@ -989,9 +961,7 @@ describe("processWorkerTick", () => {
   });
 
   test("real implementIssue infra fail does not fingerprint or stuck-publish", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-infra-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-infra-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const api = workerApi();
@@ -1027,10 +997,7 @@ describe("processWorkerTick", () => {
       expect(api.comments.some((body) => body.includes("Jumi failed:") || body.includes("stuck:"))).toBe(false);
       expect((await readStuckState(stuckStatePath(home, "kirmanak", "demo", 12))).fingerprints).toEqual([]);
       expect(logs.filter((line) => line.includes("infra-retry"))).toHaveLength(4);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("follow-up and conflict infra fails share the same requeue path", async () => {
@@ -1135,9 +1102,7 @@ describe("processWorkerTick", () => {
   });
 
   test("fake engine quota abort requeues then succeeds after the delay", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-ok-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-quota-ok-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const cooldown = new QuotaCooldown();
@@ -1176,10 +1141,7 @@ describe("processWorkerTick", () => {
       await processWorkerTick(store, makeWorkerConfig({ home, workdir }), api, "worker-1", extras);
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(calls).toBe(2);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("quota abort requeues until the delay then succeeds on a later attempt", async () => {
@@ -1222,9 +1184,7 @@ describe("processWorkerTick", () => {
   });
 
   test("quota wait exhaust at 30h posts stuck and does not retry", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-quota-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       store.rows[0]!.error = encodeQuotaWaitMarker(1, Date.now() - QUOTA_WAIT_BUDGET_MS - 1);
@@ -1265,16 +1225,11 @@ describe("processWorkerTick", () => {
       expect(
         isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
       ).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("hop-configured different provider never enters the quota wait", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-hop-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-hop-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const models: string[] = [];
@@ -1312,16 +1267,11 @@ describe("processWorkerTick", () => {
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(store.rows[0]?.error).toBeNull();
       expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("mixed chain waits on the second runner quota and does not latch", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-chain-wait-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-chain-wait-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const api = workerApi();
@@ -1371,16 +1321,11 @@ describe("processWorkerTick", () => {
       expect(
         isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
       ).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("mixed chain still hops a quota on the first runner", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-chain-hop-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-chain-hop-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const models: string[] = [];
@@ -1427,16 +1372,11 @@ describe("processWorkerTick", () => {
       expect(models).toEqual(["openai/gpt-5.5", "anthropic/claude-sonnet-4-6"]);
       expect(store.rows[0]?.state).toBe("succeeded");
       expect(isQuotaWaitMarker(store.rows[0]?.error)).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("refused quota hop waits instead of latching", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-hop-refused-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-worker-hop-refused-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const api = workerApi();
@@ -1486,10 +1426,7 @@ describe("processWorkerTick", () => {
       expect(
         isQuotaStuck(await readStuckLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 }))
       ).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("quota hit cools the instance so another job does not spawn OpenCode", async () => {
@@ -1543,8 +1480,7 @@ describe("processWorkerTick", () => {
   });
 
   test("unlabel cancel drops a job sitting in the quota wait", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-quota-cancel-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
@@ -1559,14 +1495,11 @@ describe("processWorkerTick", () => {
       expect(store.rows[0]?.state).toBe("queued");
       await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       expect(store.rows[0]?.state).toBe("cancelled");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("shared skip latch skips follow-up without OpenCode on another ordinal", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-latch-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
       await writeStuckState(stuckStatePath(home, "kirmanak", "demo", 12), {
@@ -1597,14 +1530,11 @@ describe("processWorkerTick", () => {
       expect(store.rows[0]?.state).toBe("skipped");
       expect(store.rows[0]?.resultReason).toBe("stuck: cannot resolve conflicts");
       expect(logs.some((line) => line.includes("stuck: cannot resolve conflicts"))).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("kill switch wipes HOME skip files so a writer follow-up runs", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-worker-kill-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemoryReviewJobStore();
       await store.setIssueSkipReason("kirmanak", "demo", 12, "stuck: cannot resolve conflicts");
       await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
@@ -1629,9 +1559,7 @@ describe("processWorkerTick", () => {
       expect(JSON.parse(await readFile(skipLatchGenerationPath(home, "kirmanak", "demo", 12), "utf8"))).toEqual({
         generation: 1,
       });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("follow-up stuck skip records a shared latch", async () => {

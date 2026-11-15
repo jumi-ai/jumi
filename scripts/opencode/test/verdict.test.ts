@@ -110,6 +110,32 @@ describe("parseReviewOutput", () => {
       verdict: { state: "success", description: "2 suggestions", incomplete: false },
     });
   });
+
+  test("parses > and -> in the reason with a sanitized description", () => {
+    expect(
+      parseReviewOutput("Looks good.\n<!-- jumi-check: success; bumps codex 0.167.1->0.167.2, patch only -->").verdict
+    ).toEqual({
+      state: "success",
+      description: "bumps codex 0.167.1→0.167.2, patch only",
+      incomplete: false,
+    });
+    expect(parseReviewOutput("Needs work.\n<!-- jumi-check: failure; x > y comparison inverted -->").verdict).toEqual({
+      state: "failure",
+      description: "x › y comparison inverted",
+      incomplete: false,
+    });
+    expect(
+      parseReviewOutput("Looks good.\n<!-- jumi-check: success; bumps codex 0.167.1 to 0.167.2 -->").verdict
+    ).toEqual({
+      state: "success",
+      description: "bumps codex 0.167.1 to 0.167.2",
+      incomplete: false,
+    });
+  });
+
+  test("still rejects a reason that itself contains -->", () => {
+    expect(parseReviewOutput("Looks good.\n<!-- jumi-check: success; a --> b -->").verdict.incomplete).toBe(true);
+  });
 });
 
 describe("trailerSuggestionCount", () => {

@@ -15,6 +15,7 @@ import {
   traceExportErrors,
 } from "../src/phoenix.ts";
 import { renderTokenMetrics } from "../src/token_metrics.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 const originalEndpoint = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalPublicHost = process.env.PHOENIX_PUBLIC_HOST;
@@ -337,8 +338,7 @@ describe("buildOpenCodeTraceRequest", () => {
   });
 
   test("keeps long commands and skips missing tables", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       writeTraceDb(dbPath, {
         tools: [{ tool: "bash", status: "completed", command: "x".repeat(400) }],
@@ -355,9 +355,7 @@ describe("buildOpenCodeTraceRequest", () => {
       db.run("CREATE TABLE session (id TEXT)");
       db.close();
       expect(buildOpenCodeTraceRequest(sessionOnly)).toBeUndefined();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("exports every tool span and keeps unreadable rows off the job", async () => {
@@ -517,8 +515,7 @@ describe("buildOpenCodeTraceRequest", () => {
   });
 
   test("unrecognized schema fails soft and returns undefined", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-phoenix-unknown-"));
-    try {
+    await withWorkspace(async (dir) => {
       const noSession = join(dir, "no-session.db");
       const db1 = new Database(noSession);
       db1.run("CREATE TABLE random_table (id TEXT)");
@@ -531,9 +528,7 @@ describe("buildOpenCodeTraceRequest", () => {
       db2.run("INSERT INTO session_v2 VALUES ('s1', 1, 2)");
       db2.close();
       expect(buildOpenCodeTraceRequest(sessionV2NoMessages)).toBeUndefined();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 

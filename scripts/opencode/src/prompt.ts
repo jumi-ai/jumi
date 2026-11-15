@@ -445,6 +445,13 @@ export function buildNoTrailerWritePrompt(lastAssistant?: string): string {
 Your previous JUMI_REVIEW.md had no check trailer: the last non-empty line was not <!-- jumi-check: success --> or <!-- jumi-check: failure -->. Rewrite JUMI_REVIEW.md from the review already in this session with its findings and exactly one check trailer as the last non-empty line: <!-- jumi-check: success --> when there are no 🔴/🟡 findings, otherwise <!-- jumi-check: failure --> with a short reason. Do not take the verdict from stdout or other prose; the trailer must come from JUMI_REVIEW.md.`;
 }
 
+export function buildMalformedTrailerWritePrompt(lastAssistant?: string): string {
+  const base = buildIncompleteWritePrompt(lastAssistant);
+  return `${base}
+
+Your previous JUMI_REVIEW.md had a malformed check trailer: the last non-empty line looked like a <!-- jumi-check: ... --> trailer but could not be parsed. A \`>\` in the reason (including \`->\`) breaks the trailer: keep the reason to plain words without \`>\` and without \`-->\`. Rewrite JUMI_REVIEW.md from the review already in this session with its findings and exactly one check trailer as the last non-empty line: <!-- jumi-check: success --> when there are no 🔴/🟡 findings, otherwise <!-- jumi-check: failure --> with a short reason. Do not take the verdict from stdout or other prose; the trailer must come from JUMI_REVIEW.md.`;
+}
+
 export function buildMcpIncompletePrompt(): string {
   return "No verdict was recorded through the review tools. Record each finding with add_finding and exactly one verdict with set_verdict now. Do not inspect the pull request again. Do not redo the review. Then stop.";
 }

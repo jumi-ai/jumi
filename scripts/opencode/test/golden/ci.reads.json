@@ -1,0 +1,30 @@
+{
+  "ci.test.ts::1": {
+    "name": "needsCiFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1
+    }
+  },
+  "ci.test.ts::2": {
+    "name": "needsCiFollowUp",
+    "reads": {
+      "getActionJobLogs": 1,
+      "getRepo": 1,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1
+    }
+  },
+  "ci.test.ts::3": {
+    "name": "needsCiFollowUp",
+    "reads": {
+      "getRepo": 1,
+      "listActionJobs": 2,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1
+    }
+  }
+}
