@@ -107,8 +107,12 @@ describe("codex renovate monitoring", () => {
       expect(manager?.matchStrings?.length).toBe(1);
       expect(manager?.datasourceTemplate).toBe("github-release-attachments");
       expect(manager?.depNameTemplate).toBe("openai/codex");
+      // Tag-form values: no extractVersionTemplate, so newValue stays
+      // rust-vX.Y.Z and getDigest requests releases/tags/rust-vX.Y.Z.
       expect(manager?.extractVersionTemplate).toBeUndefined();
       expect(manager?.versioningTemplate).toBe("regex:^rust-v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$");
+      // The tag is written verbatim; re-adding a prefix would double it to
+      // rust-vrust-v….
       expect(manager?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
       expect(manager?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
       expect(manager?.autoReplaceStringTemplate).not.toContain("rust-v{{{newValue}}}");
@@ -161,10 +165,15 @@ describe("codex renovate monitoring", () => {
   test("preserves release-age, scheduling, review, and CI policy", () => {
     expect(renovate.minimumReleaseAge).toBe("3 days");
     expect(renovate.prCreation).toBe("immediate");
+    // Full-automerge pilot: Renovate itself waits for checks, and every
+    // update type automerges via platform automerge once the branch ruleset
+    // (jumi/opencode-review, checks, image builds) is green.
     expect(renovate.ignoreTests).toBe(false);
     expect(renovate.automerge).toBe(true);
     expect(renovate.platformAutomerge).toBe(true);
     expect(renovate.lockFileMaintenance).toEqual({ automerge: true });
+    // No codex-specific automerge widening: the global policy covers codex,
+    // so the codex rules carry no per-package automerge bypass.
     const rules = codexRule();
     for (const rule of rules ?? []) {
       expect((rule as Record<string, unknown> | undefined)?.automerge).toBeUndefined();
@@ -211,6 +220,9 @@ describe("codex pin coherence", () => {
     expect(amd?.groups.currentDigest).toBe(SYN_OLD_AMD_SHA);
     expect(arm?.groups.currentValue).toBe(SYN_OLD_TAG);
     expect(arm?.groups.currentDigest).toBe(SYN_OLD_ARM_SHA);
+    // The lookup yields the tag verbatim (tag-form versioning, no
+    // extractVersion); each arch autoReplace template writes that tag with
+    // its new digest.
     const amdNew = compileAutoReplace(amdManager?.autoReplaceStringTemplate ?? "", {
       newValue: SYN_NEW_TAG,
       newDigest: SYN_NEW_AMD_SHA,
@@ -288,6 +300,7 @@ describe("codex build consumes one effective pin and fails closed", () => {
     expect(dockerfile).not.toMatch(/^ARG CODEX_VERSION=/m);
     expect(dockerfile).not.toMatch(/^ARG CODEX_SHA256_AMD64=/m);
     expect(dockerfile).not.toMatch(/^ARG CODEX_SHA256_ARM64=/m);
+    // Fail closed on missing wiring.
     expect(dockerfile).toContain(': "${CODEX_VERSION:?CODEX_VERSION build-arg is required}"');
     expect(dockerfile).toContain(': "${CODEX_SHA256_AMD64:?CODEX_SHA256_AMD64 build-arg is required}"');
     expect(dockerfile).toContain(': "${CODEX_SHA256_ARM64:?CODEX_SHA256_ARM64 build-arg is required}"');
@@ -297,6 +310,9 @@ describe("codex build consumes one effective pin and fails closed", () => {
     expect(dockerfile).toContain(
       "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-package-${codex_target}.tar.gz"
     );
+    // The Android cmdline-tools archive is officially named *_latest.zip with a
+    // pinned numeric version, and it installs into cmdline-tools/latest by
+    // layout convention; neither is a floating tag.
     const urls = [...dockerfile.matchAll(/https:\/\/[^\s"']+/g)].map((m) => m[0]);
     const floating = urls.filter(
       (u) => /\/latest/i.test(u) && !u.includes("dl.google.com/android/repository/commandlinetools")
