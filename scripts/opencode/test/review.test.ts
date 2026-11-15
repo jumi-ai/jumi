@@ -12,7 +12,7 @@ import {
   encodeCiLookupMarker,
 } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
-import { isJumiReviewFinding } from "../src/followup.ts";
+import { isJumiReviewFinding, lastCheckTrailer } from "../src/followup.ts";
 import { GithubAPI } from "../src/github_api.ts";
 import type { InlineComment } from "../src/ports.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
@@ -24,8 +24,10 @@ import {
   reviewPullRequest,
   skipReasonForPR,
 } from "../src/review.ts";
+import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
 import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
+import { buildCheckTrailer } from "../src/verdict.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import {
   emptyCiMethods,
@@ -4490,5 +4492,80 @@ describe("suggestion hold", () => {
       changedFiles: [{ filename: "src/foo.ts" }],
     });
     expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+});
+
+describe("check trailer reason sanitization", () => {
+  const publishOpts = {
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 7,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+  };
+
+  test("a success verdict with -> in the reason publishes success, not incomplete", async () => {
+    const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/foo.ts" }] });
+    expect(store.setVerdict({ state: "success", reason: "bump 0.167.1->0.167.2, a >= b" }).ok).toBe(true);
+    const markdown = store.toMarkdown();
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: markdown,
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (typeof review.body === "string") bodies.push(review.body);
+          return { id: 1 };
+        },
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(body);
+          return makeComment({ id: 1, body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(result.reason).not.toBe("Incomplete review: no findings");
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    const published = bodies.join("\n");
+    const trailer = lastCheckTrailer(published);
+    expect(trailer?.state).toBe("success");
+  });
+
+  test("a trailer built from a model reason with > is still read by lastCheckTrailer", async () => {
+    const trailer = buildCheckTrailer("success", "bump 0.167.1->0.167.2, a > b");
+    expect(trailer).toBe("<!-- jumi-check: success; bump 0.167.1→0.167.2, a › b -->");
+    expect(lastCheckTrailer(`Looks good.\n\n${trailer}`)).toEqual({
+      state: "success",
+      reason: "bump 0.167.1→0.167.2, a › b",
+    });
+
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...publishOpts,
+      resultMarkdown: "Looks good.\n<!-- jumi-check: success -->",
+      api: makeApi({
+        createPullReview: async (_owner, _repo, _index, review) => {
+          if (typeof review.body === "string") bodies.push(review.body);
+          return { id: 1 };
+        },
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(body);
+          return makeComment({ id: 1, body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result.status).toBe("posted");
+    expect(lastCheckTrailer(bodies.join("\n"))?.state).toBe("success");
   });
 });

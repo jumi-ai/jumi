@@ -142,4 +142,32 @@ describe("ReviewVerdictStore validation", () => {
     expect(parseReviewFindings(markdown)[0].path).toBe("src/a.ts");
     expect(parseReviewOutput(markdown).verdict.state).toBe("failure");
   });
+
+  test("a success reason with -> round-trips as success instead of incomplete", async () => {
+    const store = makeStore();
+    expect(store.setVerdict({ state: "success", reason: "bump 0.167.1->0.167.2, a >= b" }).ok).toBe(true);
+    const markdown = store.toMarkdown();
+    const { parseReviewOutput } = await import("../src/verdict.ts");
+    expect(parseReviewOutput(markdown).verdict).toEqual({
+      state: "success",
+      description: "bump 0.167.1→0.167.2, a ›= b",
+      incomplete: false,
+    });
+  });
+
+  test("a reason with a newline and a literal --> stays a single parseable trailer line", async () => {
+    const store = makeStore();
+    expect(store.setVerdict({ state: "success", reason: "bump 0.167.1->0.167.2\nliteral --> here" }).ok).toBe(true);
+    const markdown = store.toMarkdown();
+    const lines = markdown.split("\n");
+    expect(lines).toHaveLength(1);
+    const { parseCheckLine, parseReviewOutput } = await import("../src/verdict.ts");
+    const reason = parseCheckLine(lines[0])?.reason ?? "";
+    expect(reason).not.toContain(">");
+    expect(reason).not.toContain("\n");
+    const parsed = parseReviewOutput(markdown);
+    expect(parsed.verdict.state).toBe("success");
+    expect(parsed.verdict.incomplete).toBe(false);
+    expect(parsed.checkLine).toBe(lines[0]);
+  });
 });

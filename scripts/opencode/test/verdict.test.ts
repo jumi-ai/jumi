@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   blockingOpenQuestionCount,
+  buildCheckTrailer,
   buildFindingsList,
   countBlockingFindings,
   countBugFindings,
@@ -22,9 +23,11 @@ import {
   isQuestionInline,
   isRiskFindingFirstLine,
   keepReviewFindingLines,
+  parseCheckLine,
   parseReviewFindings,
   parseReviewOutput,
   reviewFindingLines,
+  sanitizeCheckReason,
   stripFindingLines,
   trailerSuggestionCount,
 } from "../src/verdict.ts";
@@ -116,6 +119,48 @@ describe("trailerSuggestionCount", () => {
     expect(trailerSuggestionCount("no blocking issues")).toBe(0);
     expect(trailerSuggestionCount("0 suggestions")).toBe(0);
     expect(trailerSuggestionCount("")).toBe(0);
+  });
+});
+
+describe("sanitizeCheckReason", () => {
+  test("replaces -> with → and other > with ›", () => {
+    expect(sanitizeCheckReason("bump 0.167.1->0.167.2, a >= b")).toBe("bump 0.167.1→0.167.2, a ›= b");
+    expect(sanitizeCheckReason("a > b")).toBe("a › b");
+    expect(sanitizeCheckReason("a => b")).toBe("a =› b");
+  });
+
+  test("collapses whitespace and newlines to single spaces", () => {
+    expect(sanitizeCheckReason("  bump\n0.167.1->0.167.2\r\nnext  line  ")).toBe("bump 0.167.1→0.167.2 next line");
+  });
+
+  test("removes --> by replacing its > so the comment never ends early", () => {
+    const safe = sanitizeCheckReason("reason with a literal --> inside");
+    expect(safe).not.toContain(">");
+    expect(safe).not.toContain("-->");
+    expect(safe).toBe("reason with a literal -→ inside");
+  });
+
+  test("never leaves > or a newline in the output", () => {
+    for (const reason of ["a>b", "a -> b", "a --> b", "line1\nline2", "x\ty", "  padded  "]) {
+      const safe = sanitizeCheckReason(reason);
+      expect(safe).not.toContain(">");
+      expect(safe).not.toContain("\n");
+    }
+    expect(sanitizeCheckReason("   ")).toBe("");
+  });
+
+  test("a sanitized reason round-trips through the trailer parser", () => {
+    const trailer = buildCheckTrailer("success", "bump 0.167.1->0.167.2, a >= b");
+    expect(trailer).toBe("<!-- jumi-check: success; bump 0.167.1→0.167.2, a ›= b -->");
+    expect(parseCheckLine(trailer)).toEqual({
+      state: "success",
+      reason: "bump 0.167.1→0.167.2, a ›= b",
+    });
+    expect(parseReviewOutput(`Looks good.\n${trailer}`).verdict).toEqual({
+      state: "success",
+      description: "bump 0.167.1→0.167.2, a ›= b",
+      incomplete: false,
+    });
   });
 });
 
