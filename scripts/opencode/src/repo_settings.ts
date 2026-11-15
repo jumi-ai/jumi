@@ -927,10 +927,15 @@ function parserErrorMessage(err: unknown): string {
 /**
  * Record one absent key's default: `required` fields take the entry default,
  * `always` fields are present with `undefined`, `optional` fields stay absent.
+ * Object and array defaults are cloned so every parse gets its own mutable
+ * value instead of sharing the registry's `defaultValue` reference.
  */
 function applyAbsentDefault(def: RegistryEntry, values: Map<string, unknown>, present: Set<string>): void {
   if (def.presence === "required") {
-    values.set(def.field, def.defaultValue);
+    const dv = def.defaultValue;
+    if (Array.isArray(dv)) values.set(def.field, [...dv]);
+    else if (dv !== null && typeof dv === "object") values.set(def.field, { ...(dv as Record<string, unknown>) });
+    else values.set(def.field, dv);
     present.add(def.field);
   } else if (def.presence === "always") {
     values.set(def.field, undefined);
@@ -1022,18 +1027,20 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
       if (!result.ok) return result;
       values.set(def.field, result.value);
       present.add(def.field);
-      // Preserved cross-field rule (checked right after `no_automerge_label`
-      // parses, before `blocking_question_authors`): the pair must differ.
-      if (def.key === "no_automerge_label") {
-        const automergeLabel = values.get("automergeLabel") as string;
-        const noAutomergeLabel = values.get("noAutomergeLabel") as string;
-        if (automergeLabel.toLowerCase() === noAutomergeLabel.toLowerCase()) {
-          return { ok: false, error: `"automerge_label" and "no_automerge_label" must be different` };
-        }
-      }
-      continue;
+    } else {
+      applyAbsentDefault(def, values, present);
     }
-    applyAbsentDefault(def, values, present);
+    // Preserved cross-field rule (checked right after `no_automerge_label`
+    // resolves, before `blocking_question_authors`): the pair must differ.
+    // Runs whether the keys were present or defaulted, like the old code's
+    // unconditional check after both labels parsed.
+    if (def.key === "no_automerge_label") {
+      const automergeLabel = values.get("automergeLabel") as string;
+      const noAutomergeLabel = values.get("noAutomergeLabel") as string;
+      if (automergeLabel.toLowerCase() === noAutomergeLabel.toLowerCase()) {
+        return { ok: false, error: `"automerge_label" and "no_automerge_label" must be different` };
+      }
+    }
   }
   return { ok: true, settings: assembleSettings(values, present) };
 }
