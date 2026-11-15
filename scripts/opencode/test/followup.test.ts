@@ -40,7 +40,8 @@ import { standingPodRuntime } from "../src/runtime.ts";
 import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -84,25 +85,19 @@ function jumiReviewSticky(opts: { id?: number; sha?: string; finding?: string; c
   });
 }
 
-function makeApi(
+function followupApi(
   overrides: Partial<IssueApi> = {}
 ): IssueApi & { comments: string[]; pulls: unknown[]; commentIndexes: number[] } {
   const comments: string[] = [];
   const pulls: unknown[] = [];
   const commentIndexes: number[] = [];
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+  const fake = makeIssueApi({
     getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
     listOpenPulls: async () => [jumiPr()],
     createPullRequest: async (_owner, _repo, pull) => {
       pulls.push(pull);
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
       comments.push(body);
@@ -115,11 +110,9 @@ function makeApi(
     listIssueComments: async () => [
       makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
     ],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides, comments, pulls, commentIndexes };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments, pulls, commentIndexes });
 }
 
 async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
@@ -155,7 +148,7 @@ function makeReview(overrides: Partial<GiteaPullReview> = {}): GiteaPullReview {
 describe("implementFollowUp", () => {
   test("skips when no open jumi closing PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
       });
       const result = await implementFollowUp({
@@ -185,7 +178,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       const oldSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       const pr = jumiPr();
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [
           makeComment({
@@ -252,7 +245,7 @@ describe("implementFollowUp", () => {
       await withDirs(async (home, workdir) => {
         const worktree = join(workdir, "kirmanak/demo/12");
         const pr = { ...jumiPr(), body: opts.body };
-        const api = makeApi({
+        const api = followupApi({
           listOpenPulls: async () => [pr],
           getPR: async () => pr,
           updatePullRequestBody:
@@ -343,7 +336,7 @@ describe("implementFollowUp", () => {
       let committed = false;
       let fetched = false;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob({ headSha: "oldsha" }),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -381,7 +374,7 @@ describe("implementFollowUp", () => {
       let committed = false;
       await expect(
         implementFollowUp({
-          api: makeApi(),
+          api: followupApi(),
           job: followUpJob({ headSha: "oldsha" }),
           giteaUrl: "https://gitea.kirmanak.stream",
           giteaToken: "bot-token",
@@ -423,7 +416,7 @@ describe("implementFollowUp", () => {
           repo_id: repo.id,
         },
       });
-      const api = makeApi({
+      const api = followupApi({
         getIssue: async () =>
           makeIssue({
             number: 50,
@@ -471,7 +464,7 @@ describe("implementFollowUp", () => {
 
   test("checks out pr.head.ref, not a freshly slugged branch from a retitled issue", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -524,7 +517,7 @@ describe("implementFollowUp", () => {
 
   test("checks out origin PR branch even when a stale local ref exists", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -572,7 +565,7 @@ describe("implementFollowUp", () => {
 
   test("existing worktree resets hard to origin PR branch", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       await mkdir(join(workdir, "kirmanak", "demo", "12", ".git"), { recursive: true });
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
@@ -612,7 +605,7 @@ describe("implementFollowUp", () => {
 
   test("writes JUMI_FEEDBACK.md and runs the follow-up engine", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       let kind: string | undefined;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -649,7 +642,7 @@ describe("implementFollowUp", () => {
 
   test("writes webhook review content into JUMI_FEEDBACK.md without a review id", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [],
       });
@@ -688,7 +681,7 @@ describe("implementFollowUp", () => {
 
   test("pushes to existing branch and does not call createPullRequest", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -734,7 +727,7 @@ describe("implementFollowUp", () => {
     ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
   ] as const)("does not push when the tip tracks %s", async (_label, dir, listed, reasonFor) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       let kind: string | undefined;
       const gitRunner: GitRunner = async (args) => {
@@ -777,7 +770,7 @@ describe("implementFollowUp", () => {
     ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
   ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       const runtime = {
         ...standingPodRuntime,
@@ -821,7 +814,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
       const closed: number[] = [];
-      const api = makeApi({
+      const api = followupApi({
         getIssue: async () => {
           gets++;
           return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
@@ -864,7 +857,7 @@ describe("implementFollowUp", () => {
 
   test("clean tree → no-changes, no PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -900,7 +893,7 @@ describe("implementFollowUp", () => {
 
   test("child extraEnv has GIT_AUTH_TOKEN and not GITEA_BOT_TOKEN", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -942,7 +935,7 @@ describe("implementFollowUp", () => {
 
   test("abort after push does not open a PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const abort = new AbortController();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -982,7 +975,7 @@ describe("implementFollowUp", () => {
         handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const stuck = await implementFollowUp({
         api,
@@ -1028,7 +1021,7 @@ describe("implementFollowUp", () => {
       };
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1061,7 +1054,7 @@ describe("implementFollowUp", () => {
         handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -1106,7 +1099,7 @@ describe("implementFollowUp", () => {
       );
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1143,7 +1136,7 @@ describe("implementFollowUp", () => {
         ],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -1190,7 +1183,7 @@ describe("implementFollowUp", () => {
       };
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1243,7 +1236,7 @@ describe("implementFollowUp", () => {
       });
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi({
+        api: followupApi({
           listIssueComments: async () => [],
           listPullReviews: async () => [
             makeReview({
@@ -1325,7 +1318,7 @@ describe("implementFollowUp", () => {
         ],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [
           makeReview({
@@ -1381,7 +1374,7 @@ describe("implementFollowUp", () => {
         ],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -1419,7 +1412,7 @@ describe("implementFollowUp", () => {
         ],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -1465,7 +1458,7 @@ describe("implementFollowUp", () => {
       };
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi({
+        api: followupApi({
           listIssueComments: async () => [],
           listPullReviews: async () => [],
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
@@ -1503,7 +1496,7 @@ describe("implementFollowUp", () => {
         handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi({
+      const api = followupApi({
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
         getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
@@ -1560,7 +1553,7 @@ describe("implementFollowUp", () => {
       });
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1585,7 +1578,7 @@ describe("implementFollowUp", () => {
 
   test("review webhook without id skips OpenCode after no-changes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1634,7 +1627,7 @@ describe("implementFollowUp", () => {
 
   test("first-time review webhook with unhandled COMMENT review runs OpenCode", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [
           makeReview({
@@ -1688,7 +1681,7 @@ describe("implementFollowUp", () => {
       };
       let timeoutMs: number | undefined;
       await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1720,7 +1713,7 @@ describe("implementFollowUp", () => {
       };
       let timeoutMs: number | undefined;
       await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1743,7 +1736,7 @@ describe("implementFollowUp", () => {
 
   test("does not persist a terminal claim after OpenCode failure", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1787,7 +1780,7 @@ describe("implementFollowUp", () => {
         return "";
       };
       await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1812,7 +1805,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       const events: string[] = [];
       const pr = { ...jumiPr(), mergeable: false as const };
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [],
         listPullReviewComments: async () => [],
@@ -1865,7 +1858,7 @@ describe("implementFollowUp", () => {
         return "";
       };
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1892,7 +1885,7 @@ describe("implementFollowUp", () => {
 
   test("prefix-merge quota skip survives a throwing destroy", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const runtime = {
         ...standingPodRuntime,
         destroyRuntimeWorkspace: async () => {
@@ -1943,7 +1936,7 @@ describe("implementFollowUp", () => {
       let openCode = 0;
       let mergeCalled = false;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1987,7 +1980,7 @@ describe("implementFollowUp", () => {
       };
       await expect(
         implementFollowUp({
-          api: makeApi(),
+          api: followupApi(),
           job: followUpJob(),
           giteaUrl: "https://gitea.kirmanak.stream",
           giteaToken: "bot-token",
@@ -2031,7 +2024,7 @@ describe("implementFollowUp", () => {
       };
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -2063,7 +2056,7 @@ describe("implementFollowUp", () => {
         updatedAt: "2026-05-23T00:00:00Z",
       });
       const pr = { ...jumiPr(), mergeable: false as const };
-      const api = makeApi({ listOpenPulls: async () => [pr] });
+      const api = followupApi({ listOpenPulls: async () => [pr] });
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -2103,7 +2096,7 @@ describe("implementFollowUp", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = followupApi();
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -2144,7 +2137,7 @@ describe("implementFollowUp", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -2201,7 +2194,7 @@ describe("implementFollowUp", () => {
         updatedAt: "2026-05-23T00:00:00Z",
       });
       const pr = { ...jumiPr(), mergeable: false as const };
-      const api = makeApi({ listOpenPulls: async () => [pr] });
+      const api = followupApi({ listOpenPulls: async () => [pr] });
       let openCode = 0;
       const result = await implementFollowUp({
         api,
@@ -2249,7 +2242,7 @@ describe("implementFollowUp", () => {
         return "";
       };
       const result = await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -2291,7 +2284,7 @@ describe("implementFollowUp", () => {
       };
       await expect(
         implementFollowUp({
-          api: makeApi(),
+          api: followupApi(),
           job: followUpJob(),
           giteaUrl: "https://gitea.kirmanak.stream",
           giteaToken: "bot-token",
@@ -2334,7 +2327,7 @@ describe("implementFollowUp", () => {
         if (gitArgs[0] === "status") return "M src/demo.ts";
         return "";
       };
-      const api = makeApi();
+      const api = followupApi();
       const resolverStamp = "_Jumi · claude · claude-opus-5 (high)_";
       await expect(
         implementFollowUp({
@@ -2379,7 +2372,7 @@ describe("implementFollowUp", () => {
         return "";
       };
       await implementFollowUp({
-        api: makeApi(),
+        api: followupApi(),
         job: followUpJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -2399,7 +2392,7 @@ describe("implementFollowUp", () => {
 
   test("retries the same commentId after OpenCode failure", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = followupApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2446,7 +2439,7 @@ describe("implementFollowUp", () => {
       const sha = "a62c750c0ffee000000000000000000000000000";
       const pr = jumiPr();
       pr.head.sha = sha;
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [
           makeComment({
@@ -2494,7 +2487,7 @@ describe("implementFollowUp", () => {
 
   test("CI-only red check writes JUMI_CI.md and runs OpenCode without review comments", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -2540,7 +2533,7 @@ describe("implementFollowUp", () => {
 
   test("GitHub Actions check-run failure with only jumi/opencode-review status runs OpenCode", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
         listCheckRuns: async () => [
@@ -2602,7 +2595,7 @@ describe("implementFollowUp", () => {
         handledReviewFindings: [{ id: sticky.id, sha }],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [sticky],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
@@ -2665,7 +2658,7 @@ describe("implementFollowUp", () => {
       });
       const pr = jumiPr();
       pr.head.sha = sha;
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [sticky],
       });
@@ -2723,7 +2716,7 @@ describe("implementFollowUp", () => {
       });
       const pr = jumiPr();
       pr.head.sha = sha;
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         listIssueComments: async () => [
           sticky,
@@ -2767,7 +2760,7 @@ describe("implementFollowUp", () => {
 
   test("address-the-earlier-review stub injects the last jumi review", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [
           jumiReviewSticky({ sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }),
           makeComment({
@@ -2816,7 +2809,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       let openCode = 0;
       const result = await implementFollowUp({
-        api: makeApi({
+        api: followupApi({
           listIssueComments: async () => [
             makeComment({
               id: 88,
@@ -2857,7 +2850,7 @@ describe("implementFollowUp", () => {
 
   test("clone/fetch failure before OpenCode does not record CI handled", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -2894,7 +2887,7 @@ describe("implementFollowUp", () => {
 
   test("CI-only OpenCode failure does not record handled CI", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -2931,7 +2924,7 @@ describe("implementFollowUp", () => {
 
   test("provider-overload exit result does not consume CI; retry on same head fixes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -2987,7 +2980,7 @@ describe("implementFollowUp", () => {
 
   test("provider-overload exception does not consume CI; retry on same head fixes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -3038,7 +3031,7 @@ describe("implementFollowUp", () => {
 
   test("chain hop then final provider failure does not consume CI; retry fixes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -3114,7 +3107,7 @@ describe("implementFollowUp", () => {
     await withDirs(async (home, workdir) => {
       let listed = 0;
       const waits: number[] = [];
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => {
           listed++;
@@ -3156,7 +3149,7 @@ describe("implementFollowUp", () => {
 
   test("red required check with a pending optional check runs the CI follow-up", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [
           { id: 1, context: "build", status: "failure" },
@@ -3198,7 +3191,7 @@ describe("implementFollowUp", () => {
   test("pending then terminal completed wake re-lists once and runs OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let listed = 0;
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => {
           listed++;
@@ -3246,7 +3239,7 @@ describe("implementFollowUp", () => {
 
   test("known infra flake comments and does not run OpenCode", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
@@ -3283,7 +3276,7 @@ describe("implementFollowUp", () => {
 
   test("review follow-up still injects failed CI logs", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = followupApi({
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
         getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
@@ -3521,7 +3514,7 @@ describe("pickLatestJumiFinding", () => {
 
 describe("collectFollowUpItems", () => {
   test("keeps human issue comments when inline listing 404s", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
       ],
@@ -3550,7 +3543,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("needsFollowUp is false when inlines 404 and there is no human feedback", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviewComments: async () => {
         throw new Error(
@@ -3582,7 +3575,7 @@ describe("collectFollowUpItems", () => {
       "404: not found",
     ];
     for (const message of errors) {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [
           makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         ],
@@ -3594,7 +3587,7 @@ describe("collectFollowUpItems", () => {
         message
       );
     }
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [],
       listPullReviewComments: async () => {
@@ -3617,7 +3610,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("includes request-changes and human COMMENT reviews with a body", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({ id: 1, body: "please change this", state: "REQUEST_CHANGES" }),
@@ -3635,7 +3628,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("skips empty, approve-without-body, approve-with-body, and bot reviews", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({ id: 1, body: "", state: "COMMENT", type: "pull_request_review_comment" }),
@@ -3655,7 +3648,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("skips jumi REQUEST_CHANGES reviews so the worker does not follow up itself", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -3672,7 +3665,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("skips bot inlines the same way stickies are ignored", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviewComments: async () => [
         makeComment({
@@ -3692,7 +3685,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("skips listed ignore logins and still skips the bot", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 1, body: "## PR Change Summary", user: makeUser({ login: "tapio" }) }),
         makeComment({ id: 2, body: "Edited/Blocked", user: makeUser({ login: "renovate-bot" }) }),
@@ -3708,7 +3701,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("unset ignore list keeps non-bot comments as human feedback", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 1, body: "## PR Change Summary", user: makeUser({ login: "tapio" }) }),
       ],
@@ -3760,7 +3753,7 @@ describe("collectFollowUpItems", () => {
   }
 
   test("keeps current-head jumi failure sticky with reason suffix and needsFollowUp", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3787,7 +3780,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("keeps current-head jumi failure sticky and needsFollowUp", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3814,7 +3807,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes jumi review sticky when trailer is missing", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3841,7 +3834,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes jumi failure sticky for a SHA that is not pr.head.sha", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3856,7 +3849,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("keeps jumi inlines for the brief without treating them as human feedback", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviewComments: async () => [
         makeComment({
@@ -3877,7 +3870,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("includes a stale-head jumi failure sticky when extraHeadShas or review-failure match", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3897,7 +3890,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes questions-only success sticky from findings but keeps it for the brief", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3912,7 +3905,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes success sticky without a suggestion count from findings", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3927,7 +3920,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("keeps current-head success sticky with leftover simplifications and needsFollowUp", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -3955,7 +3948,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes jumi-worker sticky", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 1,
@@ -3969,7 +3962,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("keeps a human alice root comment in scope", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         makeComment({
@@ -3984,7 +3977,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("excludes human jumi-check failure without jumi-review", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 77,
@@ -3998,7 +3991,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("needsFollowUp is false when the same jumi-review id and reviewed SHA are already handled", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -4033,7 +4026,7 @@ describe("collectFollowUpItems", () => {
 
   test("needsFollowUp is true when the same jumi-review id has a new current-head SHA", async () => {
     const nextSha = "cccccccccccccccccccccccccccccccccccccccc";
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -4079,7 +4072,7 @@ describe("collectFollowUpItems", () => {
   }
 
   test("keeps current-head jumi pull review with failure trailer and needsFollowUp", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4110,7 +4103,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("skips empty success pull reviews and old verdict-only bodies", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4135,7 +4128,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("needsFollowUp is false for questions-only success", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -4255,7 +4248,7 @@ describe("collectFollowUpItems", () => {
     const githubResolved = { ...inline, resolver: makeUser({ login: "alice" }) };
     expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [githubResolved])).toBe(false);
 
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [review],
       listPullReviewComments: async () => [inline],
@@ -4331,7 +4324,7 @@ describe("collectFollowUpItems", () => {
       )
     ).toBe(false);
     expect(isJumiPullReviewFinding(review, "jumi", HEAD_SHA, listedOpts, [{ ...inline, resolved: true }])).toBe(false);
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [review],
       listPullReviewComments: async () => [{ ...inline, resolved: true }],
@@ -4398,7 +4391,7 @@ describe("collectFollowUpItems", () => {
       path: "❓ q: src/foo.ts",
       pull_request_review_id: 93,
     };
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4434,7 +4427,7 @@ describe("collectFollowUpItems", () => {
           blockingQuestionAuthors: ["renovate-bot"],
         })
       ).toBe(false);
-      const reaskedApi = makeApi({
+      const reaskedApi = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [
           makeReview({
@@ -4508,7 +4501,7 @@ describe("collectFollowUpItems", () => {
       "src/foo.ts:12: ❓ q: is the timeout intentional?",
       "<!-- jumi-check: success -->",
     ].join("\n");
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38022,
@@ -4567,7 +4560,7 @@ describe("collectFollowUpItems", () => {
       "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?",
       "<!-- jumi-check: success -->",
     ].join("\n");
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38023,
@@ -4604,7 +4597,7 @@ describe("collectFollowUpItems", () => {
       "src/bar.ts:1: ❓ maintainer: please file a follow-up issue for the leftover scope?",
       "<!-- jumi-check: failure; 1 risk -->",
     ].join("\n");
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4642,7 +4635,7 @@ describe("collectFollowUpItems", () => {
       "src/bar.ts:1: ❓ maintainer: please file a follow-up issue for the leftover scope?",
       "<!-- jumi-check: success; 1 suggestion -->",
     ].join("\n");
-    const pullApi = makeApi({
+    const pullApi = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4667,7 +4660,7 @@ describe("collectFollowUpItems", () => {
         })
       ).toBe(true);
     });
-    const stickyApi = makeApi({
+    const stickyApi = followupApi({
       listIssueComments: async () => [
         makeComment({
           id: 38024,
@@ -4692,7 +4685,7 @@ describe("collectFollowUpItems", () => {
   });
 
   test("needsFollowUp is false when the same jumi pull review id and SHA are already handled", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({
@@ -4732,7 +4725,7 @@ describe("collectFollowUpItems", () => {
 describe("needsFollowUp", () => {
   test("returns true for a human COMMENT review with a summary body", async () => {
     await withDirs(async (home) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [
           makeReview({
@@ -4770,7 +4763,7 @@ describe("needsFollowUp", () => {
       });
       expect(
         await needsFollowUp({
-          api: makeApi(),
+          api: followupApi(),
           owner: "kirmanak",
           repo: "demo",
           pr: jumiPr(),
@@ -4781,7 +4774,7 @@ describe("needsFollowUp", () => {
       ).toBe(false);
       expect(
         await needsFollowUp({
-          api: makeApi(),
+          api: followupApi(),
           owner: "kirmanak",
           repo: "demo",
           pr: jumiPr(),
@@ -4796,7 +4789,7 @@ describe("needsFollowUp", () => {
 
   test("returns false for empty, approve, and bot reviews", async () => {
     await withDirs(async (home) => {
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listPullReviews: async () => [
           makeReview({ id: 1, body: "", state: "APPROVED" }),
@@ -4824,7 +4817,7 @@ describe("needsFollowUp", () => {
   });
 
   test("excludes outsider comments without write access from feedback", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         makeComment({ id: 56, body: "outsider drive-by", user: makeUser({ login: "mallory" }) }),
@@ -4840,7 +4833,7 @@ describe("needsFollowUp", () => {
 
   test("with a trusted sender list, only listed logins steer and the forge is not asked", async () => {
     let lookups = 0;
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         makeComment({ id: 56, body: "writer but unlisted", user: makeUser({ login: "mallory" }) }),
@@ -4858,7 +4851,7 @@ describe("needsFollowUp", () => {
   });
 
   test("trusted wake does not pull outsider reviews or inlines", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [],
       listPullReviews: async () => [
         makeReview({ id: 1, body: "please change this", state: "REQUEST_CHANGES", user: makeUser({ login: "alice" }) }),
@@ -4879,7 +4872,7 @@ describe("needsFollowUp", () => {
   });
 
   test("collect is fail-closed when permission lookup throws", async () => {
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
       ],
@@ -4902,7 +4895,7 @@ describe("needsFollowUp", () => {
       "1 blocking",
       "<!-- jumi-check: failure -->",
     ].join("\n");
-    const api = makeApi({
+    const api = followupApi({
       listIssueComments: async () => [
         makeComment({ id: 38022, body: stickyBody, user: makeUser({ login: "jumi" }) }),
         makeComment({ id: 38023, body: stickyBody, user: makeUser({ login: "mallory" }) }),
@@ -4944,7 +4937,7 @@ describe("suggestion hold latch", () => {
         2
       );
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [
           makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
         ],
@@ -5002,7 +4995,7 @@ describe("suggestion hold latch", () => {
         suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         // deno-lint-ignore no-explicit-any
         ...({
           createCommitStatus: async (
@@ -5052,7 +5045,7 @@ describe("suggestion hold latch", () => {
         suggestionHold: { consumed: true, headSha: "headsha", count: 1 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [
           { id: 1, context: "build", status: "failure" },
@@ -5110,7 +5103,7 @@ describe("suggestion hold latch", () => {
         suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         getIssue: async () => makeIssue({ state: "closed" }),
         // deno-lint-ignore no-explicit-any
         ...({
@@ -5163,7 +5156,7 @@ describe("suggestion hold latch", () => {
         suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
         // deno-lint-ignore no-explicit-any
         ...({
@@ -5218,7 +5211,7 @@ describe("suggestion hold latch", () => {
       const base = jumiPr();
       const pr = { ...base, head: { ...base.head, ref: "main" } };
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         listOpenPulls: async () => [pr],
         // deno-lint-ignore no-explicit-any
         ...({
@@ -5270,7 +5263,7 @@ describe("suggestion hold latch", () => {
       );
       let gets = 0;
       const statuses: Array<{ state: string; description?: string }> = [];
-      const api = makeApi({
+      const api = followupApi({
         getIssue: async () => {
           gets++;
           return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();

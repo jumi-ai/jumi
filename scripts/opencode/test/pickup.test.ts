@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { classifyCloserWork, conflictJobIfUnmergeable, isJumiCloserForIssue } from "../src/pickup.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 const repo = makeRepo();
 
@@ -24,25 +25,11 @@ function jumiCloser(overrides: Parameters<typeof makePR>[0] = {}) {
   });
 }
 
-function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
-  const defaults: IssueApi = {
+function pickupApi(overrides: Partial<IssueApi> = {}): IssueApi {
+  return makeIssueApi({
     getRepo: async () => repo,
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
-    createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
-    updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 describe("classifyCloserWork", () => {
@@ -50,7 +37,7 @@ describe("classifyCloserWork", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {
       const mode = await classifyCloserWork({
-        api: makeApi({
+        api: pickupApi({
           listIssueComments: async () => [
             makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
           ],
@@ -72,7 +59,7 @@ describe("classifyCloserWork", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {
       const mode = await classifyCloserWork({
-        api: makeApi({
+        api: pickupApi({
           listCommitStatuses: async () => [
             { id: 1, context: "jumi/opencode-review", status: "success" },
             { id: 2, context: "build", status: "failure" },
@@ -96,7 +83,7 @@ describe("classifyCloserWork", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {
       const mode = await classifyCloserWork({
-        api: makeApi({
+        api: pickupApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", status: "success" }],
           listCheckRuns: async () => [{ id: 4, context: "checks", status: "failure", jobId: 4 }],
           getActionJobLogs: async () => "##[error]lint/typecheck/tests, exit 1\n",
@@ -118,7 +105,7 @@ describe("classifyCloserWork", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {
       const mode = await classifyCloserWork({
-        api: makeApi(),
+        api: pickupApi(),
         owner: "kirmanak",
         repo: "demo",
         pr: jumiCloser({ mergeable: false }),
@@ -136,7 +123,7 @@ describe("classifyCloserWork", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-pickup-"));
     try {
       const mode = await classifyCloserWork({
-        api: makeApi({
+        api: pickupApi({
           listIssueComments: async () => [
             makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
           ],
@@ -159,7 +146,7 @@ describe("classifyCloserWork", () => {
     try {
       expect(
         await classifyCloserWork({
-          api: makeApi(),
+          api: pickupApi(),
           owner: "kirmanak",
           repo: "demo",
           pr: jumiCloser({ mergeable: null }),
@@ -170,7 +157,7 @@ describe("classifyCloserWork", () => {
       ).toBeUndefined();
       expect(
         await classifyCloserWork({
-          api: makeApi(),
+          api: pickupApi(),
           owner: "kirmanak",
           repo: "demo",
           pr: jumiCloser({ mergeable: true }),

@@ -25,8 +25,8 @@ import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } fr
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { isQuotaStuck, readStuckState, stuckMarker } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
 import {
-  emptyCiMethods,
   makeBranch,
   makeComment,
   makeConfig,
@@ -38,7 +38,7 @@ import {
   makeUser,
 } from "./fixtures.ts";
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
+function engineApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
   reviews: unknown[];
   statuses: Array<{ sha: string; state: string; description?: string }>;
@@ -46,14 +46,8 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   const comments: string[] = [];
   const reviews: unknown[] = [];
   const statuses: Array<{ sha: string; state: string; description?: string }> = [];
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+  const fake = makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
       return makeComment({ id: comments.length, body });
@@ -62,24 +56,18 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
       comments.push(body);
       return makeComment({ id: commentId, body });
     },
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
     createPullReview: async (_owner, _repo, _index, review) => {
       reviews.push(review);
       return { id: reviews.length };
     },
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, sha, status) => {
       statuses.push({ sha, state: status.state, description: status.description });
       return status;
     },
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides, comments, reviews, statuses };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments, reviews, statuses });
 }
 
 function frozenGit(): GitRunner {
@@ -134,7 +122,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       let ran = 0;
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
@@ -163,7 +151,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       let ran = 0;
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
@@ -205,7 +193,7 @@ describe("processEngineTick", () => {
       kind: "markdown",
       markdown: "Persisted review\n<!-- jumi-check: success -->",
     });
-    const api = makeApi();
+    const api = engineApi();
     const ran = 0;
     await reclaimExpiredJobs(store, api, makeConfig(), () => undefined);
     expect(ran).toBe(0);
@@ -232,7 +220,7 @@ describe("processEngineTick", () => {
       enteredPublish = resolve;
     });
     let reviewCalls = 0;
-    const api = makeApi({
+    const api = engineApi({
       createPullReview: async (_owner, _repo, _index, review) => {
         enteredPublish();
         await gate;
@@ -267,7 +255,7 @@ describe("processEngineTick", () => {
     const inPublish = new Promise<void>((resolve) => {
       enteredPublish = resolve;
     });
-    const api = makeApi({
+    const api = engineApi({
       createPullReview: async () => {
         enteredPublish();
         await gate;
@@ -309,7 +297,7 @@ describe("processEngineTick", () => {
       markdown: "Persisted review\n<!-- jumi-check: success -->",
     });
     let reviewCalls = 0;
-    const api = makeApi({
+    const api = engineApi({
       createPullReview: async (_owner, _repo, _index, review) => {
         reviewCalls++;
         if (reviewCalls === 1) throw new Error("gitea 502");
@@ -342,7 +330,7 @@ describe("processEngineTick", () => {
       const reclaimed = await store.reclaimExpired(2, new Date(5_000));
       expect(reclaimed.requeued[0]?.attempt).toBe(1);
 
-      const api = makeApi();
+      const api = engineApi();
       let ran = 0;
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
@@ -363,7 +351,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let reviewCalls = 0;
-      const api = makeApi({
+      const api = engineApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviewCalls++;
           if (reviewCalls === 1) throw new Error("gitea down");
@@ -398,7 +386,7 @@ describe("processEngineTick", () => {
         if (result.kind === "markdown") throw new Error("cannot save result");
         return originalSave(id, leasedBy, result);
       };
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
@@ -442,7 +430,7 @@ describe("processEngineTick", () => {
         if (result.kind === "skip") throw new Error("cannot save result");
         return originalSave(id, leasedBy, result);
       };
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
@@ -476,7 +464,7 @@ describe("processEngineTick", () => {
         return originalExpire(id, leasedBy, now);
       };
       let reviewCalls = 0;
-      const api = makeApi({
+      const api = engineApi({
         createPullReview: async () => {
           reviewCalls++;
           throw new Error("gitea down");
@@ -507,7 +495,7 @@ describe("processEngineTick", () => {
       await writeFile(blocker, "x");
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "pending" }],
       });
       await processEngineTick(store, makeConfig({ workdir: blocker }), api, "engine-1");
@@ -527,7 +515,7 @@ describe("processEngineTick", () => {
         lists++;
         throw new Error("rate limited");
       };
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: boom,
         listCheckRuns: boom,
         listActionJobs: boom,
@@ -571,7 +559,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let state: "pending" | "success" = "pending";
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => [{ id: 1, context: "external/ci", status: state }],
       });
       let ran = 0;
@@ -602,7 +590,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let looks = 0;
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => {
           looks++;
           return [];
@@ -642,7 +630,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let looks = 0;
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => {
           looks++;
           if (looks < 5) return [];
@@ -681,7 +669,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let looks = 0;
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => {
           looks++;
           if (looks < 5) return [];
@@ -725,7 +713,7 @@ describe("processEngineTick", () => {
         if (looks < 5) return [];
         throw new Error("rate limited");
       };
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: emptyThenFail,
         listCheckRuns: async () => {
           if (looks < 5) return [];
@@ -770,7 +758,7 @@ describe("processEngineTick", () => {
       const boom = async () => {
         throw new Error("rate limited");
       };
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: boom,
         listCheckRuns: boom,
         listActionJobs: boom,
@@ -802,7 +790,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       let looks = 0;
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => [],
         listCheckRuns: async () => [],
         listActionJobs: async () => {
@@ -831,7 +819,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi({
+      const api = engineApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate[bot]" }) }),
         getCollaboratorPermission: async () => ({ permission: "none" }),
       });
@@ -855,7 +843,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const lookedUp: string[] = [];
-      const api = makeApi({
+      const api = engineApi({
         getPR: async () =>
           makePR({
             user: makeUser({ login: "mallory" }),
@@ -884,7 +872,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi({
+      const api = engineApi({
         getPR: async () =>
           makePR({ head: makeBranch({ sha: "headsha", repo: makeRepo({ owner: makeUser({ login: "alice" }) }) }) }),
       });
@@ -915,7 +903,7 @@ describe("processEngineTick", () => {
         lists++;
         throw new Error("rate limited");
       };
-      const closed = makeApi({
+      const closed = engineApi({
         getPR: async () => makePR({ state: "closed" }),
         listCommitStatuses: boom,
         listCheckRuns: boom,
@@ -933,7 +921,7 @@ describe("processEngineTick", () => {
 
       const mergedStore = new MemoryReviewJobStore();
       await mergedStore.enqueue(makeJob());
-      const merged = makeApi({
+      const merged = engineApi({
         getPR: async () => makePR({ merged: true }),
         listCommitStatuses: boom,
         listCheckRuns: boom,
@@ -953,7 +941,7 @@ describe("processEngineTick", () => {
       await writeFile(blocker, "x");
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi({
+      const api = engineApi({
         listCommitStatuses: async () => {
           await store.enqueue(makeJob());
           throw new Error("rate limited");
@@ -984,7 +972,7 @@ describe("processEngineTick", () => {
       await writeFile(blocker, "x");
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(store, makeConfig({ workdir: blocker }), api, "engine-1");
       expect(store.rows[0]?.state).toBe("leased");
       expect(store.rows[0]?.resultMarkdown).toBeNull();
@@ -1002,7 +990,7 @@ describe("processEngineTick", () => {
     await store.enqueue(makeJob());
     const abort = new AbortController();
     abort.abort();
-    const result = await processEngineTick(store, makeConfig(), makeApi(), "engine-1", {
+    const result = await processEngineTick(store, makeConfig(), engineApi(), "engine-1", {
       abortSignal: abort.signal,
       openCodeRunner: async () => {
         throw new Error("should not run");
@@ -1026,7 +1014,7 @@ describe("processEngineTick", () => {
         makeConfig({ role: "engine", workdir: workspace, home: workspace, port: 0 }),
         {
           store,
-          api: makeApi(),
+          api: engineApi(),
           signal: shutdown.signal,
           ensureAuth: async () => undefined,
           extras: {
@@ -1062,7 +1050,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       const abort = new AbortController();
       let started!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -1128,7 +1116,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       const abort = new AbortController();
       let started!: () => void;
       const gate = new Promise<void>((resolve) => {
@@ -1163,7 +1151,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       let started!: () => void;
       const gate = new Promise<void>((resolve) => {
         started = resolve;
@@ -1192,7 +1180,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       let started!: () => void;
       const gate = new Promise<void>((resolve) => {
         started = resolve;
@@ -1265,7 +1253,7 @@ describe("processEngineTick", () => {
       }) as typeof setInterval;
 
       try {
-        const api = makeApi();
+        const api = engineApi();
         await processEngineTick(store, makeConfig({ workdir: blocker }), api, "engine-1");
         intervalCallbacks[0]!();
         expect(heartbeatCalls).toBe(1);
@@ -1294,7 +1282,7 @@ describe("processEngineTick", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeApi(),
+        engineApi(),
         "engine-1",
         {
           gitRunner: frozenGit(),
@@ -1319,7 +1307,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const logs: string[] = [];
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
@@ -1350,7 +1338,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const logs: string[] = [];
-      const api = makeApi();
+      const api = engineApi();
       const message = `opencode exited with code 1:\n'{"error": "Free usage exceeded", not json'`;
       await processEngineTick(
         store,
@@ -1378,7 +1366,7 @@ describe("processEngineTick", () => {
     await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
@@ -1398,7 +1386,7 @@ describe("processEngineTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const logs: string[] = [];
-      const api = makeApi();
+      const api = engineApi();
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
@@ -1447,7 +1435,7 @@ describe("processEngineTick", () => {
         await processEngineTick(
           store,
           makeConfig({ workdir: workspace, home: workspace }),
-          makeApi(),
+          engineApi(),
           "engine-1",
           extras,
           logger
@@ -1459,7 +1447,7 @@ describe("processEngineTick", () => {
         await processEngineTick(
           store,
           makeConfig({ workdir: workspace, home: workspace }),
-          makeApi(),
+          engineApi(),
           "engine-1",
           extras,
           logger
@@ -1473,7 +1461,7 @@ describe("processEngineTick", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeApi(),
+        engineApi(),
         "engine-1",
         extras,
         logger
@@ -1499,13 +1487,13 @@ describe("processEngineTick", () => {
         await processEngineTick(
           store,
           makeConfig({ workdir: workspace, home: workspace }),
-          makeApi(),
+          engineApi(),
           "engine-1",
           fail
         );
         store.rows[0]!.leasedUntil = Date.now() - 1;
       }
-      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeApi(), "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), engineApi(), "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
         breaker,
@@ -1524,7 +1512,7 @@ describe("processEngineTick", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeApi(),
+        engineApi(),
         "engine-1",
         fail,
         (message) => logs.push(message)
@@ -1542,7 +1530,7 @@ describe("processEngineTick", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeApi(),
+        engineApi(),
         "engine-1",
         {
           gitRunner: frozenGit(),
@@ -1579,7 +1567,7 @@ describe("processEngineTick", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeApi(),
+        engineApi(),
         "engine-1",
         {
           gitRunner: frozenGit(),

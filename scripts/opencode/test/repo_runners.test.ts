@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { implementIssue } from "../src/implement.ts";
+import type { CheckPayload } from "../src/ports.ts";
 import {
   applyRepoChain,
   invalidRepoSettingsReason,
@@ -11,7 +12,8 @@ import {
   parseRepoSettingsText,
   resolveRepoChain,
 } from "../src/repo_settings.ts";
-import { reviewPullRequest } from "../src/review.ts";
+import { type ReviewApi, reviewPullRequest } from "../src/review.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
 import { emptyCiMethods, makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
 
 function chain() {
@@ -186,40 +188,18 @@ describe("resolveRepoChain", () => {
   });
 });
 
-function reviewApi(overrides: Record<string, unknown> = {}) {
-  const statuses: Array<{ state: string; description: string }> = [];
-  const base = {
-    getRepo: async () => makeRepo({ default_branch: "main" }),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function repoRunnersApi(overrides: Partial<ReviewApi> = {}) {
+  const statuses: Array<{ state: string; description?: string }> = [];
+  const fake = makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_o: string, _r: string, _i: number, body: string) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_o: string, _r: string, id: number, body: string) => makeComment({ id, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (
-      _o: string,
-      _r: string,
-      _sha: string,
-      status: { state: string; description: string }
-    ) => {
+    createCommitStatus: async (_o: string, _r: string, _sha: string, status: CheckPayload) => {
       statuses.push({ state: status.state, description: status.description });
       return status;
     },
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" as const }],
-    getRepoFile: async () => ({ found: false as const }),
     ...overrides,
-  };
-  return { api: base as never, statuses };
+  });
+  return { api: fake, statuses };
 }
 
 async function withWorkspace(run: (workspace: string) => Promise<void>) {
@@ -235,7 +215,7 @@ describe("review runner allow-list", () => {
   test("invalid default-branch file posts failure and runs no runner", async () => {
     await withWorkspace(async (workspace) => {
       let ran = 0;
-      const { api, statuses } = reviewApi({
+      const { api, statuses } = repoRunnersApi({
         getRepoFile: async () => ({ found: true, content: "nope: 1\n" }),
       });
       const result = await reviewPullRequest({
@@ -267,7 +247,7 @@ describe("review runner allow-list", () => {
   test("allow-list matching nothing posts failure and runs no runner", async () => {
     await withWorkspace(async (workspace) => {
       let ran = 0;
-      const { api, statuses } = reviewApi({
+      const { api, statuses } = repoRunnersApi({
         getRepoFile: async () => ({ found: true, content: "allowed_runners: [nope]\n" }),
       });
       const result = await reviewPullRequest({
@@ -297,7 +277,7 @@ describe("review runner allow-list", () => {
   test("allow-list naming one of two runs on that runner", async () => {
     await withWorkspace(async (workspace) => {
       const seen: string[] = [];
-      const { api } = reviewApi({
+      const { api } = repoRunnersApi({
         getRepoFile: async () => ({ found: true, content: "allowed_runners: [opus]\n" }),
       });
       const result = await reviewPullRequest({
@@ -475,15 +455,10 @@ describe("worker runner allow-list", () => {
     await withWorkspace(async (workspace) => {
       const statuses: Array<{ state: string; description?: string }> = [];
       let ran = 0;
-      const { api } = reviewApi({
+      const { api } = repoRunnersApi({
         getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }),
         getRepoFile: async () => ({ found: true, content: "allowed_runners: [opus]\n" }),
-        createCommitStatus: async (
-          _o: string,
-          _r: string,
-          _s: string,
-          status: { state: string; description?: string }
-        ) => {
+        createCommitStatus: async (_o: string, _r: string, _s: string, status: CheckPayload) => {
           statuses.push(status);
           return status;
         },
@@ -580,7 +555,7 @@ describe("applyRepoChain fail-closed ordering", () => {
   test("review fail-closed status failure runs no runner", async () => {
     await withWorkspace(async (workspace) => {
       let ran = 0;
-      const { api } = reviewApi({
+      const { api } = repoRunnersApi({
         getRepoFile: async () => ({ found: true, content: "nope: 1\n" }),
         createCommitStatus: async () => {
           throw new Error("status store unavailable");

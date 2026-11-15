@@ -1,5 +1,5 @@
 import type { ServiceConfig } from "../src/config.ts";
-import type { LinkedIssue } from "../src/ports.ts";
+import type { IssueApi, LinkedIssue } from "../src/ports.ts";
 import { DEFAULT_RUNNER_COOLDOWN_CONFIG } from "../src/runner_cooldown.ts";
 import type {
   GiteaActionJob,
@@ -20,6 +20,7 @@ import type {
   ReviewJob,
 } from "../src/types.ts";
 import type { WorkerConfig } from "../src/worker_config.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 
 export function makeUser(overrides: Partial<GiteaUser> = {}): GiteaUser {
   return {
@@ -408,10 +409,9 @@ export function stripGitConfigArgs(args: string[]): string[] {
 
 /** Worker webhook API whose permission lookup says every sender can push. */
 export function pushApi<T extends object>(overrides?: T) {
-  return {
-    listOpenPulls: async () => [],
+  return makeIssueApi({
     getIssue: async () => makeIssue(),
     getCollaboratorPermission: async () => ({ permission: "write" }),
-    ...overrides,
-  };
+    ...(overrides as Partial<IssueApi>),
+  });
 }

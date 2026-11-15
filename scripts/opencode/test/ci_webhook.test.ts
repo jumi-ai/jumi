@@ -9,6 +9,7 @@ import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 import {
   encodeJson,
   makeIssue,
@@ -47,12 +48,12 @@ function jumiPr() {
   });
 }
 
-function makeApi(overrides: Partial<Pick<IssueApi, "listOpenPulls" | "getIssue">> = {}) {
-  return {
+function webhookApi(overrides: Partial<IssueApi> = {}) {
+  return makeIssueApi({
     listOpenPulls: async () => [jumiPr()],
     getIssue: async () => makeIssue(),
     ...overrides,
-  };
+  });
 }
 
 function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
@@ -89,7 +90,7 @@ async function signedRequest(
 
 describe("shouldEnqueueWorkflowJobFollowUp", () => {
   test("enqueues follow-up for an in-scope jumi closer matching head sha", async () => {
-    const decision = await shouldEnqueueWorkflowJobFollowUp(makeWorkflowJobPayload(), policy, makeApi());
+    const decision = await shouldEnqueueWorkflowJobFollowUp(makeWorkflowJobPayload(), policy, webhookApi());
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
     expect(decision.jobs).toHaveLength(1);
@@ -104,7 +105,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload(),
       policy,
-      makeApi({
+      webhookApi({
         listOpenPulls: async () => [
           makePR({
             number: 127,
@@ -134,7 +135,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload(),
       policy,
-      makeApi({
+      webhookApi({
         listOpenPulls: async () => [
           makePR({
             number: 127,
@@ -169,7 +170,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
         },
       }),
       policy,
-      makeApi()
+      webhookApi()
     );
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
@@ -180,7 +181,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload({ sender: makeUser({ login: "jumi" }) }),
       policy,
-      makeApi()
+      webhookApi()
     );
     expect(decision.type).toBe("enqueue");
   });
@@ -189,7 +190,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload(),
       policy,
-      makeApi({
+      webhookApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
       })
     );
@@ -200,7 +201,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
     const decision = await shouldEnqueueWorkflowJobFollowUp(
       makeWorkflowJobPayload(),
       policy,
-      makeApi({
+      webhookApi({
         getIssue: async () =>
           makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
       })
@@ -242,7 +243,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
         botUsername: "kirmanak-jumi[bot]",
         isPickedUp: hasJumiLabel,
       },
-      makeApi({ listOpenPulls: async () => [foreign] })
+      webhookApi({ listOpenPulls: async () => [foreign] })
     );
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
@@ -272,7 +273,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
         workflow_job: { id: 99, name: "build", head_sha: "headsha", head_branch: "renovate/all-digest" },
       }),
       policy,
-      makeApi({ listOpenPulls: async () => [foreign] })
+      webhookApi({ listOpenPulls: async () => [foreign] })
     );
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
@@ -286,14 +287,14 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
         workflow_job: { id: 1, name: "build", head_sha: "other", head_branch: "main" },
       }),
       policy,
-      makeApi()
+      webhookApi()
     );
     expect(decision).toEqual({ type: "skip", reason: "not an in-scope jumi pull request" });
   });
 
   test("skips queued, in_progress, and waiting jobs without listing pulls", async () => {
     let listed = 0;
-    const api = makeApi({
+    const api = webhookApi({
       listOpenPulls: async () => {
         listed++;
         return [jumiPr()];
@@ -333,7 +334,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
           },
         }),
         policy,
-        makeApi()
+        webhookApi()
       );
       expect(decision.type).toBe("enqueue");
     }
@@ -342,7 +343,7 @@ describe("shouldEnqueueWorkflowJobFollowUp", () => {
 
 describe("shouldEnqueueWorkflowJobReview", () => {
   test("enqueues review for a matching open PR", async () => {
-    const decision = await shouldEnqueueWorkflowJobReview(makeWorkflowJobPayload(), policy, makeApi());
+    const decision = await shouldEnqueueWorkflowJobReview(makeWorkflowJobPayload(), policy, webhookApi());
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
     expect(decision.jobs).toHaveLength(1);
@@ -354,7 +355,7 @@ describe("shouldEnqueueWorkflowJobReview", () => {
     const decision = await shouldEnqueueWorkflowJobReview(
       makeWorkflowJobPayload(),
       policy,
-      makeApi({
+      webhookApi({
         listOpenPulls: async () => [jumiPr(), makePR({ number: 8, title: "WIP: later", head: jumiPr().head })],
       })
     );
@@ -371,7 +372,7 @@ describe("shouldEnqueueWorkflowJobReview", () => {
         workflow_job: { id: 99, name: "build", status: "in_progress", head_sha: "headsha" },
       }),
       policy,
-      makeApi({
+      webhookApi({
         listOpenPulls: async () => {
           listed++;
           return [jumiPr()];
@@ -386,7 +387,7 @@ describe("shouldEnqueueWorkflowJobReview", () => {
 describe("createWorkerFetchHandler workflow_job", () => {
   test("enqueues on X-Gitea-Event workflow_job", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: webhookApi() });
     const response = await handler(await signedRequest(makeWorkflowJobPayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
@@ -395,7 +396,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
   });
 
   test("malformed payload is 202 skip never 400", async () => {
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue(), api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue(), api: webhookApi() });
     const response = await handler(await signedRequest({ zen: "nope" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "malformed workflow_job payload" });
@@ -405,7 +406,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
     const logs: string[] = [];
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue: makeQueue(),
-      api: makeApi(),
+      api: webhookApi(),
       logger: (message) => logs.push(message),
     });
     const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "status" }));
@@ -419,7 +420,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
     const logs: string[] = [];
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
-      api: makeApi(),
+      api: webhookApi(),
       logger: (message) => logs.push(message),
     });
     const response = await handler(

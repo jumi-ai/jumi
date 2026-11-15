@@ -20,7 +20,8 @@ import { standingPodRuntime } from "../src/runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason } from "../src/sentinels.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -53,25 +54,18 @@ function jumiPr() {
   });
 }
 
-function makeApi(
+function conflictApi(
   overrides: Partial<IssueApi> = {}
 ): IssueApi & { comments: string[]; pulls: unknown[]; commentIndexes: number[] } {
   const comments: string[] = [];
   const pulls: unknown[] = [];
   const commentIndexes: number[] = [];
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
+  const fake = makeIssueApi({
     listOpenPulls: async () => [jumiPr()],
     createPullRequest: async (_owner, _repo, pull) => {
       pulls.push(pull);
       return makePR({ number: 3, title: pull.title, body: pull.body });
     },
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, index, body) => {
       commentIndexes.push(index);
       comments.push(body);
@@ -81,12 +75,9 @@ function makeApi(
       comments.push(body);
       return makeComment({ body });
     },
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides, comments, pulls, commentIndexes };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments, pulls, commentIndexes });
 }
 
 async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
@@ -149,7 +140,7 @@ describe("conflict rounds", () => {
 describe("implementConflict", () => {
   test("skips when no open jumi closing PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = conflictApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
       });
       const result = await implementConflict({
@@ -177,7 +168,7 @@ describe("implementConflict", () => {
 
   test("checks out pr.head.ref, not a freshly slugged branch", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -247,7 +238,7 @@ describe("implementConflict", () => {
 
       // Green, finding-free head: the conflict job merges default instead of
       // skipping with `no unhandled feedback`.
-      const api = makeApi();
+      const api = conflictApi();
       let mergeBase = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -281,7 +272,7 @@ describe("implementConflict", () => {
 
   test("already up to date → no sticky, round unchanged", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
@@ -312,7 +303,7 @@ describe("implementConflict", () => {
 
   test("clean merge → no commit, no push, no sticky, no OpenCode", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       let openCode = 0;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
@@ -354,7 +345,7 @@ describe("implementConflict", () => {
 
   test("git merge --no-ff --no-commit receives committer identity", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       let mergeEnv: Record<string, string | undefined> | undefined;
       const gitRunner: GitRunner = notAncestorGit(async (args, opts) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -394,7 +385,7 @@ describe("implementConflict", () => {
 
   test("Chart.lock conflict → regenerates via helm, does not leave <<<<<<<", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const helmCalls: string[][] = [];
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -448,7 +439,7 @@ describe("implementConflict", () => {
     ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
   ] as const)("does not push when the tip tracks %s", async (_label, dir, listed, reasonFor) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       let openCode = 0;
       const gitRunner = conflictThenResolvedGit(async (args) => {
@@ -488,7 +479,7 @@ describe("implementConflict", () => {
     ["attachments", ".jumi-attachments", ".jumi-attachments/note.txt\0", attachmentsTrackedReason],
   ] as const)("tip refusal for %s survives a throwing destroy", async (_label, dir, listed, reasonFor) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       const runtime = {
         ...standingPodRuntime,
@@ -529,7 +520,7 @@ describe("implementConflict", () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
       const closed: number[] = [];
-      const api = makeApi({
+      const api = conflictApi({
         getIssue: async () => {
           gets++;
           return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
@@ -570,7 +561,7 @@ describe("implementConflict", () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
       const kinds: string[] = [];
-      const api = makeApi({
+      const api = conflictApi({
         getIssue: async () => {
           gets++;
           if (gets >= 3) return makeIssue({ title: "Rewritten title", body: "Do this instead." });
@@ -607,7 +598,7 @@ describe("implementConflict", () => {
       let gets = 0;
       let openCode = 0;
       let statusSawPrFile = false;
-      const api = makeApi({
+      const api = conflictApi({
         getIssue: async () => {
           gets++;
           if (gets >= 3) return makeIssue({ title: "Rewritten title", body: "Do this instead." });
@@ -655,7 +646,7 @@ describe("implementConflict", () => {
 
   test("stages before unmerged check so resolved markers are not stuck", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       let openCodeRan = false;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
@@ -697,7 +688,7 @@ describe("implementConflict", () => {
 
   test("remaining markers → writes JUMI_CONFLICT.md, runs conflict engine, timeout 3600000", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       let kind: string | undefined;
       let timeoutMs: number | undefined;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
@@ -742,7 +733,7 @@ describe("implementConflict", () => {
 
   test("resolver quota stuck → quota diary carries the resolver's stamp", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const result = await implementConflict({
         api,
         job: conflictJob(),
@@ -776,7 +767,7 @@ describe("implementConflict", () => {
         return "";
       });
       await implementConflict({
-        api: makeApi(),
+        api: conflictApi(),
         job: conflictJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -802,7 +793,7 @@ describe("implementConflict", () => {
     ["with a .jumi-tmp leftover", "?? .jumi-tmp/\n"],
   ])("child already committed merge (%s) → parent does not fail / does not poison SHA skip", async (_label, status) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       let openCodeRan = false;
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
@@ -860,7 +851,7 @@ describe("implementConflict", () => {
 
   test("child extraEnv has GIT_AUTH_TOKEN and not GITEA_BOT_TOKEN", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       let extraEnv: Record<string, string> | undefined;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -909,7 +900,7 @@ describe("implementConflict", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = conflictApi();
       let openCode = 0;
       const stuck = await implementConflict({
         api,
@@ -953,7 +944,7 @@ describe("implementConflict", () => {
         return "";
       });
       const result = await implementConflict({
-        api: makeApi(),
+        api: conflictApi(),
         job: conflictJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -984,7 +975,7 @@ describe("implementConflict", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = conflictApi();
       let openCode = 0;
       const result = await implementConflict({
         api,
@@ -1022,7 +1013,7 @@ describe("implementConflict", () => {
         ],
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      const api = makeApi();
+      const api = conflictApi();
       let openCode = 0;
       const result = await implementConflict({
         api,
@@ -1060,7 +1051,7 @@ describe("implementConflict", () => {
       });
       let openCode = 0;
       const result = await implementConflict({
-        api: makeApi(),
+        api: conflictApi(),
         job: conflictJob(),
         giteaUrl: "https://gitea.kirmanak.stream",
         giteaToken: "bot-token",
@@ -1088,7 +1079,7 @@ describe("implementConflict", () => {
 
   test("push rejected + remote already contains default → reset to origin, no force-push", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = conflictThenResolvedGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1124,7 +1115,7 @@ describe("implementConflict", () => {
 
   test("abort after push does not open a PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const abort = new AbortController();
       const gitRunner: GitRunner = conflictThenResolvedGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1165,7 +1156,7 @@ describe("implementConflict", () => {
     for (const { kind, prepare } of cases) {
       await withDirs(async (home, workdir) => {
         await prepare?.(workdir);
-        const api = makeApi();
+        const api = conflictApi();
         const gitRunner: GitRunner =
           kind === "push"
             ? conflictThenResolvedGit(async (args) => {
@@ -1205,7 +1196,7 @@ describe("implementConflict", () => {
 
   test("mergeDefaultIntoWorktree throw records SHA/round", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "merge") throw new Error("git merge failed with exit code 1");
@@ -1243,7 +1234,7 @@ describe("implementConflict", () => {
 
   test("helm regen failure does not send Chart.lock to OpenCode; stuck/fail instead", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       let openCode = 0;
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1295,7 +1286,7 @@ describe("implementConflict", () => {
         headShaAtStart: "abc",
         terminal: true,
       });
-      const api = makeApi();
+      const api = conflictApi();
       const result = await implementConflict({
         api,
         job: conflictJob(),
@@ -1323,7 +1314,7 @@ describe("implementConflict", () => {
       const store = new MemoryHandoffStore();
       const key = handoffKey("gitea", "kirmanak", "demo", 12);
       await store.put(key, "previous round notes");
-      const api = makeApi();
+      const api = conflictApi();
       const stagedWithSentinels: string[][] = [];
       const gitRunner = conflictThenResolvedGit(async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1377,7 +1368,7 @@ describe("implementConflict", () => {
     ["ignores JUMI_HANDOFF.md already on the default branch", "JUMI_HANDOFF.md\0", "JUMI_HANDOFF.md\0", false],
   ])("sentinel tip guard: %s", async (_label, headListed, baseListed, refused) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = conflictApi();
       const gitCalls: string[][] = [];
       let openCode = 0;
       const gitRunner: GitRunner = async (args) => {

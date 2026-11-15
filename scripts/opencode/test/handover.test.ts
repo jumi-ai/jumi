@@ -12,32 +12,18 @@ import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
-import {
-  emptyCiMethods,
-  makeComment,
-  makeIssue,
-  makeIssueJob,
-  makeJob,
-  makePR,
-  makeRepo,
-  makeUser,
-} from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
+function handoverApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
   const comments: string[] = [];
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+  const fake = makeReviewApi({
     getPR: async () =>
       makePR({
         body: "Fixes #12",
         user: makeUser({ login: "jumi" }),
         head: { ...makePR().head, ref: "jumi/issue-12-fix", sha: "headsha" },
       }),
-    getPRFiles: async () => [],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
       return makeComment({ body });
@@ -46,17 +32,9 @@ function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: st
       comments.push(body);
       return makeComment({ id: commentId, body });
     },
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides, comments };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments });
 }
 
 function makeAssignedForeignPR() {
@@ -210,7 +188,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -236,7 +214,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({
+    const api = handoverApi({
       getIssue: async () => makeIssue({ assignee: null, assignees: [], labels: [{ name: "jumi" }] }),
     });
     const result = await enqueueFollowUpFromReview({
@@ -256,7 +234,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({ getIssue: async () => makeIssue({ labels: [] }) });
+    const api = handoverApi({ getIssue: async () => makeIssue({ labels: [] }) });
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -277,7 +255,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({
+    const api = handoverApi({
       getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
     });
     const logs: string[] = [];
@@ -300,7 +278,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () => makePR({ body: "Fixes #12", head: { ...makePR().head, sha: "other" } }),
     });
     const logs: string[] = [];
@@ -324,7 +302,7 @@ describe("enqueueFollowUpFromReview", () => {
     await seedSucceededFollowUps(store, 3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -346,7 +324,7 @@ describe("enqueueFollowUpFromReview", () => {
     await seedSucceededFollowUps(store, 2);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const result = await enqueueFollowUpFromReview({
       store,
       api,
@@ -364,7 +342,7 @@ describe("enqueueFollowUpFromReview", () => {
     await seedSucceededFollowUps(store, 3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const blockedApi = makeApi();
+    const blockedApi = handoverApi();
     const blocked = await enqueueFollowUpFromReview({
       store,
       api: blockedApi,
@@ -375,7 +353,7 @@ describe("enqueueFollowUpFromReview", () => {
     });
     expect(blocked).toBeUndefined();
     expect(blockedApi.comments.at(-1)).toContain(TOO_MANY_FOLLOWUP_ROUNDS);
-    const allowedApi = makeApi();
+    const allowedApi = handoverApi();
     const allowed = await enqueueFollowUpFromReview({
       store,
       api: allowedApi,
@@ -394,7 +372,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           body: "Fixes #12",
@@ -428,7 +406,7 @@ describe("enqueueFollowUpFromReview", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const leased = await store.lease("engine-1", 60_000);
-      const api = makeApi({
+      const api = handoverApi({
         getPR: async () =>
           makePR({
             body: "Fixes #12",
@@ -460,7 +438,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           body: "Fixes #12",
@@ -487,7 +465,7 @@ describe("enqueueFollowUpFromReview", () => {
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
     const repo = makeRepo();
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           user: makeUser({ login: "jumi" }),
@@ -519,7 +497,7 @@ describe("enqueueFollowUpFromReview", () => {
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
     const repo = makeRepo();
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           body: "Refs #12",
@@ -545,7 +523,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({ getPR: async () => makePR({ body: "no close keyword" }) });
+    const api = handoverApi({ getPR: async () => makePR({ body: "no close keyword" }) });
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -570,7 +548,7 @@ describe("enqueueFollowUpFromReview", () => {
       html_url: "https://github.com/kirmanak/demo",
       clone_url: "https://github.com/kirmanak/demo.git",
     });
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           user: makeUser({ login: "renovate[bot]" }),
@@ -599,7 +577,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi({ getPR: async () => makeAssignedForeignPR() });
+    const api = handoverApi({ getPR: async () => makeAssignedForeignPR() });
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -625,7 +603,7 @@ describe("enqueueFollowUpFromReview", () => {
     await seedSucceededFollowUps(store, 3, 7);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const api = makeApi({ getPR: async () => makeAssignedForeignPR() });
+    const api = handoverApi({ getPR: async () => makeAssignedForeignPR() });
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -646,7 +624,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -669,7 +647,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -690,7 +668,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -717,7 +695,7 @@ describe("enqueueFollowUpFromReview", () => {
     expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const result = await enqueueFollowUpFromReview({
       store,
       api,
@@ -750,7 +728,7 @@ describe("enqueueFollowUpFromReview", () => {
     expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -773,7 +751,7 @@ describe("enqueueFollowUpFromReview", () => {
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const issue = makeIssue();
-    const api = makeApi({
+    const api = handoverApi({
       getIssue: async () => issue,
     });
     await enqueueFollowUpFromReview({
@@ -795,7 +773,7 @@ describe("enqueueFollowUpFromReview", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
-    const api = makeApi();
+    const api = handoverApi();
     const logs: string[] = [];
     const result = await enqueueFollowUpFromReview({
       store,
@@ -839,7 +817,7 @@ describe("suggestion hold fallback", () => {
       2
     );
     const statuses: Array<{ state: string; description?: string }> = [];
-    const api = makeApi({
+    const api = handoverApi({
       createCommitStatus: async (_owner, _repo, _sha, status) => {
         statuses.push(status);
         return status;
@@ -870,7 +848,7 @@ describe("suggestion hold fallback", () => {
       1
     );
     const statuses: Array<{ state: string; description?: string }> = [];
-    const api = makeApi({
+    const api = handoverApi({
       getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
       createCommitStatus: async (_owner, _repo, _sha, status) => {
         statuses.push(status);
@@ -902,7 +880,7 @@ describe("suggestion hold fallback", () => {
       2
     );
     const statuses: Array<{ state: string; description?: string }> = [];
-    const api = makeApi({
+    const api = handoverApi({
       getRepoFile: async () => ({ found: true, content: "automerge: true\nmode: review-only\n" }),
       createCommitStatus: async (_owner, _repo, _sha, status) => {
         statuses.push(status);
@@ -934,7 +912,7 @@ describe("suggestion hold fallback", () => {
       1
     );
     const posted: Array<{ sha: string; state: string; description?: string }> = [];
-    const api = makeApi({
+    const api = handoverApi({
       getPR: async () =>
         makePR({
           body: "Fixes #12",

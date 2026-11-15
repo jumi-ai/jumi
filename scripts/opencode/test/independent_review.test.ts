@@ -10,7 +10,8 @@ import {
 import { MemoryProvenanceStore } from "../src/provenance.ts";
 import { isTerminalSkipReason, type ReviewApi, reviewPullRequest } from "../src/review.ts";
 import { parseRunnersCatalog } from "../src/runners.ts";
-import { emptyCiMethods, makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
 
 const OPUS_CLAUDE = { type: "claude", model: "claude-opus-5", effort: "high" };
 const OPUS_OPENCODE_ALIAS = { type: "opencode", model: "anthropic/claude-opus-5", variant: "high" };
@@ -311,29 +312,12 @@ describe("resolveIndependentReviewers", () => {
   });
 });
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  return {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function independentApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_o, _r, _i, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_o, _r, id, body) => makeComment({ id, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_o, _r, _s, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     ...overrides,
-  } as ReviewApi;
+  });
 }
 
 async function withWorkspace(run: (workspace: string) => Promise<void>) {
@@ -395,7 +379,7 @@ describe("reviewPullRequest independent selection", () => {
           ...baseOptions,
           workspace,
           gitRunner: frozenGit("head1"),
-          api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+          api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
           chain: chain(),
           independentReview: policy(),
           provenance: store,
@@ -434,7 +418,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
         chain: [
           { name: "grok-a", type: "opencode", model: "xai/grok-4.6", variant: "high" },
           { name: "grok-b", type: "claude", model: "xai/grok-4.6", effort: "high" },
@@ -482,7 +466,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({
+        api: independentApi({
           getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }),
           createCommitStatus: async (_o, _r, _s, status) => {
             statuses.push(status);
@@ -517,7 +501,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
         chain: chain(),
         independentReview: policy(),
         provenance: store,
@@ -554,7 +538,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
         chain: chain(),
         independentReview: policy(),
         provenance: store,
@@ -581,7 +565,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
         chain: chain(),
         independentReview: policy(),
         provenance: failing,
@@ -619,7 +603,7 @@ describe("reviewPullRequest independent selection", () => {
         workspace,
         expectedHeadSha: "head1",
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head2" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head2" }) }) }),
         chain: chain(),
         independentReview: policy(),
         provenance: store,
@@ -638,7 +622,7 @@ describe("reviewPullRequest independent selection", () => {
           ...baseOptions,
           workspace,
           gitRunner: frozenGit("head1"),
-          api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+          api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
           chain: chain(),
           independentReview: policy(),
           provenance: store,
@@ -662,7 +646,7 @@ describe("reviewPullRequest independent selection", () => {
         ...baseOptions,
         workspace,
         gitRunner: frozenGit("head1"),
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
+        api: independentApi({ getPR: async () => makePR({ head: makeBranch({ ref: "feature", sha: "head1" }) }) }),
         engine: async (opts) => {
           seen.push(opts.model);
           await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");

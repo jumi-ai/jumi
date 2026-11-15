@@ -3,13 +3,12 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CI_LOOKUP_FAILED_REASON, encodeCiLookupMarker } from "../src/ci.ts";
-import type { IssueApi } from "../src/gitea_issues.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, REVIEW_KIND, WORKER_JOB_KINDS, workerJobKey } from "../src/review_jobs.ts";
 import { processEngineTick } from "../src/server.ts";
 import { processWorkerTick } from "../src/worker.ts";
+import { makeIssueApi, makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import {
-  emptyCiMethods,
   makeComment,
   makeConfig,
   makeIssue,
@@ -21,21 +20,15 @@ import {
   makeWorkerConfig,
 } from "./fixtures.ts";
 
-function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
+function jobsReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
   const comments: string[] = [];
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+  const fake = makeSharedReviewApi({
     getPR: async () =>
       makePR({
         body: "Fixes #12",
         user: makeUser({ login: "jumi" }),
         head: { ...makePR().head, ref: "jumi/issue-12-fix", sha: "headsha" },
       }),
-    getPRFiles: async () => [],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
       return makeComment({ body });
@@ -44,39 +37,10 @@ function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { commen
       comments.push(body);
       return makeComment({ id: commentId, body });
     },
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides, comments };
-}
-
-function makeIssueApi(overrides: Partial<IssueApi> = {}): IssueApi {
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
-    createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
-    updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments });
 }
 
 describe("job envelope kinds", () => {
@@ -285,7 +249,7 @@ describe("review failure handover to worker lease", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeReviewApi();
+      const api = jobsReviewApi();
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: async (args) => {
           if (args[0] === "rev-parse") return "headsha";
@@ -340,7 +304,7 @@ describe("review failure handover to worker lease", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeReviewApi(), "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), jobsReviewApi(), "engine-1", {
         gitRunner: async (args) => {
           if (args[0] === "rev-parse") return "headsha";
           if (args[0] === "status") return "?? JUMI_REVIEW.md";
@@ -370,7 +334,7 @@ describe("review failure handover to worker lease", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), makeReviewApi(), "engine-1", {
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), jobsReviewApi(), "engine-1", {
         gitRunner: async (args) => {
           if (args[0] === "rev-parse") return "headsha";
           if (args[0] === "status") return "?? JUMI_REVIEW.md";

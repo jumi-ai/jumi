@@ -30,16 +30,8 @@ import {
 import { isQuotaWaitError, QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import {
-  emptyCiMethods,
-  makeComment,
-  makeIssue,
-  makeIssueJob,
-  makeLinkedIssue,
-  makePR,
-  makeRepo,
-  makeUser,
-} from "./fixtures.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
+import { makeComment, makeIssue, makeIssueJob, makeLinkedIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -56,15 +48,10 @@ function stripGitConfigArgs(args: string[]): string[] {
   return result;
 }
 
-function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[]; pulls: unknown[] } {
+function implementApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[]; pulls: unknown[] } {
   const comments: string[] = [];
   const pulls: unknown[] = [];
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
+  const fake = makeIssueApi({
     createPullRequest: async (_owner, _repo, pull) => {
       pulls.push(pull);
       return makePR({
@@ -74,9 +61,6 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
         html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/3",
       });
     },
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
       return makeComment({ body });
@@ -85,12 +69,9 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
       comments.push(body);
       return makeComment({ body });
     },
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides, comments, pulls };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments, pulls });
 }
 
 async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
@@ -230,7 +211,7 @@ describe("jumi PR body fence", () => {
 describe("implementIssue", () => {
   test("skips when an open PR already closes the issue", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12" })],
       });
       const result = await implementIssue({
@@ -261,7 +242,7 @@ describe("implementIssue", () => {
     await withDirs(async (home, workdir) => {
       let commentsListed = 0;
       const repo = makeRepo();
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [
           makePR({
             number: 127,
@@ -309,7 +290,7 @@ describe("implementIssue", () => {
     await withDirs(async (home, workdir) => {
       let commentsListed = 0;
       const repo = makeRepo();
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [
           makePR({
             number: 127,
@@ -357,7 +338,7 @@ describe("implementIssue", () => {
     await withDirs(async (home, workdir) => {
       let commentsListed = 0;
       const repo = makeRepo();
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [
           makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) }),
           makePR({
@@ -405,7 +386,7 @@ describe("implementIssue", () => {
   test("first-run implement proceeds when an assigned foreign PR exists in the repo", async () => {
     await withDirs(async (home, workdir) => {
       const repo = makeRepo();
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [
           makePR({
             user: makeUser({ login: "renovate" }),
@@ -440,7 +421,7 @@ describe("implementIssue", () => {
 
   test("skips first-run before clone when a Gitea blocker is still open", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listIssueDependencies: async (_owner, _repo, index) => (index === 12 ? [makeLinkedIssue({ number: 196 })] : []),
       });
       const result = await implementIssue({
@@ -471,7 +452,7 @@ describe("implementIssue", () => {
 
   test("keeps today's skip when an open PR already closes the blocked issue", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12" })],
         listIssueDependencies: async () => [makeLinkedIssue({ number: 196 })],
       });
@@ -500,7 +481,7 @@ describe("implementIssue", () => {
 
   test("fail-closes a dependency cycle without running the engine", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listIssueDependencies: async (_owner, _repo, index) =>
           index === 12 ? [makeLinkedIssue({ number: 196 })] : [makeLinkedIssue({ number: 12 })],
       });
@@ -533,7 +514,7 @@ describe("implementIssue", () => {
     await withDirs(async (home, workdir) => {
       const deps: Array<{ owner: string; repo: string; number: number }> = [];
       const events: string[] = [];
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         createIssueDependency: async (_owner, _repo, _index, dependency) => {
           events.push("createIssueDependency");
@@ -600,7 +581,7 @@ describe("implementIssue", () => {
 
   test("invalid blocked-by retries once in the same lease then ships if the retry implements", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
       });
       const gitCalls: string[][] = [];
@@ -658,7 +639,7 @@ describe("implementIssue", () => {
 
   test("second garbage blocked-by is stuck and does not open a PR", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
       });
       const gitRunner: GitRunner = async (args) => {
@@ -728,7 +709,7 @@ describe("implementIssue", () => {
     test("a valid yield still deletes the pushed branch", async () => {
       await withDirs(async (home, workdir) => {
         const parent = join(workdir, "kirmanak/demo");
-        const api = makeApi({
+        const api = implementApi({
           listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
           createIssueDependency: async () => undefined,
         });
@@ -763,7 +744,7 @@ describe("implementIssue", () => {
     test("a second rejected yield is still stuck and deletes the branch", async () => {
       await withDirs(async (home, workdir) => {
         const parent = join(workdir, "kirmanak/demo");
-        const api = makeApi({
+        const api = implementApi({
           listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         });
         const gitCalls: string[][] = [];
@@ -800,7 +781,7 @@ describe("implementIssue", () => {
     test("a first rejected yield deletes the branch, then fails before re-spawning", async () => {
       await withDirs(async (home, workdir) => {
         const parent = join(workdir, "kirmanak/demo");
-        const api = makeApi({
+        const api = implementApi({
           listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         });
         const gitCalls: string[][] = [];
@@ -839,7 +820,7 @@ describe("implementIssue", () => {
 
   test("empty queue does not mention yield and does not extra-spawn", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -877,7 +858,7 @@ describe("implementIssue", () => {
       await mkdir(join(worktree, ".git"), { recursive: true });
       await writeFile(join(worktree, BLOCKED_BY_FILE), "<!-- jumi-blocked-by: #196 -->\n");
       const deps: Array<{ owner: string; repo: string; number: number }> = [];
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         createIssueDependency: async (_owner, _repo, _index, dependency) => {
           deps.push(dependency);
@@ -925,7 +906,7 @@ describe("implementIssue", () => {
   test("empty queue does not treat an engine-written JUMI_BLOCKED.md as a yield", async () => {
     await withDirs(async (home, workdir) => {
       const deps: Array<{ owner: string; repo: string; number: number }> = [];
-      const api = makeApi({
+      const api = implementApi({
         createIssueDependency: async (_owner, _repo, _index, dependency) => {
           deps.push(dependency);
         },
@@ -964,7 +945,7 @@ describe("implementIssue", () => {
   test("valid yield still deletes issue-branch when createIssueDependency throws", async () => {
     await withDirs(async (home, workdir) => {
       const events: string[] = [];
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         createIssueDependency: async () => {
           events.push("createIssueDependency");
@@ -1025,7 +1006,7 @@ describe("implementIssue", () => {
   test("valid yield POSTs the dependency even if issue-branch push --delete fails", async () => {
     await withDirs(async (home, workdir) => {
       const deps: Array<{ owner: string; repo: string; number: number }> = [];
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         createIssueDependency: async (_owner, _repo, _index, dependency) => {
           deps.push(dependency);
@@ -1065,7 +1046,7 @@ describe("implementIssue", () => {
   test("valid yield still skip-blocks when origin/issue-branch remains after delete", async () => {
     await withDirs(async (home, workdir) => {
       const deps: Array<{ owner: string; repo: string; number: number }> = [];
-      const api = makeApi({
+      const api = implementApi({
         listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
         createIssueDependency: async (_owner, _repo, _index, dependency) => {
           deps.push(dependency);
@@ -1103,7 +1084,7 @@ describe("implementIssue", () => {
 
   test("skips when getIssue fails", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           throw new Error("gitea 502");
         },
@@ -1133,7 +1114,7 @@ describe("implementIssue", () => {
 
   test("comments the skip artifact and does not open a PR when the tree is clean with a skip artifact", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1195,7 +1176,7 @@ describe("implementIssue", () => {
 
   test("caps the skip diary like other parent-owned prose", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1231,7 +1212,7 @@ describe("implementIssue", () => {
 
   test("commits, pushes, and opens a PR when OpenCode leaves a dirty tree", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1284,7 +1265,7 @@ describe("implementIssue", () => {
 
   test("does not open a PR when aborted after push", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const abort = new AbortController();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1315,7 +1296,7 @@ describe("implementIssue", () => {
 
   test("pushes and opens a PR when HEAD is ahead with a clean tree", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1351,7 +1332,7 @@ describe("implementIssue", () => {
     ["github", "https://github.com", "https://github.com/kirmanak/jumi.git"],
   ])("does not open a pull when the tip tracks .jumi-tmp (%s)", async (_forge, giteaUrl, cloneUrl) => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1389,7 +1370,7 @@ describe("implementIssue", () => {
   test("opens the PR when the child pushed and .jumi-tmp cannot be deleted", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1433,7 +1414,7 @@ describe("implementIssue", () => {
   test("does not treat .jumi-tmp leftovers as a dirty tree", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1474,7 +1455,7 @@ describe("implementIssue", () => {
 
   test("heartbeat does not resurrect a terminal claim after no-changes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1511,7 +1492,7 @@ describe("implementIssue", () => {
   test("stamps terminal claims with issue updated_at after commenting", async () => {
     await withDirs(async (home, workdir) => {
       let commented = false;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ updated_at: commented ? "2026-05-23T01:00:00Z" : "2026-05-23T00:00:00Z" }),
         createIssueComment: async (_owner, _repo, _index, body) => {
           commented = true;
@@ -1552,7 +1533,7 @@ describe("implementIssue", () => {
 
   test("resumes an origin-only issue branch instead of defaultBranch", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1600,7 +1581,7 @@ describe("implementIssue", () => {
 
   test("records a terminal claim when OpenCode fails", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1635,7 +1616,7 @@ describe("implementIssue", () => {
   test("does not publish a forge API error on the sticky comment", async () => {
     await withDirs(async (home, workdir) => {
       const token = "ghs_parent_secret_value";
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1676,7 +1657,7 @@ describe("implementIssue", () => {
     await withDirs(async (home) => {
       const killed: number[] = [];
       await cancelIssueWork({
-        api: makeApi(),
+        api: implementApi(),
         owner: "kirmanak",
         repo: "demo",
         issueNumber: 12,
@@ -1694,7 +1675,7 @@ describe("implementIssue", () => {
   test("uses JUMI_PR.md as the PR body and removes it before porcelain", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       let statusSawPrFile = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1740,7 +1721,7 @@ describe("implementIssue", () => {
   test("does not duplicate Fixes #n when JUMI_PR.md already closes the issue", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1774,7 +1755,7 @@ describe("implementIssue", () => {
   test("falls back to Fixes #n when JUMI_PR.md is empty", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1808,7 +1789,7 @@ describe("implementIssue", () => {
   test("does not open a PR when only JUMI_PR.md was written", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1849,7 +1830,7 @@ describe("implementIssue", () => {
 
   test("clean tree without a skip artifact is incomplete and does not stamp no-changes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1885,7 +1866,7 @@ describe("implementIssue", () => {
   test("empty skip file is incomplete", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1918,7 +1899,7 @@ describe("implementIssue", () => {
   test("skip symlink is incomplete and is not followed", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1952,7 +1933,7 @@ describe("implementIssue", () => {
   test("skip directory is incomplete", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1985,7 +1966,7 @@ describe("implementIssue", () => {
 
   test("incomplete hops once from scratch to the next named runner", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const calls: Array<{ model: string; continueSession?: boolean; hop?: boolean; hopFromIncomplete?: boolean }> = [];
       let runs = 0;
       const gitRunner: GitRunner = async (args) => {
@@ -2033,7 +2014,7 @@ describe("implementIssue", () => {
 
   test("incomplete hop still empty does not stamp terminal no-changes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const models: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -2074,7 +2055,7 @@ describe("implementIssue", () => {
   test("validated skip does not hop", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const models: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -2115,7 +2096,7 @@ describe("implementIssue", () => {
 
   test("auth hop then incomplete does not hop again or stamp no-changes", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const calls: Array<{ model: string; hopFromIncomplete?: boolean }> = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -2159,7 +2140,7 @@ describe("implementIssue", () => {
 
   test("incomplete hop starts from the issue text the gate validated", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
       });
       const calls: Array<{
@@ -2225,7 +2206,7 @@ describe("implementIssue", () => {
   test("skip artifact written before a continue round does not validate no-changes", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
       });
       const models: string[] = [];
@@ -2269,7 +2250,7 @@ describe("implementIssue", () => {
 
   test("declined incomplete hop does not continue a session in a stripped worktree", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
       });
       const calls: Array<{ model: string; continueSession?: boolean; hopFromIncomplete?: boolean }> = [];
@@ -2324,7 +2305,7 @@ describe("implementIssue", () => {
   test("continue round after an issue edit can validate skip for the rewritten text", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
       });
       const gitRunner: GitRunner = async (args) => {
@@ -2360,7 +2341,7 @@ describe("implementIssue", () => {
   test("opens a PR from JUMI_PR.md when HEAD is already ahead with a clean tree", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitCalls: string[][] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -2400,7 +2381,7 @@ describe("implementIssue", () => {
   test("treats a JUMI_PR.md symlink as missing and does not follow it", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2435,7 +2416,7 @@ describe("implementIssue", () => {
   test("treats a JUMI_PR.md directory as missing without throwing", async () => {
     await withDirs(async (home, workdir) => {
       const worktree = join(workdir, "kirmanak/demo/12");
-      const api = makeApi();
+      const api = implementApi();
       let statusSawPrDir = false;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -2480,7 +2461,7 @@ describe("implementIssue", () => {
   test("does not open a PR when the issue is closed after OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           return gets === 1 ? makeIssue() : makeIssue({ state: "closed" });
@@ -2519,7 +2500,7 @@ describe("implementIssue", () => {
   test("re-runs OpenCode once when title or body changed after the first run", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           if (gets === 1) return makeIssue();
@@ -2564,7 +2545,7 @@ describe("implementIssue", () => {
       let gets = 0;
       const kinds: string[] = [];
       const prompts: Array<string | undefined> = [];
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           if (gets === 1) return makeIssue();
@@ -2605,7 +2586,7 @@ describe("implementIssue", () => {
 
   test("does not treat updated_at churn as a rewrite", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => makeIssue({ updated_at: "2026-06-01T00:00:00Z" }),
       });
       let openCode = 0;
@@ -2641,7 +2622,7 @@ describe("implementIssue", () => {
   test("skips shipping when re-GET fails after OpenCode", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           if (gets === 1) return makeIssue();
@@ -2681,7 +2662,7 @@ describe("implementIssue", () => {
   test("does not open a PR on the old text when continue OpenCode fails", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           if (gets === 1) return makeIssue();
@@ -2737,7 +2718,7 @@ exit 1
         );
         await chmod(bin, 0o755);
         process.env.PATH = `${binDir}:${originalPath ?? ""}`;
-        const api = makeApi();
+        const api = implementApi();
         const logs: string[] = [];
         const gitRunner: GitRunner = async (args) => {
           const gitArgs = stripGitConfigArgs(args);
@@ -2781,7 +2762,7 @@ exit 1
   test("does not loop OpenCode when the issue keeps changing", async () => {
     await withDirs(async (home, workdir) => {
       let gets = 0;
-      const api = makeApi({
+      const api = implementApi({
         getIssue: async () => {
           gets++;
           if (gets === 1) return makeIssue();
@@ -2838,7 +2819,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
         );
         await chmod(join(dir, "opencode"), 0o755);
         process.env.PATH = `${dir}:${originalPath ?? ""}`;
-        const api = makeApi();
+        const api = implementApi();
         const gitRunner: GitRunner = async (args) => {
           const gitArgs = stripGitConfigArgs(args);
           if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2867,7 +2848,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
 
   test("stamps the PR and diary with the runner that ran after a hop, not the primary", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2907,7 +2888,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
 
   test("Claude usage-limit without fallback throws wait and does not set the skip flag", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2942,7 +2923,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
 
   test("Free/Zen quota without fallback throws wait and does not set the skip flag", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -2976,7 +2957,7 @@ printf '%s' "$GITEA_BOT_TOKEN" > '${secretFile}'
 
   test("Insufficient balance stays immediate stuck", async () => {
     await withDirs(async (home, workdir) => {
-      const api = makeApi();
+      const api = implementApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
