@@ -629,6 +629,33 @@ export async function sweepClosedIssueCheckpoints(
 }
 
 /**
+ * Shared startup sweep for worker flows (implement/conflict/followup):
+ * stale refs by age plus closed-issue refs by tracker state. Best-effort,
+ * never throws; individual sweep failures are already swallowed inside.
+ */
+export interface SweepCheckpointsOpts {
+  maxAgeMs?: number;
+  api: { getIssue(owner: string, repo: string, index: number): Promise<{ state: string }> };
+  owner: string;
+  repo: string;
+  log?: (message: string) => void;
+  /** Refs to keep even when stale/closed — the active run's own checkpoint. */
+  exclude?: readonly string[];
+}
+
+export async function sweepCheckpointsBestEffort(loop: CheckpointLoop, opts: SweepCheckpointsOpts): Promise<void> {
+  await sweepStaleCheckpoints(loop, {
+    maxAgeMs: opts.maxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS,
+    log: opts.log,
+    exclude: opts.exclude,
+  }).catch(() => undefined);
+  await sweepClosedIssueCheckpoints(loop, opts.api, opts.owner, opts.repo, {
+    log: opts.log,
+    exclude: opts.exclude,
+  }).catch(() => undefined);
+}
+
+/**
  * Forge statuses that mean "cannot delete this ref here", not a real
  * failure: 404 (missing ref), 422 (GitHub's missing ref), 405/501 (Gitea
  * has no DELETE for arbitrary git refs, only GET on `/git/refs`). These

@@ -14,6 +14,7 @@ import {
   resolveCheckpointConfig,
   restoreCheckpoint,
   staleCheckpointRefs,
+  sweepCheckpointsBestEffort,
   sweepClosedIssueCheckpoints,
   sweepStaleCheckpoints,
 } from "../src/checkpoint.ts";
@@ -570,6 +571,47 @@ describe("sweepClosedIssueCheckpoints", () => {
     const deleted = await sweepClosedIssueCheckpoints(loop, api, "o", "r", { exclude: ["refs/jumi/wip/13"] });
     expect(deleted).toEqual([]);
     expect(deletedPushes).toEqual([]);
+  });
+});
+
+describe("sweepCheckpointsBestEffort", () => {
+  test("runs the stale and closed sweeps together", async () => {
+    const deletedPushes: string[] = [];
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "for-each-ref") {
+          if (args.some((a) => a.includes("committerdate"))) {
+            return [`refs/jumi/wip/12 1000`, `refs/jumi/wip/13 ${nowUnix}`].join("\n");
+          }
+          return ["refs/jumi/wip/12", "refs/jumi/wip/13"].join("\n");
+        }
+        if (args[0] === "push" && typeof args[2] === "string" && args[2].startsWith(":")) {
+          deletedPushes.push(args[2].slice(1));
+          return "";
+        }
+        if (args[0] === "update-ref") return "";
+        return "";
+      },
+    });
+    const api = {
+      getIssue: async (_o: string, _r: string, n: number) => ({ state: n === 13 ? "closed" : "open" }),
+    };
+    await sweepCheckpointsBestEffort(loop, { maxAgeMs: 1000, api, owner: "o", repo: "r" });
+    expect(deletedPushes.sort()).toEqual(["refs/jumi/wip/12", "refs/jumi/wip/13"]);
+  });
+
+  test("never throws when git is unavailable", async () => {
+    const loop = makeLoop({
+      git: async () => {
+        throw new Error("no git here");
+      },
+    });
+    const api = {
+      getIssue: async () => ({ state: "closed" }),
+    };
+    await expect(sweepCheckpointsBestEffort(loop, { api, owner: "o", repo: "r" })).resolves.toBeUndefined();
   });
 });
 

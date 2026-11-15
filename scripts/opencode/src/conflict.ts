@@ -6,12 +6,10 @@ import {
   beginCheckpointing,
   checkpointRefForJob,
   DEFAULT_CHECKPOINT_INTERVAL_MS,
-  DEFAULT_CHECKPOINT_MAX_AGE_MS,
   deleteCheckpointForIssueViaForge,
   deleteCheckpointRef,
   restoreCheckpoint,
-  sweepClosedIssueCheckpoints,
-  sweepStaleCheckpoints,
+  sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
 import { CHILD_FORBIDDEN_KEYS, CHILD_FORBIDDEN_PREFIXES } from "./child_env.ts";
 import { isChildStrippedKey } from "./child_git_proxy.ts";
@@ -1184,15 +1182,14 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpoints(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS,
+      await sweepCheckpointsBestEffort(loop, {
+        maxAgeMs: opts.checkpointMaxAgeMs,
+        api: opts.api,
+        owner,
+        repo,
         log,
         exclude: conflictCheckpoint ? [conflictCheckpoint.ref] : undefined,
-      }).catch(() => undefined);
-      await sweepClosedIssueCheckpoints(loop, opts.api, owner, repo, {
-        log,
-        exclude: conflictCheckpoint ? [conflictCheckpoint.ref] : undefined,
-      }).catch(() => undefined);
+      });
       const attached = await runtime.attachPrWorktree(loop, {
         branch,
         defaultBranch: opts.job.defaultBranch,
