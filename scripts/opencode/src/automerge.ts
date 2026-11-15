@@ -81,14 +81,10 @@ export function githubMergeMethodForRepo(repo: {
   allowSquashMerge?: boolean;
   allowRebaseMerge?: boolean;
 }): "MERGE" | "SQUASH" | "REBASE" | undefined {
-  if (repo.allowMergeCommit === true) return "MERGE";
-  if (repo.allowSquashMerge === true) return "SQUASH";
-  if (repo.allowRebaseMerge === true) return "REBASE";
-  if (repo.allowMergeCommit === false && repo.allowSquashMerge === false && repo.allowRebaseMerge === false) {
-    return undefined;
-  }
-  // Unknown (fakes, older forges): the GitHub default is MERGE.
-  return "MERGE";
+  // Single implementation lives in the capability table
+  // (`forge_capabilities.ts`); this stays as a compatibility wrapper.
+  const fallback = forgeCapabilities("github").mergePolicy.defaultMethod(repo);
+  return fallback.ok ? (fallback.mergeMethod as "MERGE" | "SQUASH" | "REBASE") : undefined;
 }
 
 export function automergeMethodNotAllowedNote(method: string): string {
@@ -114,16 +110,12 @@ export function githubMergeMethodForConfiguredRepo(
   repo: { allowMergeCommit?: boolean; allowSquashMerge?: boolean; allowRebaseMerge?: boolean },
   method: string
 ): "MERGE" | "SQUASH" | "REBASE" | undefined {
-  switch (method) {
-    case "merge":
-      return repo.allowMergeCommit === false ? undefined : "MERGE";
-    case "squash":
-      return repo.allowSquashMerge === false ? undefined : "SQUASH";
-    case "rebase":
-      return repo.allowRebaseMerge === false ? undefined : "REBASE";
-    default:
-      return undefined;
-  }
+  // Compatibility wrapper; the table policy holds the implementation.
+  return forgeCapabilities("github").mergePolicy.methodForConfiguredRepo(repo, method) as
+    | "MERGE"
+    | "SQUASH"
+    | "REBASE"
+    | undefined;
 }
 
 /**
@@ -140,20 +132,8 @@ export function giteaMergeMethodForConfiguredRepo(
   },
   method: string
 ): string | undefined {
-  switch (method) {
-    case "merge":
-      return repo.allowMergeCommits === false ? undefined : "merge";
-    case "squash":
-      return repo.allowSquashMerge === false ? undefined : "squash";
-    case "rebase":
-      return repo.allowRebase === false ? undefined : "rebase";
-    case "rebase-merge":
-      return repo.allowRebaseExplicit === false ? undefined : "rebase-merge";
-    case "fast-forward-only":
-      return repo.allowFastForwardOnlyMerge === false ? undefined : "fast-forward-only";
-    default:
-      return undefined;
-  }
+  // Compatibility wrapper; the table policy holds the implementation.
+  return forgeCapabilities("gitea").mergePolicy.methodForConfiguredRepo(repo, method);
 }
 
 async function postAutomergeNote(
@@ -1250,7 +1230,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   let fetchedRepo: Awaited<ReturnType<AutomergeApi["getRepo"]>>;
   try {
     fetchedRepo = await input.api.getRepo(input.owner, input.repo);
-    if (fetchedRepo.allowAutoMerge === false) return;
+    if (forgeCapabilities(input.forgeKind).mergePolicy.isAutoMergeDisabled(fetchedRepo)) return;
   } catch {
     return;
   }
@@ -1371,9 +1351,10 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   if (current.autoMergeEnabled === true) return;
   let mergeMethod: string;
   {
+    const policy = forgeCapabilities(input.forgeKind).mergePolicy;
     const configured = settings.state === "valid" ? settings.automergeMethod : undefined;
     if (configured !== undefined) {
-      const resolved = githubMergeMethodForConfiguredRepo(fetchedRepo, configured);
+      const resolved = policy.methodForConfiguredRepo(fetchedRepo, configured);
       if (!resolved) {
         await postAutomergeNote(
           noteApi,
@@ -1387,7 +1368,8 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       }
       mergeMethod = resolved;
     } else {
-      mergeMethod = githubMergeMethodForRepo(fetchedRepo) ?? "MERGE";
+      const fallback = policy.defaultMethod(fetchedRepo);
+      mergeMethod = fallback.ok ? fallback.mergeMethod : "MERGE";
     }
   }
   try {
