@@ -76,7 +76,7 @@ export function buildCheckTrailer(state: "success" | "failure", reason?: string)
   return safe ? `<!-- jumi-check: ${state}; ${safe} -->` : `<!-- jumi-check: ${state} -->`;
 }
 
-function lastNonEmptyLine(text: string): string {
+export function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();

@@ -26,6 +26,7 @@ import {
   hasBlockingFindings,
   isTrailerShapedLine,
   keepReviewFindingLines,
+  lastNonEmptyLine,
   parseCheckLine,
   parseReviewFindings,
   parseReviewOutput,
@@ -487,15 +488,6 @@ function errorMessage(err: unknown): string {
 
 function quotaSkip(reason: string): string {
   return isQuotaText(reason) ? quotaStuckReasonForText(reason) : reason;
-}
-
-function lastNonEmptyLineOf(text: string): string {
-  const lines = text.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line) return line;
-  }
-  return "";
 }
 
 export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayRecord> {
@@ -1041,7 +1033,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           extrasUsed++;
           await rm(join(workdir, "JUMI_REVIEW.md"), { recursive: true, force: true }).catch(() => undefined);
           const continued = await hasResumableSession(workdir);
-          const lastLine = lastNonEmptyLineOf(artifact.content);
+          const lastLine = lastNonEmptyLine(artifact.content);
           const malformed = isTrailerShapedLine(lastLine) && !parseCheckLine(lastLine);
           const retryPrompt = malformed
             ? buildMalformedTrailerWritePrompt(continued ? undefined : artifact.content)

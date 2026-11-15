@@ -149,6 +149,7 @@ import {
   isBlockingQuestionAuthor,
   isTrailerShapedLine,
   keepReviewFindingLines,
+  lastNonEmptyLine,
   MAX_SUGGESTION_FINDINGS,
   openQuestionDescription,
   parseCheckLine,
@@ -803,15 +804,6 @@ function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
     if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isEngineTempPath(path))) return false;
   }
   return true;
-}
-
-function lastNonEmptyLineOf(text: string): string {
-  const lines = text.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line) return line;
-  }
-  return "";
 }
 
 type ReviewArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "too_large" };
@@ -2847,7 +2839,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             log(`Incomplete review: no check verdict; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
             await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
             const continueSessionNoTrailer = await hasResumableSession(opts.workspace);
-            const lastLine = lastNonEmptyLineOf(artifact.content);
+            const lastLine = lastNonEmptyLine(artifact.content);
             const malformedTrailer = isTrailerShapedLine(lastLine) && !parseCheckLine(lastLine);
             const writePromptNoTrailer = malformedTrailer
               ? buildMalformedTrailerWritePrompt(continueSessionNoTrailer ? undefined : artifact.content)
