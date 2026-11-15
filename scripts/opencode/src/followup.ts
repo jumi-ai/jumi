@@ -96,18 +96,8 @@ import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
-import {
-  applyRepoChain,
-  effectiveBlockingQuestionAuthors,
-  effectiveCiGateWait,
-  effectiveConflictRounds,
-  effectiveFollowupIgnoreLogins,
-  effectiveFollowupRounds,
-  effectiveIgnoreConflictsLabel,
-  effectiveTrustedSenderLogins,
-  isSuggestionFollowupEnabled,
-  loadRepoSettings,
-} from "./repo_settings.ts";
+import { resolveRepoPolicy } from "./repo_policy.ts";
+import { applyRepoChain } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -957,29 +947,35 @@ export async function needsFollowUp(opts: {
   // Effective blocking authors: deployer plus the repository's
   // default-branch file. Fail-open to the deployer list. Prefer the
   // caller-provided default branch so no extra repo lookup is needed.
-  // The settings file is read once; the pure helpers derive both the cap
-  // and the blocking union from that load.
+  // The settings file is read once; the resolver derives the cap and the
+  // blocking union from that load.
   let effectiveBlocking = opts.blockingQuestionAuthors;
   let effectiveIgnore = opts.followupIgnoreLogins;
   let effectiveTrusted = opts.trustedSenderLogins;
   try {
     let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
-    let settingsLoad: Awaited<ReturnType<typeof loadRepoSettings>> | undefined;
-    if (settingsBranch) {
-      settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
-    } else {
+    if (!settingsBranch) {
       const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
       settingsBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
-      if (settingsBranch) {
-        settingsLoad = await loadRepoSettings(opts.api, opts.owner, opts.repo, settingsBranch);
-      }
     }
-    if (settingsLoad) {
-      effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, settingsLoad);
-      followupOnSuggestions = isSuggestionFollowupEnabled(settingsLoad);
-      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, settingsLoad);
-      effectiveIgnore = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, settingsLoad);
-      effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, settingsLoad);
+    if (settingsBranch) {
+      const policy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: settingsBranch },
+        {
+          trustedSenderLogins: opts.trustedSenderLogins,
+          followupIgnoreLogins: opts.followupIgnoreLogins,
+          ignoreConflictsLabel: undefined,
+          blockingQuestionAuthors: opts.blockingQuestionAuthors,
+          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+        },
+        { onUnreadable: "fallback" }
+      );
+      effectiveMax = policy.maxFollowupRounds;
+      followupOnSuggestions = policy.followupOnSuggestions;
+      effectiveBlocking = policy.blockingQuestionAuthors;
+      effectiveIgnore = policy.followupIgnoreLogins;
+      effectiveTrusted = policy.trustedSenderLogins;
     }
   } catch {
     // Fail-open: deployment caps and the deployer list still decide.
@@ -1243,21 +1239,32 @@ export async function implementFollowUp(
   try {
     const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
     if (defaultBranch) {
-      const load = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, defaultBranch);
-      if (load.state === "invalid") {
-        log(`follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${defaultBranch}: ${load.error}`);
+      const repoPolicy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.job.owner, repo: opts.job.repo, ref: defaultBranch },
+        {
+          trustedSenderLogins: opts.trustedSenderLogins,
+          followupIgnoreLogins: opts.followupIgnoreLogins,
+          ignoreConflictsLabel: opts.ignoreConflictsLabel,
+          blockingQuestionAuthors: opts.blockingQuestionAuthors,
+          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+        },
+        { onUnreadable: "throw" }
+      );
+      if (repoPolicy.status === "invalid") {
+        log(`follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${defaultBranch}: ${repoPolicy.error}`);
       } else {
         policy = {
-          followupOnSuggestions: isSuggestionFollowupEnabled(load),
-          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
-          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+          followupOnSuggestions: repoPolicy.followupOnSuggestions,
+          maxFollowupRounds: repoPolicy.maxFollowupRounds,
+          maxConflictRounds: repoPolicy.maxConflictRounds,
         };
       }
-      ciGateWaitUpFront = effectiveCiGateWait(load);
-      effectiveBlockingUpFront = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
-      effectiveFollowupIgnoreUpFront = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, load);
-      effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, load);
-      effectiveIgnoreLabelUpFront = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, load);
+      ciGateWaitUpFront = repoPolicy.ciGateWait;
+      effectiveBlockingUpFront = repoPolicy.blockingQuestionAuthors;
+      effectiveFollowupIgnoreUpFront = repoPolicy.followupIgnoreLogins;
+      effectiveTrustedUpFront = repoPolicy.trustedSenderLogins;
+      effectiveIgnoreLabelUpFront = repoPolicy.ignoreConflictsLabel;
     }
   } catch (err) {
     log(

@@ -25,13 +25,10 @@ import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./in
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import { deriveRepoPolicy } from "./repo_policy.ts";
 import {
-  effectiveFollowupIgnoreLogins,
-  effectiveIgnoreConflictsLabel,
   effectiveLeaseMs,
-  effectivePickupLabel,
   effectiveTimeoutMsForKind,
-  effectiveTrustedSenderLogins,
   loadDefaultBranchSettings,
   REPO_MODE_DISABLED_NOTE,
   REPO_MODE_OFF_REASON,
@@ -188,6 +185,14 @@ export function createIssueQueue(
           followupMs: localFollowupMs,
           conflictMs: localConflictMs,
         } = await resolveWorkerTimeouts(api, config, job.owner, job.repo, job.defaultBranch, logger);
+        const localPolicy = deriveRepoPolicy(localSettingsLoad, {
+          trustedSenderLogins: config.trustedSenderLogins,
+          followupIgnoreLogins: config.followupIgnoreLogins,
+          ignoreConflictsLabel: config.ignoreConflictsLabel,
+          blockingQuestionAuthors: config.blockingQuestionAuthors,
+          maxFollowupRounds: config.maxFollowupRounds,
+          maxConflictRounds: config.maxConflictRounds,
+        });
         const shared = {
           api,
           tracker: api,
@@ -204,12 +209,12 @@ export function createIssueQueue(
           ...pickupPolicyForForge(
             config.forge,
             config.botUsername,
-            forgeCapabilities(config.forge).pickupLabelApplies ? effectivePickupLabel(localSettingsLoad) : undefined
+            forgeCapabilities(config.forge).pickupLabelApplies ? localPolicy.pickupLabel : undefined
           ),
-          followupIgnoreLogins: effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, localSettingsLoad),
-          trustedSenderLogins: effectiveTrustedSenderLogins(config.trustedSenderLogins, localSettingsLoad),
+          followupIgnoreLogins: localPolicy.followupIgnoreLogins,
+          trustedSenderLogins: localPolicy.trustedSenderLogins,
           blockingQuestionAuthors: config.blockingQuestionAuthors,
-          ignoreConflictsLabel: effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, localSettingsLoad),
+          ignoreConflictsLabel: localPolicy.ignoreConflictsLabel,
           automergeRepos: config.automergeRepos,
           automergeEnabled: config.automergeEnabled,
           forgeKind: config.forge,
@@ -683,12 +688,18 @@ export async function processWorkerTick(
   // `pickup_label` (GitHub only) all come from the same default-branch read
   // that supplied the timeouts. Missing, invalid, or unreadable falls back to
   // the deployment values.
-  const repoTrusted = effectiveTrustedSenderLogins(config.trustedSenderLogins, tickSettingsLoad);
-  const repoFollowupIgnore = effectiveFollowupIgnoreLogins(config.followupIgnoreLogins, tickSettingsLoad);
-  const repoIgnoreLabel = effectiveIgnoreConflictsLabel(config.ignoreConflictsLabel, tickSettingsLoad);
-  const repoPickup = forgeCapabilities(config.forge).pickupLabelApplies
-    ? effectivePickupLabel(tickSettingsLoad)
-    : undefined;
+  const tickPolicy = deriveRepoPolicy(tickSettingsLoad, {
+    trustedSenderLogins: config.trustedSenderLogins,
+    followupIgnoreLogins: config.followupIgnoreLogins,
+    ignoreConflictsLabel: config.ignoreConflictsLabel,
+    blockingQuestionAuthors: config.blockingQuestionAuthors,
+    maxFollowupRounds: config.maxFollowupRounds,
+    maxConflictRounds: config.maxConflictRounds,
+  });
+  const repoTrusted = tickPolicy.trustedSenderLogins;
+  const repoFollowupIgnore = tickPolicy.followupIgnoreLogins;
+  const repoIgnoreLabel = tickPolicy.ignoreConflictsLabel;
+  const repoPickup = forgeCapabilities(config.forge).pickupLabelApplies ? tickPolicy.pickupLabel : undefined;
   const effectiveConfig =
     effectiveImplementMs === config.opencodeTimeoutMs &&
     effectiveFollowupMs === config.followupTimeoutMs &&

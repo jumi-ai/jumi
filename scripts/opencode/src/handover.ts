@@ -4,16 +4,8 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import {
-  effectiveBlockingQuestionAuthors,
-  effectiveConflictRounds,
-  effectiveFollowupRounds,
-  effectivePickupLabel,
-  isSuggestionFollowupEnabled,
-  loadRepoSettings,
-  type RepoSettingsLoad,
-  repoMode,
-} from "./repo_settings.ts";
+import { resolveRepoPolicy } from "./repo_policy.ts";
+import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -241,18 +233,31 @@ export async function enqueueFollowUpFromReview(
   try {
     const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
     if (defaultBranch) {
-      const load = await loadRepoSettings(opts.api, opts.row.owner, opts.row.repo, defaultBranch);
-      repoSettings = load;
-      if (load.state === "invalid") {
-        opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${load.error}`);
+      const repoPolicy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.row.owner, repo: opts.row.repo, ref: defaultBranch },
+        {
+          trustedSenderLogins: undefined,
+          followupIgnoreLogins: undefined,
+          ignoreConflictsLabel: undefined,
+          blockingQuestionAuthors: opts.blockingQuestionAuthors,
+          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+        },
+        { onUnreadable: "throw" }
+      );
+      repoSettings = repoPolicy.load;
+      if (repoPolicy.status === "invalid") {
+        opts.logger?.(
+          `repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${repoPolicy.error}`
+        );
       } else {
         policy = {
-          followupOnSuggestions: isSuggestionFollowupEnabled(load),
-          maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, load),
-          maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load),
+          followupOnSuggestions: repoPolicy.followupOnSuggestions,
+          maxFollowupRounds: repoPolicy.maxFollowupRounds,
+          maxConflictRounds: repoPolicy.maxConflictRounds,
         };
       }
-      effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
+      effectiveBlocking = repoPolicy.blockingQuestionAuthors;
     }
   } catch (err) {
     opts.logger?.(`repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${errorMessage(err)}`);

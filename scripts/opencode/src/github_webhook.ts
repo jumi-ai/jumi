@@ -28,14 +28,8 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
-import {
-  effectiveFollowupIgnoreLogins,
-  effectiveIgnoreConflictsLabel,
-  effectivePickupLabel,
-  effectiveTrustedSenderLogins,
-  loadRepoSettings,
-  loadReviewDraftsEnabled,
-} from "./repo_settings.ts";
+import { resolveRepoPolicy } from "./repo_policy.ts";
+import { loadReviewDraftsEnabled } from "./repo_settings.ts";
 import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
@@ -258,23 +252,34 @@ export async function effectiveGithubPolicyForRepo(
 ): Promise<GithubWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
   if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
-  let settings: Awaited<ReturnType<typeof loadRepoSettings>>;
-  try {
-    settings = await loadRepoSettings(api, owner, repo, branch);
-  } catch (err) {
-    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${errorMessage(err)}`);
+  const policy = await resolveRepoPolicy(
+    { api, owner, repo, ref: branch },
+    {
+      trustedSenderLogins: basePolicy.trustedSenderLogins,
+      followupIgnoreLogins: basePolicy.followupIgnoreLogins,
+      ignoreConflictsLabel: basePolicy.ignoreConflictsLabel,
+      blockingQuestionAuthors: undefined,
+      maxFollowupRounds: 0,
+      maxConflictRounds: 0,
+    },
+    { onUnreadable: "fallback" }
+  );
+  if (policy.status === "invalid") {
+    log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
     return basePolicy;
   }
-  if (settings.state === "invalid") {
-    log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${settings.error}`);
+  if (policy.status === "unreadable") {
+    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
     return basePolicy;
   }
-  const pickupLabel = effectivePickupLabel(settings);
-  const trustedSenderLogins = effectiveTrustedSenderLogins(basePolicy.trustedSenderLogins, settings);
+  // Missing still sets the pickup label (`jumi`) and `isPickedUp`, unlike
+  // the worker webhook which returns `basePolicy` unchanged.
+  const pickupLabel = policy.pickupLabel;
+  const trustedSenderLogins = policy.trustedSenderLogins;
   // `basePolicy.followupIgnoreLogins` already merges the deployer list with
   // the GitHub defaults; the repository list unions on top.
-  const followupIgnoreLogins = effectiveFollowupIgnoreLogins(basePolicy.followupIgnoreLogins, settings);
-  const ignoreConflictsLabel = effectiveIgnoreConflictsLabel(basePolicy.ignoreConflictsLabel, settings);
+  const followupIgnoreLogins = policy.followupIgnoreLogins;
+  const ignoreConflictsLabel = policy.ignoreConflictsLabel;
   return {
     ...basePolicy,
     trustedSenderLogins,
