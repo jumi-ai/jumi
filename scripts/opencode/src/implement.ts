@@ -9,8 +9,10 @@ import {
   DEFAULT_CHECKPOINT_INTERVAL_MS,
   DEFAULT_CHECKPOINT_MAX_AGE_MS,
   deleteCheckpointForIssueViaForge,
+  deleteCheckpointRef,
   deleteCheckpointRefViaForge,
   restoreCheckpoint,
+  sweepClosedIssueCheckpoints,
   sweepStaleCheckpoints,
 } from "./checkpoint.ts";
 import { claimFilePath, deleteClaim, isPidAlive, readClaim } from "./claim.ts";
@@ -474,12 +476,13 @@ function checkpointTickerForRun(
 /** Opportunistic per-repo orphan sweep: same bare cache, best-effort, never throws. */
 async function sweepStaleCheckpointsBestEffort(
   loop: Parameters<typeof sweepStaleCheckpoints>[0],
-  opts: Pick<ImplementOptions, "checkpointMaxAgeMs">,
+  opts: Pick<ImplementOptions, "checkpointMaxAgeMs" | "api"> & { owner: string; repo: string },
   log: (message: string) => void,
   exclude?: readonly string[]
 ): Promise<void> {
   const maxAgeMs = opts.checkpointMaxAgeMs ?? DEFAULT_CHECKPOINT_MAX_AGE_MS;
   await sweepStaleCheckpoints(loop, { maxAgeMs, log, exclude }).catch(() => undefined);
+  await sweepClosedIssueCheckpoints(loop, opts.api, opts.owner, opts.repo, { log, exclude }).catch(() => undefined);
 }
 
 function escapeTaskXmlAttr(str: string): string {
@@ -785,7 +788,12 @@ async function implementExternalIssue(
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpointsBestEffort(loop, opts, log, externalCheckpoint ? [externalCheckpoint.ref] : undefined);
+      await sweepStaleCheckpointsBestEffort(
+        loop,
+        { checkpointMaxAgeMs: opts.checkpointMaxAgeMs, api: opts.api, owner, repo },
+        log,
+        externalCheckpoint ? [externalCheckpoint.ref] : undefined
+      );
       if (externalCheckpoint) {
         await restoreCheckpoint(loop, externalCheckpoint.ref, {
           branch,
@@ -954,7 +962,7 @@ async function implementExternalIssue(
         throw err;
       }
       if (externalCheckpoint) {
-        await deleteCheckpointRefViaForge(forge, owner, repo, externalCheckpoint.ref, { log });
+        await deleteCheckpointRef(loop, externalCheckpoint.ref, { log }).catch(() => undefined);
       }
       throwIfAborted(opts.abortSignal);
 
@@ -1185,7 +1193,12 @@ export async function implementIssue(
         abortSignal: opts.abortSignal,
         log,
       });
-      await sweepStaleCheckpointsBestEffort(loop, opts, log, checkpoint ? [checkpoint.ref] : undefined);
+      await sweepStaleCheckpointsBestEffort(
+        loop,
+        { checkpointMaxAgeMs: opts.checkpointMaxAgeMs, api: opts.api, owner, repo },
+        log,
+        checkpoint ? [checkpoint.ref] : undefined
+      );
       if (checkpoint) {
         await restoreCheckpoint(loop, checkpoint.ref, {
           branch,
@@ -1664,7 +1677,7 @@ export async function implementIssue(
         throw err;
       }
       if (checkpoint) {
-        await deleteCheckpointRefViaForge(opts.api, owner, repo, checkpoint.ref, { log });
+        await deleteCheckpointRef(loop, checkpoint.ref, { log }).catch(() => undefined);
       }
       throwIfAborted(opts.abortSignal);
 

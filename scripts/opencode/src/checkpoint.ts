@@ -552,10 +552,98 @@ export async function sweepStaleCheckpoints(loop: CheckpointLoop, opts: SweepSta
   return deleted;
 }
 
+export interface SweepClosedCheckpointsOpts {
+  log?: (message: string) => void;
+  /** Refs to keep even when closed — the active run's own checkpoint. */
+  exclude?: readonly string[];
+}
+
+function issueNumberFromCheckpointRef(ref: string): number | undefined {
+  if (!ref.startsWith(CHECKPOINT_REF_PREFIX)) return undefined;
+  const suffix = ref.slice(CHECKPOINT_REF_PREFIX.length);
+  if (!/^\d+$/.test(suffix)) return undefined;
+  const n = Number.parseInt(suffix, 10);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+/**
+ * Next-run git cleanup for Gitea closes/merges/cancels that have no
+ * worktree. The router's forge-side delete is unsupported on Gitea (no
+ * DELETE for arbitrary git refs, only GET), so it stays silent and the
+ * ref lingers. The next job on the same repo fetches all
+ * `refs/jumi/wip/*`, checks each numeric ref's issue state, and deletes
+ * via `deleteCheckpointRef` (git push) when the issue is no longer open.
+ * Best-effort: listing/fetch failures yield an empty sweep, per-issue
+ * lookup failures are skipped, and individual delete failures are logged
+ * once; never throws.
+ */
+export async function sweepClosedIssueCheckpoints(
+  loop: CheckpointLoop,
+  api: { getIssue(owner: string, repo: string, index: number): Promise<{ state: string }> },
+  owner: string,
+  repo: string,
+  opts: SweepClosedCheckpointsOpts = {}
+): Promise<string[]> {
+  try {
+    await loop.runConfiguredGit(["fetch", "origin", `+${CHECKPOINT_REF_PREFIX}*:${CHECKPOINT_REF_PREFIX}*`], {
+      cwd: loop.barePath,
+      env: loop.env,
+    });
+  } catch {
+    // Fall through to whatever refs already exist locally.
+  }
+  let listing = "";
+  try {
+    listing = await loop.runConfiguredGit(["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_PREFIX], {
+      cwd: loop.barePath,
+      env: loop.env,
+    });
+  } catch {
+    return [];
+  }
+  const keep = new Set(opts.exclude ?? []);
+  const deleted: string[] = [];
+  for (const line of listing.split("\n")) {
+    const ref = line.trim();
+    if (!ref || !isCheckpointRef(ref) || keep.has(ref)) continue;
+    const issueNumber = issueNumberFromCheckpointRef(ref);
+    if (issueNumber === undefined) continue;
+    let state: string | undefined;
+    try {
+      state = (await api.getIssue(owner, repo, issueNumber)).state;
+    } catch {
+      continue;
+    }
+    if (state === "open") continue;
+    try {
+      const result = await deleteCheckpointRef(loop, ref, { log: opts.log });
+      if (result.deleted) deleted.push(ref);
+    } catch {
+      // Best-effort per ref; continue with the rest.
+    }
+  }
+  if (deleted.length > 0) {
+    opts.log?.(`checkpoint sweep deleted ${deleted.length} closed ref(s): ${deleted.join(", ")}`);
+  }
+  return deleted;
+}
+
+/**
+ * Forge statuses that mean "cannot delete this ref here", not a real
+ * failure: 404 (missing ref), 422 (GitHub's missing ref), 405/501 (Gitea
+ * has no DELETE for arbitrary git refs, only GET on `/git/refs`). These
+ * are silent; auth/5xx still log one line and never throw.
+ */
+function isForgeDeleteUnsupportedError(err: unknown): boolean {
+  return err instanceof Error && /→ (404|405|422|501)\b/.test(err.message);
+}
+
 /**
  * Best-effort forge-side delete of a checkpoint ref (post-push and
- * close/merge/cancel paths that have no worktree). Missing refs and missing
- * forge support are silent; other failures log one line and never throw.
+ * close/merge/cancel paths that have no worktree). Missing refs and
+ * unsupported forge deletes (Gitea answers 405: it has no DELETE for
+ * arbitrary git refs) are silent; other failures log one line and never
+ * throw.
  * Unlike `deleteCheckpointRef` this never runs git, so guarded skip paths
  * stay push-free.
  */
@@ -575,6 +663,7 @@ export async function deleteCheckpointRefViaForge(
   try {
     await (deleteGitRef as (owner: string, repo: string, ref: string) => Promise<void>).call(api, owner, repo, ref);
   } catch (err) {
+    if (isForgeDeleteUnsupportedError(err)) return;
     opts.log?.(
       `checkpoint delete failed for ${ref}: ${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`
     );
@@ -583,8 +672,9 @@ export async function deleteCheckpointRefViaForge(
 
 /**
  * Best-effort forge-side delete of one issue's checkpoint ref (close/merge/
- * cancel paths that have no worktree). Missing refs and missing forge support
- * are silent; other failures log one line and never throw.
+ * cancel paths that have no worktree). Missing refs and unsupported forge
+ * deletes (Gitea 405) are silent; other failures log one line and never
+ * throw.
  */
 export async function deleteCheckpointForIssueViaForge(
   api: unknown,

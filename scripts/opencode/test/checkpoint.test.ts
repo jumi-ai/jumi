@@ -7,12 +7,14 @@ import {
   checkpointRefForJob,
   deleteCheckpointForIssueViaForge,
   deleteCheckpointRef,
+  deleteCheckpointRefViaForge,
   isCheckpointRef,
   isRefNamespaceRefusal,
   pushCheckpointRef,
   resolveCheckpointConfig,
   restoreCheckpoint,
   staleCheckpointRefs,
+  sweepClosedIssueCheckpoints,
   sweepStaleCheckpoints,
 } from "../src/checkpoint.ts";
 import { GithubAPI } from "../src/github_api.ts";
@@ -457,6 +459,20 @@ describe("forge deleteGitRef", () => {
     expect(seen[0]).toContain("/git/refs/jumi/wip/12");
   });
 
+  test("Gitea swallows 405/501 (no DELETE for arbitrary refs, only GET)", async () => {
+    for (const status of [405, 501]) {
+      globalThis.fetch = (async () => new Response("unsupported", { status })) as unknown as typeof fetch;
+      const api = new GiteaAPI("https://gitea.kirmanak.stream", "token");
+      await api.deleteGitRef("o", "r", "refs/jumi/wip/12");
+    }
+  });
+
+  test("Gitea still throws on 500", async () => {
+    globalThis.fetch = (async () => new Response("boom", { status: 500 })) as unknown as typeof fetch;
+    const api = new GiteaAPI("https://gitea.kirmanak.stream", "token");
+    await expect(api.deleteGitRef("o", "r", "refs/jumi/wip/12")).rejects.toThrow("→ 500");
+  });
+
   test("GitHub strips refs/ and swallows 422", async () => {
     const seen: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -466,6 +482,94 @@ describe("forge deleteGitRef", () => {
     const api = new GithubAPI({ token: "token" });
     await api.deleteGitRef("o", "r", "refs/jumi/wip/12");
     expect(seen[0]).toContain("/git/refs/jumi/wip/12");
+  });
+});
+
+describe("deleteCheckpointRefViaForge unsupported handling", () => {
+  test("405/404/422/501 are silent, 500 logs exactly one line", async () => {
+    for (const status of [404, 405, 422, 501]) {
+      const logs: string[] = [];
+      await deleteCheckpointRefViaForge(
+        {
+          deleteGitRef: async () => {
+            throw new Error(`Gitea API DELETE https://gitea.test/api/v1/repos/o/r/git/refs/jumi/wip/12 → ${status}: x`);
+          },
+        },
+        "o",
+        "r",
+        "refs/jumi/wip/12",
+        { log: (m) => logs.push(m) }
+      );
+      expect(logs).toEqual([]);
+    }
+    const logs: string[] = [];
+    await deleteCheckpointRefViaForge(
+      {
+        deleteGitRef: async () => {
+          throw new Error("Gitea API DELETE https://gitea.test/api/v1/repos/o/r/git/refs/jumi/wip/12 → 500: boom");
+        },
+      },
+      "o",
+      "r",
+      "refs/jumi/wip/12",
+      { log: (m) => logs.push(m) }
+    );
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain("checkpoint delete failed for refs/jumi/wip/12");
+    expect(logs[0]).toContain("→ 500");
+  });
+});
+
+describe("sweepClosedIssueCheckpoints", () => {
+  test("deletes closed refs via git, keeps open and ext refs", async () => {
+    const deletedPushes: string[] = [];
+    const logs: string[] = [];
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "for-each-ref") {
+          return ["refs/jumi/wip/12", "refs/jumi/wip/13", "refs/jumi/wip/ext-linear-abc"].join("\n");
+        }
+        if (args[0] === "push" && typeof args[2] === "string" && args[2].startsWith(":")) {
+          deletedPushes.push(args[2].slice(1));
+          return "";
+        }
+        if (args[0] === "update-ref") return "";
+        return "";
+      },
+    });
+    const api = {
+      getIssue: async (_o: string, _r: string, n: number) => ({ state: n === 12 ? "closed" : "open" }),
+    };
+    const deleted = await sweepClosedIssueCheckpoints(loop, api, "o", "r", { log: (m) => logs.push(m) });
+    expect(deleted).toEqual(["refs/jumi/wip/12"]);
+    expect(deletedPushes).toEqual(["refs/jumi/wip/12"]);
+    expect(logs.join("\n")).toContain("closed ref(s)");
+  });
+
+  test("respects exclude and skips lookup failures", async () => {
+    const deletedPushes: string[] = [];
+    const loop = makeLoop({
+      git: async (args: string[]) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "for-each-ref") return ["refs/jumi/wip/12", "refs/jumi/wip/13"].join("\n");
+        if (args[0] === "push" && typeof args[2] === "string" && args[2].startsWith(":")) {
+          deletedPushes.push(args[2].slice(1));
+          return "";
+        }
+        if (args[0] === "update-ref") return "";
+        return "";
+      },
+    });
+    const api = {
+      getIssue: async (_o: string, _r: string, n: number) => {
+        if (n === 12) throw new Error("Gitea API GET → 500: boom");
+        return { state: "closed" };
+      },
+    };
+    const deleted = await sweepClosedIssueCheckpoints(loop, api, "o", "r", { exclude: ["refs/jumi/wip/13"] });
+    expect(deleted).toEqual([]);
+    expect(deletedPushes).toEqual([]);
   });
 });
 
