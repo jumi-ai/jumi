@@ -1,28 +1,37 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { parseRequirements, STABLE_SEMVER_RE } from "./tool_pin_helpers.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
 const requirements = readFileSync(join(repoRoot, "requirements.txt"), "utf8");
 
-const PYTEST_PIN = "pytest==9.2.0";
-const PYYAML_PIN = "PyYAML==6.0.3";
+function readPythonPins(content: string) {
+  const pins = parseRequirements(content);
+  const pytest = pins["pytest"];
+  const pyyaml = pins["pyyaml"];
+  if (!pytest) throw new Error("missing pytest pin");
+  if (!pyyaml) throw new Error("missing pyyaml pin");
+  return { pytest, pyyaml };
+}
 
 describe("python 3.13 default with pytest and PyYAML", () => {
   test("Dockerfile links python3 and python into /usr/local/bin ahead of apt python", () => {
     expect(dockerfile).toContain('ln -sfn "${py_bin}" /usr/local/bin/python3.13');
     expect(dockerfile).toContain("ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python3");
     expect(dockerfile).toContain("ln -sfn /usr/local/bin/python3.13 /usr/local/bin/python");
-    // The apt Debian Python stays installed for system packages but is not first on PATH.
     expect(dockerfile).toMatch(/apt-get install.*python3 python-is-python3 python3-yaml/s);
   });
 
   test("requirements file pins pytest and PyYAML with ==", () => {
-    expect(requirements).toContain(PYTEST_PIN);
-    expect(requirements).toContain(PYYAML_PIN);
+    const { pytest, pyyaml } = readPythonPins(requirements);
     expect(requirements).toMatch(/^pytest==\S+$/m);
     expect(requirements).toMatch(/^PyYAML==\S+$/m);
+    expect(STABLE_SEMVER_RE.test(pytest)).toBe(true);
+    expect(STABLE_SEMVER_RE.test(pyyaml)).toBe(true);
+    expect(requirements).toContain(`pytest==${pytest}`);
+    expect(requirements).toContain(`PyYAML==${pyyaml}`);
   });
 
   test("Dockerfile installs the pinned requirements into the 3.13 interpreter", () => {
@@ -42,6 +51,20 @@ describe("python 3.13 default with pytest and PyYAML", () => {
     expect(dockerfile).toContain("UV_OFFLINE=1 uv run --no-project --python 3.13 python -V");
   });
 
+  test("an unpinned requirement fails coherence", () => {
+    expect(() => readPythonPins("pytest\nPyYAML==0.0.1")).toThrow();
+  });
+
+  test("a non-semver requirement fails coherence", () => {
+    const { pytest } = readPythonPins(requirements);
+    expect(STABLE_SEMVER_RE.test("main")).toBe(false);
+    expect(STABLE_SEMVER_RE.test(pytest)).toBe(true);
+  });
+
+  test("a missing PyYAML pin fails coherence", () => {
+    expect(() => readPythonPins("pytest==0.0.1\n")).toThrow();
+  });
+
   test("image CI fails on a version or module mismatch and exercises the hook POST path", () => {
     const paths = [
       ".github/workflows/jumi-reviewer-image.yml",
@@ -56,8 +79,6 @@ describe("python 3.13 default with pytest and PyYAML", () => {
       expect(text).toContain("python3 -m pytest --version");
       expect(text).toContain("import yaml, pytest");
       expect(text).toContain('filter="data"');
-      // The tracing hooks POST through python3 stdlib; the POST path runs once under the new interpreter.
-      // common.sh is bash-only (set -euo pipefail, [[ ]]), so the exercise must source it with bash, not sh.
       expect(text).toContain("_http_post_json http://127.0.0.1:9 /tmp/jumi-post.json");
       expect(text).toContain("bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh;");
     }

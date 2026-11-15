@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+  allowedVersionsToRegExp,
+  compileAutoReplace,
+  extractFirst,
+  parseEnv,
+  requireEnvValue,
+  validateArchPin,
+} from "./tool_pin_helpers.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 const renovateRaw = readFileSync(join(repoRoot, "renovate.json"), "utf8");
@@ -36,17 +44,6 @@ const renovate = JSON.parse(renovateRaw) as {
 const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
 const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
 
-// Official stable pin exercised successfully (see JUMI_TASK evidence). Digests
-// are the GitHub API `digest` fields for the musl-package assets of
-// rust-v0.167.2, verified byte-for-byte against the 0.167.1 pins they replace.
-const CODEX_VERSION = "0.167.2";
-const CODEX_TAG = "rust-v0.167.2";
-const CODEX_SHA256_AMD64 = "3d77be1748d35a4bb0e7f8752cde3b11890c63338e8c599f01eafa4a59e17b3d";
-const CODEX_SHA256_ARM64 = "56b08c1214e062a5b61684bacb5033c4372a01062a47c87c49a32be83af70695";
-const OLD_VERSION = "0.167.1";
-const OLD_SHA256_AMD64 = "a945df3df83e849dd7b74787e27f8a459c1946b0e3afe3dc8eef8a8d1845fd4f";
-const OLD_SHA256_ARM64 = "ef3e1443a7795d596f1601a533d7225a1030488d60c965af1f0610ab95889031";
-
 function codexDigestManagers() {
   return renovate.customManagers?.filter(
     (m) => m.depNameTemplate === "openai/codex" && m.datasourceTemplate === "github-release-attachments"
@@ -57,21 +54,42 @@ function codexRule() {
   return renovate.packageRules?.filter((r) => r.matchPackageNames?.includes("openai/codex"));
 }
 
-function extractFirst(matchString: string, content: string) {
-  const re = new RegExp(matchString, "g");
-  const match = re.exec(content);
-  if (!match) return null;
-  return { replaceString: match[0], groups: (match.groups ?? {}) as Record<string, string | undefined> };
+function readCodexPin(content: string) {
+  const env = parseEnv(content);
+  const rules = codexRule() ?? [];
+  const numericRule = rules.find((r) => r.matchDatasources?.includes("github-releases"));
+  const tagRule = rules.find((r) => r.matchDatasources?.includes("github-release-attachments"));
+  return {
+    version: requireEnvValue(env, "CODEX_VERSION"),
+    amdTag: requireEnvValue(env, "CODEX_AMD64_TAG"),
+    armTag: requireEnvValue(env, "CODEX_ARM64_TAG"),
+    amdSha: requireEnvValue(env, "CODEX_SHA256_AMD64"),
+    armSha: requireEnvValue(env, "CODEX_SHA256_ARM64"),
+    allowedVersion: numericRule?.allowedVersions ? allowedVersionsToRegExp(numericRule.allowedVersions) : undefined,
+    allowedTag: tagRule?.allowedVersions ? allowedVersionsToRegExp(tagRule.allowedVersions) : undefined,
+  };
 }
 
-// Minimal Handlebars subset used by our autoReplace templates:
-// {{{newValue}}} and {{{newDigest}}}.
-function compileAutoReplace(template: string, vars: { newValue?: string; newDigest?: string }): string {
-  return template
-    .replace(/\{\{\{newValue\}\}\}/g, vars.newValue ?? "")
-    .replace(/\{\{\{newDigest\}\}\}/g, vars.newDigest ?? "")
-    .replace(/\{\{newValue\}\}/g, vars.newValue ?? "")
-    .replace(/\{\{newDigest\}\}/g, vars.newDigest ?? "");
+// Synthetic fixtures only: the representative-update simulation is about the
+// regex managers and autoReplace templates, not about any real release.
+const SYN_OLD_VERSION = "0.0.1";
+const SYN_NEW_VERSION = "0.0.2";
+const SYN_OLD_TAG = "rust-v0.0.1";
+const SYN_NEW_TAG = "rust-v0.0.2";
+const SYN_OLD_AMD_SHA = "a".repeat(64);
+const SYN_OLD_ARM_SHA = "b".repeat(64);
+const SYN_NEW_AMD_SHA = "c".repeat(64);
+const SYN_NEW_ARM_SHA = "d".repeat(64);
+
+function syntheticOldContent(): string {
+  return [
+    "# renovate: datasource=github-release-attachments depName=openai/codex",
+    `CODEX_AMD64_TAG=${SYN_OLD_TAG}`,
+    `CODEX_SHA256_AMD64=${SYN_OLD_AMD_SHA}`,
+    "# renovate: datasource=github-release-attachments depName=openai/codex",
+    `CODEX_ARM64_TAG=${SYN_OLD_TAG}`,
+    `CODEX_SHA256_ARM64=${SYN_OLD_ARM_SHA}`,
+  ].join("\n");
 }
 
 describe("codex renovate monitoring", () => {
@@ -125,25 +143,23 @@ describe("codex renovate monitoring", () => {
     }
   });
 
-  test("release tag maps to the intended numeric version; prereleases stay out", () => {
-    const extract = "^rust-v(?<version>.+)$";
-    const tagVersion = new RegExp(extract).exec(CODEX_TAG)?.groups?.version;
-    expect(tagVersion).toBe(CODEX_VERSION);
-    const allowed = /^[0-9]+\.[0-9]+\.[0-9]+$/;
-    expect(allowed.test(CODEX_VERSION)).toBe(true);
-    expect(allowed.test("0.163.0-alpha.8")).toBe(false);
-    expect(allowed.test("0.163.0-beta.1")).toBe(false);
-    expect(allowed.test("0.162.1")).toBe(true);
-    // Tag-form digest entries keep the rust-v prefix and order via the
-    // regex versioning; only stable rust-vX.Y.Z tags pass the filter.
-    const tagVersioning = /^rust-v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/;
-    expect(tagVersioning.exec(CODEX_TAG)?.groups?.major).toBe("0");
-    expect(tagVersioning.exec("rust-v0.163.0-alpha.8")).toBeNull();
-    const tagAllowed = /^rust-v[0-9]+\.[0-9]+\.[0-9]+$/;
-    expect(tagAllowed.test(CODEX_TAG)).toBe(true);
-    expect(tagAllowed.test("rust-v0.163.0-alpha.8")).toBe(false);
-    expect(tagAllowed.test("rust-v0.163.0")).toBe(true);
-    expect(tagAllowed.test("0.163.0")).toBe(false);
+  test("release tag maps to the numeric version; prereleases stay out", () => {
+    const pin = readCodexPin(toolVersions);
+    const numericRule = (codexRule() ?? []).find((r) => r.matchDatasources?.includes("github-releases"));
+    const tagRule = (codexRule() ?? []).find((r) => r.matchDatasources?.includes("github-release-attachments"));
+    const extract = numericRule?.extractVersion ?? "^rust-v(?<version>.+)$";
+    const tagVersion = new RegExp(extract).exec(pin.amdTag)?.groups?.version;
+    expect(tagVersion).toBe(pin.version);
+    const allowed = allowedVersionsToRegExp(numericRule?.allowedVersions ?? "/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(allowed.test(pin.version)).toBe(true);
+    expect(allowed.test("0.0.1-alpha.1")).toBe(false);
+    expect(allowed.test("0.0.1-beta.1")).toBe(false);
+    expect(allowed.test(SYN_NEW_VERSION)).toBe(true);
+    const tagAllowed = allowedVersionsToRegExp(tagRule?.allowedVersions ?? "/^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(tagAllowed.test(pin.amdTag)).toBe(true);
+    expect(tagAllowed.test("rust-v0.0.1-alpha.1")).toBe(false);
+    expect(tagAllowed.test(SYN_NEW_TAG)).toBe(true);
+    expect(tagAllowed.test(SYN_NEW_VERSION)).toBe(false);
   });
 
   test("preserves release-age, scheduling, review, and CI policy", () => {
@@ -166,37 +182,29 @@ describe("codex renovate monitoring", () => {
 });
 
 describe("codex pin coherence", () => {
-  test("tool-versions.env carries the upgraded pin, not 0.162.1, with both official archive checksums", () => {
-    expect(toolVersions).toContain(`CODEX_VERSION=${CODEX_VERSION}`);
-    expect(toolVersions).not.toContain(`CODEX_VERSION=${OLD_VERSION}`);
-    expect(toolVersions).toContain(`CODEX_AMD64_TAG=${CODEX_TAG}`);
-    expect(toolVersions).toContain(`CODEX_ARM64_TAG=${CODEX_TAG}`);
-    expect(toolVersions).toContain(`CODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`CODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}`);
-    expect(toolVersions).not.toContain(OLD_SHA256_AMD64);
-    expect(toolVersions).not.toContain(OLD_SHA256_ARM64);
+  test("tool-versions.env carries a coherent codex pin", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() => validateArchPin({ ...pin, tagScheme: "rust-v" })).not.toThrow();
   });
 
   test("tags stay paired with the numeric version so digest entries cannot drift", () => {
-    const version = /^CODEX_VERSION=(?<v>[^\s]+)$/m.exec(toolVersions)?.groups?.v;
-    const amdTag = /^CODEX_AMD64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    const armTag = /^CODEX_ARM64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    expect(version).toBe(CODEX_VERSION);
-    expect(amdTag).toBe(`rust-v${version}`);
-    expect(armTag).toBe(`rust-v${version}`);
-    expect(amdTag).toBe(armTag);
+    const pin = readCodexPin(toolVersions);
+    expect(pin.amdTag).toBe(`rust-v${pin.version}`);
+    expect(pin.armTag).toBe(`rust-v${pin.version}`);
+    expect(pin.amdTag).toBe(pin.armTag);
   });
 
   test("digest managers extract the tag and its arch checksum together", () => {
+    const pin = readCodexPin(toolVersions);
     const managers = codexDigestManagers();
     const amdPattern = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_AMD64_TAG"))?.matchStrings?.[0] ?? "";
     const armPattern = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_ARM64_TAG"))?.matchStrings?.[0] ?? "";
     const amd = extractFirst(amdPattern, toolVersions);
-    expect(amd?.groups.currentValue).toBe(CODEX_TAG);
-    expect(amd?.groups.currentDigest).toBe(CODEX_SHA256_AMD64);
+    expect(amd?.groups.currentValue).toBe(pin.amdTag);
+    expect(amd?.groups.currentDigest).toBe(pin.amdSha);
     const arm = extractFirst(armPattern, toolVersions);
-    expect(arm?.groups.currentValue).toBe(CODEX_TAG);
-    expect(arm?.groups.currentDigest).toBe(CODEX_SHA256_ARM64);
+    expect(arm?.groups.currentValue).toBe(pin.armTag);
+    expect(arm?.groups.currentDigest).toBe(pin.armSha);
   });
 
   test("a representative update moves the version and both archive pins coherently", () => {
@@ -205,55 +213,82 @@ describe("codex pin coherence", () => {
     const armManager = managers?.find((m) => m.matchStrings?.[0]?.includes("CODEX_ARM64_TAG"));
     const amdPattern = amdManager?.matchStrings?.[0] ?? "";
     const armPattern = armManager?.matchStrings?.[0] ?? "";
-    const oldContent = [
-      "# renovate: datasource=github-release-attachments depName=openai/codex",
-      "CODEX_AMD64_TAG=rust-v0.167.1",
-      `CODEX_SHA256_AMD64=${OLD_SHA256_AMD64}`,
-      "# renovate: datasource=github-release-attachments depName=openai/codex",
-      "CODEX_ARM64_TAG=rust-v0.167.1",
-      `CODEX_SHA256_ARM64=${OLD_SHA256_ARM64}`,
-    ].join("\n");
+    const oldContent = syntheticOldContent();
     const amd = extractFirst(amdPattern, oldContent);
     const arm = extractFirst(armPattern, oldContent);
-    expect(amd?.groups.currentValue).toBe("rust-v0.167.1");
-    expect(amd?.groups.currentDigest).toBe(OLD_SHA256_AMD64);
-    expect(arm?.groups.currentValue).toBe("rust-v0.167.1");
-    expect(arm?.groups.currentDigest).toBe(OLD_SHA256_ARM64);
+    expect(amd?.groups.currentValue).toBe(SYN_OLD_TAG);
+    expect(amd?.groups.currentDigest).toBe(SYN_OLD_AMD_SHA);
+    expect(arm?.groups.currentValue).toBe(SYN_OLD_TAG);
+    expect(arm?.groups.currentDigest).toBe(SYN_OLD_ARM_SHA);
     // The lookup yields the tag verbatim (tag-form versioning, no
     // extractVersion); each arch autoReplace template writes that tag with
-    // its new digest. A numeric newValue would hand getDigest a bare
-    // version (tags/0.x.y → 404), so assert the tag survives verbatim.
+    // its new digest.
     const amdNew = compileAutoReplace(amdManager?.autoReplaceStringTemplate ?? "", {
-      newValue: CODEX_TAG,
-      newDigest: CODEX_SHA256_AMD64,
+      newValue: SYN_NEW_TAG,
+      newDigest: SYN_NEW_AMD_SHA,
     });
     const armNew = compileAutoReplace(armManager?.autoReplaceStringTemplate ?? "", {
-      newValue: CODEX_TAG,
-      newDigest: CODEX_SHA256_ARM64,
+      newValue: SYN_NEW_TAG,
+      newDigest: SYN_NEW_ARM_SHA,
     });
-    expect(amdNew).toBe(`CODEX_AMD64_TAG=${CODEX_TAG}\nCODEX_SHA256_AMD64=${CODEX_SHA256_AMD64}`);
-    expect(armNew).toBe(`CODEX_ARM64_TAG=${CODEX_TAG}\nCODEX_SHA256_ARM64=${CODEX_SHA256_ARM64}`);
+    expect(amdNew).toBe(`CODEX_AMD64_TAG=${SYN_NEW_TAG}\nCODEX_SHA256_AMD64=${SYN_NEW_AMD_SHA}`);
+    expect(armNew).toBe(`CODEX_ARM64_TAG=${SYN_NEW_TAG}\nCODEX_SHA256_ARM64=${SYN_NEW_ARM_SHA}`);
     const updated = oldContent.replace(amd?.replaceString ?? "", amdNew).replace(arm?.replaceString ?? "", armNew);
-    expect(updated).toContain(CODEX_TAG);
-    expect(updated).toContain(CODEX_SHA256_AMD64);
-    expect(updated).toContain(CODEX_SHA256_ARM64);
-    expect(updated).not.toContain("0.167.1");
-    expect(updated).not.toContain(OLD_SHA256_AMD64);
-    expect(updated).not.toContain(OLD_SHA256_ARM64);
-    // Re-extract after the update: both entries land on the new tag+digest.
-    expect(extractFirst(amdPattern, updated)?.groups.currentDigest).toBe(CODEX_SHA256_AMD64);
-    expect(extractFirst(armPattern, updated)?.groups.currentDigest).toBe(CODEX_SHA256_ARM64);
+    expect(updated).toContain(SYN_NEW_TAG);
+    expect(updated).toContain(SYN_NEW_AMD_SHA);
+    expect(updated).toContain(SYN_NEW_ARM_SHA);
+    expect(updated).not.toContain(SYN_OLD_TAG);
+    expect(updated).not.toContain(SYN_OLD_AMD_SHA);
+    expect(updated).not.toContain(SYN_OLD_ARM_SHA);
+    expect(extractFirst(amdPattern, updated)?.groups.currentDigest).toBe(SYN_NEW_AMD_SHA);
+    expect(extractFirst(armPattern, updated)?.groups.currentDigest).toBe(SYN_NEW_ARM_SHA);
   });
 
-  test("a version-only bump with stale hashes is detected", () => {
-    // New version paired with old archives must not look coherent: the
-    // checked-in pins for the new version are the official digests above.
-    const staleAmd = toolVersions.includes(CODEX_VERSION) && toolVersions.includes(OLD_SHA256_AMD64);
-    const staleArm = toolVersions.includes(CODEX_VERSION) && toolVersions.includes(OLD_SHA256_ARM64);
-    expect(staleAmd).toBe(false);
-    expect(staleArm).toBe(false);
-    expect(toolVersions).toContain(CODEX_SHA256_AMD64);
-    expect(toolVersions).toContain(CODEX_SHA256_ARM64);
+  test("a non-stable version fails coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() =>
+      validateArchPin({
+        ...pin,
+        version: "0.0.1-alpha.1",
+        amdTag: "rust-v0.0.1-alpha.1",
+        armTag: "rust-v0.0.1-alpha.1",
+        tagScheme: "rust-v",
+      })
+    ).toThrow();
+  });
+
+  test("a version that does not match the tag fails coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() => validateArchPin({ ...pin, amdTag: SYN_NEW_TAG, tagScheme: "rust-v" })).toThrow();
+  });
+
+  test("mismatched arch tags fail coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() =>
+      validateArchPin({
+        version: pin.version,
+        amdTag: pin.amdTag,
+        armTag: SYN_NEW_TAG,
+        amdSha: pin.amdSha,
+        armSha: pin.armSha,
+        tagScheme: "rust-v",
+      })
+    ).toThrow();
+  });
+
+  test("a short digest fails coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() => validateArchPin({ ...pin, amdSha: "a".repeat(63), tagScheme: "rust-v" })).toThrow();
+  });
+
+  test("a non-hex digest fails coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() => validateArchPin({ ...pin, armSha: "G".repeat(64), tagScheme: "rust-v" })).toThrow();
+  });
+
+  test("identical arch digests fail coherence", () => {
+    const pin = readCodexPin(toolVersions);
+    expect(() => validateArchPin({ ...pin, armSha: pin.amdSha, tagScheme: "rust-v" })).toThrow();
   });
 });
 
@@ -262,9 +297,9 @@ describe("codex build consumes one effective pin and fails closed", () => {
     expect(dockerfile).toMatch(/^ARG CODEX_VERSION$/m);
     expect(dockerfile).toMatch(/^ARG CODEX_SHA256_AMD64$/m);
     expect(dockerfile).toMatch(/^ARG CODEX_SHA256_ARM64$/m);
-    expect(dockerfile).not.toMatch(/^ARG CODEX_VERSION=0\.167\.0$/m);
-    expect(dockerfile).not.toMatch(OLD_SHA256_AMD64);
-    expect(dockerfile).not.toMatch(OLD_SHA256_ARM64);
+    expect(dockerfile).not.toMatch(/^ARG CODEX_VERSION=/m);
+    expect(dockerfile).not.toMatch(/^ARG CODEX_SHA256_AMD64=/m);
+    expect(dockerfile).not.toMatch(/^ARG CODEX_SHA256_ARM64=/m);
     // Fail closed on missing wiring.
     expect(dockerfile).toContain(': "${CODEX_VERSION:?CODEX_VERSION build-arg is required}"');
     expect(dockerfile).toContain(': "${CODEX_SHA256_AMD64:?CODEX_SHA256_AMD64 build-arg is required}"');

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { compileAutoReplace, extractFirst } from "./tool_pin_helpers.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 const renovateRaw = readFileSync(join(repoRoot, "renovate.json"), "utf8");
@@ -44,23 +45,9 @@ function nonDockerManager() {
   return toolManager()?.find((m) => m.depNameTemplate === undefined);
 }
 
-// Minimal Handlebars subset used by our autoReplace templates:
-// {{{newValue}}}, {{{newDigest}}}, {{#if newDigest}}...{{/if}}.
-function compileAutoReplace(template: string, vars: { newValue?: string; newDigest?: string }): string {
-  const withConditionals = template.replace(/\{\{#if newDigest\}\}([\s\S]*?)\{\{\/if\}\}/g, vars.newDigest ? "$1" : "");
-  return withConditionals
-    .replace(/\{\{\{newValue\}\}\}/g, vars.newValue ?? "")
-    .replace(/\{\{\{newDigest\}\}\}/g, vars.newDigest ?? "")
-    .replace(/\{\{newValue\}\}/g, vars.newValue ?? "")
-    .replace(/\{\{newDigest\}\}/g, vars.newDigest ?? "");
-}
-
-function extractFirst(matchString: string, content: string) {
-  const re = new RegExp(matchString, "g");
-  const match = re.exec(content);
-  if (!match) return null;
-  return { replaceString: match[0], groups: (match.groups ?? {}) as Record<string, string | undefined> };
-}
+// Minimal Handlebars subset used by our autoReplace templates lives in
+// ./tool_pin_helpers.ts (compileAutoReplace / extractFirst), shared with the
+// *_pins.test.ts suites so the next template-syntax change touches one place.
 
 const OLD_DIGEST = `sha256:${"a".repeat(64)}`;
 const NEW_DIGEST = `sha256:${"b".repeat(64)}`;

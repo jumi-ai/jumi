@@ -1,48 +1,106 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { allowedVersionsToRegExp, parseEnv, requireEnvValue, validateArchPin } from "./tool_pin_helpers.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
 const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
+const renovateRaw = readFileSync(join(repoRoot, "renovate.json"), "utf8");
 
-// Official stable pins verified against the GitHub API `digest` fields.
-const YQ_VERSION = "4.54.3";
-const YQ_TAG = "v4.54.3";
-const YQ_SHA256_AMD64 = "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973";
-const YQ_SHA256_ARM64 = "89f69310b61b68d1245065a1241d1fc843f7a36cd6103ffd77ad987613bd1b67";
-const UV_VERSION = "0.13.7";
-const UV_TAG = "0.13.7";
-const UV_SHA256_AMD64 = "c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83";
-const UV_SHA256_ARM64 = "71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc";
+function readYqPin(content: string) {
+  const env = parseEnv(content);
+  return {
+    version: requireEnvValue(env, "YQ_VERSION"),
+    amdTag: requireEnvValue(env, "YQ_AMD64_TAG"),
+    armTag: requireEnvValue(env, "YQ_ARM64_TAG"),
+    amdSha: requireEnvValue(env, "YQ_SHA256_AMD64"),
+    armSha: requireEnvValue(env, "YQ_SHA256_ARM64"),
+  };
+}
+
+function readUvPin(content: string) {
+  const env = parseEnv(content);
+  return {
+    version: requireEnvValue(env, "UV_VERSION"),
+    amdTag: requireEnvValue(env, "UV_AMD64_TAG"),
+    armTag: requireEnvValue(env, "UV_ARM64_TAG"),
+    amdSha: requireEnvValue(env, "UV_SHA256_AMD64"),
+    armSha: requireEnvValue(env, "UV_SHA256_ARM64"),
+  };
+}
 
 describe("yq/uv pin coherence", () => {
   test("tool-versions.env carries both pins with per-arch checksums", () => {
-    expect(toolVersions).toContain(`YQ_VERSION=${YQ_VERSION}`);
-    expect(toolVersions).toContain(`YQ_AMD64_TAG=${YQ_TAG}`);
-    expect(toolVersions).toContain(`YQ_ARM64_TAG=${YQ_TAG}`);
-    expect(toolVersions).toContain(`YQ_SHA256_AMD64=${YQ_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`YQ_SHA256_ARM64=${YQ_SHA256_ARM64}`);
-    expect(toolVersions).toContain(`UV_VERSION=${UV_VERSION}`);
-    expect(toolVersions).toContain(`UV_AMD64_TAG=${UV_TAG}`);
-    expect(toolVersions).toContain(`UV_ARM64_TAG=${UV_TAG}`);
-    expect(toolVersions).toContain(`UV_SHA256_AMD64=${UV_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`UV_SHA256_ARM64=${UV_SHA256_ARM64}`);
+    expect(() => validateArchPin({ ...readYqPin(toolVersions), tagScheme: "v" })).not.toThrow();
+    expect(() => validateArchPin({ ...readUvPin(toolVersions), tagScheme: "bare" })).not.toThrow();
   });
 
   test("tags stay paired with the numeric versions", () => {
-    const yqVersion = /^YQ_VERSION=(?<v>[^\s]+)$/m.exec(toolVersions)?.groups?.v;
-    const yqAmd = /^YQ_AMD64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    const yqArm = /^YQ_ARM64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    expect(yqVersion).toBe(YQ_VERSION);
-    expect(yqAmd).toBe(`v${yqVersion}`);
-    expect(yqArm).toBe(`v${yqVersion}`);
-    const uvVersion = /^UV_VERSION=(?<v>[^\s]+)$/m.exec(toolVersions)?.groups?.v;
-    const uvAmd = /^UV_AMD64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    const uvArm = /^UV_ARM64_TAG=(?<t>[^\s]+)$/m.exec(toolVersions)?.groups?.t;
-    expect(uvVersion).toBe(UV_VERSION);
-    expect(uvAmd).toBe(uvVersion);
-    expect(uvArm).toBe(uvVersion);
+    const yq = readYqPin(toolVersions);
+    expect(yq.amdTag).toBe(`v${yq.version}`);
+    expect(yq.armTag).toBe(`v${yq.version}`);
+    const uv = readUvPin(toolVersions);
+    expect(uv.amdTag).toBe(uv.version);
+    expect(uv.armTag).toBe(uv.version);
+  });
+
+  test("versions match the allowed-versions rules from renovate.json", () => {
+    const parsed = JSON.parse(renovateRaw) as {
+      packageRules?: { matchPackageNames?: string[]; matchDatasources?: string[]; allowedVersions?: string }[];
+    };
+    const yqRule = parsed.packageRules?.find(
+      (r) => r.matchPackageNames?.includes("mikefarah/yq") && r.matchDatasources?.includes("github-releases")
+    );
+    const uvRule = parsed.packageRules?.find(
+      (r) => r.matchPackageNames?.includes("astral-sh/uv") && r.matchDatasources?.includes("github-releases")
+    );
+    expect(yqRule?.allowedVersions).toBe("/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(uvRule?.allowedVersions).toBe("/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    const yqAllowed = allowedVersionsToRegExp(yqRule?.allowedVersions ?? "/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    const uvAllowed = allowedVersionsToRegExp(uvRule?.allowedVersions ?? "/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+    expect(yqAllowed.test(readYqPin(toolVersions).version)).toBe(true);
+    expect(uvAllowed.test(readUvPin(toolVersions).version)).toBe(true);
+    expect(yqAllowed.test("0.0.1-alpha.1")).toBe(false);
+    expect(uvAllowed.test("0.0.1-alpha.1")).toBe(false);
+  });
+
+  test("a non-stable yq version fails coherence", () => {
+    const yq = readYqPin(toolVersions);
+    expect(() =>
+      validateArchPin({
+        ...yq,
+        version: "0.0.1-alpha.1",
+        amdTag: "v0.0.1-alpha.1",
+        armTag: "v0.0.1-alpha.1",
+        tagScheme: "v",
+      })
+    ).toThrow();
+  });
+
+  test("a yq version that does not match the tag fails coherence", () => {
+    const yq = readYqPin(toolVersions);
+    expect(() => validateArchPin({ ...yq, amdTag: "v0.0.2", tagScheme: "v" })).toThrow();
+  });
+
+  test("mismatched uv arch tags fail coherence", () => {
+    const uv = readUvPin(toolVersions);
+    expect(() => validateArchPin({ ...uv, armTag: "0.0.2", tagScheme: "bare" })).toThrow();
+  });
+
+  test("a short yq digest fails coherence", () => {
+    const yq = readYqPin(toolVersions);
+    expect(() => validateArchPin({ ...yq, amdSha: "a".repeat(63), tagScheme: "v" })).toThrow();
+  });
+
+  test("a non-hex uv digest fails coherence", () => {
+    const uv = readUvPin(toolVersions);
+    expect(() => validateArchPin({ ...uv, armSha: "Z".repeat(64), tagScheme: "bare" })).toThrow();
+  });
+
+  test("identical arch digests fail coherence", () => {
+    const yq = readYqPin(toolVersions);
+    expect(() => validateArchPin({ ...yq, armSha: yq.amdSha, tagScheme: "v" })).toThrow();
   });
 });
 
