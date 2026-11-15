@@ -83,13 +83,8 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import {
-  applyRepoChain,
-  type ConflictRegenerateEntry,
-  effectiveIgnoreConflictsLabel,
-  loadRepoFollowupPolicy,
-  loadRepoSettings,
-} from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { applyRepoChain, type ConflictRegenerateEntry, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -286,17 +281,17 @@ export async function needsConflict(opts: {
 }): Promise<boolean> {
   let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
   if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
-    try {
-      const loaded = await loadRepoSettings(
-        { getRepoFile: opts.getRepoFile },
-        opts.owner,
-        opts.repo,
-        opts.defaultBranch
-      );
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
-    } catch {
-      // Fail-open to the deployment value.
-    }
+    const policy = await resolveRepoPolicy(
+      {
+        api: { getRepoFile: opts.getRepoFile },
+        owner: opts.owner,
+        repo: opts.repo,
+        ref: opts.defaultBranch,
+      },
+      fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
+      { onUnreadable: "fallback" }
+    ).catch(() => undefined);
+    if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
   }
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
@@ -545,21 +540,18 @@ async function resolveConflictRegenerateEntries(opts: {
   const getFile = opts.api?.getRepoFile;
   if (typeof getFile !== "function" || !opts.defaultBranch.trim()) return [];
   try {
-    const load = await loadRepoSettings(
-      { getRepoFile: getFile.bind(opts.api) },
-      opts.owner,
-      opts.repo,
-      opts.defaultBranch
+    const policy = await resolveRepoPolicy(
+      { api: { getRepoFile: getFile.bind(opts.api) }, owner: opts.owner, repo: opts.repo, ref: opts.defaultBranch },
+      fallbackPolicyDeployment(),
+      { onUnreadable: "throw" }
     );
-    if (load.state !== "valid") {
-      if (load.state === "invalid") {
-        opts.log?.(
-          `conflict regenerate settings invalid for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${load.error}`
-        );
-      }
+    if (policy.status === "invalid") {
+      opts.log?.(
+        `conflict regenerate settings invalid for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${policy.error}`
+      );
       return [];
     }
-    return load.conflictRegenerate ?? [];
+    return [...policy.conflictRegenerate];
   } catch (err) {
     opts.log?.(
       `conflict regenerate settings unreadable for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${errorMessage(err)}`
@@ -994,8 +986,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   try {
     const branch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch.trim() : "";
     if (branch) {
-      const loaded = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, branch);
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+      const policy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.job.owner, repo: opts.job.repo, ref: branch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
     }
   } catch {
     // Fail-open to the deployment value.
