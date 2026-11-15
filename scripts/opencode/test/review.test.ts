@@ -1188,6 +1188,34 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("publishes a legacy artifact with -> in the trailer reason without retry", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: makeApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          ran++;
+          await writeReview(
+            workspace,
+            "Looks good\n<!-- jumi-check: success; bumps codex 0.167.1->0.167.2, patch only -->"
+          );
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(1);
+      expect(result).toEqual({ status: "posted" });
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+    });
+  });
+
   test("does not take the check verdict from stdout", async () => {
     await withWorkspace(async (workspace) => {
       const comments: string[] = [];

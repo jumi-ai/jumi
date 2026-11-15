@@ -11,6 +11,7 @@ import { resolvePermissions } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullFile, PullReview, Repo, ReviewApi, Task } from "./ports.ts";
 import {
   buildIncompleteWritePrompt,
+  buildMalformedTrailerWritePrompt,
   buildNoFindingsWritePrompt,
   buildNoTrailerWritePrompt,
   buildPROpenedPrompt,
@@ -21,7 +22,14 @@ import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./re
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
-import { hasBlockingFindings, keepReviewFindingLines, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
+import {
+  hasBlockingFindings,
+  isTrailerShapedLine,
+  keepReviewFindingLines,
+  parseCheckLine,
+  parseReviewFindings,
+  parseReviewOutput,
+} from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
@@ -479,6 +487,15 @@ function errorMessage(err: unknown): string {
 
 function quotaSkip(reason: string): string {
   return isQuotaText(reason) ? quotaStuckReasonForText(reason) : reason;
+}
+
+function lastNonEmptyLineOf(text: string): string {
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line) return line;
+  }
+  return "";
 }
 
 export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayRecord> {
@@ -1024,9 +1041,14 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           extrasUsed++;
           await rm(join(workdir, "JUMI_REVIEW.md"), { recursive: true, force: true }).catch(() => undefined);
           const continued = await hasResumableSession(workdir);
+          const lastLine = lastNonEmptyLineOf(artifact.content);
+          const malformed = isTrailerShapedLine(lastLine) && !parseCheckLine(lastLine);
+          const retryPrompt = malformed
+            ? buildMalformedTrailerWritePrompt(continued ? undefined : artifact.content)
+            : buildNoTrailerWritePrompt(continued ? undefined : artifact.content);
           try {
             await runOnce({
-              prompt: buildNoTrailerWritePrompt(continued ? undefined : artifact.content),
+              prompt: retryPrompt,
               continueSession: continued,
             });
           } catch (err) {
