@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { buildPullRequestBody, rewriteClosingToRefs } from "../src/implement.ts";
+import { buildFollowupPrompt, buildImplementPrompt } from "../src/git.ts";
+import {
+  buildPullRequestBody,
+  hasRemainingWorkList,
+  rewriteClosingToRefs,
+  rewriteRefsToClosing,
+} from "../src/implement.ts";
 import { resolveClosingIssuesForReview } from "../src/review.ts";
 import { makePR } from "./fixtures.ts";
 
@@ -75,5 +81,55 @@ describe("closing rewrite keeps ignored ranges", () => {
     expect(buildPullRequestBody(12, "`Fixes #12`")).toBe("`Fixes #12`\n\nFixes #12");
     expect(buildPullRequestBody(12, "> Fixes #12")).toBe("> Fixes #12\n\nFixes #12");
     expect(buildPullRequestBody(12, "Fixes #12")).toBe("Fixes #12");
+  });
+});
+
+describe("bare Refs without a remaining-work list cannot ship non-closing", () => {
+  test("hasRemainingWorkList needs an explicit marker; prose alone does not count", () => {
+    expect(hasRemainingWorkList("Refs #12")).toBe(false);
+    expect(hasRemainingWorkList("Partial work.\n\nRefs #12")).toBe(false);
+    expect(hasRemainingWorkList("Caches categories.\n\nRefs #12")).toBe(false);
+    expect(hasRemainingWorkList("Refs #12\n\nRemaining:\n- one more case")).toBe(true);
+    expect(hasRemainingWorkList("Refs #12\n\nTODO: backfill test")).toBe(true);
+    expect(hasRemainingWorkList("Refs #12\n\n- [ ] backfill test")).toBe(true);
+    expect(hasRemainingWorkList("Refs #12\n\nStill to do: backfill")).toBe(true);
+    expect(hasRemainingWorkList("`Remaining`\n\nRefs #12")).toBe(false);
+  });
+
+  test("a bare Refs #N is rewritten to the closing keyword", () => {
+    expect(rewriteRefsToClosing("Refs #12", 12)).toBe("Fixes #12");
+    expect(rewriteRefsToClosing("`Refs #12`", 12)).toBe("`Refs #12`");
+    expect(rewriteRefsToClosing("> Refs #12", 12)).toBe("> Refs #12");
+    expect(rewriteRefsToClosing("Refs #13", 12)).toBe("Refs #13");
+    expect(buildPullRequestBody(12, "Did the work.\n\nRefs #12")).toBe("Did the work.\n\nFixes #12");
+    // No merged PR body from a bare Refs stays without a closing reference.
+    expect(buildPullRequestBody(12, "Did the work.\n\nRefs #12")).toMatch(/fixes #12/i);
+  });
+
+  test("a Refs #N with an explicit remaining-work list is kept non-closing", () => {
+    const body = buildPullRequestBody(12, "Did part.\n\nRefs #12\n\nRemaining:\n- one more case");
+    expect(body).toBe("Did part.\n\nRefs #12\n\nRemaining:\n- one more case");
+    expect(body).not.toMatch(/fixes #12/i);
+  });
+
+  test("closing_keyword refs behaviour is unchanged", () => {
+    // Repos that stay open after merge keep Refs, and Fixes is rewritten to Refs.
+    expect(buildPullRequestBody(12, "Did the work.\n\nRefs #12", undefined, [], "refs")).toBe(
+      "Did the work.\n\nRefs #12"
+    );
+    expect(buildPullRequestBody(12, "Did the work.", undefined, [], "refs")).toBe("Did the work.\n\nRefs #12");
+    expect(buildPullRequestBody(12, "Did the work.\n\nFixes #12", undefined, [], "refs")).toBe(
+      "Did the work.\n\nRefs #12"
+    );
+  });
+
+  test("worker prompts cover bare Refs and forge CI for CI-green Done items", () => {
+    for (const prompt of [buildImplementPrompt(), buildFollowupPrompt()]) {
+      expect(prompt).toContain("bare");
+      expect(prompt).toContain("Refs #N");
+      expect(prompt).toContain("remaining-work list");
+      expect(prompt).toContain("forge's CI is what counts");
+      expect(prompt).toContain("clean default-branch tree");
+    }
   });
 });

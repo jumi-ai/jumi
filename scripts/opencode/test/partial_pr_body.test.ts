@@ -76,12 +76,19 @@ function successSticky(headSha: string) {
   });
 }
 
-describe("partial work stays non-closing", () => {
-  test("Part of / Progress toward / Related to publish without a closing keyword", () => {
+describe("partial work stays non-closing only with a remaining-work list", () => {
+  test("Refs and equivalents with a remaining list publish without a closing keyword", () => {
+    for (const phrase of ["Part of #12", "Progress toward #12", "Related to #12", "Refs #12"]) {
+      const body = buildPullRequestBody(12, `Partial work.\n\n${phrase}\n\nRemaining:\n- one more case`);
+      expect(body).toBe(`Partial work.\n\n${phrase}\n\nRemaining:\n- one more case`);
+      expect(body).not.toMatch(/fixes #12/i);
+    }
+  });
+
+  test("a bare non-closing reference without a remaining list is published with the closing keyword", () => {
     for (const phrase of ["Part of #12", "Progress toward #12", "Related to #12", "Refs #12"]) {
       const body = buildPullRequestBody(12, `Partial work.\n\n${phrase}`);
-      expect(body).toBe(`Partial work.\n\n${phrase}`);
-      expect(body).not.toMatch(/fixes #12/i);
+      expect(body).toBe("Partial work.\n\nFixes #12");
     }
   });
 
@@ -239,7 +246,7 @@ describe("follow-up body-only round queues a fresh review", () => {
   }
 
   test("a body-only change on a failed head queues that head", async () => {
-    const run = await runBodyOnly({ writePr: "Partial work.\n\nRefs #12" });
+    const run = await runBodyOnly({ writePr: "Partial work.\n\nRefs #12\n\nRemaining:\n- one more case" });
     expect(run.result?.status).toBe("no-changes");
     expect(run.queued).toHaveLength(1);
     expect(run.queued[0]?.prNumber).toBe(127);
@@ -255,7 +262,7 @@ describe("follow-up body-only round queues a fresh review", () => {
 
   test("a body-only change on a passing head does not queue", async () => {
     const run = await runBodyOnly({
-      writePr: "Partial work.\n\nRefs #12",
+      writePr: "Partial work.\n\nRefs #12\n\nRemaining:\n- one more case",
       stickyBody: [successSticky("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")],
     });
     expect(run.queued).toHaveLength(0);
