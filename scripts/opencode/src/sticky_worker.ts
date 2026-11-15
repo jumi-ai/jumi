@@ -13,6 +13,7 @@ import {
   resolveRunnerSelection,
   rotateChainForStart,
 } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 
 export interface StickyWorkerInput {
   chain?: NamedRunner[];
@@ -80,7 +81,7 @@ export async function decideStickyWorkerChain(input: StickyWorkerInput): Promise
       startIndex: undefined,
       stickyFamily: undefined,
       stickyApplied: false,
-      reason: `provenance lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `provenance lookup failed: ${errorMessage(err)}`,
       writerFamilies: [],
       writers: [],
     };

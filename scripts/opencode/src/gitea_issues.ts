@@ -1,6 +1,7 @@
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { Forge, Pull, Tracker } from "./ports.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
+import { loginEquals } from "./util/login.ts";
 
 export type { IssueApi, LinkedIssue, Tracker } from "./ports.ts";
 
@@ -239,10 +240,6 @@ export function extractWorkingIssueNumber(
   const fromClose = extractClosingIssueNumber(pr, branchPrefix);
   if (fromClose !== undefined) return fromClose;
   return extractRefsIssueNumber(pr);
-}
-
-function loginEquals(login: string | undefined, botUsername: string): boolean {
-  return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
 }
 
 export function isJumiPrIdentity(

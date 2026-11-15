@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AGY_SKIP_PERMISSIONS, ensureAgyForgeDeny } from "./agy.ts";
 import { agyReadUrlDeny } from "./forge_webfetch.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Example homelab host for manual probing only; production derives the deny host from config. */
 const PROBE_DENY_DOMAIN = "kirmanak.stream";
@@ -417,7 +418,7 @@ async function main(): Promise<number> {
       } catch (err) {
         reviewChecks.push({
           ok: false,
-          line: `review: shell hook install failed (${err instanceof Error ? err.message : String(err)})`,
+          line: `review: shell hook install failed (${errorMessage(err)})`,
         });
       }
       try {

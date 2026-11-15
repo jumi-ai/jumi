@@ -1,6 +1,7 @@
 import { handleAutomergeLabelChange } from "./automerge.ts";
 import { isJumiPrIdentity } from "./gitea_issues.ts";
 import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL, loadRepoSettings } from "./repo_settings.ts";
+import { loginEquals } from "./util/login.ts";
 import { assertRepositoryPolicy, type WebhookPolicy } from "./webhook.ts";
 
 export type AutomergeWebhookPolicy = WebhookPolicy & {
@@ -14,10 +15,6 @@ export type AutomergeWebhookPolicy = WebhookPolicy & {
 type AutomergeWebhookApi = Parameters<typeof handleAutomergeLabelChange>[0]["api"] & {
   getRepo(owner: string, repo: string): Promise<{ default_branch?: string }>;
 };
-
-function loginEquals(a: string | undefined, b: string): boolean {
-  return typeof a === "string" && a.toLowerCase() === b.toLowerCase();
-}
 
 interface ParsedLabelEvent {
   owner: string;

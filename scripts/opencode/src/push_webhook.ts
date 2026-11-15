@@ -12,6 +12,8 @@ import {
 } from "./ignore_conflicts.ts";
 import type { Pull } from "./ports.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { isObjectLike } from "./util/object.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -27,10 +29,6 @@ export type PushWebhookDecision =
   | { type: "enqueue"; jobs: Omit<IssueJob, "delivery" | "receivedAt">[] }
   | { type: "skip"; reason: string };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new Error(`Invalid webhook payload: missing ${name}`);
   return value;
@@ -43,9 +41,9 @@ function isZeroSha(value: string | undefined): boolean {
 
 export function parsePushPayload(rawBody: Uint8Array): GiteaPushPayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
   requireString(parsed.ref, "ref");
   requireString(repository.full_name, "repository.full_name");
   requireString(repository.default_branch, "repository.default_branch");
@@ -79,7 +77,7 @@ export async function shouldEnqueuePushConflicts(
   try {
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
-    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`repository not allowed: ${errorMessage(err)}`);
     return { type: "skip", reason: "repository not allowed" };
   }
 

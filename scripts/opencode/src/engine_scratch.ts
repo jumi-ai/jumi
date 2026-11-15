@@ -1,5 +1,7 @@
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { isEnoent } from "./util/error.ts";
+import { lstatExists } from "./util/fs.ts";
 
 export const ENGINE_TEMP_DIR = ".jumi-tmp";
 export const CHILD_SCRATCH_DIR = "scratch";
@@ -10,19 +12,6 @@ const ATTACHMENTS_SCRATCH_EXCLUDE = `${ATTACHMENTS_DIR}/`;
 
 export function engineScratchTrackedReason(ref: string): string {
   return `refusing to open a pull request: ${ref} tracks ${ENGINE_TEMP_DIR}, which holds provider auth and session transcripts`;
-}
-
-function isEnoent(err: unknown): boolean {
-  return typeof err === "object" && err != null && "code" in err && (err as { code?: string }).code === "ENOENT";
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await lstat(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function excludeListsScratch(text: string): boolean {
@@ -71,7 +60,7 @@ export async function engineScratchExcludePath(worktree: string): Promise<string
   const gitdirRel = /^gitdir:\s*(.+?)\s*$/m.exec(text)?.[1];
   if (!gitdirRel) return undefined;
   const gitdir = resolve(worktree, gitdirRel);
-  if (!(await pathExists(gitdir))) return undefined;
+  if (!(await lstatExists(gitdir))) return undefined;
   let common = gitdir;
   const commondir = (await readFile(join(gitdir, "commondir"), "utf8").catch(() => "")).trim();
   if (commondir) common = resolve(gitdir, commondir);

@@ -2,6 +2,7 @@ import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { normalizeForge } from "./provenance.ts";
 import { type SqlClient, wrapSqlError } from "./sql_client.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Repo-root artifact the worker child writes for the next round. Never committed. */
 export const HANDOFF_FILE = "JUMI_HANDOFF.md";
@@ -226,7 +227,7 @@ export async function injectStoredHandoff(
     await writeHandoffToWorktree(worktree, note);
     return note;
   } catch (err) {
-    log?.(`handoff inject unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log?.(`handoff inject unavailable: ${errorMessage(err)}`);
     return null;
   }
 }
@@ -244,7 +245,7 @@ export async function saveWorktreeHandoff(
     await store.put(key, capHandoffNote(raw as string));
     return capHandoffNote(raw as string);
   } catch (err) {
-    log?.(`handoff store unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log?.(`handoff store unavailable: ${errorMessage(err)}`);
     return null;
   }
 }

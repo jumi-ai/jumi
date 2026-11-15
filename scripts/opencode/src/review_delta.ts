@@ -1,5 +1,6 @@
 import { isJumiPullReviewWriteup, isJumiReviewSticky, lastCheckTrailer, parseReviewedCommitSha } from "./followup.ts";
 import type { Comment, InlineComment, PullFile, PullReview } from "./ports.ts";
+import { loginEquals } from "./util/login.ts";
 import { reviewFindingLines } from "./verdict.ts";
 import type { GitRunner } from "./workspace.ts";
 
@@ -19,10 +20,6 @@ export interface ReviewDelta {
   findings: string[];
   commits: string[];
   files: PullFile[];
-}
-
-function loginEquals(left: string | undefined, right: string): boolean {
-  return typeof left === "string" && left.toLowerCase() === right.toLowerCase();
 }
 
 /**

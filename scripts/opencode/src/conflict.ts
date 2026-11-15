@@ -1,4 +1,4 @@
-import { access, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
 import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
@@ -107,6 +107,8 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { pathExists } from "./util/fs.ts";
 import { type GitRunner, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -210,15 +212,6 @@ export interface MergeDefaultIntoWorktreeOpts {
 
 function logDefault(message: string) {
   console.log(`[conflict] ${message}`);
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function emptyConflictState(): ConflictState {
@@ -563,7 +556,7 @@ async function resolveConflictRegenerateEntries(opts: {
     return load.conflictRegenerate ?? [];
   } catch (err) {
     opts.log?.(
-      `conflict regenerate settings unreadable for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+      `conflict regenerate settings unreadable for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${errorMessage(err)}`
     );
     return [];
   }
@@ -587,7 +580,7 @@ async function regenerateCustomLock(
   try {
     await runRegenCommand(command, regen);
   } catch (err) {
-    log(`conflict regenerate failed for ${lockPath}: ${command}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`conflict regenerate failed for ${lockPath}: ${command}: ${errorMessage(err)}`);
     return false;
   }
   const absLock = join(worktree, lockPath);
@@ -800,7 +793,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         if (!ok) regenFailed.add(path);
       }
     } catch (regenErr) {
-      log(`Failed to regenerate generated lock: ${regenErr instanceof Error ? regenErr.message : String(regenErr)}`);
+      log(`Failed to regenerate generated lock: ${errorMessage(regenErr)}`);
       return { status: "stuck", headSha, baseSha, openCodeRan: false, conflicted: true };
     }
   }
@@ -865,7 +858,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
         bodies: [opts.job.body, opts.pr.body],
         worktree,
         log,
-      }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+      }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
     }
     log(`Running OpenCode conflict resolution for ${opts.job.owner}/${opts.job.repo}#${opts.job.issueNumber}`);
     openCodeRan = true;
@@ -1277,9 +1270,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         });
         if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
       } catch (err) {
-        log(
-          `CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`
-        );
+        log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
       }
 
       let mergeResult: MergeDefaultResult;
@@ -1336,7 +1327,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
             ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
-          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+          const quotaReason = quotaStuckReasonForText(errorMessage(err));
           await sticky(quotaReason, pr.number);
           await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
           // The stuck outcome is decided; teardown noise must not replace it.
@@ -1391,7 +1382,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
               bodies: [issue.body ?? taskJob.body, pr.body],
               worktree,
               log,
-            }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+            }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
             log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
             const continuedOpts: EngineRunOptions = {
               model: opts.model,
@@ -1538,7 +1529,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: "remote already contains default" };
         }
-        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
         throw err;
       }
       if (conflictCheckpoint) {
@@ -1581,7 +1572,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
           ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
-        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        const quotaReason = quotaStuckReasonForText(errorMessage(err));
         await sticky(quotaReason, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
@@ -1594,7 +1585,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
         pr.number
       ).catch(() => undefined);
-      const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+      const errorHash = fingerprintError(errorMessage(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
           () => undefined

@@ -1,4 +1,5 @@
 import type { CollaboratorPermission } from "./ports.ts";
+import { errorMessage } from "./util/error.ts";
 
 export type { CollaboratorPermission };
 
@@ -161,7 +162,7 @@ interface PushAccess {
 }
 
 function errorText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  return errorMessage(err);
 }
 
 /**

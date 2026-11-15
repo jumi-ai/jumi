@@ -1,4 +1,5 @@
 import { boardUsername, isAllowedBoardOrigin } from "./board.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Router-side proxy for one ordinal's device login (Grok and Codex).
@@ -337,7 +338,7 @@ export async function handleDeviceLoginStatus(request: Request, deps: DeviceLogi
       timeoutMs
     );
   } catch (err) {
-    logger(`device login status unavailable ordinal=${ordinal}: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`device login status unavailable ordinal=${ordinal}: ${errorMessage(err)}`);
     return json(502, { error: "ordinal unavailable", ordinal, role, available: false });
   }
   if (!response.ok) {
@@ -403,7 +404,7 @@ async function handleDeviceLoginWrite(
     );
   } catch (err) {
     logger(
-      `device login ${kind} unavailable actor=${actor} ordinal=${ordinal} provider=${provider}: ${err instanceof Error ? err.message : String(err)}`
+      `device login ${kind} unavailable actor=${actor} ordinal=${ordinal} provider=${provider}: ${errorMessage(err)}`
     );
     return json(502, { error: "ordinal unavailable", ordinal, role, available: false });
   }

@@ -1,3 +1,4 @@
+import { errorMessage } from "./util/error.ts";
 /** Operator-visible response excerpt. The rest of a forge body never leaves the client. */
 export const FORGE_ERROR_BODY_MAX_CHARS = 240;
 
@@ -24,7 +25,7 @@ export function isForgeRequestErrorMessage(message: string): boolean {
 
 export function isForgeRequestError(err: unknown): boolean {
   if (typeof err === "object" && err !== null && FORGE_REQUEST_ERROR_BRAND in err) return true;
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   return isForgeRequestErrorMessage(message);
 }
 
@@ -133,4 +134,8 @@ export function forgeRequestError(input: {
   const err = new Error(`${input.service} ${method} ${url} → ${input.status}: ${body}`);
   Object.defineProperty(err, FORGE_REQUEST_ERROR_BRAND, { value: true });
   return err;
+}
+
+export function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && /→ 404\b/.test(err.message);
 }

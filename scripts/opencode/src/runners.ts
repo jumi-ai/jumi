@@ -12,6 +12,7 @@ import {
   type RunnerCooldownConfig,
   type RunnerCooldownStore,
 } from "./runner_cooldown.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const RUNNERS_FILE_ENV = "JUMI_RUNNERS_FILE";
 /** Catalog default when a `type: codex` entry omits effort. Not a synthesized-chain model. */
@@ -374,7 +375,7 @@ export function parseRunnersFile(path: string): RunnersCatalog {
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch (err) {
-    fail(`Invalid ${RUNNERS_FILE_ENV}: ${err instanceof Error ? err.message : String(err)}`);
+    fail(`Invalid ${RUNNERS_FILE_ENV}: ${errorMessage(err)}`);
   }
   return parseRunnersCatalog(raw);
 }

@@ -41,6 +41,7 @@ import {
   suggestionHoldSkippedDescription,
 } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {
@@ -92,9 +93,7 @@ export async function effectiveWorkerPolicyForRepo(
       ignoreConflictsLabel: effectiveIgnoreConflictsLabel(basePolicy.ignoreConflictsLabel, settings),
     };
   } catch (err) {
-    log?.(
-      `repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${errorMessage(err)}`);
     return basePolicy;
   }
 }
@@ -243,7 +242,7 @@ async function rememberSkipSit(
       logger(`queue unavailable: ${(err as Error).message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`sit remember failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`sit remember failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   return undefined;
@@ -264,7 +263,7 @@ async function clearSitForEnqueue(
       logger(`queue unavailable: ${(err as Error).message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`sit clear failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`sit clear failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   return undefined;
@@ -311,7 +310,7 @@ async function markPullClosedBestEffort(
   try {
     await sits.markPullClosed(owner, repo, number);
   } catch (err) {
-    logger(`closed marker remember failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`closed marker remember failed: ${errorMessage(err)}`);
   }
 }
 
@@ -320,7 +319,7 @@ function wakeFailedResponse(err: unknown, logger: (message: string) => void): Re
     logger(`queue unavailable: ${err.message}`);
     return json(503, { error: "queue unavailable" });
   }
-  logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+  logger(`failed to wake waiting issues: ${errorMessage(err)}`);
   return json(503, { error: "failed to wake waiting issues" });
 }
 
@@ -417,7 +416,7 @@ export async function cancelLedgerWorkerJobs(opts: {
     try {
       await upsertWorkerComment(opts.api, opts.owner, opts.repo, opts.issueNumber, opts.botUsername, "stopped");
     } catch (err) {
-      opts.logger?.(`stopped comment failed ${key}: ${err instanceof Error ? err.message : String(err)}`);
+      opts.logger?.(`stopped comment failed ${key}: ${errorMessage(err)}`);
     }
   }
   return { key, cancelled: true };
@@ -452,7 +451,7 @@ export async function handleWorkerWebhookEvent(
         });
         if (handled.handled) return json(202, { queued: false, reason: handled.reason });
       } catch (err) {
-        logger(`automerge label webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`automerge label webhook failed: ${errorMessage(err)}`);
       }
     }
   }
@@ -469,7 +468,7 @@ export async function handleWorkerWebhookEvent(
         try {
           assertRepositoryPolicy(payload.repository, policy);
         } catch (err) {
-          logger(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`repository not allowed: ${errorMessage(err)}`);
           return skipped("repository not allowed", logger);
         }
         const decision = await shouldEnqueueTakeoverForOpenedPull({
@@ -510,7 +509,7 @@ export async function handleWorkerWebhookEvent(
           logger(`queue unavailable: ${(err as Error).message}`);
           return json(503, { error: "queue unavailable" });
         }
-        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`invalid webhook payload: ${errorMessage(err)}`);
         return json(400, { error: "invalid webhook payload" });
       }
     }
@@ -649,7 +648,7 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`invalid webhook payload: ${errorMessage(err)}`);
       return json(400, { error: "invalid webhook payload" });
     }
   }
@@ -689,7 +688,7 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      logger(`status webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`status webhook failed: ${errorMessage(err)}`);
       return json(500, { error: "internal error" });
     }
   }
@@ -768,7 +767,7 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      logger(`workflow job webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`workflow job webhook failed: ${errorMessage(err)}`);
       return json(500, { error: "internal error" });
     }
   }
@@ -798,7 +797,7 @@ export async function handleWorkerWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      logger(`push webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`push webhook failed: ${errorMessage(err)}`);
       return json(500, { error: "internal error" });
     }
   }
@@ -1038,7 +1037,7 @@ export async function handleWorkerWebhookEvent(
       logger(`queue unavailable: ${err.message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`invalid webhook payload: ${errorMessage(err)}`);
     return json(400, { error: "invalid webhook payload" });
   }
 }

@@ -10,6 +10,7 @@ import {
   type RoleGateRole,
   WORKER_JOB_KINDS,
 } from "./review_jobs.ts";
+import { errorMessage } from "./util/error.ts";
 
 export type DispatchRole = "engine" | "worker";
 
@@ -417,7 +418,7 @@ async function dispatchOneRole(opts: {
     gateBlocked = !(await store.mayStartWork(roleGateForDispatchRole(role), new Date(nowMs)));
   } catch (err) {
     recordDispatchError(role, "list");
-    logger(`dispatch ${role}: gate read failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`dispatch ${role}: gate read failed: ${errorMessage(err)}`);
     return { role, created: 0, active: 0, skipped: true, skipReason: "gate read failed" };
   }
 
@@ -426,7 +427,7 @@ async function dispatchOneRole(opts: {
     template = await loadJobTemplate(templateFile);
   } catch (err) {
     recordDispatchError(role, "template");
-    logger(`dispatch ${role}: template read failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`dispatch ${role}: template read failed: ${errorMessage(err)}`);
     return { role, created: 0, active: 0, skipped: true, skipReason: "template read failed" };
   }
 
@@ -435,7 +436,7 @@ async function dispatchOneRole(opts: {
     jobs = await k8sListJobs({ apiUrl, namespace, token, fetchImpl: opts.fetchImpl });
   } catch (err) {
     recordDispatchError(role, "list");
-    logger(`dispatch ${role}: job list failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`dispatch ${role}: job list failed: ${errorMessage(err)}`);
     return { role, created: 0, active: 0, skipped: true, skipReason: "job list failed" };
   }
 
@@ -450,9 +451,7 @@ async function dispatchOneRole(opts: {
         await k8sDeleteJob({ apiUrl, namespace, token, name, fetchImpl: opts.fetchImpl });
       } catch (err) {
         recordDispatchError(role, "delete");
-        logger(
-          `dispatch ${role}: delete of succeeded ${name} failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        logger(`dispatch ${role}: delete of succeeded ${name} failed: ${errorMessage(err)}`);
         active++;
       }
       continue;
@@ -493,17 +492,13 @@ async function dispatchOneRole(opts: {
         }
       } catch (err) {
         recordDispatchError(role, "expire");
-        logger(
-          `dispatch ${role}: expire of failed ${name} failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        logger(`dispatch ${role}: expire of failed ${name} failed: ${errorMessage(err)}`);
       }
       try {
         await k8sDeleteJob({ apiUrl, namespace, token, name, fetchImpl: opts.fetchImpl });
       } catch (err) {
         recordDispatchError(role, "delete");
-        logger(
-          `dispatch ${role}: delete of failed ${name} failed: ${err instanceof Error ? err.message : String(err)}`
-        );
+        logger(`dispatch ${role}: delete of failed ${name} failed: ${errorMessage(err)}`);
         active++;
       }
       continue;
@@ -515,7 +510,7 @@ async function dispatchOneRole(opts: {
         pods = await k8sListPodsForJob({ apiUrl, namespace, token, jobName: name, fetchImpl: opts.fetchImpl });
       } catch (err) {
         recordDispatchError(role, "pods");
-        logger(`dispatch ${role}: pod list for ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`dispatch ${role}: pod list for ${name} failed: ${errorMessage(err)}`);
         active++;
         continue;
       }
@@ -528,9 +523,7 @@ async function dispatchOneRole(opts: {
           logger(`dispatch ${role}: deleted never-started ${name}`);
         } catch (err) {
           recordDispatchError(role, "delete");
-          logger(
-            `dispatch ${role}: delete of never-started ${name} failed: ${err instanceof Error ? err.message : String(err)}`
-          );
+          logger(`dispatch ${role}: delete of never-started ${name} failed: ${errorMessage(err)}`);
           active++;
         }
         continue;
@@ -553,7 +546,7 @@ async function dispatchOneRole(opts: {
     runnable = await store.peekRunnable(kindsForDispatchRole(role), slots, new Date(nowMs));
   } catch (err) {
     recordDispatchError(role, "list");
-    logger(`dispatch ${role}: runnable peek failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`dispatch ${role}: runnable peek failed: ${errorMessage(err)}`);
     return { role, created: 0, active, skipped: true, skipReason: "peek failed" };
   }
   let created = 0;
@@ -570,7 +563,7 @@ async function dispatchOneRole(opts: {
       recordCreated(role);
     } catch (err) {
       recordDispatchError(role, "create");
-      logger(`dispatch ${role}: create of ${name} failed: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`dispatch ${role}: create of ${name} failed: ${errorMessage(err)}`);
     }
   }
   // Reconciled active plus newly created: the gauge above counted pre-create

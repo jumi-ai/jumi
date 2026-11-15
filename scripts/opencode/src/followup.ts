@@ -139,6 +139,8 @@ import {
   suggestionHoldSkippedDescription,
 } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { loginEquals } from "./util/login.ts";
 import {
   blockingOpenQuestionCount,
   countMaintainerQuestionFindings,
@@ -191,10 +193,6 @@ export interface FollowUpState {
 
 function logDefault(message: string) {
   console.log(`[followup] ${message}`);
-}
-
-function loginEquals(login: string | undefined, botUsername: string): boolean {
-  return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
 }
 
 export { followUpStatePath };
@@ -1263,7 +1261,7 @@ export async function implementFollowUp(
     }
   } catch (err) {
     log(
-      `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
+      `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${errorMessage(err)}`
     );
   }
   const maxFollowupRounds = policy.maxFollowupRounds;
@@ -1435,14 +1433,14 @@ export async function implementFollowUp(
   try {
     ci = await inspectCi(inspectOpts);
   } catch (err) {
-    log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
   }
   if (ci.pending && opts.job.trigger?.event === "workflow_job") {
     try {
       await (opts.sleep ?? sleep)(CI_PENDING_RETRY_MS);
       ci = await inspectCi(inspectOpts);
     } catch (err) {
-      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
     }
   }
   const ciWake = !ci.pending && ci.unhandled.length > 0;
@@ -1600,9 +1598,7 @@ export async function implementFollowUp(
         prDiffHash = fingerprintPrDiffFromFiles(files);
       }
     } catch (err) {
-      log(
-        `same-finding diff unavailable for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`same-finding diff unavailable for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
       prDiffHash = undefined;
     }
   }
@@ -1802,9 +1798,7 @@ export async function implementFollowUp(
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
       return { changed: true, ...seen };
     } catch (err) {
-      log(
-        `PR body refresh failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`PR body refresh failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
       return { changed: false, headSha: fallback };
     }
   };
@@ -1839,9 +1833,7 @@ export async function implementFollowUp(
     try {
       await opts.reviewQueue.enqueue(job);
     } catch (err) {
-      log(
-        `body-only review requeue failed for ${owner}/${repo}#${pr.number}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`body-only review requeue failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
     }
   };
 
@@ -2002,7 +1994,7 @@ export async function implementFollowUp(
               ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
               ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
-            const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+            const quotaReason = quotaStuckReasonForText(errorMessage(err));
             await sticky(quotaReason, pr.number);
             await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
             // The stuck outcome is decided; teardown noise must not replace it.
@@ -2064,7 +2056,7 @@ export async function implementFollowUp(
         bodies: [taskJob.body, pr.body],
         worktree,
         log,
-      }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+      }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
       if (hasFeedback) {
         const items = await collectFollowUpItems(
           opts.api,
@@ -2258,7 +2250,7 @@ export async function implementFollowUp(
               bodies: [issue.body ?? taskJob.body, pr.body],
               worktree,
               log,
-            }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+            }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
             const quotaContinued = await runEngine(
               `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
               { continueSession: true }
@@ -2278,7 +2270,7 @@ export async function implementFollowUp(
             ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
             ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
-          const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+          const quotaReason = quotaStuckReasonForText(errorMessage(err));
           // The stuck outcome is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "skipped", reason: quotaReason };
@@ -2354,7 +2346,7 @@ export async function implementFollowUp(
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha) };
         }
-        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
         throw err;
       }
       if (followUpCheckpoint) {
@@ -2392,7 +2384,7 @@ export async function implementFollowUp(
           ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
           ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
-        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        const quotaReason = quotaStuckReasonForText(errorMessage(err));
         await sticky(quotaReason, pr.number).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
@@ -2405,7 +2397,7 @@ export async function implementFollowUp(
         `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
         pr.number
       ).catch(() => undefined);
-      const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+      const errorHash = fingerprintError(errorMessage(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
           () => undefined

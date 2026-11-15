@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { defaultOpenCodeDbPath } from "./diagnostics.ts";
+import { errorMessage } from "./util/error.ts";
 import { type AuthFile, durableAuthPath, readAuthFile, writeDurableAuth, XAI_PROVIDER_ID } from "./xai_auth.ts";
 
 /**
@@ -139,6 +140,6 @@ export async function armChildCredentialImport(opts: {
       db.close();
     }
   } catch (err) {
-    opts.log(`OpenCode credential bootstrap failed: ${err instanceof Error ? err.message : String(err)}`);
+    opts.log(`OpenCode credential bootstrap failed: ${errorMessage(err)}`);
   }
 }

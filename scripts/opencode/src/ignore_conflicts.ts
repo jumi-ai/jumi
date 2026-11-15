@@ -2,6 +2,7 @@ import { hasLabel } from "./assignee.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isListedLogin } from "./permissions.ts";
 import type { PullCommit } from "./ports.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
 
@@ -105,9 +106,7 @@ export async function hasJumiCommitOnPull(
     const commits = await api.listPullCommits(owner, repo, prNumber);
     return hasJumiCommit(commits, expectation);
   } catch (err) {
-    logger?.(
-      `ignore-conflicts lookup failed for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    logger?.(`ignore-conflicts lookup failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return undefined;
   }
 }
@@ -208,9 +207,7 @@ export async function loadIgnoreConflictsAuthors(
     if (loaded.state !== "valid") return [];
     return [...(loaded.ignoreConflictsAuthors ?? [])];
   } catch (err) {
-    logger?.(
-      `ignore-conflicts authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    logger?.(`ignore-conflicts authors unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return undefined;
   }
 }

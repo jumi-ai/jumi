@@ -1,4 +1,5 @@
 import { byteLength } from "./diagnostics.ts";
+import { errorMessage } from "./util/error.ts";
 import type { GitRunner } from "./workspace.ts";
 
 /**
@@ -137,14 +138,14 @@ export async function collectRecentHistory(opts: {
       { cwd: opts.cwd, env: opts.env }
     );
   } catch (err) {
-    opts.log?.(`recent history unavailable: ${err instanceof Error ? err.message : String(err)}`.split("\n")[0]);
+    opts.log?.(`recent history unavailable: ${errorMessage(err)}`.split("\n")[0]);
     return undefined;
   }
   let commits: RecentHistoryCommit[];
   try {
     commits = parseRecentHistoryLog(output).slice(0, maxCommits);
   } catch (err) {
-    opts.log?.(`recent history unavailable: ${err instanceof Error ? err.message : String(err)}`.split("\n")[0]);
+    opts.log?.(`recent history unavailable: ${errorMessage(err)}`.split("\n")[0]);
     return undefined;
   }
   if (commits.length === 0) {

@@ -16,6 +16,7 @@ import type { ReviewQueue } from "./queue.ts";
 import { createPgReviewJobStore, isJobMode, QUEUE_POLL_MS, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import { verifyGiteaSignature } from "./webhook.ts";
 import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
 import {
@@ -195,10 +196,10 @@ async function main() {
   const shutdown = new AbortController();
   installProcessShutdown(shutdown, log);
   await adoptOrphanXaiSibling(config.home, log).catch((err) =>
-    log(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+    log(`xAI sibling adoption failed: ${errorMessage(err)}`)
   );
   await adoptOpenCodeDbCredentials(config.home, log).catch((err) =>
-    log(`OpenCode credential adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+    log(`OpenCode credential adoption failed: ${errorMessage(err)}`)
   );
   await ensureOpenCodeWellKnownAuth({
     home: config.home,
@@ -277,7 +278,7 @@ async function main() {
       { once: true }
     );
   } catch (err) {
-    log(`device login unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log(`device login unavailable: ${errorMessage(err)}`);
   }
 
   if (store) {
@@ -302,7 +303,7 @@ async function main() {
           if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);
         } catch (err) {
           if (shutdown.signal.aborted) return;
-          log(`worker tick failed: ${err instanceof Error ? err.message : String(err)}`);
+          log(`worker tick failed: ${errorMessage(err)}`);
           await sleep(QUEUE_POLL_MS, shutdown.signal).catch(() => undefined);
         }
       }

@@ -77,6 +77,7 @@ import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { installProcessShutdown, releaseLeaseOnShutdown } from "./shutdown.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import type { ReviewJob } from "./types.ts";
+import { errorMessage, isAbortError } from "./util/error.ts";
 import {
   isReviewWebhookAction,
   parsePullRequestPayload,
@@ -248,9 +249,7 @@ export async function runReviewJob(
       return reviewSkipReasonForCi(ci, ciGateWait);
     } catch (err) {
       if (isAbortError(err) || extras.abortSignal?.aborted) throw err;
-      logger(
-        `CI inspect failed for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      logger(`CI inspect failed for ${job.owner}/${job.repo}#${job.prNumber}: ${errorMessage(err)}`);
       return CI_LOOKUP_FAILED_REASON;
     }
   };
@@ -357,10 +356,6 @@ export async function runReviewJob(
       cgroup_h: formatBytes(after.cgroupBytes),
     });
   }
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 function bindAbort(signal: AbortSignal | undefined, fn: () => void): void {
@@ -514,7 +509,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                 return markDurable(json(202, { key, queued: false }));
               }
             } catch (err) {
-              logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+              logger(`pr head lookup failed: ${errorMessage(err)}`);
             }
           }
           const result = await enqueueReviewWithCiGate(deps.queue, job, {
@@ -573,7 +568,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                 }
               }
             } catch (err) {
-              logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+              logger(`takeover failed: ${errorMessage(err)}`);
             }
           }
           return markDurable(json(202, result));
@@ -582,7 +577,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
             logger(`queue unavailable: ${err.message}`);
             return json(503, { error: "queue unavailable" });
           }
-          logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`invalid webhook payload: ${errorMessage(err)}`);
           return json(400, { error: "invalid webhook payload" });
         }
       }
@@ -676,14 +671,12 @@ export async function reclaimExpiredJobs(
       const result = await publishAndCompleteJob(store, api, config, row, logger);
       logger(`reclaim-published ${row.jobKey} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     } catch (err) {
-      logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
       try {
         if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
         await store.expireLease(row.id, row.leasedBy);
       } catch (expireErr) {
-        logger(
-          `reclaim expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-        );
+        logger(`reclaim expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
       }
     }
   }
@@ -701,14 +694,12 @@ export async function reclaimExpiredJobs(
       await publishWorkerReclaimRow(store, api, config, row, logger);
       logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
     } catch (err) {
-      logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
       try {
         if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
         await store.expireLease(row.id, row.leasedBy);
       } catch (expireErr) {
-        logger(
-          `reclaim expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-        );
+        logger(`reclaim expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
       }
     }
   }
@@ -772,7 +763,7 @@ async function handoverFollowUp(
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);
   } catch (err) {
-    logger(`handover failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`handover failed ${row.jobKey}: ${errorMessage(err)}`);
   }
 }
 
@@ -1121,7 +1112,7 @@ export async function processEngineTick(
   } catch (err) {
     const shutdown = Boolean(extras.abortSignal?.aborted);
     const triedSuffix = describeTriedRunnersSuffix(err);
-    const baseMessage = err instanceof Error ? err.message : String(err);
+    const baseMessage = errorMessage(err);
     logger(
       shutdown
         ? `engine job ${row.jobKey} interrupted`
@@ -1158,9 +1149,7 @@ export async function processEngineTick(
           try {
             await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
           } catch (expireErr) {
-            logger(
-              `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-            );
+            logger(`engine expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
           }
         } else {
           logDiagnostic(logger, "opencode_quota_wait", {
@@ -1171,15 +1160,11 @@ export async function processEngineTick(
           logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
         }
       } catch (quotaErr) {
-        logger(
-          `engine quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
-        );
+        logger(`engine quota requeue failed ${row.jobKey}: ${errorMessage(quotaErr)}`);
         try {
           await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
-          logger(
-            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-          );
+          logger(`engine expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
         }
       }
       return "processed";
@@ -1203,15 +1188,11 @@ export async function processEngineTick(
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
-        logger(
-          `engine infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
-        );
+        logger(`engine infra requeue failed ${row.jobKey}: ${errorMessage(infraErr)}`);
         try {
           await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
-          logger(
-            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-          );
+          logger(`engine expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
         }
       }
       return "processed";
@@ -1231,9 +1212,7 @@ export async function processEngineTick(
         published = true;
       }
     } catch (publishErr) {
-      logger(
-        `engine publish failed ${row.jobKey}: ${publishErr instanceof Error ? publishErr.message : String(publishErr)}`
-      );
+      logger(`engine publish failed ${row.jobKey}: ${errorMessage(publishErr)}`);
     }
     if (!published) {
       if (shutdown) {
@@ -1242,9 +1221,7 @@ export async function processEngineTick(
         try {
           await store.expireLease(row.id, leasedBy, new Date(), failedRunnerNameForRetry(config, err));
         } catch (expireErr) {
-          logger(
-            `engine expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-          );
+          logger(`engine expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
         }
       }
     }
@@ -1395,10 +1372,10 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
 
   if (shouldSeedOpenCodeAuth(config.role)) {
     await adoptOrphanXaiSibling(config.home, logger).catch((err) =>
-      logger(`xAI sibling adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger(`xAI sibling adoption failed: ${errorMessage(err)}`)
     );
     await adoptOpenCodeDbCredentials(config.home, logger).catch((err) =>
-      logger(`OpenCode credential adoption failed: ${err instanceof Error ? err.message : String(err)}`)
+      logger(`OpenCode credential adoption failed: ${errorMessage(err)}`)
     );
     await (deps.ensureAuth ?? ensureOpenCodeWellKnownAuth)({
       home: config.home,
@@ -1484,7 +1461,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             await reclaimExpiredJobs(store, api, config, logger);
           } catch (err) {
             if (reclaim.signal.aborted) return;
-            logger(`reclaim failed: ${err instanceof Error ? err.message : String(err)}`);
+            logger(`reclaim failed: ${errorMessage(err)}`);
           }
           await sleep(QUEUE_POLL_MS, reclaim.signal).catch(() => undefined);
         }
@@ -1570,7 +1547,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         priorStop();
       };
     } catch (err) {
-      logger(`device login unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`device login unavailable: ${errorMessage(err)}`);
     }
     const run = async () => {
       while (!shutdown.signal.aborted) {
@@ -1586,7 +1563,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
           if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);
         } catch (err) {
           if (shutdown.signal.aborted) return;
-          logger(`engine tick failed: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`engine tick failed: ${errorMessage(err)}`);
           await sleep(QUEUE_POLL_MS, shutdown.signal).catch(() => undefined);
         }
       }

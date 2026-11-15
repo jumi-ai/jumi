@@ -20,6 +20,7 @@ import { rememberSitBestEffort } from "./router_sits.ts";
 import { upsertStuckText } from "./stuck.ts";
 import { postSuggestionHoldSuccess, readSuggestionHold, suggestionHoldSkippedDescription } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import {
   blockingOpenQuestionCount,
   isMaintainerOnlyTrailerText,
@@ -254,9 +255,7 @@ export async function enqueueFollowUpFromReview(
       effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, load);
     }
   } catch (err) {
-    opts.logger?.(
-      `repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    opts.logger?.(`repo settings unreadable for ${opts.row.owner}/${opts.row.repo}: ${errorMessage(err)}`);
     repoSettings = { state: "missing" };
   }
   // GitHub pickup label from the same default-branch read: Gitea keeps using

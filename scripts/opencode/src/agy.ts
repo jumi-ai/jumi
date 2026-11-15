@@ -52,6 +52,8 @@ import {
   searxngUrlFromEnv,
 } from "./searxng.ts";
 import { recordAgyUsage } from "./token_metrics.ts";
+import { engineExitMessage } from "./util/engine.ts";
+import { errorMessage, isEnoent } from "./util/error.ts";
 
 /** stream-json keeps per-step usage even when the child is killed before `result`. */
 export const AGY_OUTPUT_FORMAT = "stream-json";
@@ -87,10 +89,6 @@ const AGY_QUOTA_RE = /resource[_\s-]*exhausted|\b429\b|rate[\s_-]*limit|too many
 export function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClass | undefined {
   if (!text || !AGY_QUOTA_RE.test(text)) return undefined;
   return "resetting";
-}
-
-function isEnoent(err: unknown): boolean {
-  return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
 }
 
 export function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
@@ -187,7 +185,7 @@ export async function ensureAgyForgeDeny(home: string, host: string): Promise<vo
     await rename(tmp, path);
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new EngineFailedError(`agy spawn refused: cannot install forge read_url deny: ${reason}`, false);
   }
 }
@@ -231,7 +229,7 @@ export async function ensureAgyMcpServer(home: string, baseUrl: string, forgeHos
     await rename(tmp, path);
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new EngineFailedError(`agy spawn refused: cannot install searxng MCP server: ${reason}`, false);
   }
 }
@@ -362,7 +360,7 @@ export async function installAgyReviewHooks(
     log(`agy review hooks installed: ${hooksPath}`);
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new EngineFailedError(`agy review spawn refused: cannot install review shell hooks: ${reason}`, false);
   }
   return async () => {
@@ -431,10 +429,6 @@ async function readAgyStdout(stream: ReadableStream<Uint8Array>, parser: AgyStre
     reader.releaseLock();
     parser.end();
   }
-}
-
-function engineExitMessage(exitCode: number | null, detail: string): string {
-  return `agy exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
 }
 
 /**
@@ -512,7 +506,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
           gitProxy = await startChildGitProxy(request);
         } catch (err) {
           throw new EngineFailedError(
-            `agy spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            `agy spawn refused: cannot start git credential proxy: ${errorMessage(err)}`,
             true
           );
         }
@@ -581,7 +575,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
           env,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         throw new EngineFailedError(message, true);
       }
     })();
@@ -648,7 +642,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     if (opts.abortSignal?.aborted) throw cancelled();
 
     if (runError) {
-      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
+      const message = redactEngineText(errorMessage(runError), opts);
       if (auth || looksLikeAgyAuthDeath(message)) {
         if (stderr) log(`[agy stderr] ${stderr}`);
         logAgyEnvelopeError(log, opts, envelope?.error, stderr);
@@ -679,7 +673,7 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
         status: "timeout",
         exitCode,
         stdout,
-        message: engineExitMessage(exitCode, combined),
+        message: engineExitMessage("agy", exitCode, combined),
         infra: false,
         durationMs,
       });
@@ -737,14 +731,14 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       status: "exit",
       exitCode,
       stdout,
-      message: providerDown ? providerText : engineExitMessage(exitCode, providerText),
+      message: providerDown ? providerText : engineExitMessage("agy", exitCode, providerText),
       infra: providerDown ? false : looksLikeInfraStderr(providerText),
       durationMs,
     });
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     if (looksLikeAgyAuthDeath(message)) {
       throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "agy" }), false, { auth: true });
     }

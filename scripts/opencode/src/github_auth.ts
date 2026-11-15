@@ -1,5 +1,6 @@
 import { createPrivateKey, type KeyObject, sign } from "node:crypto";
 import { forgeRequestError } from "./forge_errors.ts";
+import { isRecord } from "./util/object.ts";
 
 const JWT_IAT_SKEW_SEC = 60;
 const JWT_LIFETIME_SEC = 10 * 60;
@@ -46,10 +47,6 @@ function base64UrlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function installationIdText(value: unknown): string | undefined {
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (typeof value === "string" && value.trim()) return value.trim();
@@ -65,13 +62,13 @@ export function githubInstallationFromPayload(payload: unknown): {
   owner?: string;
   repo?: string;
 } {
-  if (!isObject(payload)) return {};
+  if (!isRecord(payload)) return {};
   const installation = payload.installation;
-  const installationId = isObject(installation) ? installationIdText(installation.id) : undefined;
+  const installationId = isRecord(installation) ? installationIdText(installation.id) : undefined;
   const repository = payload.repository;
   let owner: string | undefined;
   let repo: string | undefined;
-  if (isObject(repository)) {
+  if (isRecord(repository)) {
     if (typeof repository.full_name === "string") {
       const [fullOwner, fullRepo] = repository.full_name.split("/");
       if (fullOwner && fullRepo) {
@@ -85,7 +82,7 @@ export function githubInstallationFromPayload(payload: unknown): {
       const ownerLogin =
         typeof ownerField === "string"
           ? ownerField
-          : isObject(ownerField) && typeof ownerField.login === "string"
+          : isRecord(ownerField) && typeof ownerField.login === "string"
             ? ownerField.login
             : undefined;
       if (ownerLogin && name) {
@@ -145,7 +142,7 @@ function readRepositoryInstallationId(body: string): string {
   } catch {
     throw new Error("GitHub repository installation response is not JSON");
   }
-  const id = installationIdText(isObject(parsed) ? parsed.id : undefined);
+  const id = installationIdText(isRecord(parsed) ? parsed.id : undefined);
   if (!id) throw new Error("GitHub repository installation response is not JSON");
   return id;
 }

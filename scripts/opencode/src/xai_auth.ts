@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, open, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { opencodeAuthPath } from "./opencode_auth.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * The long-lived process owns the xAI refresh grant.
@@ -472,7 +473,7 @@ async function ensureLocked(opts: EnsureXaiCredentialOptions): Promise<XaiJobCre
   } catch (err) {
     // Nothing was POSTed: the grant on the file is still live and a later job
     // may try again once the directory takes a write.
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new XaiGrantError(`cannot write a new xAI credential beside ${path}; not refreshing: ${reason}`);
   }
 
@@ -485,7 +486,7 @@ async function ensureLocked(opts: EnsureXaiCredentialOptions): Promise<XaiJobCre
     // transport error proves nothing about the grant, so the job fails closed
     // without latching and a later job may POST again.
     if (err instanceof XaiRefreshRejected && isSpentGrantStatus(err.status)) rejectedGrants.add(key);
-    throw new XaiGrantError(err instanceof Error ? err.message : String(err));
+    throw new XaiGrantError(errorMessage(err));
   }
 
   const pair: XaiOAuthCredential = {

@@ -1,6 +1,7 @@
 import { readFileSync, unlinkSync } from "node:fs";
 import { SECRET_ENV_KEYS, SECRETS_DIR_ENV, SECRETS_FILE_ENV } from "./config.ts";
 import { defaultK8sCaFile } from "./k8s_ca.ts";
+import { intEnv, optionalEnv } from "./util/env.ts";
 
 export interface ControlDispatchRoleConfig {
   enabled: boolean;
@@ -51,20 +52,6 @@ function requireEnv(env: Env, name: string): string {
   const value = env[name];
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
   return value;
-}
-
-function optionalEnv(env: Env, name: string, fallback?: string): string | undefined {
-  return env[name] || fallback;
-}
-
-function intEnv(env: Env, name: string, fallback: number): number {
-  const value = env[name];
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid positive integer for ${name}: ${value}`);
-  }
-  return parsed;
 }
 
 function defaultK8sApiUrl(env: Env): string {

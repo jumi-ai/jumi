@@ -6,6 +6,7 @@ import { codexAuthPath, codexPublishedAuthPath } from "./codex_auth.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { EngineFailedError, type EngineResult } from "./engine.ts";
 import { isCreditBalanceText, isQuotaError } from "./quota.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const RUNNER_QUOTA_COOLDOWN_DEFAULT_MS = 60 * 60 * 1000;
 export const RUNNER_QUOTA_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
@@ -245,7 +246,7 @@ export function classifyCooldownFailure(input: {
     return undefined;
   }
   if (isAuthFailure(err)) return "auth";
-  if (isCreditBalanceText(err instanceof Error ? err.message : String(err))) return "credit";
+  if (isCreditBalanceText(errorMessage(err))) return "credit";
   // A generic quota error (e.g. a thrown `429` / `rate limit` without an
   // EngineFailedError wrapper) drives QuotaWaitError/role-wide logic in
   // quota_wait.ts, so it must cool the runner too. Without this the quota hit

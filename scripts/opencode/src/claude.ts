@@ -56,6 +56,8 @@ import {
 } from "./review_sandbox.ts";
 import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordClaudeUsage } from "./token_metrics.ts";
+import { engineExitMessage } from "./util/engine.ts";
+import { errorMessage } from "./util/error.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 /** `project` is what loads the checkout's `AGENTS.md`, `CLAUDE.md`, skills and settings. */
@@ -453,10 +455,6 @@ export async function claudeReviewBasePrompt(dir: string): Promise<string | unde
   );
 }
 
-function engineExitMessage(exitCode: number | null, detail: string): string {
-  return `claude exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
-}
-
 export function inspectClaudeUsageLimit(text: string | null | undefined): QuotaClass | undefined {
   if (!text || !CLAUDE_USAGE_LIMIT_RE.test(text)) return undefined;
   return "resetting";
@@ -537,7 +535,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
           gitProxy = await startChildGitProxy(request);
         } catch (err) {
           throw new EngineFailedError(
-            `claude spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            `claude spawn refused: cannot start git credential proxy: ${errorMessage(err)}`,
             true
           );
         }
@@ -579,7 +577,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
           env: childEnv,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         throw new EngineFailedError(message, true);
       }
     })();
@@ -651,7 +649,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     }
 
     if (runError) {
-      const message = redact(runError instanceof Error ? runError.message : String(runError));
+      const message = redact(errorMessage(runError));
       const runCredit = inspectClaudeCreditExhaustion(message);
       if (runCredit) {
         if (stderr) log(`[claude stderr] ${stderr}`);
@@ -686,7 +684,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
         status: "timeout",
         exitCode,
         stdout,
-        message: engineExitMessage(exitCode, combined),
+        message: engineExitMessage("claude", exitCode, combined),
         infra: false,
         durationMs,
       });
@@ -746,14 +744,14 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       status: "exit",
       exitCode,
       stdout,
-      message: engineExitMessage(exitCode, combined),
+      message: engineExitMessage("claude", exitCode, combined),
       infra: looksLikeInfraStderr(combined),
       durationMs,
     });
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
-    const rawMessage = err instanceof Error ? err.message : String(err);
+    const rawMessage = errorMessage(err);
     const message = isClaudeApiKeyRunner(opts)
       ? redactGitSecrets(rawMessage, claudeRedactSecrets(resolveClaudeApiKey(opts.authEnv, process.env)))
       : rawMessage;
