@@ -142,7 +142,8 @@ import {
   parseCheckLine,
   trailerSuggestionCount,
 } from "./verdict.ts";
-import { workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
+import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
@@ -1848,148 +1849,433 @@ export async function implementFollowUp(
   let attemptedBaseSha = "";
   let prefixMergeThrew = false;
 
-  const followUpResult: FollowUpResult = await runClaimedLoop(
-    loop,
-    opts.abortSignal,
-    async () => {
-      const runtime = opts.runtime ?? standingPodRuntime;
-      await runtime.ensureBareCache(loop, {
-        cloneUrl: opts.job.cloneUrl,
-        giteaUrl: opts.giteaUrl,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await sweepCheckpointsBestEffort(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs,
-        api: opts.api,
-        owner,
-        repo,
-        log,
-        exclude: followUpCheckpoint ? [followUpCheckpoint.ref] : undefined,
-      });
-      const attached = await runtime.attachPrWorktree(loop, {
-        branch,
-        defaultBranch: opts.job.defaultBranch,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      if (isClaimedEarlyResult(attached)) return attached;
-      const { headSha, baseSha } = attached;
-      attemptedHeadSha = headSha;
-      attemptedBaseSha = baseSha;
-      await loop.stampHeadSha(headSha);
-      if (followUpCheckpoint) {
-        const restored = await restoreCheckpoint(loop, followUpCheckpoint.ref, {
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          log,
-        }).catch(() => undefined);
-        if (restored?.restored && restored.sha) {
-          await loop
-            .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
-            .catch(() => undefined);
-        }
-        beginCheckpointing(loop, {
-          ref: followUpCheckpoint.ref,
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          intervalMs: followUpCheckpoint.intervalMs,
-          enabled: true,
+  // Parent-owned worker MCP server for the follow-up spawns. The model
+  // records `no_changes` through the tool; the parent posts from this
+  // in-memory state and fails open when the model never calls it.
+  const workerStore = new WorkerResultStore();
+  const workerServer = await startWorkerMcpServer({ store: workerStore });
+  const workerMcpRef = { url: workerServer.url, token: workerServer.token };
+  let followUpResult: FollowUpResult;
+  try {
+    followUpResult = await runClaimedLoop(
+      loop,
+      opts.abortSignal,
+      async () => {
+        const runtime = opts.runtime ?? standingPodRuntime;
+        await runtime.ensureBareCache(loop, {
+          cloneUrl: opts.job.cloneUrl,
+          giteaUrl: opts.giteaUrl,
+          abortSignal: opts.abortSignal,
           log,
         });
-      }
-      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
-      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
-      await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
-
-      if (
-        previousConflict.lastHeadSha &&
-        previousConflict.lastBaseSha &&
-        previousConflict.lastHeadSha === headSha &&
-        previousConflict.lastBaseSha === baseSha
-      ) {
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: "same head and base already attempted" };
-      }
-
-      const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-      const taskJob: IssueJob = {
-        ...opts.job,
-        title: currentIssue.title,
-        body: currentIssue.body ?? "",
-        htmlUrl: currentIssue.html_url,
-      };
-      let followupSetupBlock: string | undefined;
-      {
-        const setup = await runRepoSetupForKind({
+        await sweepCheckpointsBestEffort(loop, {
+          maxAgeMs: opts.checkpointMaxAgeMs,
           api: opts.api,
-          kind: "followup",
-          workdir: worktree,
-          defaultBranch: opts.job.defaultBranch || undefined,
-          auth: loop.auth,
           owner,
           repo,
-          home: opts.home,
-          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
-          git: loop.runConfiguredGit,
-          gitEnv: loop.env,
-          runScript: opts.repoSetupRunScript,
+          exclude: followUpCheckpoint ? [followUpCheckpoint.ref] : undefined,
         });
-        if (setup.ran) {
-          followupSetupBlock = setup.promptBlock;
-          if (setup.failureReason) {
-            await sticky(setup.failureReason, pr.number);
-            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-            return { status: "skipped", reason: setup.failureReason };
+        const attached = await runtime.attachPrWorktree(loop, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          abortSignal: opts.abortSignal,
+          log,
+        });
+        if (isClaimedEarlyResult(attached)) return attached;
+        const { headSha, baseSha } = attached;
+        attemptedHeadSha = headSha;
+        attemptedBaseSha = baseSha;
+        await loop.stampHeadSha(headSha);
+        if (followUpCheckpoint) {
+          const restored = await restoreCheckpoint(loop, followUpCheckpoint.ref, {
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            log,
+          }).catch(() => undefined);
+          if (restored?.restored && restored.sha) {
+            await loop
+              .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
+              .catch(() => undefined);
+          }
+          beginCheckpointing(loop, {
+            ref: followUpCheckpoint.ref,
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            intervalMs: followUpCheckpoint.intervalMs,
+            enabled: true,
+            log,
+          });
+        }
+        const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+        const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+
+        if (
+          previousConflict.lastHeadSha &&
+          previousConflict.lastBaseSha &&
+          previousConflict.lastHeadSha === headSha &&
+          previousConflict.lastBaseSha === baseSha
+        ) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "same head and base already attempted" };
+        }
+
+        const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
+        const taskJob: IssueJob = {
+          ...opts.job,
+          title: currentIssue.title,
+          body: currentIssue.body ?? "",
+          htmlUrl: currentIssue.html_url,
+        };
+        let followupSetupBlock: string | undefined;
+        {
+          const setup = await runRepoSetupForKind({
+            api: opts.api,
+            kind: "followup",
+            workdir: worktree,
+            defaultBranch: opts.job.defaultBranch || undefined,
+            auth: loop.auth,
+            owner,
+            repo,
+            home: opts.home,
+            timeoutMaxMs: opts.setupTimeoutMaxMs,
+            log,
+            git: loop.runConfiguredGit,
+            gitEnv: loop.env,
+            runScript: opts.repoSetupRunScript,
+          });
+          if (setup.ran) {
+            followupSetupBlock = setup.promptBlock;
+            if (setup.failureReason) {
+              await sticky(setup.failureReason, pr.number);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "skipped", reason: setup.failureReason };
+            }
           }
         }
-      }
-      let mergeResult: MergeDefaultResult;
-      if (leftToAuthor) {
-        mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
-      } else {
-        try {
-          mergeResult = await mergeDefaultIntoWorktree({
-            git: loop.runConfiguredGit,
-            env: loop.env,
-            worktree,
-            runtime,
-            loop,
-            defaultBranch: opts.job.defaultBranch,
-            headRef: branch,
-            job: taskJob,
+        let mergeResult: MergeDefaultResult;
+        if (leftToAuthor) {
+          mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
+        } else {
+          try {
+            mergeResult = await mergeDefaultIntoWorktree({
+              git: loop.runConfiguredGit,
+              env: loop.env,
+              worktree,
+              runtime,
+              loop,
+              defaultBranch: opts.job.defaultBranch,
+              headRef: branch,
+              job: taskJob,
+              pr,
+              api: opts.api,
+              model: opts.model,
+              variant: opts.variant,
+              home: opts.home,
+              sanitizeOpenCodeEnv: sanitizeEnv,
+              extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+                owner,
+                repo,
+                logger: log,
+              }),
+              maxOutputBytes: opts.maxOutputBytes,
+              timeoutMs: conflictTimeoutMs,
+              openCodeRunner: activeEngine,
+              helmRunner: opts.helmRunner,
+              conflictRegenerate: opts.conflictRegenerate,
+              regenRunner: opts.regenRunner,
+              regenTimeoutMs: opts.regenTimeoutMs,
+              logger: log,
+              abortSignal: opts.abortSignal,
+              jobId: opts.jobId ?? opts.job.delivery,
+              ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+              handoffStore,
+              handoffKey,
+              ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
+              onPid: loop.engineOnPid(opts.onPid),
+              onRunner: (r) => {
+                runner = r;
+              },
+            });
+          } catch (err: unknown) {
+            if (isQuotaError(err)) {
+              throwIfQuotaWait({
+                err,
+                model: opts.model,
+                fallbackModel: opts.fallbackModel,
+                chain: jobChain,
+                previousError: opts.previousError,
+                ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+                ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+                ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+              });
+              const quotaReason = quotaStuckReasonForText(errorMessage(err));
+              await sticky(quotaReason, pr.number);
+              await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+              // The stuck outcome is decided; teardown noise must not replace it.
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+              return { status: "skipped", reason: quotaReason };
+            }
+            prefixMergeThrew = true;
+            throw err;
+          }
+        }
+        runner = mergeResult.runner;
+        if (mergeResult.contributors && mergeResult.contributors.length > 0) {
+          provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
+        } else if (mergeResult.runner) {
+          provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+        }
+        await noteProvenanceRunners(opts, provenanceCollector, log);
+        const persistConflictAttempt = async (result: typeof mergeResult) => {
+          if (shouldResetConflictRound(result)) {
+            await writeConflictLatch(latches, latchKey, {
+              prNumber: pr.number,
+              round: 0,
+              lastHeadSha: result.headSha,
+              lastBaseSha: result.baseSha,
+              updatedAt: now().toISOString(),
+            });
+            return;
+          }
+          if (!shouldIncrementRound(result)) return;
+          await writeConflictLatch(latches, latchKey, {
+            prNumber: pr.number,
+            round: previousConflict.round + 1,
+            lastHeadSha: result.headSha,
+            lastBaseSha: result.baseSha,
+            updatedAt: now().toISOString(),
+          });
+        };
+        if (mergeResult.status === "stuck") {
+          await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+          await persistConflictAttempt(mergeResult);
+          await sticky("stuck: cannot resolve conflicts", pr.number);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
+        }
+
+        throwIfAborted(opts.abortSignal);
+        const followupTaskMarkdown = followupSetupBlock
+          ? `${buildTaskMarkdown(taskJob)}\n${followupSetupBlock}\n`
+          : buildTaskMarkdown(taskJob);
+        await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
+        // Parent-staged inputs for the follow-up child: the issue's attachments
+        // as well as any on the PR. Parent credentials only; the child has no
+        // forge read access.
+        await stageIssueAttachments({
+          api: opts.api,
+          owner,
+          repo,
+          indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+          bodies: [taskJob.body, pr.body],
+          worktree,
+          log,
+        }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
+        if (hasFeedback) {
+          const items = await collectFollowUpItems(
+            opts.api,
+            owner,
+            repo,
+            pr.number,
+            opts.botUsername,
+            pr.head.sha,
+            effectiveFollowupIgnoreUpFront,
+            findingOpts,
+            effectiveTrustedUpFront
+          );
+          const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
+          const feedback = buildFeedbackMarkdown({
             pr,
-            api: opts.api,
+            trigger: opts.job.trigger,
+            triggerBody: triggerBodyFromItems(opts.job.trigger, items),
+            comments: items.comments,
+            inlines: briefInlines(items),
+            reviews: items.reviews,
+            lastReview: briefReview,
+            currentInlines: unresolvedJumiInlines(items),
+            earlierReviews: earlierJumiReviews(items, briefReview),
+          });
+          handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
+          handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
+          const findingById = new Map<number, HandledReviewFinding>();
+          for (const comment of [...items.comments, ...items.jumiStickies]) {
+            const finding = reviewFindingFromComment(comment);
+            if (finding) findingById.set(finding.id, finding);
+          }
+          for (const review of [...items.jumiFindingReviews, ...items.jumiReviews]) {
+            const finding = reviewFindingFromReview(review);
+            if (finding) findingById.set(finding.id, finding);
+          }
+          if (briefReview) {
+            const finding = reviewFindingFromComment(briefReview);
+            if (finding) findingById.set(finding.id, finding);
+          }
+          handledCommentIds = handledCommentIds.filter((id) => {
+            const finding = findingById.get(id);
+            if (!finding) return true;
+            handledReviewFindings.push(finding);
+            return false;
+          });
+          await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
+        } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
+          await writeFile(
+            join(worktree, "JUMI_FEEDBACK.md"),
+            buildFeedbackMarkdown({
+              pr,
+              trigger: opts.job.trigger,
+              triggerBody: pendingTriggerBody,
+              comments: [],
+              inlines: [],
+              reviews: [],
+              lastReview: pendingLastReview,
+              currentInlines: unresolvedJumiInlines(pendingItems),
+              earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
+            }).markdown
+          );
+        } else {
+          await writeFile(
+            join(worktree, "JUMI_FEEDBACK.md"),
+            "# Review feedback\n\nNo review comments this round. Address JUMI_CI.md.\n"
+          );
+        }
+        if (ci.failed.length) {
+          await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
+        }
+        // Let the child edit the description already posted; only a fenced body is jumi-owned.
+        const postedRegion = jumiPrBodyRegion(pr.body);
+        if (postedRegion != null) {
+          await writeFile(join(worktree, PR_DESCRIPTION_FILE), seedPullRequestDescription(postedRegion));
+        } else {
+          await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
+        }
+        // No follow-up runner has spawned yet; don't carry the resolver's stamp.
+        runner = undefined;
+        await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
+
+        const runEngine = async (
+          label: string,
+          extra?: { continueSession?: boolean }
+        ): Promise<{ status: "skipped"; reason: string } | undefined> => {
+          throwIfAborted(opts.abortSignal);
+          log(label);
+          const runOpts: EngineRunOptions = {
             model: opts.model,
             variant: opts.variant,
+            workdir: worktree,
             home: opts.home,
-            sanitizeOpenCodeEnv: sanitizeEnv,
+            sanitizeEnv,
             extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
               owner,
               repo,
               logger: log,
             }),
+            timeoutMs,
             maxOutputBytes: opts.maxOutputBytes,
-            timeoutMs: conflictTimeoutMs,
-            openCodeRunner: activeEngine,
-            helmRunner: opts.helmRunner,
-            conflictRegenerate: opts.conflictRegenerate,
-            regenRunner: opts.regenRunner,
-            regenTimeoutMs: opts.regenTimeoutMs,
+            reviewLabel: `${owner}/${repo}#${issueNumber}`,
+            trace: {
+              kind: "follow-up",
+              owner,
+              repo,
+              sha: pr.head.sha,
+              jobId: opts.jobId ?? opts.job.delivery,
+            },
+            workerMcp: workerMcpRef,
+            ...(extra?.continueSession ? { continueSession: true } : {}),
             logger: log,
             abortSignal: opts.abortSignal,
-            jobId: opts.jobId ?? opts.job.delivery,
-            ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
-            handoffStore,
-            handoffKey,
-            ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
             onPid: loop.engineOnPid(opts.onPid),
-            onRunner: (r) => {
+          };
+          runner = undefined;
+          const runtime = opts.runtime ?? standingPodRuntime;
+          let result: EngineResult;
+          try {
+            result = await runtime.runRuntimeEngine(loop, activeEngine, runOpts, (r) => {
               runner = r;
+            });
+          } catch (err) {
+            provenanceCollector.noteError(err);
+            await noteProvenanceRunners(opts, provenanceCollector, log);
+            throw err;
+          }
+          provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+          await noteProvenanceRunners(opts, provenanceCollector, log);
+          // Gate on the message so a future non-quota `stuck` producer uses the
+          // fingerprint path instead of the human-clear quota flag.
+          if (result.status === "stuck" && isQuotaText(result.message)) {
+            throwIfQuotaWait({
+              result,
+              model: opts.model,
+              fallbackModel: opts.fallbackModel,
+              chain: jobChain,
+              previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+            });
+            const quotaReason = quotaStuckReasonForText(result.message);
+            if (
+              (opts as { runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns &&
+              hasHealthyRunnerForQuota(
+                jobChain,
+                (opts as { runnerCooldowns: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns,
+                (opts as { cooldownNowMs?: () => number }).cooldownNowMs?.() ?? Date.now(),
+                (opts as { authFingerprints?: Record<string, string | undefined> }).authFingerprints
+              )
+            ) {
+              throw new Error(quotaReason);
+            }
+            await sticky(quotaReason, pr.number);
+            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+            // The stuck outcome is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "skipped", reason: quotaReason };
+          }
+          throwIfEngineFailed(result);
+          // Only a successful engine result counts as having run: an
+          // unsuccessful provider/runner attempt must not consume CI work.
+          followUpEngineRan = true;
+          return undefined;
+        };
+
+        const quotaFollowUp = await runEngine(
+          `Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`
+        );
+        if (quotaFollowUp) return quotaFollowUp;
+
+        let gate: ShipGate;
+        try {
+          gate = await gateShipAfterOpenCode({
+            api: opts.api,
+            owner,
+            repo,
+            issueNumber,
+            botUsername: opts.botUsername,
+            snapshot: snapshotFromJob(taskJob),
+            closerPrNumber: pr.number,
+            continueOpenCode: async (issue) => {
+              await writeFile(
+                join(worktree, "JUMI_TASK.md"),
+                buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))
+              );
+              await stageIssueAttachments({
+                api: opts.api,
+                owner,
+                repo,
+                indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+                bodies: [issue.body ?? taskJob.body, pr.body],
+                worktree,
+                log,
+              }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
+              const quotaContinued = await runEngine(
+                `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
+                { continueSession: true }
+              );
+              if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
             },
           });
-        } catch (err: unknown) {
+        } catch (err) {
           if (isQuotaError(err)) {
             throwIfQuotaWait({
               err,
@@ -2002,270 +2288,116 @@ export async function implementFollowUp(
               ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
             const quotaReason = quotaStuckReasonForText(errorMessage(err));
-            await sticky(quotaReason, pr.number);
-            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
             return { status: "skipped", reason: quotaReason };
           }
-          prefixMergeThrew = true;
           throw err;
         }
-      }
-      runner = mergeResult.runner;
-      if (mergeResult.contributors && mergeResult.contributors.length > 0) {
-        provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
-      } else if (mergeResult.runner) {
-        provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
-      }
-      await noteProvenanceRunners(opts, provenanceCollector, log);
-      const persistConflictAttempt = async (result: typeof mergeResult) => {
-        if (shouldResetConflictRound(result)) {
-          await writeConflictLatch(latches, latchKey, {
-            prNumber: pr.number,
-            round: 0,
-            lastHeadSha: result.headSha,
-            lastBaseSha: result.baseSha,
-            updatedAt: now().toISOString(),
-          });
-          return;
+        if (gate.action === "skip") {
+          if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: gate.reason };
         }
-        if (!shouldIncrementRound(result)) return;
-        await writeConflictLatch(latches, latchKey, {
-          prNumber: pr.number,
-          round: previousConflict.round + 1,
-          lastHeadSha: result.headSha,
-          lastBaseSha: result.baseSha,
-          updatedAt: now().toISOString(),
-        });
-      };
-      if (mergeResult.status === "stuck") {
-        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-        await persistConflictAttempt(mergeResult);
-        await sticky("stuck: cannot resolve conflicts", pr.number);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
-      }
 
-      throwIfAborted(opts.abortSignal);
-      const followupTaskMarkdown = followupSetupBlock
-        ? `${buildTaskMarkdown(taskJob)}\n${followupSetupBlock}\n`
-        : buildTaskMarkdown(taskJob);
-      await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
-      // Parent-staged inputs for the follow-up child: the issue's attachments
-      // as well as any on the PR. Parent credentials only; the child has no
-      // forge read access.
-      await stageIssueAttachments({
-        api: opts.api,
-        owner,
-        repo,
-        indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
-        bodies: [taskJob.body, pr.body],
-        worktree,
-        log,
-      }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
-      if (hasFeedback) {
-        const items = await collectFollowUpItems(
-          opts.api,
-          owner,
-          repo,
-          pr.number,
-          opts.botUsername,
-          pr.head.sha,
-          effectiveFollowupIgnoreUpFront,
-          findingOpts,
-          effectiveTrustedUpFront
-        );
-        const briefReview = pickLatestJumiFinding(items, pr.head.sha) ?? pendingLastReview;
-        const feedback = buildFeedbackMarkdown({
-          pr,
-          trigger: opts.job.trigger,
-          triggerBody: triggerBodyFromItems(opts.job.trigger, items),
-          comments: items.comments,
-          inlines: briefInlines(items),
-          reviews: items.reviews,
-          lastReview: briefReview,
-          currentInlines: unresolvedJumiInlines(items),
-          earlierReviews: earlierJumiReviews(items, briefReview),
-        });
-        handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
-        handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
-        const findingById = new Map<number, HandledReviewFinding>();
-        for (const comment of [...items.comments, ...items.jumiStickies]) {
-          const finding = reviewFindingFromComment(comment);
-          if (finding) findingById.set(finding.id, finding);
-        }
-        for (const review of [...items.jumiFindingReviews, ...items.jumiReviews]) {
-          const finding = reviewFindingFromReview(review);
-          if (finding) findingById.set(finding.id, finding);
-        }
-        if (briefReview) {
-          const finding = reviewFindingFromComment(briefReview);
-          if (finding) findingById.set(finding.id, finding);
-        }
-        handledCommentIds = handledCommentIds.filter((id) => {
-          const finding = findingById.get(id);
-          if (!finding) return true;
-          handledReviewFindings.push(finding);
-          return false;
-        });
-        await writeFile(join(worktree, "JUMI_FEEDBACK.md"), feedback.markdown);
-      } else if (pendingLastReview || unresolvedJumiInlines(pendingItems).length > 0) {
-        await writeFile(
-          join(worktree, "JUMI_FEEDBACK.md"),
-          buildFeedbackMarkdown({
-            pr,
-            trigger: opts.job.trigger,
-            triggerBody: pendingTriggerBody,
-            comments: [],
-            inlines: [],
-            reviews: [],
-            lastReview: pendingLastReview,
-            currentInlines: unresolvedJumiInlines(pendingItems),
-            earlierReviews: earlierJumiReviews(pendingItems, pendingLastReview),
-          }).markdown
-        );
-      } else {
-        await writeFile(
-          join(worktree, "JUMI_FEEDBACK.md"),
-          "# Review feedback\n\nNo review comments this round. Address JUMI_CI.md.\n"
-        );
-      }
-      if (ci.failed.length) {
-        await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
-      }
-      // Let the child edit the description already posted; only a fenced body is jumi-owned.
-      const postedRegion = jumiPrBodyRegion(pr.body);
-      if (postedRegion != null) {
-        await writeFile(join(worktree, PR_DESCRIPTION_FILE), seedPullRequestDescription(postedRegion));
-      } else {
-        await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
-      }
-      // No follow-up runner has spawned yet; don't carry the resolver's stamp.
-      runner = undefined;
-      await sticky(hasFeedback ? "Jumi is addressing review comments." : "Jumi is addressing CI failure.", pr.number);
-
-      const runEngine = async (
-        label: string,
-        extra?: { continueSession?: boolean }
-      ): Promise<{ status: "skipped"; reason: string } | undefined> => {
         throwIfAborted(opts.abortSignal);
-        log(label);
-        const runOpts: EngineRunOptions = {
-          model: opts.model,
-          variant: opts.variant,
-          workdir: worktree,
-          home: opts.home,
-          sanitizeEnv,
-          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
-            owner,
-            repo,
-            logger: log,
-          }),
-          timeoutMs,
-          maxOutputBytes: opts.maxOutputBytes,
-          reviewLabel: `${owner}/${repo}#${issueNumber}`,
-          trace: {
-            kind: "follow-up",
-            owner,
-            repo,
-            sha: pr.head.sha,
-            jobId: opts.jobId ?? opts.job.delivery,
-          },
-          ...(extra?.continueSession ? { continueSession: true } : {}),
-          logger: log,
-          abortSignal: opts.abortSignal,
-          onPid: loop.engineOnPid(opts.onPid),
-        };
-        runner = undefined;
-        const runtime = opts.runtime ?? standingPodRuntime;
-        let result: EngineResult;
+        const prFileContents = await readPullRequestDescription(worktree);
+        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
+        const porcelain = await worktreePorcelain(loop);
+        if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
+          const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+          const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+          await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
+          const noChangesReason = workerStore.getNoChangesReason();
+          await sticky(
+            buildNoChangesSticky(
+              noChangesReason
+                ? redactGitSecrets(noChangesReason, workerPublishSecrets(loop.auth.token, jobChain))
+                : undefined
+            ),
+            pr.number
+          );
+          await recordAttempt(sha || pr.head.sha);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "no-changes" };
+        }
+
+        await commitIfDirty(loop, porcelain, `Address review on #${pr.number}: ${gate.snapshot.title}`);
+        if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = engineScratchTrackedReason(branch);
+          await sticky(reason, pr.number);
+          // The refusal is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
+        if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = attachmentsTrackedReason(branch);
+          await sticky(reason, pr.number);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
+        {
+          const added = await tipAddedSentinels(loop.runConfiguredGit, {
+            cwd: loop.worktree,
+            env: loop.env,
+            defaultBranch: opts.job.defaultBranch,
+          });
+          if (added.length > 0) {
+            const reason = sentinelTrackedReason(branch, added);
+            await sticky(reason, pr.number);
+            // The refusal is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "skipped", reason };
+          }
+        }
         try {
-          result = await runtime.runRuntimeEngine(loop, activeEngine, runOpts, (r) => {
-            runner = r;
+          await pushClaimedBranchWithAutomergeRestore(loop, branch, {
+            api: opts.api,
+            forgeKind: opts.forgeKind ?? "gitea",
+            owner,
+            repo,
+            prNumber: pr.number,
+            automergeRepos: opts.automergeRepos,
+            automergeEnabled: opts.automergeEnabled,
+            trustedSenderLogins: effectiveTrustedUpFront,
+            issueNumber: opts.job.issueNumber,
+            botUsername: opts.botUsername,
+            log,
           });
         } catch (err) {
-          provenanceCollector.noteError(err);
-          await noteProvenanceRunners(opts, provenanceCollector, log);
+          const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);
+          if (remoteSha) {
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha) };
+          }
+          await failProvenanceIntent(opts, errorMessage(err), undefined, log);
           throw err;
         }
-        provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
-        await noteProvenanceRunners(opts, provenanceCollector, log);
-        // Gate on the message so a future non-quota `stuck` producer uses the
-        // fingerprint path instead of the human-clear quota flag.
-        if (result.status === "stuck" && isQuotaText(result.message)) {
-          throwIfQuotaWait({
-            result,
-            model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            chain: jobChain,
-            previousError: opts.previousError,
-            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-          });
-          const quotaReason = quotaStuckReasonForText(result.message);
-          if (
-            (opts as { runnerCooldowns?: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns &&
-            hasHealthyRunnerForQuota(
-              jobChain,
-              (opts as { runnerCooldowns: import("./runner_cooldown.ts").RunnerCooldownStore }).runnerCooldowns,
-              (opts as { cooldownNowMs?: () => number }).cooldownNowMs?.() ?? Date.now(),
-              (opts as { authFingerprints?: Record<string, string | undefined> }).authFingerprints
-            )
-          ) {
-            throw new Error(quotaReason);
-          }
-          await sticky(quotaReason, pr.number);
-          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-          // The stuck outcome is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: quotaReason };
+        if (followUpCheckpoint) {
+          await deleteCheckpointRef(loop, followUpCheckpoint.ref, { log }).catch(() => undefined);
         }
-        throwIfEngineFailed(result);
-        // Only a successful engine result counts as having run: an
-        // unsuccessful provider/runner attempt must not consume CI work.
-        followUpEngineRan = true;
-        return undefined;
-      };
+        throwIfAborted(opts.abortSignal);
+        await persistConflictAttempt(mergeResult);
 
-      const quotaFollowUp = await runEngine(
-        `Running OpenCode follow-up for ${owner}/${repo}#${issueNumber} PR ${pr.number}`
-      );
-      if (quotaFollowUp) return quotaFollowUp;
+        await refreshPullRequestBody(prFileContents);
 
-      let gate: ShipGate;
-      try {
-        gate = await gateShipAfterOpenCode({
-          api: opts.api,
-          owner,
-          repo,
-          issueNumber,
-          botUsername: opts.botUsername,
-          snapshot: snapshotFromJob(taskJob),
-          closerPrNumber: pr.number,
-          continueOpenCode: async (issue) => {
-            await writeFile(
-              join(worktree, "JUMI_TASK.md"),
-              buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))
-            );
-            await stageIssueAttachments({
-              api: opts.api,
-              owner,
-              repo,
-              indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
-              bodies: [issue.body ?? taskJob.body, pr.body],
-              worktree,
-              log,
-            }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
-            const quotaContinued = await runEngine(
-              `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber} PR ${pr.number}`,
-              { continueSession: true }
-            );
-            if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
-          },
-        });
-      } catch (err) {
+        const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+        await confirmProvenancePublication(
+          opts,
+          { prNumber: pr.number, branch, headSha: sha || pr.head.sha, collector: provenanceCollector },
+          log
+        );
+        await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
+        await recordAttempt(sha || pr.head.sha);
+        // Push already landed; a failed destroy must not discard it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
+        return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
+      },
+      async (err) => {
+        runner = thrownRunner(err) ?? runner;
+        provenanceCollector.noteError(err);
+        await noteProvenanceRunners(opts, provenanceCollector, log);
         if (isQuotaError(err)) {
           throwIfQuotaWait({
             err,
@@ -2278,163 +2410,57 @@ export async function implementFollowUp(
             ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(errorMessage(err));
-          // The stuck outcome is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: quotaReason };
+          await sticky(quotaReason, pr.number).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+          await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+            pushLanded: false,
+            logger: log,
+          });
+          return;
         }
-        throw err;
-      }
-      if (gate.action === "skip") {
-        if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: gate.reason };
-      }
-
-      throwIfAborted(opts.abortSignal);
-      const prFileContents = await readPullRequestDescription(worktree);
-      await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
-      const porcelain = await worktreePorcelain(loop);
-      if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
-        const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-        const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
-        await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
-        await sticky("no follow-up changes", pr.number);
-        await recordAttempt(sha || pr.head.sha);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "no-changes" };
-      }
-
-      await commitIfDirty(loop, porcelain, `Address review on #${pr.number}: ${gate.snapshot.title}`);
-      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = engineScratchTrackedReason(branch);
-        await sticky(reason, pr.number);
-        // The refusal is decided; teardown noise must not replace it.
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = attachmentsTrackedReason(branch);
-        await sticky(reason, pr.number);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      {
-        const added = await tipAddedSentinels(loop.runConfiguredGit, {
-          cwd: loop.worktree,
-          env: loop.env,
-          defaultBranch: opts.job.defaultBranch,
-        });
-        if (added.length > 0) {
-          const reason = sentinelTrackedReason(branch, added);
-          await sticky(reason, pr.number);
-          // The refusal is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason };
+        await sticky(
+          `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
+          pr.number
+        ).catch(() => undefined);
+        const errorHash = fingerprintError(errorMessage(err));
+        if (errorHash) {
+          await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+            () => undefined
+          );
         }
-      }
-      try {
-        await pushClaimedBranchWithAutomergeRestore(loop, branch, {
-          api: opts.api,
-          forgeKind: opts.forgeKind ?? "gitea",
-          owner,
-          repo,
+        if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
+          await writeConflictLatch(latches, latchKey, {
+            prNumber: pr.number,
+            round: previousConflict.round + 1,
+            lastHeadSha: attemptedHeadSha,
+            lastBaseSha: attemptedBaseSha,
+            updatedAt: now().toISOString(),
+          }).catch(() => undefined);
+        }
+        await writeFollowUpLatch(latches, latchKey, {
           prNumber: pr.number,
-          automergeRepos: opts.automergeRepos,
-          automergeEnabled: opts.automergeEnabled,
-          trustedSenderLogins: effectiveTrustedUpFront,
-          issueNumber: opts.job.issueNumber,
-          botUsername: opts.botUsername,
-          log,
-        });
-      } catch (err) {
-        const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);
-        if (remoteSha) {
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "skipped", reason: prHeadChangedReason(opts.job.headSha || attemptedHeadSha, remoteSha) };
-        }
-        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
-        throw err;
-      }
-      if (followUpCheckpoint) {
-        await deleteCheckpointRef(loop, followUpCheckpoint.ref, { log }).catch(() => undefined);
-      }
-      throwIfAborted(opts.abortSignal);
-      await persistConflictAttempt(mergeResult);
-
-      await refreshPullRequestBody(prFileContents);
-
-      const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
-      await confirmProvenancePublication(
-        opts,
-        { prNumber: pr.number, branch, headSha: sha || pr.head.sha, collector: provenanceCollector },
-        log
-      );
-      await sticky(`Pushed follow-up to ${pr.html_url}`, pr.number);
-      await recordAttempt(sha || pr.head.sha);
-      // Push already landed; a failed destroy must not discard it.
-      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
-      return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
-    },
-    async (err) => {
-      runner = thrownRunner(err) ?? runner;
-      provenanceCollector.noteError(err);
-      await noteProvenanceRunners(opts, provenanceCollector, log);
-      if (isQuotaError(err)) {
-        throwIfQuotaWait({
-          err,
-          model: opts.model,
-          fallbackModel: opts.fallbackModel,
-          chain: jobChain,
-          previousError: opts.previousError,
-          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-        });
-        const quotaReason = quotaStuckReasonForText(errorMessage(err));
-        await sticky(quotaReason, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-          pushLanded: false,
-          logger: log,
-        });
-        return;
-      }
-      await sticky(
-        `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
-        pr.number
-      ).catch(() => undefined);
-      const errorHash = fingerprintError(errorMessage(err));
-      if (errorHash) {
-        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
-          () => undefined
-        );
-      }
-      if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
-        await writeConflictLatch(latches, latchKey, {
-          prNumber: pr.number,
-          round: previousConflict.round + 1,
-          lastHeadSha: attemptedHeadSha,
-          lastBaseSha: attemptedBaseSha,
+          round: hasFeedback ? state.round + 1 : state.round,
+          lastHeadSha: pr.head.sha,
+          handledCommentIds: state.handledCommentIds,
+          handledReviewIds: state.handledReviewIds,
+          handledReviewFindings: state.handledReviewFindings,
           updatedAt: now().toISOString(),
+          ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
         }).catch(() => undefined);
+        // Intentionally no persistCi(): an unsuccessful attempt must not
+        // consume the outstanding CI-fix work. Only recordAttempt() on a
+        // pushed fix or successful no-change disposition marks CI handled.
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
       }
-      await writeFollowUpLatch(latches, latchKey, {
-        prNumber: pr.number,
-        round: hasFeedback ? state.round + 1 : state.round,
-        lastHeadSha: pr.head.sha,
-        handledCommentIds: state.handledCommentIds,
-        handledReviewIds: state.handledReviewIds,
-        handledReviewFindings: state.handledReviewFindings,
-        updatedAt: now().toISOString(),
-        ...(state.suggestionHold ? { suggestionHold: state.suggestionHold } : {}),
-      }).catch(() => undefined);
-      // Intentionally no persistCi(): an unsuccessful attempt must not
-      // consume the outstanding CI-fix work. Only recordAttempt() on a
-      // pushed fix or successful no-change disposition marks CI handled.
-      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+    );
+  } finally {
+    workerStore.close();
+    try {
+      workerServer.close();
+    } catch {
+      // Best-effort: never replace the follow-up result.
     }
-  );
+  }
   if (
     followUpCheckpoint &&
     typeof followUpResult === "object" &&

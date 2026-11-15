@@ -240,7 +240,8 @@ export function buildCodexEnv(
   proxyUrl?: string,
   reviewHome?: string
 ): Record<string, string> {
-  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
+  const outsideTemp = opts.trace?.kind === "review" || !!opts.workerMcp;
+  const scratchDir = outsideTemp ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   const base = opts.sanitizeEnv
     ? {
         HOME: opts.home ?? process.env.HOME ?? opts.workdir,
@@ -340,9 +341,15 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const isReview = opts.trace?.kind === "review";
+  const hasWorkerMcp = !!opts.workerMcp && !isReview;
+  const ownsOutsideTemp = isReview || hasWorkerMcp;
   // Review harness files live outside the checkout (jumi#550) so sandboxed
-  // shells cannot reach them; workers keep the old layout.
-  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
+  // shells cannot reach them. Worker MCP configs live outside too.
+  const tempRoot = isReview
+    ? await makeReviewHarnessTempRoot()
+    : hasWorkerMcp
+      ? await (await import("./worker_mcp.ts")).makeWorkerHarnessTempRoot()
+      : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
   const scratchDir = await ensureChildScratchDir(opts.workdir);
 
@@ -354,10 +361,11 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   let baseStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
   let reviewHome: string | undefined;
+  let workerHome: string | undefined;
 
   if (opts.abortSignal?.aborted) {
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw cancelled();
   }
 
@@ -411,9 +419,10 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       // HTTP MCP lives in the Jumi-owned CODEX_HOME config, outside the
       // checkout, so a checkout `.codex` cannot shadow it.
       if (opts.reviewMcp && reviewHome) {
+        const { codexMcpTomlEntry } = await import("./review_mcp.ts");
         const { appendFile } = await import("node:fs/promises");
         const home: string = reviewHome;
-        const entry = `\n[mcp_servers.jumi-review]\nurl = ${JSON.stringify(opts.reviewMcp.url)}\nhttp_headers = { Authorization = ${JSON.stringify(`Bearer ${opts.reviewMcp.token}`)} }\n`;
+        const entry = codexMcpTomlEntry("jumi-review", opts.reviewMcp.url, opts.reviewMcp.token);
         await appendFile(join(home, "config.toml"), entry).catch(async () => {
           const { writeFile } = await import("node:fs/promises");
           await writeFile(join(home, "config.toml"), `${entry}\n`).catch(() => undefined);
@@ -441,6 +450,43 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         baseStaging = await stageBaseSkillsIntoWorkdir(opts.workdir, opts.baseInstructionsDir, log);
       }
     }
+    if (hasWorkerMcp) {
+      // Parent-owned worker MCP server: a worker-only CODEX_HOME under the
+      // outside harness temp (never the checkout). Unlike the review home it
+      // stays trusted so the head's `.codex` still loads; only the MCP entry
+      // is Jumi-owned. Auth links in from the real HOME like the review home.
+      workerHome = join(tempRoot, "codex-worker-home");
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      await mkdir(workerHome, { recursive: true });
+      await writeFile(join(workerHome, "config.toml"), "# Worker-only home: Jumi-owned MCP entry below.\n").catch(
+        () => undefined
+      );
+      try {
+        const home = opts.home ?? process.env.HOME ?? opts.workdir;
+        const authSrc = join(home, ".codex", "auth.json");
+        const authDst = join(workerHome, "auth.json");
+        const { readlink, symlink } = await import("node:fs/promises");
+        const target = await readlink(authSrc).catch(() => undefined);
+        if (target) await symlink(target, authDst).catch(() => undefined);
+        else {
+          const { readFile } = await import("node:fs/promises");
+          const raw = await readFile(authSrc, "utf8").catch(() => undefined);
+          if (raw) await writeFile(authDst, raw, { mode: 0o600 }).catch(() => undefined);
+        }
+      } catch {
+        // Best-effort: API-key and local modes have no HOME auth file.
+      }
+      if (opts.workerMcp && workerHome) {
+        const { codexWorkerMcpTomlEntry } = await import("./worker_mcp.ts");
+        const { appendFile } = await import("node:fs/promises");
+        const home: string = workerHome;
+        const entry = codexWorkerMcpTomlEntry(opts.workerMcp.url, opts.workerMcp.token);
+        await appendFile(join(home, "config.toml"), entry).catch(async () => {
+          const { writeFile } = await import("node:fs/promises");
+          await writeFile(join(home, "config.toml"), `${entry}\n`).catch(() => undefined);
+        });
+      }
+    }
     // Shared image skills: review gets the reviewer skill, workers get the
     // worker skill. Staged into the repo-local `.agents/skills` Codex scans,
     // cleaned up before return so the tree stays clean.
@@ -462,7 +508,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         throw new EngineFailedError("codex spawn refused: git token present but no credential proxy available", true);
       }
     }
-    const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url, reviewHome);
+    const codexEnv = buildCodexEnv(opts, tempRoot, gitProxy?.url, reviewHome ?? workerHome);
     // Part-2 (jumi#550): the agent stays unsandboxed; its shells are wrapped
     // by the Jumi-owned hooks above. The gate fails closed on missing Landlock.
     const codexSpawnArgv = resolveReviewSpawnSandbox(opts, args, codexEnv, log).argv;
@@ -642,7 +688,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

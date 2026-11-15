@@ -305,8 +305,11 @@ export function buildClaudeEnv(opts: EngineRunOptions, tempRoot: string, proxyUr
   const tracing = claudeTracingEnv(opts.trace);
   // Part-2 (jumi#550): review TMPDIR stays under the checkout
   // (`childScratchDir`), never under the outside harness temp that holds the
-  // MCP token. Workers keep the old layout (identical when tempRoot is inside).
-  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
+  // MCP token. Worker MCP runs use the same outside-temp layout, so they stay
+  // under the checkout too; other workers keep the old layout (identical when
+  // tempRoot is inside).
+  const outsideTemp = opts.trace?.kind === "review" || !!opts.workerMcp;
+  const scratchDir = outsideTemp ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   const apiKeyMode = isClaudeApiKeyRunner(opts);
   // Every parent variable that holds an API key across the chain. No child
   // — subscription or API-key — receives one under its own name.
@@ -465,9 +468,15 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   await ensureEngineScratchIgnored(opts.workdir);
   const prompt = await resolveOpenCodePrompt(opts);
   const isReview = opts.trace?.kind === "review";
+  const hasWorkerMcp = !!opts.workerMcp && !isReview;
+  const ownsOutsideTemp = isReview || hasWorkerMcp;
   // Review harness files live outside the checkout (jumi#550) so sandboxed
-  // shells cannot reach the MCP token; workers keep the old layout.
-  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
+  // shells cannot reach the MCP token. Worker MCP configs live outside too.
+  const tempRoot = isReview
+    ? await makeReviewHarnessTempRoot()
+    : hasWorkerMcp
+      ? await (await import("./worker_mcp.ts")).makeWorkerHarnessTempRoot()
+      : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
   const scratchDir = await ensureChildScratchDir(opts.workdir);
 
@@ -481,7 +490,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     const err = new Error("cancelled");
     err.name = "AbortError";
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw err;
   }
 
@@ -489,14 +498,20 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     // Image skills are per-kind: review gets the reviewer skill, workers get the
     // worker skill.
     const imageSkills = await stageImageSkillsForClaude(join(tmpDir, "image-skills"), opts.trace?.kind);
-    // Parent-owned review verdict server: config lives under the spawn temp
-    // root (never the worktree, never the prompt, never the child env) and
+    // Parent-owned MCP servers: config lives under the spawn temp root
+    // (never the worktree, never the prompt, never the child env) and
     // `--strict-mcp-config` keeps a repository `.mcp.json` from shadowing it.
-    let reviewMcpConfigPath: string | undefined;
+    let mcpConfigPath: string | undefined;
     if (opts.reviewMcp && opts.trace?.kind === "review") {
       const { claudeReviewMcpConfig } = await import("./review_mcp.ts");
-      reviewMcpConfigPath = join(tmpDir, "review-mcp.json");
-      await writeFile(reviewMcpConfigPath, claudeReviewMcpConfig(opts.reviewMcp.url, opts.reviewMcp.token), {
+      mcpConfigPath = join(tmpDir, "review-mcp.json");
+      await writeFile(mcpConfigPath, claudeReviewMcpConfig(opts.reviewMcp.url, opts.reviewMcp.token), {
+        mode: 0o600,
+      });
+    } else if (opts.workerMcp && opts.trace?.kind !== "review") {
+      const { claudeWorkerMcpConfig } = await import("./worker_mcp.ts");
+      mcpConfigPath = join(tmpDir, "worker-mcp.json");
+      await writeFile(mcpConfigPath, claudeWorkerMcpConfig(opts.workerMcp.url, opts.workerMcp.token), {
         mode: 0o600,
       });
     }
@@ -509,7 +524,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
       baseSkills = await stageBaseSkillsForClaude(join(tmpDir, "base-skills"), opts.baseInstructionsDir);
       basePrompt = await claudeReviewBasePrompt(opts.baseInstructionsDir);
     }
-    const args = claudeArgv(opts, imageSkills, baseSkills, basePrompt, reviewMcpConfigPath);
+    const args = claudeArgv(opts, imageSkills, baseSkills, basePrompt, mcpConfigPath);
     // Part-2 (jumi#550): Jumi-owned PreToolUse hook wraps every Bash through
     // the shell Landlock domain. The agent itself stays unsandboxed.
     let reviewShellPlugin: string | undefined;
@@ -772,7 +787,7 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
     await gitProxy?.close().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

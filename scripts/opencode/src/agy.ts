@@ -92,7 +92,8 @@ export function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClas
 }
 
 export function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: string): Record<string, string> {
-  const scratchDir = opts.trace?.kind === "review" ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
+  const outsideTemp = opts.trace?.kind === "review" || !!opts.workerMcp;
+  const scratchDir = outsideTemp ? childScratchDir(opts.workdir) : join(tempRoot, CHILD_SCRATCH_DIR);
   if (!opts.sanitizeEnv) {
     const env = { ...process.env, TMPDIR: scratchDir } as Record<string, string>;
     delete env.XDG_CONFIG_HOME;
@@ -337,6 +338,7 @@ export async function installAgyReviewHooks(
     const nextHooks = { ...hooksParsed, ...hookEntry };
     await writeFile(hooksPath, `${JSON.stringify(nextHooks, null, 2)}\n`, { mode: 0o600 });
     if (reviewMcp) {
+      const { agyMcpServerEntry } = await import("./review_mcp.ts");
       try {
         mcpBackup = await readFile(mcpPath, "utf8");
         mcpExisted = true;
@@ -352,7 +354,7 @@ export async function installAgyReviewHooks(
       }
       const rawServers = mcpParsed.mcpServers;
       const servers = { ...((rawServers as Record<string, unknown> | undefined) ?? {}) };
-      servers["jumi-review"] = { serverUrl: reviewMcp.url, headers: { Authorization: `Bearer ${reviewMcp.token}` } };
+      servers["jumi-review"] = agyMcpServerEntry(reviewMcp.url, reviewMcp.token);
       await writeFile(mcpPath, `${JSON.stringify({ ...mcpParsed, mcpServers: servers }, null, 2)}\n`, {
         mode: 0o600,
       });
@@ -386,6 +388,69 @@ export async function installAgyReviewHooks(
         }
       } catch {}
     }
+  };
+}
+
+/**
+ * Install the parent-owned worker MCP server for one Agy worker spawn. The
+ * entry lives in the global `mcp_config.json` (never the checkout) under the
+ * `jumi-worker` name. Existing entries are preserved; our key is removed on
+ * restore. Fail-closed: a spawn that cannot install its entry refuses.
+ */
+export async function installAgyWorkerMcp(
+  home: string | undefined,
+  workerMcp: { url: string; token: string } | undefined,
+  log: (message: string) => void = () => undefined
+): Promise<() => Promise<void>> {
+  if (!home) throw new EngineFailedError("agy spawn refused: no HOME for the worker MCP server", false);
+  if (!workerMcp) return async () => undefined;
+  const { readFile, writeFile, rm, mkdir } = await import("node:fs/promises");
+  const { agyWorkerMcpEntry } = await import("./worker_mcp.ts");
+  const mcpPath = join(home, AGY_MCP_CONFIG_DIR, AGY_MCP_CONFIG_FILE);
+  let mcpBackup: string | undefined;
+  let mcpExisted = false;
+  try {
+    await mkdir(join(home, AGY_MCP_CONFIG_DIR), { recursive: true, mode: 0o700 });
+    try {
+      mcpBackup = await readFile(mcpPath, "utf8");
+      mcpExisted = true;
+    } catch {
+      mcpExisted = false;
+    }
+    let mcpParsed: Record<string, unknown> = {};
+    if (mcpBackup !== undefined) {
+      const parsed: unknown = JSON.parse(mcpBackup);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("mcp_config.json is not an object");
+      mcpParsed = parsed as Record<string, unknown>;
+    }
+    const rawServers = mcpParsed.mcpServers;
+    const servers = { ...((rawServers as Record<string, unknown> | undefined) ?? {}) };
+    servers["jumi-worker"] = agyWorkerMcpEntry(workerMcp.url, workerMcp.token);
+    await writeFile(mcpPath, `${JSON.stringify({ ...mcpParsed, mcpServers: servers }, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    log(`agy worker MCP installed: ${mcpPath}`);
+  } catch (err) {
+    if (err instanceof EngineFailedError) throw err;
+    const reason = errorMessage(err);
+    throw new EngineFailedError(`agy worker spawn refused: cannot install worker MCP server: ${reason}`, false);
+  }
+  return async () => {
+    try {
+      if (mcpExisted && mcpBackup !== undefined) await writeFile(mcpPath, mcpBackup);
+      else {
+        try {
+          const raw = await readFile(mcpPath, "utf8");
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const servers = { ...((parsed.mcpServers as Record<string, unknown> | undefined) ?? {}) };
+          delete servers["jumi-worker"];
+          await writeFile(mcpPath, `${JSON.stringify({ ...parsed, mcpServers: servers }, null, 2)}\n`);
+        } catch {
+          await rm(mcpPath, { force: true }).catch(() => undefined);
+        }
+      }
+    } catch {}
   };
 }
 
@@ -471,10 +536,16 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   const log = opts.logger ?? ((message: string) => console.log(message));
   await ensureEngineScratchIgnored(opts.workdir);
   const isReview = opts.trace?.kind === "review";
+  const hasWorkerMcp = !!opts.workerMcp && !isReview;
+  const ownsOutsideTemp = isReview || hasWorkerMcp;
   const prompt = await resolveOpenCodePrompt(opts);
   // Review harness files live outside the checkout (jumi#550) so sandboxed
-  // shells cannot reach them; workers keep the old layout.
-  const tempRoot = isReview ? await makeReviewHarnessTempRoot() : join(opts.workdir, ".jumi-tmp");
+  // shells cannot reach them. Worker MCP configs live outside too.
+  const tempRoot = isReview
+    ? await makeReviewHarnessTempRoot()
+    : hasWorkerMcp
+      ? await (await import("./worker_mcp.ts")).makeWorkerHarnessTempRoot()
+      : join(opts.workdir, ".jumi-tmp");
   await mkdir(tempRoot, { recursive: true });
   const scratchDir = await ensureChildScratchDir(opts.workdir);
 
@@ -484,11 +555,12 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   let baseStaging: { cleanup: () => Promise<void> } | undefined;
   let gitProxy: ChildGitProxy | undefined;
   let agyHooksRestore: (() => Promise<void>) | undefined;
+  let agyWorkerMcpRestore: (() => Promise<void>) | undefined;
 
   if (opts.abortSignal?.aborted) {
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
     throw cancelled();
   }
 
@@ -561,6 +633,9 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
       const hookPath = await writeAgyReviewShellHook(tempRoot, hookInput);
       agyHooksRestore = await installAgyReviewHooks(home, hookPath, opts.reviewMcp, log);
       log(`agy review shell sandbox: run_command wrapped via ${hookPath}`);
+    }
+    if (hasWorkerMcp) {
+      agyWorkerMcpRestore = await installAgyWorkerMcp(home, opts.workerMcp, log);
     }
     const args = agyArgv(opts, promptArg, conversationId);
     // The gate fails closed on missing Landlock, so pull code never runs unsandboxed.
@@ -749,9 +824,10 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
     await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     await agyHooksRestore?.().catch(() => undefined);
+    await agyWorkerMcpRestore?.().catch(() => undefined);
     // Best-effort: a temp dir that will not go must not replace the engine result (#129).
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
-    if (isReview) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
