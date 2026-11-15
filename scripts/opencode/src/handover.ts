@@ -4,8 +4,8 @@ import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
+import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import { rememberSitBestEffort } from "./router_sits.ts";
@@ -247,7 +247,9 @@ export async function enqueueFollowUpFromReview(
       );
       repoSettings = repoPolicy.load;
       if (repoPolicy.status === "invalid") {
-        opts.logger?.(`repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${repoPolicy.error}`);
+        opts.logger?.(
+          `repo settings invalid for ${opts.row.owner}/${opts.row.repo}@${defaultBranch}: ${repoPolicy.error}`
+        );
       } else {
         policy = {
           followupOnSuggestions: repoPolicy.followupOnSuggestions,

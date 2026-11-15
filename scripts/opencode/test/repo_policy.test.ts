@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { hasLabel } from "../src/assignee.ts";
 import { effectiveGithubPolicyForRepo } from "../src/github_webhook.ts";
-import {
-  deriveRepoPolicy,
-  resolveRepoPolicy,
-  type RepoPolicyDeployment,
-} from "../src/repo_policy.ts";
+import { deriveRepoPolicy, type RepoPolicyDeployment, resolveRepoPolicy } from "../src/repo_policy.ts";
 import {
   effectiveBlockingQuestionAuthors,
   effectiveCiGateWait,
@@ -49,11 +45,9 @@ function validYaml(): string {
 describe("resolveRepoPolicy load-state table", () => {
   test("missing file returns deployment-only policy with status missing", async () => {
     const api = makeForgeApi({ getRepoFile: async () => ({ found: false }) });
-    const policy = await resolveRepoPolicy(
-      { api, owner: "o", repo: "r", ref: "main" },
-      deployment,
-      { onUnreadable: "fallback" }
-    );
+    const policy = await resolveRepoPolicy({ api, owner: "o", repo: "r", ref: "main" }, deployment, {
+      onUnreadable: "fallback",
+    });
     expect(policy.status).toBe("missing");
     expect(policy.load).toEqual({ state: "missing" });
     expect(policy.error).toBeUndefined();
@@ -74,11 +68,9 @@ describe("resolveRepoPolicy load-state table", () => {
     const api = makeForgeApi({
       getRepoFile: async () => ({ found: true, content: "trusted_senders: nope\n" }),
     });
-    const policy = await resolveRepoPolicy(
-      { api, owner: "o", repo: "r", ref: "main" },
-      deployment,
-      { onUnreadable: "fallback" }
-    );
+    const policy = await resolveRepoPolicy({ api, owner: "o", repo: "r", ref: "main" }, deployment, {
+      onUnreadable: "fallback",
+    });
     expect(policy.status).toBe("invalid");
     expect(policy.load.state).toBe("invalid");
     expect(typeof policy.error).toBe("string");
@@ -95,11 +87,9 @@ describe("resolveRepoPolicy load-state table", () => {
     const api = makeForgeApi({
       getRepoFile: async () => ({ found: true, content: validYaml() }),
     });
-    const policy = await resolveRepoPolicy(
-      { api, owner: "o", repo: "r", ref: "main" },
-      deployment,
-      { onUnreadable: "fallback" }
-    );
+    const policy = await resolveRepoPolicy({ api, owner: "o", repo: "r", ref: "main" }, deployment, {
+      onUnreadable: "fallback",
+    });
     expect(policy.status).toBe("ok");
     expect(policy.load.state).toBe("valid");
     // Same as calling the existing helpers directly on the load.
@@ -140,11 +130,9 @@ describe("resolveRepoPolicy load-state table", () => {
         throw new Error("boom");
       },
     });
-    const fallback = await resolveRepoPolicy(
-      { api: throwing, owner: "o", repo: "r", ref: "main" },
-      deployment,
-      { onUnreadable: "fallback" }
-    );
+    const fallback = await resolveRepoPolicy({ api: throwing, owner: "o", repo: "r", ref: "main" }, deployment, {
+      onUnreadable: "fallback",
+    });
     expect(fallback.status).toBe("unreadable");
     expect(fallback.load).toEqual({ state: "missing" });
     expect(fallback.error).toContain("boom");
@@ -238,9 +226,7 @@ describe("migrated sites keep the same output", () => {
     );
     expect(policy.status).toBe("invalid");
     expect(policy.maxFollowupRounds).toBe(3);
-    expect(policy.blockingQuestionAuthors).toEqual(
-      effectiveBlockingQuestionAuthors(["reviewer"], policy.load)
-    );
+    expect(policy.blockingQuestionAuthors).toEqual(effectiveBlockingQuestionAuthors(["reviewer"], policy.load));
   });
 
   test("worker: derived values come from the already-loaded settings", async () => {
@@ -253,9 +239,7 @@ describe("migrated sites keep the same output", () => {
     })();
     const policy = deriveRepoPolicy(load, deployment);
     expect(policy.trustedSenderLogins).toEqual(effectiveTrustedSenderLogins(deployment.trustedSenderLogins, load));
-    expect(policy.followupIgnoreLogins).toEqual(
-      effectiveFollowupIgnoreLogins(deployment.followupIgnoreLogins, load)
-    );
+    expect(policy.followupIgnoreLogins).toEqual(effectiveFollowupIgnoreLogins(deployment.followupIgnoreLogins, load));
     expect(policy.ignoreConflictsLabel).toEqual(effectiveIgnoreConflictsLabel(deployment.ignoreConflictsLabel, load));
     expect(policy.pickupLabel).toEqual(effectivePickupLabel(load));
   });
@@ -288,9 +272,9 @@ describe("migrated sites keep the same output", () => {
       },
     });
     const unreadableLogs: string[] = [];
-    expect(
-      await effectiveWorkerPolicyForRepo(throwingApi, "o", "r", "main", base, (m) => unreadableLogs.push(m))
-    ).toBe(base);
+    expect(await effectiveWorkerPolicyForRepo(throwingApi, "o", "r", "main", base, (m) => unreadableLogs.push(m))).toBe(
+      base
+    );
     expect(unreadableLogs.some((m) => m.includes("unreadable"))).toBe(true);
 
     expect(await effectiveWorkerPolicyForRepo(undefined, "o", "r", "main", base)).toBe(base);
@@ -318,9 +302,11 @@ describe("migrated sites keep the same output", () => {
     const missingApi = makeForgeApi({ getRepoFile: async () => ({ found: false }) });
     const missing = await effectiveGithubPolicyForRepo(missingApi, "o", "r", "main", base);
     expect(missing.pickupLabel).toBe("jumi");
-    expect(missing.isPickedUp?.({ labels: [{ name: "jumi" }] } as unknown as Parameters<
-      NonNullable<typeof missing.isPickedUp>
-    >[0])).toBe(true);
+    expect(
+      missing.isPickedUp?.({ labels: [{ name: "jumi" }] } as unknown as Parameters<
+        NonNullable<typeof missing.isPickedUp>
+      >[0])
+    ).toBe(true);
     expect(hasLabel({ labels: [{ name: "jumi" }] }, "jumi")).toBe(true);
 
     const invalidApi = makeForgeApi({

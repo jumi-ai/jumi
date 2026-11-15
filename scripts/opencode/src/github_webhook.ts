@@ -27,8 +27,8 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
-import { loadReviewDraftsEnabled } from "./repo_settings.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
+import { loadReviewDraftsEnabled } from "./repo_settings.ts";
 import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts";
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";

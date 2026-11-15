@@ -25,6 +25,7 @@ import {
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
+import { resolveRepoPolicy } from "./repo_policy.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
@@ -36,7 +37,6 @@ import {
 } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import { resolveRepoPolicy } from "./repo_policy.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
 
 export type WorkerWebhookPolicy = WebhookPolicy & {

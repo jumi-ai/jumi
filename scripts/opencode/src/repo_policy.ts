@@ -1,5 +1,5 @@
-import { errorMessage } from "./util/error.ts";
 import {
+  type CiGateWait,
   effectiveBlockingQuestionAuthors,
   effectiveCiGateWait,
   effectiveConflictRounds,
@@ -10,12 +10,12 @@ import {
   effectiveTrustedSenderLogins,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
-  repoMode,
-  type CiGateWait,
   type RepoMode,
   type RepoSettingsFileApi,
   type RepoSettingsLoad,
+  repoMode,
 } from "./repo_settings.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Who and where to read the default-branch `.jumi.yml` for. */
 export interface RepoPolicyContext {

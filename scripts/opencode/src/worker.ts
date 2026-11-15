@@ -24,6 +24,7 @@ import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./in
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import { deriveRepoPolicy } from "./repo_policy.ts";
 import {
   effectiveLeaseMs,
   effectiveTimeoutMsForKind,
@@ -36,7 +37,6 @@ import {
   type RepoSettingsLoad,
   resolveRepoMode,
 } from "./repo_settings.ts";
-import { deriveRepoPolicy } from "./repo_policy.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
