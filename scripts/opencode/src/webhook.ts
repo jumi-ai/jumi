@@ -1,4 +1,5 @@
 import type { GiteaPRPayload, ReviewJob } from "./types.ts";
+import { isObjectLike } from "./util/object.ts";
 
 export interface WebhookPolicy {
   giteaUrl: string;
@@ -67,10 +68,6 @@ export async function verifyGiteaSignature(
   return constantTimeEqual(normalizeSignature(signatureHeader), toHex(new Uint8Array(digest)));
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new Error(`Invalid webhook payload: missing ${name}`);
   return value;
@@ -85,11 +82,11 @@ function requireNumber(value: unknown, name: string): number {
 
 export function parsePullRequestPayload(rawBody: Uint8Array): GiteaPRPayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
   const pr = parsed.pull_request;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
-  if (!isObject(pr)) throw new Error("Invalid webhook payload: missing pull_request");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(pr)) throw new Error("Invalid webhook payload: missing pull_request");
   requireString(parsed.action, "action");
   requireString(repository.full_name, "repository.full_name");
   requireNumber(pr.number, "pull_request.number");

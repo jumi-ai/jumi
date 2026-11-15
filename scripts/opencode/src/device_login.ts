@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { isCodexChatGptPresent } from "./codex_auth.ts";
 import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE, type RunnerConfig } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 import { durableAuthPath, isXaiModel, readAuthFile, readXaiCredential } from "./xai_auth.ts";
 
 /**
@@ -390,9 +391,7 @@ export class DeviceLoginManager {
         result,
       });
     } catch (err) {
-      this.options.logger?.(
-        `device login record failed ordinal=${this.options.ordinal}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      this.options.logger?.(`device login record failed ordinal=${this.options.ordinal}: ${errorMessage(err)}`);
     }
   }
 
@@ -553,7 +552,7 @@ export class DeviceLoginManager {
                     this.state = { state: "error", error: "Login failed" };
                     this.recordTerminalOnce("error");
                     this.options.logger?.(
-                      `device login credential copy failed ordinal=${this.options.ordinal}: ${err instanceof Error ? err.message : String(err)}`
+                      `device login credential copy failed ordinal=${this.options.ordinal}: ${errorMessage(err)}`
                     );
                   }
                 )
@@ -584,9 +583,7 @@ export class DeviceLoginManager {
       } catch (err) {
         this.state = { state: "error", error: "Login failed to start" };
         this.recordTerminalOnce("error");
-        this.options.logger?.(
-          `device login spawn failed ordinal=${this.options.ordinal}: ${err instanceof Error ? err.message : String(err)}`
-        );
+        this.options.logger?.(`device login spawn failed ordinal=${this.options.ordinal}: ${errorMessage(err)}`);
         resolve({ refused: false, provider, state: "error" });
         return;
       }

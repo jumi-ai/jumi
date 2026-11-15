@@ -4,33 +4,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildPROpenedPrompt } from "../src/prompt.ts";
 import { publishReviewResult, type ReviewApi, reviewPullRequest } from "../src/review.ts";
-import { emptyCiMethods, makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function excludesApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
     getIssue: async () => {
       throw new Error("not used");
     },
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 const skipOptions = {
@@ -77,7 +62,7 @@ describe("review_exclude end to end", () => {
         ...skipOptions,
         workspace,
         gitRunner: frozenGit(),
-        api: makeApi({
+        api: excludesApi({
           getPRFiles: async () => [
             makeFile({ filename: "src/app.ts", patch: "@@ -1 +1 @@\n-old\n+new-app" }),
             makeFile({ filename: "src/generated/foo.ts", patch: "GENERATED_PATCH_BODY" }),
@@ -114,7 +99,7 @@ describe("review_exclude end to end", () => {
         ...skipOptions,
         workspace,
         gitRunner: frozenGit(),
-        api: makeApi({
+        api: excludesApi({
           getPRFiles: async () => [
             makeFile({ filename: ".jumi.yml", patch: "SETTINGS_PATCH_BODY" }),
             makeFile({ filename: "src/app.ts", patch: "APP_PATCH_BODY" }),
@@ -140,7 +125,7 @@ describe("review_exclude end to end", () => {
         ...skipOptions,
         workspace,
         gitRunner: frozenGit(),
-        api: makeApi({
+        api: excludesApi({
           getPRFiles: async () => [makeFile({ filename: "pnpm-lock.yaml", patch: "LOCK_PATCH" })],
           getRepoFile: async () => ({ found: true, content: 'review_exclude:\n  - "pnpm-lock.yaml"\n' }),
           createPullReview: async (_o, _r, _n, review) => {
@@ -174,7 +159,7 @@ describe("review_exclude end to end", () => {
         ...skipOptions,
         workspace,
         gitRunner: frozenGit(),
-        api: makeApi({
+        api: excludesApi({
           getPRFiles: async () => [
             makeFile({ filename: ".jumi.yml", patch: "added review_exclude" }),
             makeFile({ filename: "src/app.ts", patch: "APP_PATCH_BODY" }),
@@ -208,7 +193,7 @@ describe("review_exclude end to end", () => {
         ...skipOptions,
         workspace,
         gitRunner: frozenGit(),
-        api: makeApi({
+        api: excludesApi({
           getPRFiles: async () => [makeFile({ filename: "src/app.ts", patch: "APP_PATCH_BODY" })],
           createPullReview: async (_o, _r, _n, review) => {
             bodies.push(review);
@@ -232,7 +217,7 @@ describe("publishReviewResult with excludes", () => {
   test("appends the left-out note even when the child omitted it", async () => {
     const bodies: string[] = [];
     await publishReviewResult({
-      api: makeApi({
+      api: excludesApi({
         createPullReview: async (_o, _r, _n, review) => {
           bodies.push(review.body ?? "");
           return { id: 1 };
@@ -253,7 +238,7 @@ describe("publishReviewResult with excludes", () => {
   test("a child disclosure mentioning review_exclude does not suppress the parent note", async () => {
     const bodies: string[] = [];
     await publishReviewResult({
-      api: makeApi({
+      api: excludesApi({
         createPullReview: async (_o, _r, _n, review) => {
           bodies.push(review.body ?? "");
           return { id: 1 };
@@ -279,7 +264,7 @@ describe("publishReviewResult with excludes", () => {
   test("a finding that mentions review_exclude survives intact", async () => {
     const bodies: string[] = [];
     await publishReviewResult({
-      api: makeApi({
+      api: excludesApi({
         createPullReview: async (_o, _r, _n, review) => {
           bodies.push(review.body ?? "");
           return { id: 1 };

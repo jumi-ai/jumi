@@ -12,6 +12,7 @@ import type { EnqueueResult } from "./queue.ts";
 import type { ReviewApi } from "./review.ts";
 import type { EnqueueReviewOpts } from "./review_jobs.ts";
 import type { ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 export interface ReviewGateQueue {
   enqueue(job: ReviewJob, opts?: EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
@@ -106,12 +107,12 @@ export async function enqueueReviewWithCiGate(
   } catch (err) {
     if (waitMode === "none") {
       opts.logger?.(
-        `${gatePrefix(waitMode)}: dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+        `${gatePrefix(waitMode)}: dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${errorMessage(err)}`
       );
       return queue.enqueue(job);
     }
     opts.logger?.(
-      `${gatePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, waiting on budget: ${err instanceof Error ? err.message : String(err)}`
+      `${gatePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, waiting on budget: ${errorMessage(err)}`
     );
     return queue.enqueue(job, {
       waitUntilMs: nowMs + CI_LOOKUP_BUDGET_MS,
@@ -178,12 +179,12 @@ export async function enqueueCiWakeWithGate(
   } catch (err) {
     if (waitMode === "none") {
       opts.logger?.(
-        `${wakePrefix(waitMode)} dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${err instanceof Error ? err.message : String(err)}`
+        `${wakePrefix(waitMode)} dispatching after lookup failure for ${job.owner}/${job.repo}#${job.prNumber}: ${errorMessage(err)}`
       );
       return queue.enqueue(job);
     }
     opts.logger?.(
-      `${wakePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, keeping budget wait: ${err instanceof Error ? err.message : String(err)}`
+      `${wakePrefix(waitMode)} lookup failed for ${job.owner}/${job.repo}#${job.prNumber}, keeping budget wait: ${errorMessage(err)}`
     );
     const nowMs = opts.nowMs ?? Date.now();
     await queue.enqueue(job, {

@@ -7,6 +7,7 @@ import { runOneShotJob } from "../src/job.ts";
 import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { handleIssueCancel } from "../src/worker.ts";
+import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import {
   emptyCiMethods,
   makeComment,
@@ -23,28 +24,11 @@ import {
 const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
 const describePg = databaseUrl ? describe : describe.skip;
 
-function makeReviewApi() {
-  return {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function jobPgReviewApi() {
+  return makeSharedReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async () => makeComment(),
-    updateIssueComment: async () => makeComment(),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_o: string, _r: string, _s: string, status: { state: string }) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  } as never;
+  });
 }
 
 function frozenGitRunner() {
@@ -91,7 +75,7 @@ describePg("one-shot jobs against real postgres", () => {
           opencodeWellKnownUrl: "disabled",
         }),
         workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
-        api: makeReviewApi() as never,
+        api: jobPgReviewApi() as never,
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
           workspacePreparer: async () => undefined,

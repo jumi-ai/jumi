@@ -5,6 +5,7 @@ import { parsePushPayload, shouldEnqueuePushConflicts } from "../src/push_webhoo
 import type { IssueJob } from "../src/types.ts";
 import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 import {
   encodeJson,
   makeIssue,
@@ -43,12 +44,12 @@ function jumiPr() {
   });
 }
 
-function makeApi(overrides: Partial<Pick<IssueApi, "listOpenPulls" | "getIssue">> = {}) {
-  return {
+function pushWebhookApi(overrides: Partial<IssueApi> = {}) {
+  return makeIssueApi({
     listOpenPulls: async () => [jumiPr()],
     getIssue: async () => makeIssue(),
     ...overrides,
-  };
+  });
 }
 
 function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
@@ -85,7 +86,7 @@ async function signedRequest(
 
 describe("shouldEnqueuePushConflicts", () => {
   test("enqueues when ref is the default branch and an in-scope jumi closer is assigned", async () => {
-    const decision = await shouldEnqueuePushConflicts(makePushPayload(), policy, makeApi());
+    const decision = await shouldEnqueuePushConflicts(makePushPayload(), policy, pushWebhookApi());
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
     expect(decision.jobs).toHaveLength(1);
@@ -100,7 +101,7 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
       policy,
-      makeApi({
+      pushWebhookApi({
         listOpenPulls: async () => [
           makePR({
             number: 127,
@@ -129,13 +130,17 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload({ ref: "refs/heads/jumi/issue-12-x" }),
       policy,
-      makeApi()
+      pushWebhookApi()
     );
     expect(decision).toEqual({ type: "skip", reason: "not the default branch" });
   });
 
   test("skips tags", async () => {
-    const decision = await shouldEnqueuePushConflicts(makePushPayload({ ref: "refs/tags/v1" }), policy, makeApi());
+    const decision = await shouldEnqueuePushConflicts(
+      makePushPayload({ ref: "refs/tags/v1" }),
+      policy,
+      pushWebhookApi()
+    );
     expect(decision).toEqual({ type: "skip", reason: "not a branch ref" });
   });
 
@@ -143,13 +148,13 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload({ after: "0000000000000000000000000000000000000000" }),
       policy,
-      makeApi()
+      pushWebhookApi()
     );
     expect(decision).toEqual({ type: "skip", reason: "deleted ref" });
   });
 
   test("skips missing after", async () => {
-    const decision = await shouldEnqueuePushConflicts(makePushPayload({ after: undefined }), policy, makeApi());
+    const decision = await shouldEnqueuePushConflicts(makePushPayload({ after: undefined }), policy, pushWebhookApi());
     expect(decision).toEqual({ type: "skip", reason: "deleted ref" });
   });
 
@@ -184,7 +189,7 @@ describe("shouldEnqueuePushConflicts", () => {
         botUsername: "kirmanak-jumi[bot]",
         isPickedUp: hasJumiLabel,
       },
-      makeApi({ listOpenPulls: async () => [foreign] })
+      pushWebhookApi({ listOpenPulls: async () => [foreign] })
     );
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
@@ -213,7 +218,7 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
       policy,
-      makeApi({ listOpenPulls: async () => [foreign] })
+      pushWebhookApi({ listOpenPulls: async () => [foreign] })
     );
     expect(decision.type).toBe("enqueue");
     if (decision.type !== "enqueue") return;
@@ -226,7 +231,7 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
       policy,
-      makeApi({
+      pushWebhookApi({
         listOpenPulls: async () => [makePR({ title: "Fix", body: "Fixes #12", user: makeUser({ login: "alice" }) })],
       })
     );
@@ -237,7 +242,7 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
       policy,
-      makeApi({
+      pushWebhookApi({
         getIssue: async () =>
           makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
       })
@@ -249,7 +254,7 @@ describe("shouldEnqueuePushConflicts", () => {
     const decision = await shouldEnqueuePushConflicts(
       makePushPayload(),
       policy,
-      makeApi({
+      pushWebhookApi({
         getIssue: async () => {
           throw new Error(
             "Gitea API GET https://gitea.kirmanak.stream/api/v1/repos/kirmanak/demo/issues/12 → 404: not found"
@@ -265,7 +270,7 @@ describe("shouldEnqueuePushConflicts", () => {
       shouldEnqueuePushConflicts(
         makePushPayload(),
         policy,
-        makeApi({
+        pushWebhookApi({
           getIssue: async () => {
             throw new Error(
               "Gitea API GET https://gitea.kirmanak.stream/api/v1/repos/kirmanak/demo/issues/12 → 500: boom"
@@ -280,7 +285,7 @@ describe("shouldEnqueuePushConflicts", () => {
 describe("push webhook HTTP", () => {
   test("enqueues X-Gitea-Event: push when a managed jumi closer exists", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
@@ -291,7 +296,7 @@ describe("push webhook HTTP", () => {
 
   test("skips push to refs/heads/jumi/issue-12-x", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(
       await signedRequest(makePushPayload({ ref: "refs/heads/jumi/issue-12-x" }), { event: "push" })
     );
@@ -302,7 +307,7 @@ describe("push webhook HTTP", () => {
 
   test("skips refs/tags/v1", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload({ ref: "refs/tags/v1" }), { event: "push" }));
     expect(response.status).toBe(202);
     expect((await responseJson(response)).skipped).toBeTruthy();
@@ -311,7 +316,7 @@ describe("push webhook HTTP", () => {
 
   test("skips after all-zeros / missing", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const zeros = await handler(
       await signedRequest(makePushPayload({ after: "0000000000000000000000000000000000000000" }), { event: "push" })
     );
@@ -323,7 +328,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
-      api: makeApi({ listOpenPulls: async () => [] }),
+      api: pushWebhookApi({ listOpenPulls: async () => [] }),
     });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
@@ -334,7 +339,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
-      api: makeApi({
+      api: pushWebhookApi({
         getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
       }),
     });
@@ -345,7 +350,7 @@ describe("push webhook HTTP", () => {
 
   test("skips X-Gitea-Event: pull_request", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event pull_request" });
@@ -354,7 +359,7 @@ describe("push webhook HTTP", () => {
 
   test("accepts Event-Type push if Event header is missing", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "", eventType: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
@@ -363,7 +368,7 @@ describe("push webhook HTTP", () => {
 
   test("malformed body → 202 skip, not 400", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(
       await signedRequest({}, { event: "push", raw: new TextEncoder().encode("{not-json") })
     );
@@ -376,7 +381,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
-      api: makeApi({
+      api: pushWebhookApi({
         getIssue: async () => {
           throw new Error(
             "Gitea API GET https://gitea.kirmanak.stream/api/v1/repos/kirmanak/demo/issues/12 → 500: boom"
@@ -396,7 +401,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), {
       queue,
-      api: makeApi({
+      api: pushWebhookApi({
         listOpenPulls: async () => {
           throw new Error("gitea unavailable");
         },
@@ -416,7 +421,7 @@ describe("push webhook HTTP", () => {
         throw new Error("queue unavailable");
       },
     };
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
     expect(await responseJson(response)).toEqual({ error: "internal error" });
@@ -424,7 +429,7 @@ describe("push webhook HTTP", () => {
 
   test("HTTP handler does not call git / OpenCode", async () => {
     const queue = makeQueue();
-    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: makeApi() });
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(queue.jobs[0]?.mode).toBe("conflict");

@@ -12,6 +12,7 @@ import {
   quotaWaitJitterMs,
 } from "./quota.ts";
 import { allRunnersCooled, earliestCooldownEnd, type RunnerCooldownStore } from "./runner_cooldown.ts";
+import { errorMessage } from "./util/error.ts";
 
 export { isQuotaWaitError, QuotaWaitError } from "./quota.ts";
 
@@ -25,7 +26,7 @@ export function isResettingQuotaError(err: unknown): boolean {
     return quotaClassOf({ quota: err.quota, message: err.message, engineFailure: true }) === "resetting";
   }
   if (!isQuotaError(err)) return false;
-  const text = err instanceof Error ? err.message : String(err);
+  const text = errorMessage(err);
   return isResettingQuotaText(text);
 }
 
@@ -104,7 +105,7 @@ export function throwIfQuotaWait(input: {
       kind = quotaClassOf({ quota: input.err.quota, message: input.err.message, engineFailure: true });
       retryAfterMs = input.err.retryAfterMs;
     } else {
-      const text = input.err instanceof Error ? input.err.message : String(input.err);
+      const text = errorMessage(input.err);
       kind = quotaClassOf({ message: text });
     }
   } else {

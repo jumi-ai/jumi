@@ -39,6 +39,8 @@ import { enqueueCiWakeWithGate, enqueueReviewWithCiGate } from "./review_gate.ts
 import { isQueueUnavailable } from "./review_jobs.ts";
 import { normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
 import type { GiteaIssuePayload, IssueJob, ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { isObjectLike } from "./util/object.ts";
 import {
   assertRepositoryPolicy,
   parsePullRequestPayload,
@@ -133,7 +135,7 @@ async function rememberGithubSkip(
       logger(`queue unavailable: ${(err as Error).message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`sit remember failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`sit remember failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   return undefined;
@@ -154,7 +156,7 @@ async function clearGithubSit(
       logger(`queue unavailable: ${(err as Error).message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`sit clear failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`sit clear failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   return undefined;
@@ -259,9 +261,7 @@ export async function effectiveGithubPolicyForRepo(
   try {
     settings = await loadRepoSettings(api, owner, repo, branch);
   } catch (err) {
-    log?.(
-      `repo settings unreadable for ${owner}/${repo}@${branch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${errorMessage(err)}`);
     return basePolicy;
   }
   if (settings.state === "invalid") {
@@ -383,16 +383,12 @@ function encodeJson(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function workflowJobBody(rawBody: Uint8Array): Uint8Array {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) return rawBody;
+  if (!isObjectLike(parsed)) return rawBody;
   if (parsed.workflow_job != null) return rawBody;
   const run = parsed.workflow_run;
-  if (!isObject(run)) return rawBody;
+  if (!isObjectLike(run)) return rawBody;
   return encodeJson({
     ...parsed,
     workflow_job: {
@@ -404,9 +400,9 @@ function workflowJobBody(rawBody: Uint8Array): Uint8Array {
 
 function issueCommentBody(rawBody: Uint8Array): Uint8Array {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed) || parsed.issue != null) return rawBody;
+  if (!isObjectLike(parsed) || parsed.issue != null) return rawBody;
   const pr = parsed.pull_request;
-  if (!isObject(pr)) return rawBody;
+  if (!isObjectLike(pr)) return rawBody;
   return encodeJson({
     ...parsed,
     issue: {
@@ -428,13 +424,18 @@ async function issueCommentPullRequestBody(
   logger: (message: string) => void
 ): Promise<Uint8Array | null> {
   const existing = parsed.pull_request;
-  if (isObject(existing) && isObject(existing.head) && typeof existing.head.ref === "string" && existing.head.ref) {
+  if (
+    isObjectLike(existing) &&
+    isObjectLike(existing.head) &&
+    typeof existing.head.ref === "string" &&
+    existing.head.ref
+  ) {
     return rawBody;
   }
   const issue = parsed.issue;
-  if (!isObject(issue) || issue.pull_request == null) return rawBody;
+  if (!isObjectLike(issue) || issue.pull_request == null) return rawBody;
   const repository = parsed.repository;
-  if (!isObject(repository) || typeof repository.full_name !== "string") return rawBody;
+  if (!isObjectLike(repository) || typeof repository.full_name !== "string") return rawBody;
   const [owner, repo] = repository.full_name.split("/");
   if (!owner || !repo || typeof issue.number !== "number") return rawBody;
   const getPR = deps.getPR ?? deps.worker?.api?.getPR;
@@ -443,7 +444,7 @@ async function issueCommentPullRequestBody(
     const pr = await getPR(owner, repo, issue.number);
     return encodeJson({ ...parsed, pull_request: pr });
   } catch (err) {
-    logger(`pr lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`pr lookup failed: ${errorMessage(err)}`);
     return null;
   }
 }
@@ -530,7 +531,7 @@ export async function handleGithubWebhookEvent(
         logger(`queue unavailable: ${err.message}`);
         return json(503, { error: "queue unavailable" });
       }
-      logger(`status webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`status webhook failed: ${errorMessage(err)}`);
       return json(500, { error: "internal error" });
     }
   }
@@ -586,7 +587,7 @@ export async function handleGithubWebhookEvent(
               return json(202, { key: `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`, queued: false });
             }
           } catch (err) {
-            logger(`pr head lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+            logger(`pr head lookup failed: ${errorMessage(err)}`);
           }
         }
         const result = await enqueueReviewWithCiGate(deps.review, job, {
@@ -649,7 +650,7 @@ export async function handleGithubWebhookEvent(
               }
             }
           } catch (err) {
-            logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+            logger(`takeover failed: ${errorMessage(err)}`);
           }
         }
         return json(202, result);
@@ -658,7 +659,7 @@ export async function handleGithubWebhookEvent(
           logger(`queue unavailable: ${err.message}`);
           return json(503, { error: "queue unavailable" });
         }
-        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`invalid webhook payload: ${errorMessage(err)}`);
         return json(400, { error: "invalid webhook payload" });
       }
     }
@@ -698,7 +699,7 @@ export async function handleGithubWebhookEvent(
         logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
         return json(202, result);
       } catch (err) {
-        logger(`takeover failed: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`takeover failed: ${errorMessage(err)}`);
         return skipped("takeover failed", logger);
       }
     }
@@ -718,7 +719,7 @@ export async function handleGithubWebhookEvent(
         });
         if (automergeHandled.handled) return json(202, { queued: false, reason: automergeHandled.reason });
       } catch (err) {
-        logger(`automerge label webhook failed: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`automerge label webhook failed: ${errorMessage(err)}`);
       }
       try {
         const payload = parsePullRequestPayload(rawBody);
@@ -792,7 +793,7 @@ export async function handleGithubWebhookEvent(
           logger(`queue unavailable: ${err.message}`);
           return json(503, { error: "queue unavailable" });
         }
-        logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`invalid webhook payload: ${errorMessage(err)}`);
         return json(400, { error: "invalid webhook payload" });
       }
     }
@@ -899,7 +900,7 @@ export async function handleGithubWebhookEvent(
             const pr = await getPR(job.owner, job.repo, prNumber);
             if (pr.head?.sha) job.headSha = pr.head.sha;
           } catch (err) {
-            logger(`mergeable lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+            logger(`mergeable lookup failed: ${errorMessage(err)}`);
           }
         }
         jobs.push(job);
@@ -919,7 +920,11 @@ export async function handleGithubWebhookEvent(
       // invalid file falls back to the deployment policy.
       let effectiveFollowupPolicy = policy;
       try {
-        if (isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string") {
+        if (
+          isObjectLike(parsed) &&
+          isObjectLike(parsed.repository) &&
+          typeof parsed.repository.full_name === "string"
+        ) {
           const [fuOwner, fuRepo] = (parsed.repository.full_name as string).split("/");
           const fuBranch =
             typeof parsed.repository.default_branch === "string" ? parsed.repository.default_branch : undefined;
@@ -937,7 +942,7 @@ export async function handleGithubWebhookEvent(
       } catch {
         // Fall back to the deployment policy.
       }
-      const sender = isObject(parsed) && isObject(parsed.sender) ? parsed.sender : undefined;
+      const sender = isObjectLike(parsed) && isObjectLike(parsed.sender) ? parsed.sender : undefined;
       const githubSender = sender as { login?: string; type?: string } | undefined;
       if (isFactoryBotSender(githubSender, effectiveFollowupPolicy.botUsername)) {
         return skipped("sender is bot", logger);
@@ -948,7 +953,7 @@ export async function handleGithubWebhookEvent(
       const eventName = event ?? "issue_comment";
       let commentBody = rawBody;
       if (event === "pull_request_review_comment") commentBody = issueCommentBody(rawBody);
-      else if (event === "issue_comment" && isObject(parsed)) {
+      else if (event === "issue_comment" && isObjectLike(parsed)) {
         const resolved = await issueCommentPullRequestBody(rawBody, parsed, deps, logger);
         if (resolved == null) return json(503, { error: "pr lookup failed" });
         commentBody = resolved;
@@ -971,13 +976,13 @@ export async function handleGithubWebhookEvent(
             );
       if (decision.type === "skip") {
         const fullName =
-          isObject(parsed) && isObject(parsed.repository) && typeof parsed.repository.full_name === "string"
+          isObjectLike(parsed) && isObjectLike(parsed.repository) && typeof parsed.repository.full_name === "string"
             ? (parsed.repository.full_name as string)
             : undefined;
         const prNumber =
-          isObject(parsed) && isObject(parsed.pull_request) && typeof parsed.pull_request.number === "number"
+          isObjectLike(parsed) && isObjectLike(parsed.pull_request) && typeof parsed.pull_request.number === "number"
             ? (parsed.pull_request.number as number)
-            : isObject(parsed) && isObject(parsed.issue) && typeof parsed.issue.number === "number"
+            : isObjectLike(parsed) && isObjectLike(parsed.issue) && typeof parsed.issue.number === "number"
               ? (parsed.issue.number as number)
               : undefined;
         if (fullName) {
@@ -1097,7 +1102,7 @@ export async function handleGithubWebhookEvent(
           logger(`queue unavailable: ${err.message}`);
           return json(503, { error: "queue unavailable" });
         }
-        logger(`failed to wake waiting issues: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`failed to wake waiting issues: ${errorMessage(err)}`);
         return json(503, { error: "failed to wake waiting issues" });
       }
     }
@@ -1150,7 +1155,7 @@ export async function handleGithubWebhookEvent(
       logger(`queue unavailable: ${err.message}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`invalid webhook payload: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`invalid webhook payload: ${errorMessage(err)}`);
     return json(400, { error: "invalid webhook payload" });
   }
 }

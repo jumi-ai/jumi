@@ -18,6 +18,7 @@ import { patchActiveRunUsageTiming } from "./run_usage.ts";
 import { orderedRunners } from "./runners.ts";
 import { processEngineTick, type RunReviewJobExtras } from "./server.ts";
 import { installProcessShutdown } from "./shutdown.ts";
+import { errorMessage } from "./util/error.ts";
 import { processWorkerTick, type RunWorkerJobExtras } from "./worker.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { loadWorkerConfig } from "./worker_config.ts";
@@ -112,7 +113,7 @@ async function verifyRowSettled(
   try {
     current = await store.get(jobId);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log(`ledger unreachable verifying row ${jobId}: ${message}`);
     return { exitCode: 1, reason: "ledger unreachable" };
   }
@@ -193,7 +194,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
   try {
     row = await options.store.get(options.jobId);
   } catch (err) {
-    log(`ledger unreachable getting row ${options.jobId}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`ledger unreachable getting row ${options.jobId}: ${errorMessage(err)}`);
     return { exitCode: 1, reason: "ledger unreachable" };
   }
   if (!row) {
@@ -275,7 +276,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
       }
       return verifyRowSettled(options.store, options.jobId, leasedBy, log);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       log(`one-shot review failed: ${message}`);
       return { exitCode: 1, reason: message };
     }
@@ -324,7 +325,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
     }
     return verifyRowSettled(options.store, options.jobId, leasedBy, log);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log(`one-shot worker failed: ${message}`);
     return { exitCode: 1, reason: message };
   }
@@ -361,7 +362,7 @@ async function main(): Promise<void> {
     databaseUrl = process.env.DATABASE_URL ?? "";
     if (!databaseUrl) throw new Error("Missing required environment variable: DATABASE_URL");
   } catch (err) {
-    console.error(`[job] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[job] ${errorMessage(err)}`);
     process.exit(1);
   }
   // No HTTP, no probes, no reclaim, no migration (job-mode opener below never
@@ -380,7 +381,7 @@ async function main(): Promise<void> {
   try {
     ({ engineConfig, workerConfig } = loadJobConfigs(process.env));
   } catch (err) {
-    console.error(`[job] bad config: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[job] bad config: ${errorMessage(err)}`);
     process.exit(1);
   }
   scrubSecretEnv();
@@ -392,7 +393,7 @@ async function main(): Promise<void> {
   try {
     store = await openPgReviewJobStoreForJob(databaseUrl!);
   } catch (err) {
-    console.error(`[job] ledger unreachable: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[job] ledger unreachable: ${errorMessage(err)}`);
     process.exit(1);
   }
 
@@ -405,7 +406,7 @@ async function main(): Promise<void> {
       logger,
     });
   } catch (err) {
-    console.error(`[job] well-known auth failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[job] well-known auth failed: ${errorMessage(err)}`);
     process.exit(1);
   }
 
@@ -431,7 +432,7 @@ async function main(): Promise<void> {
       abortSignal: abort.signal,
     });
   } catch (err) {
-    console.error(`[job] failed: ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[job] failed: ${errorMessage(err)}`);
     process.exit(1);
   }
 

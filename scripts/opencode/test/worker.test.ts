@@ -31,8 +31,8 @@ import { isQuotaStuck, readStuckLatch, readStuckState, writeStuckState } from ".
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { handleIssueCancel, processWorkerTick, reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 import {
-  emptyCiMethods,
   makeComment,
   makeIssue,
   makeIssueJob,
@@ -52,17 +52,9 @@ function waitUntilAborted(signal?: AbortSignal): Promise<void> {
   });
 }
 
-function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[] } {
+function workerApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: string[] } {
   const comments: string[] = [];
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
-    createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
+  const fake = makeIssueApi({
     findStickyIssueComment: async () => ({ id: 9 }),
     createIssueComment: async (_owner, _repo, _index, body) => {
       comments.push(body);
@@ -72,19 +64,16 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments: stri
       comments.push(body);
       return makeComment({ body });
     },
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides, comments };
+    ...overrides,
+  });
+  return Object.assign(fake, { comments });
 }
 
 describe("handleIssueCancel", () => {
   test("does not overwrite a leftover sticky after finished work", async () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-cancel-"));
     try {
-      const api = makeApi();
+      const api = workerApi();
       const result = await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(result).toEqual({ key: "kirmanak/demo#12", cancelled: true });
       expect(api.comments).toEqual([]);
@@ -107,7 +96,7 @@ describe("handleIssueCancel", () => {
         headShaAtStart: "abc",
         terminal: true,
       });
-      const api = makeApi();
+      const api = workerApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(await readClaim(path)).toBeUndefined();
       expect(api.comments).toEqual([]);
@@ -129,7 +118,7 @@ describe("handleIssueCancel", () => {
         headShaAtStart: "",
         terminal: false,
       });
-      const api = makeApi();
+      const api = workerApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12);
       expect(api.comments.at(-1)).toContain("stopped");
     } finally {
@@ -154,7 +143,7 @@ describe("handleIssueCancel", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       await store.lease("worker-other", 60_000, undefined, WORKER_JOB_KINDS);
-      const api = makeApi();
+      const api = workerApi();
       await handleIssueCancel(
         makeWorkerConfig({ home }),
         api,
@@ -194,7 +183,7 @@ describe("handleIssueCancel", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
       expect(await store.skipLatches.get({ owner: "kirmanak", repo: "demo", issueNumber: 12 })).toEqual({
         followup: {},
@@ -204,7 +193,7 @@ describe("handleIssueCancel", () => {
         reviewStuck: {},
       });
       expect(await readFile(conflictStatePath(home, "kirmanak", "demo", 12), "utf8").catch(() => "")).toBe("");
-      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 2, skipReason: null });
     } finally {
       await rm(home, { recursive: true, force: true });
@@ -223,7 +212,7 @@ describe("handleIssueCancel", () => {
       );
       const statuses: Array<{ sha: string; state: string; description?: string }> = [];
       const api = {
-        ...makeApi(),
+        ...workerApi(),
         createCommitStatus: async (
           _owner: string,
           _repo: string,
@@ -254,7 +243,7 @@ describe("handleIssueCancel", () => {
       const key = "kirmanak/demo#12";
       const aborts = new Map<string, AbortController>([[key, new AbortController()]]);
       const pids = new Map<string, number>([[key, child.pid]]);
-      const api = makeApi();
+      const api = workerApi();
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store, aborts, pids);
       expect(aborts.get(key)?.signal.aborted).toBe(true);
       // The router marks; the running tick settles (posts `stopped` and
@@ -300,7 +289,7 @@ describe("processWorkerTick", () => {
     const prIndexes: number[] = [];
     const statuses: Array<{ sha: string; state: string; description?: string; target_url?: string }> = [];
     const api = {
-      ...makeApi(),
+      ...workerApi(),
       getRepoFile: async () => ({ found: true, content: "mode: review-only\n" }),
       getPR: async (_owner: string, _repo: string, index: number) => {
         prIndexes.push(index);
@@ -342,7 +331,7 @@ describe("processWorkerTick", () => {
         maxFollowupRounds: 5,
         maxConflictRounds: 7,
       }),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         followUp: async (opts) => {
@@ -374,7 +363,7 @@ describe("processWorkerTick", () => {
         maxFollowupRounds: 5,
         maxConflictRounds: 7,
       }),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         implement: async (opts) => {
@@ -406,7 +395,7 @@ describe("processWorkerTick", () => {
         conflictTimeoutMs: 900_000,
         maxConflictRounds: 7,
       }),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         conflict: async (opts) => {
@@ -431,8 +420,8 @@ describe("processWorkerTick", () => {
       return { status: "pr" as const, prNumber: 1, htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/1" };
     };
     const results = await Promise.all([
-      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", { implement }),
-      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-a", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", { implement }),
     ]);
     expect(maxRunning).toBe(1);
     expect(results.sort()).toEqual(["idle", "processed"]);
@@ -446,7 +435,7 @@ describe("processWorkerTick", () => {
     await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 127, headSha: "headsha" }));
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
-    const follow = processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", {
+    const follow = processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-a", {
       followUp: async () => {
         started.resolve();
         await release.promise;
@@ -458,7 +447,7 @@ describe("processWorkerTick", () => {
     });
     await started.promise;
     expect(
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", {
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", {
         conflict: async () => {
           throw new Error("conflict should wait");
         },
@@ -468,7 +457,7 @@ describe("processWorkerTick", () => {
     expect(await follow).toBe("processed");
     let conflictRan = 0;
     expect(
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", {
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", {
         conflict: async () => {
           conflictRan++;
           return { status: "up-to-date" };
@@ -488,7 +477,7 @@ describe("processWorkerTick", () => {
         trigger: { event: "review-failure", sender: "jumi" },
       })
     );
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       followUp: async () => ({ status: "skipped", reason: "PR head changed from oldsha to newsha" }),
     });
     const successor = store.rows.find((row) => row.headSha === "newsha");
@@ -510,8 +499,8 @@ describe("processWorkerTick", () => {
       return { status: "pr" as const, prNumber: opts.job.issueNumber, htmlUrl: "https://example" };
     };
     const results = await Promise.all([
-      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-a", { implement }),
-      processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-b", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-a", { implement }),
+      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", { implement }),
     ]);
     expect(results).toEqual(["processed", "processed"]);
     expect(seen.sort((a, b) => a - b)).toEqual([12, 13]);
@@ -528,7 +517,7 @@ describe("processWorkerTick", () => {
       const tick = processWorkerTick(
         store,
         makeWorkerConfig({ home }),
-        makeApi(),
+        workerApi(),
         "worker-1",
         {
           heartbeatMs: 60_000,
@@ -542,7 +531,16 @@ describe("processWorkerTick", () => {
         aborts
       );
       await started.promise;
-      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store, aborts);
+      await handleIssueCancel(
+        makeWorkerConfig({ home }),
+        workerApi(),
+        "kirmanak",
+        "demo",
+        12,
+        undefined,
+        store,
+        aborts
+      );
       expect(await tick).toBe("processed");
       expect(store.rows[0]?.state).toBe("cancelled");
     } finally {
@@ -562,7 +560,7 @@ describe("processWorkerTick", () => {
       const tick = processWorkerTick(
         store,
         makeWorkerConfig({ home }),
-        makeApi(),
+        workerApi(),
         "worker-holder",
         {
           heartbeatMs: 15,
@@ -580,7 +578,7 @@ describe("processWorkerTick", () => {
       await started.promise;
       await handleIssueCancel(
         makeWorkerConfig({ home }),
-        makeApi(),
+        workerApi(),
         "kirmanak",
         "demo",
         12,
@@ -607,7 +605,7 @@ describe("processWorkerTick", () => {
     await store.enqueueIssue(makeIssueJob());
     const abort = new AbortController();
     abort.abort();
-    const result = await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    const result = await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       abortSignal: abort.signal,
       implement: async () => {
         throw new Error("should not run");
@@ -621,7 +619,7 @@ describe("processWorkerTick", () => {
   test("abort without a published result requeues the same job without consuming an attempt", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
-    const api = makeApi();
+    const api = workerApi();
     const abort = new AbortController();
     const started = Promise.withResolvers<void>();
     const tick = processWorkerTick(
@@ -698,7 +696,7 @@ describe("processWorkerTick", () => {
     const tick = processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         abortSignal: abort.signal,
@@ -729,7 +727,7 @@ describe("processWorkerTick", () => {
     const tick = processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         abortSignal: abort.signal,
@@ -757,7 +755,7 @@ describe("processWorkerTick", () => {
   test("abort throw requeues without publishing", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
-    const api = makeApi();
+    const api = workerApi();
     const abort = new AbortController();
     const started = Promise.withResolvers<void>();
     const tick = processWorkerTick(
@@ -794,7 +792,7 @@ describe("processWorkerTick", () => {
     const tick = processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         abortSignal: abort.signal,
@@ -818,7 +816,7 @@ describe("processWorkerTick", () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();
     await store.enqueueIssue(job);
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       implement: async () => ({ status: "cancelled" }),
     });
     expect(store.rows[0]?.state).toBe("skipped");
@@ -833,7 +831,7 @@ describe("processWorkerTick", () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();
     await store.enqueueIssue(job);
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       implement: async () => ({ status: "skipped", reason: "blocked on #196" }),
     });
     expect(store.rows[0]?.state).toBe("skipped");
@@ -845,7 +843,7 @@ describe("processWorkerTick", () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();
     await store.enqueueIssue(job);
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       implement: async () => ({ status: "skipped", reason: "assigned PR is the job for this repo" }),
     });
     expect(store.rows[0]?.state).toBe("skipped");
@@ -857,7 +855,7 @@ describe("processWorkerTick", () => {
     const store = new MemoryReviewJobStore();
     const job = makeIssueJob();
     await store.enqueueIssue(job);
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       implement: async () => ({ status: "no-changes" }),
     });
     expect(store.rows[0]?.state).toBe("skipped");
@@ -885,7 +883,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi({
+      workerApi({
         getPR: async () => makePR({ number: 3, mergeable: false, head: { ...makePR().head, sha: "newsha" } }),
       }),
       "worker-1",
@@ -910,7 +908,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi({ getPR: async () => makePR({ number: 127, mergeable: false }) }),
+      workerApi({ getPR: async () => makePR({ number: 127, mergeable: false }) }),
       "worker-1",
       {
         followUp: async () => ({
@@ -929,7 +927,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi({
+      workerApi({
         getPR: async () => makePR({ number: 127, mergeable: false, head: { ...makePR().head, sha: "next" } }),
       }),
       "worker-1",
@@ -951,7 +949,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi({ getPR: async () => makePR({ number: 3, mergeable: null }) }),
+      workerApi({ getPR: async () => makePR({ number: 3, mergeable: null }) }),
       "worker-1",
       {
         implement: async () => ({
@@ -972,7 +970,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         breaker,
@@ -996,7 +994,7 @@ describe("processWorkerTick", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
-      const api = makeApi();
+      const api = workerApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1051,7 +1049,7 @@ describe("processWorkerTick", () => {
                 throw new EngineFailedError("spawn opencode ENOENT", true);
               },
             };
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
         breaker: new InfraCircuitBreaker(),
         ...extras,
       });
@@ -1073,19 +1071,23 @@ describe("processWorkerTick", () => {
     };
     const logs: string[] = [];
     for (let i = 0; i < 3; i++) {
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) =>
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
         logs.push(message)
       );
       store.rows[0]!.leasedUntil = Date.now() - 1;
     }
     logs.length = 0;
     expect(
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message))
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
+        logs.push(message)
+      )
     ).toBe("idle");
     expect(logs.some((line) => line === "breaker open")).toBe(true);
     await Bun.sleep(25);
     logs.length = 0;
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message));
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
+      logs.push(message)
+    );
     expect(logs.some((line) => line.includes("infra-retry"))).toBe(true);
   });
 
@@ -1098,10 +1100,10 @@ describe("processWorkerTick", () => {
         throw new EngineFailedError("opencode exited with code 1:\nbad things", false);
       },
     };
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras);
     expect((await reclaimExpiredWorkerJobs(store, 2, () => undefined)).requeued).toBe(1);
     expect(store.rows[0]?.attempt).toBe(1);
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras);
     expect(await reclaimExpiredWorkerJobs(store, 2, () => undefined)).toEqual({ requeued: 0, published: 1 });
     expect(store.rows[0]?.state).toBe("failed");
     expect(store.rows[0]?.error).toContain("max attempts");
@@ -1115,7 +1117,7 @@ describe("processWorkerTick", () => {
     await processWorkerTick(
       store,
       makeWorkerConfig(),
-      makeApi(),
+      workerApi(),
       "worker-1",
       {
         breaker: new InfraCircuitBreaker(),
@@ -1139,7 +1141,7 @@ describe("processWorkerTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       const cooldown = new QuotaCooldown();
-      const api = makeApi();
+      const api = workerApi();
       let calls = 0;
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1203,16 +1205,18 @@ describe("processWorkerTick", () => {
         };
       },
     };
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message));
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
+      logs.push(message)
+    );
     expect(store.rows[0]?.state).toBe("queued");
     expect(store.rows[0]?.attempt).toBe(0);
     expect(store.rows[0]?.leasedUntil).toBeGreaterThan(Date.now());
     expect(logs.some((line) => line.includes("quota-wait") && line.includes("n=1"))).toBe(true);
     expect(logs.some((line) => line.includes("event=opencode_quota_wait"))).toBe(true);
-    expect(await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras)).toBe("idle");
+    expect(await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras)).toBe("idle");
     store.rows[0]!.leasedUntil = Date.now() - 1;
     cooldown.reset();
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras);
     expect(store.rows[0]?.state).toBe("succeeded");
     expect(calls).toBe(2);
   });
@@ -1224,7 +1228,7 @@ describe("processWorkerTick", () => {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
       store.rows[0]!.error = encodeQuotaWaitMarker(1, Date.now() - QUOTA_WAIT_BUDGET_MS - 1);
-      const api = makeApi();
+      const api = workerApi();
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
         if (gitArgs[0] === "rev-parse") return "abc123";
@@ -1284,7 +1288,7 @@ describe("processWorkerTick", () => {
       await processWorkerTick(
         store,
         makeWorkerConfig({ home, workdir, fallbackModel: "anthropic/claude-sonnet-4-6" }),
-        makeApi(),
+        workerApi(),
         "worker-1",
         {
           breaker: new InfraCircuitBreaker(),
@@ -1320,7 +1324,7 @@ describe("processWorkerTick", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
-      const api = makeApi();
+      const api = workerApi();
       const models: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1400,7 +1404,7 @@ describe("processWorkerTick", () => {
           },
           chain: ["first", "second"],
         }),
-        makeApi(),
+        workerApi(),
         "worker-1",
         {
           breaker: new InfraCircuitBreaker(),
@@ -1435,7 +1439,7 @@ describe("processWorkerTick", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueueIssue(makeIssueJob());
-      const api = makeApi();
+      const api = workerApi();
       const models: string[] = [];
       const gitRunner: GitRunner = async (args) => {
         const gitArgs = stripGitConfigArgs(args);
@@ -1502,10 +1506,12 @@ describe("processWorkerTick", () => {
         throw new QuotaWaitError(decision);
       },
     };
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras);
     const logs: string[] = [];
     expect(
-      await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) => logs.push(message))
+      await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
+        logs.push(message)
+      )
     ).toBe("idle");
     expect(logs.filter((line) => line === "quota cooldown")).toEqual(["quota cooldown"]);
   });
@@ -1524,11 +1530,11 @@ describe("processWorkerTick", () => {
         throw new QuotaWaitError(decision);
       },
     };
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras);
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras);
     const logs: string[] = [];
     for (let i = 0; i < 5; i++) {
       expect(
-        await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", extras, (message) =>
+        await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", extras, (message) =>
           logs.push(message)
         )
       ).toBe("idle");
@@ -1543,7 +1549,7 @@ describe("processWorkerTick", () => {
       await store.enqueueIssue(makeIssueJob());
       const decision = decideQuotaRetry(null, Date.now(), undefined, () => 0);
       if (decision.action !== "requeue") throw new Error("expected requeue");
-      await processWorkerTick(store, makeWorkerConfig({ home }), makeApi(), "worker-1", {
+      await processWorkerTick(store, makeWorkerConfig({ home }), workerApi(), "worker-1", {
         breaker: new InfraCircuitBreaker(),
         quotaCooldown: new QuotaCooldown(),
         implement: async () => {
@@ -1551,7 +1557,7 @@ describe("processWorkerTick", () => {
         },
       });
       expect(store.rows[0]?.state).toBe("queued");
-      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       expect(store.rows[0]?.state).toBe("cancelled");
     } finally {
       await rm(home, { recursive: true, force: true });
@@ -1577,7 +1583,7 @@ describe("processWorkerTick", () => {
       await processWorkerTick(
         store,
         makeWorkerConfig({ home }),
-        makeApi(),
+        workerApi(),
         "worker-1",
         {
           followUp: async () => {
@@ -1608,10 +1614,10 @@ describe("processWorkerTick", () => {
         lastBaseSha: "def",
         updatedAt: "2026-05-23T00:00:00Z",
       });
-      await handleIssueCancel(makeWorkerConfig({ home }), makeApi(), "kirmanak", "demo", 12, undefined, store);
+      await handleIssueCancel(makeWorkerConfig({ home }), workerApi(), "kirmanak", "demo", 12, undefined, store);
       await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
       let followUp = 0;
-      await processWorkerTick(store, makeWorkerConfig({ home }), makeApi(), "worker-1", {
+      await processWorkerTick(store, makeWorkerConfig({ home }), workerApi(), "worker-1", {
         followUp: async () => {
           followUp++;
           return { status: "pushed", prNumber: 19, htmlUrl: "https://github.com/kirmanak/demo/pull/19" };
@@ -1631,7 +1637,7 @@ describe("processWorkerTick", () => {
   test("follow-up stuck skip records a shared latch", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ mode: "follow-up", prNumber: 19, headSha: "headsha" }));
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       followUp: async () => ({ status: "skipped", reason: "stuck: repeated error" }),
     });
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({
@@ -1643,7 +1649,7 @@ describe("processWorkerTick", () => {
   test("stuck result remembers a sit alongside the shared latch", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ mode: "conflict", prNumber: 19, headSha: "headsha" }));
-    await processWorkerTick(store, makeWorkerConfig(), makeApi(), "worker-1", {
+    await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-1", {
       conflict: async () => ({ status: "stuck" }),
     });
     expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({

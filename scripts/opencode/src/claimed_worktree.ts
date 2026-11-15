@@ -1,4 +1,4 @@
-import { access, chmod, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import type { ClaimRecord } from "./claim.ts";
@@ -18,6 +18,7 @@ import {
   orderChainForRetry,
   resolveRunnerSelection,
 } from "./runners.ts";
+import { pathExists } from "./util/fs.ts";
 import {
   type GitAuth,
   type GitAuthResolver,
@@ -106,9 +107,9 @@ export function throwIfAborted(signal?: AbortSignal): void {
   throw err;
 }
 
-export function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
-}
+import { errorMessage, isAbortError } from "./util/error.ts";
+
+export { isAbortError };
 
 function assertSafeSegment(value: string, label: string): string {
   if (!value || value === "." || value === ".." || /[\\/\0]/.test(value)) {
@@ -235,18 +236,9 @@ export async function recheckAssignedAndOpen(
     }
   } catch (err) {
     await claimed.forgetClaim();
-    return { status: "skipped", reason: `failed to load issue: ${err instanceof Error ? err.message : String(err)}` };
+    return { status: "skipped", reason: `failed to load issue: ${errorMessage(err)}` };
   }
   return undefined;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Stage everything except scratch dirs, which a failed delete can leave behind. */
@@ -531,9 +523,7 @@ export async function clearLeftoverWorktree(loop: ClaimedLoop): Promise<void> {
   try {
     await removeTree(loop.worktree);
   } catch (err) {
-    throw new Error(
-      `leftover worktree ${loop.worktree} could not be removed: ${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new Error(`leftover worktree ${loop.worktree} could not be removed: ${errorMessage(err)}`);
   }
   await loop.runConfiguredGit(["worktree", "prune"], { cwd: loop.barePath, env: loop.env }).catch(() => undefined);
 }

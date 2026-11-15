@@ -1,4 +1,4 @@
-import { forgeRequestError } from "./forge_errors.ts";
+import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
   ActionJob,
@@ -25,6 +25,7 @@ import {
   omitOpenCodeStderr,
   truncateStatusDescription,
 } from "./status_description.ts";
+import { loginEqualsNonEmpty } from "./util/login.ts";
 
 export type GithubAuth = {
   getInstallationToken(target?: GithubTokenTarget): Promise<string>;
@@ -204,10 +205,6 @@ const LOG_MAX_BYTES = 1_048_576;
 
 function actor(user: GithubUser | null | undefined): { login: string } {
   return { login: user?.login ?? "" };
-}
-
-function isNotFoundError(err: unknown): boolean {
-  return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
 function isActionsDisabledError(err: unknown): boolean {
@@ -531,11 +528,6 @@ export function toActionJob(job: GithubJob, headBranch?: string): ActionJob {
 export function toGithubReviewEvent(event: string | undefined): string | undefined {
   if (event === "APPROVED") return "APPROVE";
   return event;
-}
-
-function loginEquals(left: string | undefined, right: string | undefined): boolean {
-  if (!left || !right) return false;
-  return left.toLowerCase() === right.toLowerCase();
 }
 
 function toGithubReviewComments(comments: CreatePullReviewComment[] | undefined): unknown[] | undefined {
@@ -1233,7 +1225,7 @@ export class GithubAPI {
       const batch = await this.get<GithubComment[]>(`${path}?per_page=${PAGE_SIZE}&page=${page}`);
       for (const comment of batch) {
         if (
-          loginEquals(comment.user?.login, botUsername) &&
+          loginEqualsNonEmpty(comment.user?.login, botUsername) &&
           typeof comment.body === "string" &&
           comment.body.includes(marker)
         ) {
@@ -1290,7 +1282,7 @@ export class GithubAPI {
     let body = review.body;
     if (needsSelfReviewGuard(event)) {
       const [pr, me] = await Promise.all([this.getPR(owner, repo, index), this.getViewerLogin({ owner, repo })]);
-      if (!me || loginEquals(pr.user?.login, me)) {
+      if (!me || loginEqualsNonEmpty(pr.user?.login, me)) {
         event = "COMMENT";
       }
     }

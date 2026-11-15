@@ -1,4 +1,5 @@
 import type { ReviewJobStore } from "./review_jobs.ts";
+import { errorMessage } from "./util/error.ts";
 
 export async function releaseLeaseOnShutdown(
   store: ReviewJobStore,
@@ -18,7 +19,7 @@ export async function releaseLeaseOnShutdown(
       await store.expireLease(id, leasedBy);
     }
   } catch (err) {
-    logger(`${expireLabel} ${jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`${expireLabel} ${jobKey}: ${errorMessage(err)}`);
   }
 }
 

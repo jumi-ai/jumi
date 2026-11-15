@@ -3,14 +3,12 @@ import { DEPENDENCY_GRAPH_CAP } from "./dependencies.ts";
 import { extractClosingIssueNumbers, isAssignedForeignPR, isForeignPrIdentity } from "./gitea_issues.ts";
 import type { LinkedIssue, Pull, Repo, Task } from "./ports.ts";
 import type { GiteaIssuePayload, GiteaPRPayload, IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { isObjectLike } from "./util/object.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
 const ENQUEUE_ACTIONS = new Set(["assigned", "opened", "reopened"]);
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new Error(`Invalid webhook payload: missing ${name}`);
@@ -26,11 +24,11 @@ function requireNumber(value: unknown, name: string): number {
 
 export function parseIssuesPayload(rawBody: Uint8Array): GiteaIssuePayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
   const issue = parsed.issue;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
-  if (!isObject(issue)) throw new Error("Invalid webhook payload: missing issue");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(issue)) throw new Error("Invalid webhook payload: missing issue");
   requireString(parsed.action, "action");
   requireString(repository.full_name, "repository.full_name");
   requireNumber(issue.number, "issue.number");
@@ -315,7 +313,7 @@ export async function pullWaitClearJobsToEnqueue(
       }
     } catch (err) {
       blocksError = err;
-      logger?.(`failed to list issue blocks: ${err instanceof Error ? err.message : String(err)}`);
+      logger?.(`failed to list issue blocks: ${errorMessage(err)}`);
     }
   }
 

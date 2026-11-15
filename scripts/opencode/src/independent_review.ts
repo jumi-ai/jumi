@@ -1,5 +1,6 @@
 import type { ProvenanceLookup } from "./provenance.ts";
 import type { IndependentReviewConfig, NamedRunner, RunnerStamp } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Parent-owned fail-closed reason prefix. Maps to a failure status, never success. */
 export const INDEPENDENT_REVIEW_UNAVAILABLE_PREFIX = "Independent review unavailable:";
@@ -158,7 +159,7 @@ export function resolveIndependentReviewers(input: {
   try {
     familyMap = buildFamilyMap(policy);
   } catch (err) {
-    const reason = `${INDEPENDENT_REVIEW_UNAVAILABLE_PREFIX} contradictory independence groups for ${head} (${err instanceof Error ? err.message : String(err)})`;
+    const reason = `${INDEPENDENT_REVIEW_UNAVAILABLE_PREFIX} contradictory independence groups for ${head} (${errorMessage(err)})`;
     return refusal(head, provenance.status, reason);
   }
   if (familyMap.size === 0) {
@@ -333,7 +334,7 @@ export function resolveStickyWorkerStart(input: {
   } catch (err) {
     return {
       ...empty,
-      reason: `contradictory independence groups (${err instanceof Error ? err.message : String(err)})`,
+      reason: `contradictory independence groups (${errorMessage(err)})`,
     };
   }
   const writers = contributors.map(stampLabel);

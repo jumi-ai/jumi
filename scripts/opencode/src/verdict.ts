@@ -122,7 +122,11 @@ function parseFindingLine(raw: string): number | undefined {
 function usableFindingPath(path: string): string | undefined {
   let value = path.trim().replace(/\\/g, "/");
   if (value.startsWith("./")) value = value.slice(2);
-  if (!value || value.startsWith("/") || value.includes("\0")) return undefined;
+  // A `:` inside the path would make `path:line:` ambiguous: an unlocated
+  // store line `marker: <text>` whose text mentions `src/a.ts:12:` must not
+  // parse as a located finding with a bogus `marker: ... src/a.ts` path.
+  // Real changed-file paths never contain `:`.
+  if (!value || value.startsWith("/") || value.includes("\0") || value.includes(":")) return undefined;
   const parts = value.split("/");
   if (parts.some((part) => part === "" || part === "." || part === "..")) return undefined;
   return value;
@@ -186,7 +190,7 @@ function isHeadingLine(line: string): boolean {
 }
 
 function isCheckTrailerLine(line: string): boolean {
-  return isTrailerShapedLine(line);
+  return parseCheckLine(line.trim()) !== undefined;
 }
 
 /** A line that looks like a `jumi-check` trailer, whether or not it parses. */

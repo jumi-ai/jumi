@@ -17,35 +17,19 @@ import {
   MAX_SUGGESTION_FINDINGS,
   parseReviewFindings,
 } from "../src/verdict.ts";
-import { emptyCiMethods, makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeFile } from "./fixtures.ts";
 
 function suggestionLine(index: number): string {
   return `src/a.ts:${index}: 💡 simpler: simplify helper ${index}.`;
 }
 
-function makeApi(overrides: Record<string, unknown> = {}) {
-  const defaults = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function suggestionApi(overrides: Parameters<typeof makeReviewApi>[0] = {}) {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => ({ number: 12 }),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_o: string, _r: string, _i: number, body: string) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_o: string, _r: string, id: number, body: string) => makeComment({ id, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_o: string, _r: string, _s: string, status: unknown) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides } as never;
+    ...overrides,
+  });
 }
 
 describe("suggestion cap", () => {
@@ -148,7 +132,7 @@ describe("publishReviewResult suggestion cap", () => {
       ...Array.from({ length: 6 }, (_, i) => suggestionLine(i + 1)),
       "<!-- jumi-check: success -->",
     ].join("\n");
-    const inlines: Array<{ path: string; new_position: number; body: string }> = [];
+    const inlines: Array<{ path: string; new_position?: number; body: string }> = [];
     const bodies: string[] = [];
     const recorded: Array<{ runner: string; forge: string; posted: number; dropped: number; addressed: number }> = [];
     const result = await publishReviewResult({
@@ -159,7 +143,7 @@ describe("publishReviewResult suggestion cap", () => {
       recordSuggestions: async (counts) => {
         recorded.push(counts);
       },
-      api: makeApi({
+      api: suggestionApi({
         createPullReview: async (
           _o: string,
           _r: string,
@@ -187,12 +171,12 @@ describe("publishReviewResult suggestion cap", () => {
       ...Array.from({ length: 6 }, (_, i) => suggestionLine(i + 1)),
       "<!-- jumi-check: failure; 1 blocking, 1 risk -->",
     ].join("\n");
-    const inlines: Array<{ path: string }> = [];
+    const inlines: Array<{ path: string; new_position?: number; body?: string }> = [];
     const bodies: string[] = [];
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: markdown,
-      api: makeApi({
+      api: suggestionApi({
         createPullReview: async (
           _o: string,
           _r: string,
@@ -222,7 +206,7 @@ describe("publishReviewResult suggestion cap", () => {
       recordSuggestions: async (counts) => {
         recorded.push(counts);
       },
-      api: makeApi({
+      api: suggestionApi({
         createPullReview: async () => ({ id: 1 }),
       }),
     });

@@ -94,7 +94,7 @@ import {
   type ReviewSuggestionCounts,
   runnerLabelForStamp,
 } from "./review_suggestions.ts";
-import { ReviewVerdictStore } from "./review_verdict_store.ts";
+import { type ReviewRecord, ReviewVerdictStore } from "./review_verdict_store.ts";
 import type { RunnerCooldownConfig, RunnerCooldownStore } from "./runner_cooldown.ts";
 import {
   appendRunnerStamp,
@@ -133,6 +133,8 @@ import {
   suggestionHoldSkippedDescription,
 } from "./suggestion_hold.ts";
 import type { ReviewJob } from "./types.ts";
+import { errorMessage, isAbortError } from "./util/error.ts";
+import { loginEqualsNonEmpty } from "./util/login.ts";
 import {
   buildCheckTrailer,
   buildFindingsList,
@@ -310,7 +312,7 @@ export interface ReviewOptions {
 }
 
 export type PersistReviewResult =
-  | { kind: "markdown"; markdown: string; runner?: string }
+  | { kind: "markdown"; markdown: string; runner?: string; record?: ReviewRecord }
   | { kind: "skip"; reason: string }
   | { kind: "error"; error: string };
 
@@ -377,10 +379,6 @@ function throwIfAborted(signal?: AbortSignal) {
   const err = new Error("cancelled");
   err.name = "AbortError";
   throw err;
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 export function reviewJobKey(job: ReviewJob): string {
@@ -453,22 +451,17 @@ function isBotPullReview(review: PullReview, botUsername: string): boolean {
 
 type PullReviewEvent = "APPROVED" | "REQUEST_CHANGES" | "COMMENT";
 
-function loginEquals(left: string | undefined, right: string | undefined): boolean {
-  if (!left || !right) return false;
-  return left.toLowerCase() === right.toLowerCase();
-}
-
 function reviewEventForVerdict(
   state: "success" | "failure",
   prAuthor: string | undefined,
   botUsername: string
 ): PullReviewEvent {
-  if (loginEquals(prAuthor, botUsername)) return "COMMENT";
+  if (loginEqualsNonEmpty(prAuthor, botUsername)) return "COMMENT";
   return state === "success" ? "APPROVED" : "REQUEST_CHANGES";
 }
 
 function isSelfReviewRejection(err: unknown, prAuthor: string | undefined, botUsername: string): boolean {
-  if (loginEquals(prAuthor, botUsername)) return true;
+  if (loginEqualsNonEmpty(prAuthor, botUsername)) return true;
   const message = errorMessage(err).toLowerCase();
   return /own pull|not allowed to (?:approve|reject|review)|author of (?:the )?pull|poster of (?:the )?pull/.test(
     message
@@ -889,7 +882,7 @@ async function gatePersonalJumiContractEnv(
     const issues = contractEnvIssues(parseContract(contractMd), reviewerSrc, workerSrc);
     return applyContractEnvGate(markdown, issues.map(formatContractEnvIssue));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     return applyContractEnvGate(markdown, [`failed to parse loader env against deploy/contract.md: ${message}`]);
   }
 }
@@ -1081,9 +1074,7 @@ export async function resolveClosingIssuesForReview(opts: {
     }
     return { issues: result, source: "forge" };
   } catch (err) {
-    opts.log?.(
-      `closing issues unavailable, falling back to parser: ${err instanceof Error ? err.message : String(err)}`
-    );
+    opts.log?.(`closing issues unavailable, falling back to parser: ${errorMessage(err)}`);
     return { issues: fallback, source: "fallback" };
   }
 }
@@ -1170,10 +1161,6 @@ function prepareFiles(
   });
 
   return { files: prepared, notes };
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 async function loadPrComments(
@@ -1315,9 +1302,7 @@ export async function invalidHeadSettingsFailure(opts: {
     try {
       files = await listFiles.call(opts.api, opts.owner, opts.repo, opts.prNumber);
     } catch (err) {
-      opts.log(
-        `settings pull files unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      opts.log(`settings pull files unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
       return undefined;
     }
     touches = prTouchesRepoSettings(files);
@@ -1327,9 +1312,7 @@ export async function invalidHeadSettingsFailure(opts: {
   try {
     settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.headSha);
   } catch (err) {
-    opts.log(
-      `settings head unreadable for ${opts.owner}/${opts.repo}@${opts.headSha}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    opts.log(`settings head unreadable for ${opts.owner}/${opts.repo}@${opts.headSha}: ${errorMessage(err)}`);
     return undefined;
   }
   if (settings.state === "invalid") return `${REPO_SETTINGS_PATH} is invalid: ${settings.error}`;
@@ -1345,9 +1328,7 @@ export async function invalidHeadSettingsFailure(opts: {
   try {
     branch = await getBranch.call(opts.api, opts.owner, opts.repo, opts.baseBranch);
   } catch (err) {
-    opts.log(
-      `settings branch unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    opts.log(`settings branch unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return undefined;
   }
   const required = branchRequiresReviewCheck(branch);
@@ -1414,9 +1395,7 @@ export async function loadReviewExcludeMatchers(opts: {
   try {
     settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, ref);
   } catch (err) {
-    opts.log(
-      `review excludes unreadable for ${opts.owner}/${opts.repo}@${ref}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    opts.log(`review excludes unreadable for ${opts.owner}/${opts.repo}@${ref}: ${errorMessage(err)}`);
     return [];
   }
   if (settings.state === "missing") return [];
@@ -1863,9 +1842,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   try {
     earlyRepo = await forgeApi.getRepo(opts.owner, opts.repo);
   } catch (err) {
-    log(
-      `runner settings repo unreadable for ${repoFullName}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`runner settings repo unreadable for ${repoFullName}#${opts.prNumber}: ${errorMessage(err)}`);
   }
   const defaultBranch = earlyRepo?.default_branch ?? "";
   // Draft / WIP: reviews run only when the repository opts in via
@@ -1879,9 +1856,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       try {
         repoBudgetLoad = await loadRepoSettings(forgeApi, opts.owner, opts.repo, branch);
       } catch (err) {
-        log(
-          `review settings unreadable for ${repoFullName}@${branch}: ${err instanceof Error ? err.message : String(err)}`
-        );
+        log(`review settings unreadable for ${repoFullName}@${branch}: ${errorMessage(err)}`);
         repoBudgetLoad = undefined;
       }
     }
@@ -2007,7 +1982,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     try {
       lookup = await resolveProvenanceForReview(opts, pr, reviewedHeadSha);
     } catch (err) {
-      const reason = provenanceLookupFailureReason(reviewedHeadSha, err instanceof Error ? err.message : String(err));
+      const reason = provenanceLookupFailureReason(reviewedHeadSha, errorMessage(err));
       logDiagnostic(log, "independent_review", {
         review: `${repoFullName}#${pr.number}`,
         head: reviewedHeadSha,
@@ -2508,7 +2483,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         truncated: staged.truncated,
       });
     } catch (err) {
-      log(`base instructions unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      log(`base instructions unavailable: ${errorMessage(err)}`);
     }
 
     const prompt = buildPROpenedPrompt({
@@ -2677,7 +2652,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }
-      return await publishMarkdownVerdict(gated);
+      // The stored record is only valid for the exact markdown the store
+      // produced. Any post-processing above (contract-env gate, secret
+      // redaction, the no-CI note, or the trailer repair branch) means the
+      // persisted markdown no longer matches the record, so persist no
+      // record: a stored record must never disagree with the stored markdown.
+      const record = gated === markdown ? verdictStore.toRecord() : undefined;
+      return await publishMarkdownVerdict(gated, record);
     };
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     // A stale JUMI_REVIEW.md planted before this run must not count as this
@@ -2703,8 +2684,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     };
     // Shared publish tail for the MCP-verdict and file-artifact branches:
     // gated markdown in, quota-state bookkeeping and forge publish out.
-    const publishMarkdownVerdict = async (gatedMarkdown: string): Promise<ReviewResult> => {
-      await persistOutcome({ kind: "markdown", markdown: gatedMarkdown, ...(runner ? { runner } : {}) });
+    const publishMarkdownVerdict = async (gatedMarkdown: string, record?: ReviewRecord): Promise<ReviewResult> => {
+      await persistOutcome({
+        kind: "markdown",
+        markdown: gatedMarkdown,
+        ...(runner ? { runner } : {}),
+        ...(record ? { record } : {}),
+      });
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         const stuckRef = {
           home: opts.home,
@@ -2949,7 +2935,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           throw err;
         }
       }
-      const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+      const quotaReason = quotaStuckReasonForText(errorMessage(err));
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         await markReviewQuotaStuckState(
           {
@@ -2973,10 +2959,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       throw err;
     }
     if (!persisted && !persistFailed) {
-      const message = redactGitSecrets(
-        `Jumi review failed: ${err instanceof Error ? err.message : String(err)}`,
-        failureSecrets
-      );
+      const message = redactGitSecrets(`Jumi review failed: ${errorMessage(err)}`, failureSecrets);
       await opts.persistResult?.({ kind: "error", error: message });
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         const errorHash = fingerprintError(message);

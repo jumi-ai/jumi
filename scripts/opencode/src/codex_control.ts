@@ -1,6 +1,7 @@
 import { chmod, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { codexAuthPath } from "./codex_auth.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Codex control-plane auth: one `control` replica owns the ChatGPT refresh
@@ -252,9 +253,7 @@ export async function postCodexRefresh(
       signal: AbortSignal.timeout(CODEX_TOKEN_TIMEOUT_MS),
     });
   } catch (err) {
-    throw new CodexGrantError(
-      `Codex token refresh transport failed: ${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new CodexGrantError(`Codex token refresh transport failed: ${errorMessage(err)}`);
   }
   if (!response.ok) {
     const raw = await response.text().catch(() => "");
@@ -468,7 +467,7 @@ export async function publishTokenOnlyAuth(doc: CodexAuthFile, deps: K8sPublishD
     }
   } catch (err) {
     if (err instanceof CodexPublishError) throw err;
-    throw new CodexPublishError(`Codex Secret read failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new CodexPublishError(`Codex Secret read failed: ${errorMessage(err)}`);
   }
   const body: Record<string, unknown> = {
     apiVersion: "v1",
@@ -502,7 +501,7 @@ export async function publishTokenOnlyAuth(doc: CodexAuthFile, deps: K8sPublishD
       );
     }
   } catch (err) {
-    throw new CodexPublishError(`Codex Secret write failed: ${err instanceof Error ? err.message : String(err)}`);
+    throw new CodexPublishError(`Codex Secret write failed: ${errorMessage(err)}`);
   }
   if (response.status === 409 && resourceVersion) {
     throw new CodexPublishError("Codex Secret write conflicted; retry the publish");

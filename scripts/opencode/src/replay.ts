@@ -22,6 +22,8 @@ import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./re
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
+import { isRecord } from "./util/object.ts";
 import {
   hasBlockingFindings,
   isTrailerShapedLine,
@@ -153,10 +155,6 @@ export interface ReplayCase {
   note?: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function fail(message: string): never {
   throw new Error(`Invalid replay case file: ${message}`);
 }
@@ -221,7 +219,7 @@ export function parseReplayCaseFileText(text: string): ReplayCase[] {
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    fail(`not JSON: ${err instanceof Error ? err.message : String(err)}`);
+    fail(`not JSON: ${errorMessage(err)}`);
   }
   return parseReplayCases(parsed);
 }
@@ -482,10 +480,6 @@ function sanitizeFileSegment(value: string): string {
   return clean || "case";
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 function quotaSkip(reason: string): string {
   return isQuotaText(reason) ? quotaStuckReasonForText(reason) : reason;
 }
@@ -536,9 +530,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
       maxPatchBytes = budget.maxPatchBytes;
     }
   } catch (err) {
-    log(
-      `review budget settings unreadable for ${reviewCase.owner}/${reviewCase.repo}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`review budget settings unreadable for ${reviewCase.owner}/${reviewCase.repo}: ${errorMessage(err)}`);
   }
   let pr: Pull | null = null;
   if (reviewCase.prNumber != null) {
@@ -911,8 +903,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
         try {
           throwIfEngineFailed(result);
         } catch (err) {
-          if (isQuotaError(err))
-            throw new Error(quotaStuckReasonForText(err instanceof Error ? err.message : String(err)));
+          if (isQuotaError(err)) throw new Error(quotaStuckReasonForText(errorMessage(err)));
           throw err;
         }
       }
@@ -1292,7 +1283,7 @@ function intEnvOr(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function csvEnv(value: string | undefined): string[] {
+function csvValueEnv(value: string | undefined): string[] {
   if (!value) return [];
   return value
     .split(",")
@@ -1331,7 +1322,7 @@ function loadReplayCliConfig(runnerNames: string[] | undefined): ReplayCliConfig
     giteaUrl,
     giteaToken,
     botUsername: envOr(env.BOT_USERNAME, "jumi"),
-    blockingQuestionAuthors: csvEnv(env.REVIEW_BLOCKING_QUESTION_AUTHORS),
+    blockingQuestionAuthors: csvValueEnv(env.REVIEW_BLOCKING_QUESTION_AUTHORS),
     runners,
     home: envOr(env.HOME, "/data"),
     workdir: envOr(env.WORKDIR, "/work"),
@@ -1440,7 +1431,7 @@ async function main(): Promise<void> {
 
 if (import.meta.main) {
   main().catch((err) => {
-    console.error(`[replay] ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`[replay] ${errorMessage(err)}`);
     process.exit(1);
   });
 }

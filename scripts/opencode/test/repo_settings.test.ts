@@ -21,7 +21,8 @@ import {
   publishReviewResult,
   type ReviewApi,
 } from "../src/review.ts";
-import { emptyCiMethods, makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
 
 describe("parseRepoSettingsText", () => {
   test("automerge true parses on", () => {
@@ -1513,10 +1514,7 @@ describe("invalidHeadSettingsFailure", () => {
 
 describe("publishReviewResult head settings file listing", () => {
   function publishApi(calls: { prFiles: number; refs: string[] }): ReviewApi {
-    return {
-      getRepo: async () => makeRepo(),
-      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-      getPR: async () => makePR(),
+    return makeReviewApi({
       getPRFiles: async () => {
         calls.prFiles++;
         return [makeFile({ filename: "README.md" })];
@@ -1528,21 +1526,8 @@ describe("publishReviewResult head settings file listing", () => {
       getIssue: async () => {
         throw new Error("not used");
       },
-      listIssueComments: async () => [],
-      findStickyIssueComment: async () => undefined,
-      createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
-      updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
-      listPullReviewComments: async () => [],
-      listPullReviews: async () => [],
-      createPullReview: async () => ({ id: 1 }),
-      submitPullReview: async () => ({ id: 1 }),
-      resolvePullComment: async () => undefined,
-      unresolvePullComment: async () => undefined,
-      dismissPullReview: async () => ({ id: 1 }),
-      createCommitStatus: async (_owner, _repo, _sha, status) => status,
-      ...emptyCiMethods(),
       listCommitStatuses: async () => [],
-    };
+    });
   }
 
   const publishOpts = {

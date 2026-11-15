@@ -1,4 +1,4 @@
-import { forgeRequestError } from "./forge_errors.ts";
+import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
 import type {
   ActionJob,
   BranchProtection,
@@ -31,13 +31,10 @@ import type {
   GiteaRepo,
   GiteaUser,
 } from "./types.ts";
+import { loginEquals } from "./util/login.ts";
 
 function actor(user: GiteaUser | { login?: string } | null | undefined): { login: string } {
   return { login: user?.login ?? "" };
-}
-
-function loginEquals(login: string | undefined, botUsername: string): boolean {
-  return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
 }
 
 export function toRepo(repo: GiteaRepo): Repo {
@@ -280,10 +277,6 @@ export interface GiteaAttachment {
   browser_download_url: string;
   created_at: string;
   download_count: number;
-}
-
-function isNotFoundError(err: unknown): boolean {
-  return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
 function isUnsupportedRefDeleteError(err: unknown): boolean {

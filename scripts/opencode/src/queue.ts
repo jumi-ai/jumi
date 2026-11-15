@@ -1,5 +1,6 @@
 import { reviewJobKey } from "./review.ts";
 import type { ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 export interface EnqueueResult {
   key: string;
@@ -57,7 +58,7 @@ export class ReviewQueue<T = ReviewJob> {
       await this.handler(job);
       this.logger(`[queue] completed ${key}`);
     } catch (err) {
-      this.logger(`[queue] failed ${key}: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger(`[queue] failed ${key}: ${errorMessage(err)}`);
     } finally {
       this.active--;
       this.activeKeys.delete(key);

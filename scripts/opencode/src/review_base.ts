@@ -1,6 +1,7 @@
 import { lstat, mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import { DEFAULT_MAX_REVIEW_MD_BYTES } from "./review_md.ts";
+import { errorMessage } from "./util/error.ts";
 import type { GitRunner } from "./workspace.ts";
 
 /**
@@ -356,7 +357,7 @@ export async function stageBaseSkillsIntoWorkdir(
       await rename(root, backup);
       backups.push({ original: root, backup });
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = errorMessage(err);
       log(`[skills] head skills not hidden: ${reason}`);
     }
   }
@@ -386,7 +387,7 @@ export async function stageBaseSkillsIntoWorkdir(
       if (await stageSkillEntry(from, join(dest, name))) staged.push(join(dest, name));
     }
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log(`[skills] base skills not staged: ${reason}`);
   }
   const cleanup = async (): Promise<void> => {

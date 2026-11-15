@@ -112,6 +112,7 @@ import {
   trackerRefOfJob,
 } from "./tracker.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import {
   type GitAuthResolver,
   type GitRunner,
@@ -329,7 +330,7 @@ export async function ensureProvenanceIntent(
       await opts.provenance.setIntentTarget(opts.provenanceJob.jobId, target);
     }
   } catch (err) {
-    log(`provenance intent unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log(`provenance intent unavailable: ${errorMessage(err)}`);
   }
 }
 
@@ -346,7 +347,7 @@ export async function noteProvenanceRunners(
       collector.getPublisher() ?? null
     );
   } catch (err) {
-    log(`provenance note unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log(`provenance note unavailable: ${errorMessage(err)}`);
   }
 }
 
@@ -396,7 +397,7 @@ export async function confirmProvenancePublication(
     });
   } catch (err) {
     // The push already landed; provenance stays pending for a later round to preserve.
-    log(`provenance confirm unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log(`provenance confirm unavailable: ${errorMessage(err)}`);
   }
 }
 
@@ -410,7 +411,7 @@ export async function failProvenanceIntent(
   try {
     await opts.provenance.markIntentFailed(opts.provenanceJob.jobId, error, headSha);
   } catch (err) {
-    log(`provenance fail unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    log(`provenance fail unavailable: ${errorMessage(err)}`);
   }
 }
 
@@ -748,7 +749,7 @@ async function implementExternalIssue(
       } catch (err) {
         return {
           status: "skipped",
-          reason: `failed to request repository: ${err instanceof Error ? err.message : String(err)}`,
+          reason: `failed to request repository: ${errorMessage(err)}`,
         };
       }
       return { status: "skipped", reason };
@@ -1008,7 +1009,7 @@ async function implementExternalIssue(
       try {
         await pushClaimedBranch(loop, branch);
       } catch (err) {
-        await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
         throw err;
       }
       if (externalCheckpoint) {
@@ -1031,7 +1032,7 @@ async function implementExternalIssue(
           base: effectiveJob.defaultBranch,
         });
       } catch (err) {
-        await failProvenanceIntent(provenanceOpts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
         throw err;
       }
       await scheduleAutomergeForPr({
@@ -1181,7 +1182,7 @@ export async function implementIssue(
     await forgetClaim();
     return {
       status: "skipped",
-      reason: `failed to load dependencies: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `failed to load dependencies: ${errorMessage(err)}`,
     };
   }
 
@@ -1219,7 +1220,7 @@ export async function implementIssue(
     await forgetClaim();
     return {
       status: "skipped",
-      reason: `failed to load candidate queue: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `failed to load candidate queue: ${errorMessage(err)}`,
     };
   }
 
@@ -1339,7 +1340,7 @@ export async function implementIssue(
           bodies: [job.body],
           worktree,
           log,
-        }).catch((err) => log(`attachments staging failed: ${err instanceof Error ? err.message : String(err)}`));
+        }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
       };
       await writeTaskFiles(opts.job);
       await upsertWorkerComment(
@@ -1472,7 +1473,7 @@ export async function implementIssue(
         try {
           await loop.runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env: loop.env });
         } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
+          const msg = errorMessage(err);
           if (!/remote ref does not exist/i.test(msg)) throw err;
         }
         if (checkpoint) {
@@ -1518,7 +1519,7 @@ export async function implementIssue(
           });
         } catch (err) {
           await deletePushedIssueBranch().catch(() => undefined);
-          const raw = err instanceof Error ? err.message : String(err);
+          const raw = errorMessage(err);
           const secrets = workerPublishSecrets(loop.auth.token, jobChain);
           return skipBlocked(
             `failed to set dependency: ${redactGitSecrets(raw, secrets)}`,
@@ -1643,7 +1644,7 @@ export async function implementIssue(
               ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
               ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
-            const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+            const quotaReason = quotaStuckReasonForText(errorMessage(err));
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
             return { status: "skipped" as const, reason: quotaReason };
@@ -1725,7 +1726,7 @@ export async function implementIssue(
       try {
         await pushClaimedBranch(loop, branch);
       } catch (err) {
-        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
         throw err;
       }
       if (checkpoint) {
@@ -1750,7 +1751,7 @@ export async function implementIssue(
           base: opts.job.defaultBranch,
         });
       } catch (err) {
-        await failProvenanceIntent(opts, err instanceof Error ? err.message : String(err), undefined, log);
+        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
         throw err;
       }
       await scheduleAutomergeForNewPr({
@@ -1795,7 +1796,7 @@ export async function implementIssue(
           ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
           ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
         });
-        const quotaReason = quotaStuckReasonForText(err instanceof Error ? err.message : String(err));
+        const quotaReason = quotaStuckReasonForText(errorMessage(err));
         await diary(quotaReason).catch(() => undefined);
         await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
@@ -1807,7 +1808,7 @@ export async function implementIssue(
       await diary(`Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`).catch(
         () => undefined
       );
-      const errorHash = fingerprintError(err instanceof Error ? err.message : String(err));
+      const errorHash = fingerprintError(errorMessage(err));
       if (errorHash) {
         await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
           () => undefined

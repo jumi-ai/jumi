@@ -9,6 +9,9 @@ import {
 } from "./gitea_issues.ts";
 import { hasTrustedSenders, type PermissionApi, senderCanSteer } from "./permissions.ts";
 import type { GiteaIssue, GiteaIssueCommentPayload, GiteaPR, GiteaPRPayload, GiteaRepo, IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { loginEquals } from "./util/login.ts";
+import { isObjectLike } from "./util/object.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -31,10 +34,6 @@ export type PullAssignWebhookDecision =
   | FollowUpWebhookDecision
   | { type: "cancel"; owner: string; repo: string; issueNumber: number };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new Error(`Invalid webhook payload: missing ${name}`);
   return value;
@@ -45,10 +44,6 @@ function requireNumber(value: unknown, name: string): number {
     throw new Error(`Invalid webhook payload: missing ${name}`);
   }
   return value;
-}
-
-function loginEquals(login: string | undefined, botUsername: string): boolean {
-  return typeof login === "string" && login.toLowerCase() === botUsername.toLowerCase();
 }
 
 export function loginInList(login: string | undefined, logins: readonly string[] | undefined): boolean {
@@ -74,13 +69,13 @@ export function isJumiInternalBody(body: string | null | undefined): boolean {
 
 export function parseIssueCommentPayload(rawBody: Uint8Array): GiteaIssueCommentPayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
   const issue = parsed.issue;
   const comment = parsed.comment;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
-  if (!isObject(issue)) throw new Error("Invalid webhook payload: missing issue");
-  if (!isObject(comment)) throw new Error("Invalid webhook payload: missing comment");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(issue)) throw new Error("Invalid webhook payload: missing issue");
+  if (!isObjectLike(comment)) throw new Error("Invalid webhook payload: missing comment");
   requireString(parsed.action, "action");
   requireString(repository.full_name, "repository.full_name");
   requireNumber(issue.number, "issue.number");
@@ -89,20 +84,20 @@ export function parseIssueCommentPayload(rawBody: Uint8Array): GiteaIssueComment
   requireNumber(comment.id, "comment.id");
   if (parsed.pull_request != null) {
     const pr = parsed.pull_request;
-    if (!isObject(pr)) throw new Error("Invalid webhook payload: missing pull_request");
+    if (!isObjectLike(pr)) throw new Error("Invalid webhook payload: missing pull_request");
     requireNumber(pr.number, "pull_request.number");
-    if (!isObject(pr.head)) throw new Error("Invalid webhook payload: missing pull_request.head");
+    if (!isObjectLike(pr.head)) throw new Error("Invalid webhook payload: missing pull_request.head");
   }
   return parsed as unknown as GiteaIssueCommentPayload;
 }
 
 export function parsePullRejectedPayload(rawBody: Uint8Array): GiteaPRPayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
   const pr = parsed.pull_request;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
-  if (!isObject(pr)) throw new Error("Invalid webhook payload: missing pull_request");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(pr)) throw new Error("Invalid webhook payload: missing pull_request");
   requireString(repository.full_name, "repository.full_name");
   requireNumber(pr.number, "pull_request.number");
   if (typeof parsed.action !== "string" || !parsed.action) parsed.action = "reviewed";
@@ -426,7 +421,7 @@ export async function shouldEnqueuePullAssign(
         return { type: "skip", reason: "closing issue already assigned" };
       }
     } catch (err) {
-      logger?.(`failed to load issue: ${err instanceof Error ? err.message : String(err)}`);
+      logger?.(`failed to load issue: ${errorMessage(err)}`);
       return {
         type: "skip",
         reason: "failed to load issue",
@@ -490,7 +485,7 @@ export async function shouldEnqueuePullLabel(
         return { type: "skip", reason: "closing issue already assigned" };
       }
     } catch (err) {
-      logger?.(`failed to load issue: ${err instanceof Error ? err.message : String(err)}`);
+      logger?.(`failed to load issue: ${errorMessage(err)}`);
       return {
         type: "skip",
         reason: "failed to load issue",

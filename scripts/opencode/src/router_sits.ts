@@ -1,4 +1,5 @@
 import { createBunSqlClient, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Why Jumi is sitting still for one pull or issue.
@@ -454,7 +455,7 @@ export async function rememberSitBestEffort(
   try {
     await sits.remember(owner, repo, number, code);
   } catch (err) {
-    logger?.(`sit remember failed ${owner}/${repo}#${number}: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`sit remember failed ${owner}/${repo}#${number}: ${errorMessage(err)}`);
   }
 }
 
@@ -470,6 +471,6 @@ export async function clearSitBestEffort(
   try {
     await sits.clear(owner, repo, number);
   } catch (err) {
-    logger?.(`sit clear failed ${owner}/${repo}#${number}: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`sit clear failed ${owner}/${repo}#${number}: ${errorMessage(err)}`);
   }
 }

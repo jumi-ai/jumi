@@ -1,5 +1,6 @@
 import { EngineFailedError } from "./engine.ts";
 import { omitClaudeConfigWarning } from "./status_description.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const AUTH_DEATH_REASON = "provider auth death";
 
@@ -77,6 +78,6 @@ export function providerAuthDeathForRun(opts: { type?: string; model?: string; t
 
 export function isAuthFailure(err: unknown): boolean {
   if (err instanceof EngineFailedError) return err.auth === true;
-  const text = err instanceof Error ? err.message : String(err);
+  const text = errorMessage(err);
   return looksLikeProviderAuthDeath(text);
 }

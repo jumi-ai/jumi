@@ -17,6 +17,7 @@ import {
   repoMode,
 } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
 export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
@@ -453,9 +454,7 @@ export async function isAutomergeLabelAdmitted(opts: {
     const admitted = await senderCanSteer(api, opts.owner, opts.repo, adder, opts.trustedSenderLogins);
     return admitted ? { admitted: true, adder } : { admitted: false, adder };
   } catch (err) {
-    log(
-      `automerge sender check failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge sender check failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { admitted: false, adder, unreadable: true };
   }
 }
@@ -484,9 +483,7 @@ async function cancelAutomergeSchedule(
   } catch (err) {
     // A missing schedule is the steady state; any other failure stays in the
     // server log and never fails the job.
-    log(
-      `automerge cancel failed for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge cancel failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return false;
   }
 }
@@ -510,9 +507,7 @@ export async function scheduleAutomergeForNewPr(
       effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, settings);
     }
   } catch (err) {
-    log(
-      `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
   }
   let copiedTrusted: boolean | undefined;
   try {
@@ -557,9 +552,7 @@ async function loadPrFiles(
     if (typeof listFiles !== "function") return [];
     return await listFiles.call(api, owner, repo, prNumber);
   } catch (err) {
-    log(
-      `automerge pull files unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge pull files unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return undefined;
   }
 }
@@ -595,9 +588,7 @@ async function loadPrLabels(
     const pr = await api.getPR(owner, repo, prNumber);
     return (pr.labels ?? []) as AutomergeLabelList;
   } catch (err) {
-    log(
-      `automerge pull unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge pull unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return undefined;
   }
 }
@@ -759,9 +750,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   try {
     settings = await loadRepoSettings(api, input.owner, input.repo, input.baseBranch);
   } catch (err) {
-    log(
-      `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     await postAutomergeNote(
       api,
       input.owner,
@@ -914,9 +903,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     log(`automerge scheduled for ${input.owner}/${input.repo}#${input.prNumber} (${gate.mergeMethod})`);
     return { scheduled: true };
   } catch (err) {
-    log(
-      `automerge schedule failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge schedule failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     await postAutomergeNote(
       api,
       input.owner,
@@ -957,9 +944,7 @@ async function checkAutomergeGates(
       };
     }
   } catch (err) {
-    log(
-      `automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return {
       ok: false,
       note: `Jumi did not schedule auto-merge on this pull request: the base branch requirements could not be read. A person needs to merge once reviews and CI are green.`,
@@ -1014,9 +999,7 @@ async function checkAutomergeGates(
     }
     return { ok: true, mergeMethod: style };
   } catch (err) {
-    log(
-      `automerge repo unreadable for ${owner}/${repo}#${prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge repo unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return {
       ok: false,
       note: `Jumi did not schedule auto-merge on this pull request: the repository merge settings could not be read. A person needs to merge once reviews and CI are green.`,
@@ -1055,9 +1038,7 @@ export async function copyIssueAutomergeLabelsToPr(opts: {
     const issue = await getIssue.call(opts.api, opts.owner, opts.repo, opts.issueNumber);
     issueLabels = (issue.labels ?? []) as AutomergeLabelList;
   } catch (err) {
-    log(
-      `automerge issue labels unreadable for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge issue labels unreadable for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${errorMessage(err)}`);
     return { copiedAutomerge: false, copiedNoAutomerge: false };
   }
   const wantAutomerge = hasLabelCaseInsensitive(issueLabels, opts.automergeLabel);
@@ -1090,9 +1071,7 @@ export async function copyIssueAutomergeLabelsToPr(opts: {
       log(`automerge copied label \`${label}\` from issue #${opts.issueNumber} to PR #${opts.prNumber}`);
       return true;
     } catch (err) {
-      log(
-        `automerge label copy failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`automerge label copy failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
       return false;
     }
   };
@@ -1201,9 +1180,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       const pr = await noteApi.getPR(input.owner, input.repo, input.prNumber);
       prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
     } catch (err) {
-      log(
-        `automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
       return;
     }
     let defaultBranch = "main";
@@ -1211,18 +1188,14 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       const info = await noteApi.getRepo(input.owner, input.repo);
       if (typeof info.default_branch === "string" && info.default_branch) defaultBranch = info.default_branch;
     } catch (err) {
-      log(
-        `automerge repo unreadable for ${input.owner}/${input.repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`automerge repo unreadable for ${input.owner}/${input.repo}: ${errorMessage(err)}`);
       return;
     }
     let settings: RepoSettingsLoad | undefined;
     try {
       settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
     } catch (err) {
-      log(
-        `automerge settings unreadable for ${input.owner}/${input.repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      log(`automerge settings unreadable for ${input.owner}/${input.repo}: ${errorMessage(err)}`);
       return;
     }
     if (settings.state !== "valid") return;
@@ -1281,9 +1254,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   try {
     current = await input.api.getPR(input.owner, input.repo, input.prNumber);
   } catch (err) {
-    log(
-      `automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     return;
   }
   if (current.merged || current.state !== "open") return;
@@ -1300,9 +1271,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
   try {
     settings = await loadRepoSettings(noteApi, input.owner, input.repo, defaultBranch);
   } catch (err) {
-    log(
-      `automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     return;
   }
   if (settings.state === "invalid") {
@@ -1438,9 +1407,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     await schedule.call(input.api, input.owner, input.repo, input.prNumber, { mergeMethod });
     log(`automerge restored for ${input.owner}/${input.repo}#${input.prNumber} (${mergeMethod})`);
   } catch (err) {
-    log(
-      `automerge restore failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge restore failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
   }
 }
 
@@ -1564,9 +1531,7 @@ export async function handleAutomergeLabelChange(opts: {
     if (pr.merged || pr.state !== "open") return { action: "none" };
     prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
   } catch (err) {
-    log(
-      `automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { action: "none" };
   }
   const listed = isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos);
@@ -1595,9 +1560,7 @@ export async function handleAutomergeLabelChange(opts: {
   try {
     settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.baseBranch);
   } catch (err) {
-    log(
-      `automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { action: "none" };
   }
   if (settings.state === "invalid") {

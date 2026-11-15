@@ -11,6 +11,7 @@ import {
   resolveRunnerSelection,
 } from "./runners.ts";
 import { searxngUrlFromEnv } from "./searxng.ts";
+import { csvEnv, intEnv, optionalEnv } from "./util/env.ts";
 
 export interface WorkerConfig {
   host: string;
@@ -78,29 +79,6 @@ export interface WorkerConfig {
 }
 
 type Env = Record<string, string | undefined>;
-
-function optionalEnv(env: Env, name: string, fallback?: string): string | undefined {
-  return env[name] || fallback;
-}
-
-function intEnv(env: Env, name: string, fallback: number): number {
-  const value = env[name];
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid positive integer for ${name}: ${value}`);
-  }
-  return parsed;
-}
-
-function csvEnv(env: Env, name: string, fallback: string[] = []): string[] {
-  const value = env[name];
-  if (!value) return fallback;
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
 
 function checkpointBit(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value === "") return fallback;

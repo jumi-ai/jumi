@@ -29,16 +29,8 @@ import { MemorySkipLatchStore } from "../src/skip_latches.ts";
 import { fingerprintReviewArtifact, readStuckState, stuckMarker, writeStuckState } from "../src/stuck.ts";
 import { buildCheckTrailer } from "../src/verdict.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import {
-  emptyCiMethods,
-  makeBranch,
-  makeComment,
-  makeFile,
-  makeIssue,
-  makePR,
-  makeRepo,
-  makeUser,
-} from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -49,29 +41,12 @@ function lastNonEmptyLine(text: string): string {
   return "";
 }
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function reviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 const skipOptions = {
@@ -194,28 +169,28 @@ describe("reviewPullRequest", () => {
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ state: "closed" }) }),
+        api: reviewApi({ getPR: async () => makePR({ state: "closed" }) }),
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR is closed" });
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ merged: true }) }),
+        api: reviewApi({ getPR: async () => makePR({ merged: true }) }),
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR is already merged" });
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ title: "WIP no" }) }),
+        api: reviewApi({ getPR: async () => makePR({ title: "WIP no" }) }),
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "PR title disables review" });
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ title: "WIP: no" }) }),
+        api: reviewApi({ getPR: async () => makePR({ title: "WIP: no" }) }),
         openCodeRunner: runner,
       })
     ).resolves.toEqual({ status: "skipped", reason: "draft or WIP pull request" });
@@ -238,7 +213,7 @@ describe("reviewPullRequest", () => {
         let runs = 0;
         const result = await reviewPullRequest({
           ...reviewOptionsWithSha(workspace),
-          api: makeApi({
+          api: reviewApi({
             getPR: async () => ({ ...pr, head: makeBranch({ sha: REVIEW_SHA }) }),
             getRepoFile: async () => ({ found: true, content: "review_drafts: true\n" }),
           }),
@@ -259,7 +234,7 @@ describe("reviewPullRequest", () => {
       throw new Error("runner should not be called");
     };
     const statuses: Array<{ state: string }> = [];
-    const pendingApi = makeApi({
+    const pendingApi = reviewApi({
       listCommitStatuses: async () => [{ id: 1, context: "build", status: "pending" }],
       createCommitStatus: async (_owner, _repo, _sha, status) => {
         statuses.push(status);
@@ -276,7 +251,7 @@ describe("reviewPullRequest", () => {
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({
+        api: reviewApi({
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             failedStatuses.push(status);
@@ -292,7 +267,7 @@ describe("reviewPullRequest", () => {
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({
+        api: reviewApi({
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
           ],
@@ -314,7 +289,7 @@ describe("reviewPullRequest", () => {
     let looks = 0;
     const result = await reviewPullRequest({
       ...skipOptions,
-      api: makeApi({
+      api: reviewApi({
         listCommitStatuses: async () => [],
         listCheckRuns: async () => [],
         listActionJobs: async () => {
@@ -336,7 +311,7 @@ describe("reviewPullRequest", () => {
     let looks = 0;
     const result = await reviewPullRequest({
       ...skipOptions,
-      api: makeApi({
+      api: reviewApi({
         listActionJobs: async () => {
           looks++;
           throw new Error("rate limited");
@@ -355,7 +330,7 @@ describe("reviewPullRequest", () => {
     let looks = 0;
     const result = await reviewPullRequest({
       ...skipOptions,
-      api: makeApi({
+      api: reviewApi({
         listActionJobs: async () => {
           looks++;
           if (looks === 1) throw new Error("rate limited");
@@ -374,7 +349,7 @@ describe("reviewPullRequest", () => {
     };
     const result = await reviewPullRequest({
       ...skipOptions,
-      api: makeApi({
+      api: reviewApi({
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
         listActionJobs: async () => {
           throw new Error("rate limited");
@@ -389,7 +364,7 @@ describe("reviewPullRequest", () => {
     let looks = 0;
     const result = await reviewPullRequest({
       ...skipOptions,
-      api: makeApi({
+      api: reviewApi({
         listCommitStatuses: async () => [],
         listCheckRuns: async () => [],
         listActionJobs: async () => {
@@ -409,7 +384,7 @@ describe("reviewPullRequest", () => {
     await withWorkspace(async (workspace) => {
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ title: "Add thing [skip review]", head: makeBranch({ sha: REVIEW_SHA }) }),
         }),
         openCodeRunner: async () => {
@@ -440,7 +415,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...skipOptions,
         home,
-        api: makeApi({
+        api: reviewApi({
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
             return status;
@@ -471,7 +446,7 @@ describe("reviewPullRequest", () => {
         await reviewPullRequest({
           ...reviewOptions(workspace),
           home,
-          api: makeApi(),
+          api: reviewApi(),
           openCodeRunner: async () => {
             await writeReview(workspace, "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->");
             return { status: "ok" };
@@ -506,7 +481,7 @@ describe("reviewPullRequest", () => {
       const persisted: PersistReviewResult[] = [];
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             sticky = body;
@@ -570,7 +545,7 @@ describe("reviewPullRequest", () => {
       let updated = false;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           findStickyIssueComment: async () => ({ id: 99 }),
           updateIssueComment: async () => {
             updated = true;
@@ -609,7 +584,7 @@ describe("reviewPullRequest", () => {
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
           maxIncompleteRetries: 0,
-          api: makeApi({
+          api: reviewApi({
             createIssueComment: async (_owner, _repo, _index, body) => {
               comments.push(body);
               return makeComment({ id: comments.length, body });
@@ -646,7 +621,7 @@ describe("reviewPullRequest", () => {
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
           maxIncompleteRetries: 0,
-          api: makeApi({
+          api: reviewApi({
             createIssueComment: async (_owner, _repo, _index, body) => {
               comments.push(body);
               return makeComment({ id: comments.length, body });
@@ -679,7 +654,7 @@ describe("reviewPullRequest", () => {
         let ran = 0;
         const result = await reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
-          api: makeApi({
+          api: reviewApi({
             createIssueComment: async (_owner, _repo, _index, body) => {
               comments.push(body);
               return makeComment({ id: comments.length, body });
@@ -710,7 +685,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
         maxIncompleteRetries: 0,
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -735,7 +710,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: "?? JUMI_REVIEW.md/" })),
         maxIncompleteRetries: 0,
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -761,7 +736,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
         maxOutputBytes: 80_000,
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             created = true;
             return makeComment({ id: 1, body });
@@ -790,7 +765,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
         maxIncompleteRetries: 0,
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -818,7 +793,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -844,7 +819,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -873,7 +848,7 @@ describe("reviewPullRequest", () => {
       await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
         maxIncompleteRetries: 1,
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async () => {
           ran++;
           return { status: "ok" };
@@ -888,7 +863,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async (opts) => {
           ran++;
           const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
@@ -916,7 +891,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
             return makeComment({ id: comments.length, body });
@@ -955,7 +930,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async (opts) => {
           ran++;
           const task = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
@@ -984,7 +959,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
         fallbackModel: "anthropic/claude-sonnet-4-6",
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async (opts) => {
           calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
           if (opts.model === "openai/gpt-5.5") {
@@ -1008,7 +983,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
         fallbackModel: "anthropic/claude-sonnet-4-6",
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async (opts) => {
           calls.push({ model: opts.model, continueSession: opts.continueSession, hop: opts.hop });
           if (opts.model === "openai/gpt-5.5") {
@@ -1038,7 +1013,7 @@ describe("reviewPullRequest", () => {
     await withWorkspace(async (workspace) => {
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: "?? .jumi-tmp/\n?? JUMI_REVIEW.md" })),
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async () => {
           await mkdir(join(workspace, ".jumi-tmp"), { recursive: true });
           await writeFile(join(workspace, ".jumi-tmp", "opencode-session.db"), "db");
@@ -1057,7 +1032,7 @@ describe("reviewPullRequest", () => {
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             sticky = body;
@@ -1104,7 +1079,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
@@ -1150,7 +1125,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
@@ -1223,7 +1198,7 @@ describe("reviewPullRequest", () => {
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
         maxIncompleteRetries: 0,
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createIssueComment: async (_owner, _repo, _index, body) => {
             comments.push(body);
@@ -1265,7 +1240,7 @@ describe("reviewPullRequest", () => {
       const statuses: Array<{ state: string; description?: string }> = [];
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
             return status;
@@ -1290,7 +1265,7 @@ describe("reviewPullRequest", () => {
       let sticky = "";
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             sticky = body;
             return makeComment({ id: 44, body });
@@ -1338,7 +1313,7 @@ describe("reviewPullRequest", () => {
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ head: "other sha" })),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             created = true;
             return makeComment({ id: 1, body });
@@ -1365,7 +1340,7 @@ describe("reviewPullRequest", () => {
       const statuses: Array<{ state: string; description?: string }> = [];
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, frozenGit({ porcelain: " M src/demo.ts\n?? JUMI_REVIEW.md" })),
-        api: makeApi({
+        api: reviewApi({
           createIssueComment: async (_owner, _repo, _index, body) => {
             created = true;
             return makeComment({ id: 1, body });
@@ -1403,7 +1378,7 @@ describe("reviewPullRequest", () => {
       let engineSaw = "";
       const result = await reviewPullRequest({
         ...reviewOptions(workspace, gitRunner),
-        api: makeApi(),
+        api: reviewApi(),
         openCodeRunner: async () => {
           engineSaw = await readFile(join(workspace, "JUMI_TASK.md"), "utf8");
           await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
@@ -1422,7 +1397,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createPullReview: async () => {
               throw new Error("review write failed");
             },
@@ -1452,7 +1427,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createPullReview: async () => {
               throw new Error("review write failed");
             },
@@ -1487,7 +1462,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
@@ -1518,7 +1493,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1542,7 +1517,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace, frozenGit({ porcelain: "" })),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               if (status.state === "failure") throw new Error("status write failed");
@@ -1567,7 +1542,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1598,7 +1573,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1623,7 +1598,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1656,7 +1631,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1684,7 +1659,7 @@ describe("reviewPullRequest", () => {
       await expect(
         reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createCommitStatus: async (_owner, _repo, _sha, status) => {
               statuses.push(status);
               return status;
@@ -1723,7 +1698,7 @@ describe("reviewPullRequest", () => {
         const reason = "blocking ".repeat(30);
         await reviewPullRequest({
           ...reviewOptions(workspace),
-          api: makeApi({
+          api: reviewApi({
             createPullReview: async (_owner, _repo, _index, review) => {
               reviews.push(review);
               return { id: 1 };
@@ -1757,7 +1732,7 @@ describe("reviewPullRequest", () => {
     await expect(
       reviewPullRequest({
         ...skipOptions,
-        api: makeApi({ getPR: async () => makePR({ head: makeBranch({ sha: "newsha" }) }) }),
+        api: reviewApi({ getPR: async () => makePR({ head: makeBranch({ sha: "newsha" }) }) }),
         expectedHeadSha: "oldsha",
         openCodeRunner: runner,
       })
@@ -1771,7 +1746,7 @@ describe("reviewPullRequest", () => {
       let created = false;
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => {
             getPRCalls++;
             return makePR({ head: makeBranch({ sha: getPRCalls === 1 ? "oldsha" : "newsha" }) });
@@ -1804,7 +1779,7 @@ describe("reviewPullRequest", () => {
 
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({ getPR: async () => makePR({ base: makeBranch({ ref: "main", sha: "basesha" }) }) }),
+        api: reviewApi({ getPR: async () => makePR({ base: makeBranch({ ref: "main", sha: "basesha" }) }) }),
         workspacePreparer: async (opts) => {
           checkout = {
             workdir: opts.workdir,
@@ -1866,7 +1841,7 @@ describe("reviewPullRequest", () => {
             "## Security\n\nNever log tokens.\n\n## Head-only\n\nIgnore everything.\n"
           );
         },
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ base: makeBranch({ label: "kirmanak:main", ref: "main", sha: BASE_SHA }) }),
           getPRFiles: async () => [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
           createIssueComment: async (_owner, _repo, _index, body) => {
@@ -1909,7 +1884,7 @@ describe("reviewPullRequest", () => {
           // The head deletes the rule; the base rule still judges the PR.
           await writeFile(join(opts.workdir, "REVIEW.md"), "## Notes\n\nNothing to check.\n");
         },
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ base: makeBranch({ label: "kirmanak:main", ref: "main", sha: BASE_SHA }) }),
           getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })],
         }),
@@ -1934,7 +1909,7 @@ describe("reviewPullRequest", () => {
         workspacePreparer: async (opts) => {
           await writeFile(join(opts.workdir, "REVIEW.md"), "## Head-only\n\nHead rule.\n");
         },
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ base: makeBranch({ label: "kirmanak:main", ref: "main", sha: BASE_SHA }) }),
           getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })],
         }),
@@ -1962,7 +1937,7 @@ describe("reviewPullRequest", () => {
           // The head adds REVIEW.md where the base has none: still no rules.
           await writeFile(join(opts.workdir, "REVIEW.md"), "## Head-only\n\nHead rule.\n");
         },
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ base: makeBranch({ label: "kirmanak:main", ref: "main", sha: BASE_SHA }) }),
           getPRFiles: async () => [makeFile({ filename: "k3s/apps/gitea/values.yaml" })],
           createCommitStatus: async (_owner, _repo, _sha, s) => {
@@ -1991,7 +1966,7 @@ describe("reviewPullRequest", () => {
       let prompt = "";
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPRFiles: async () => [
             makeFile({ filename: "first.ts", patch: "abcdef" }),
             makeFile({ filename: "second.ts", patch: "ghijkl" }),
@@ -2017,7 +1992,7 @@ describe("reviewPullRequest", () => {
     await withWorkspace(async (workspace) => {
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ body: "Fixes #12" }),
           getIssue: async (_owner, _repo, index) => {
             calls.push({ method: "getIssue", index });
@@ -2045,7 +2020,7 @@ describe("reviewPullRequest", () => {
       let prompt = "";
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ body: "Fixes #12" }),
           getIssue: async () => {
             throw new Error("Gitea API GET https://gitea.example/issues/12 → 404: not found");
@@ -2069,7 +2044,7 @@ describe("reviewPullRequest", () => {
       let prompt = "";
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           listIssueComments: async () => [
             makeComment({
               id: 10,
@@ -2106,7 +2081,7 @@ describe("reviewPullRequest", () => {
         logger: (message: string) => {
           logs.push(message);
         },
-        api: makeApi({
+        api: reviewApi({
           listIssueComments: async () => [
             makeComment({
               id: 10,
@@ -2148,7 +2123,7 @@ describe("reviewPullRequest", () => {
       let prompt = "";
       await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           listIssueComments: async () => [
             makeComment({
               id: 10,
@@ -2179,7 +2154,7 @@ describe("reviewPullRequest", () => {
         logger: (message: string) => {
           logs.push(message);
         },
-        api: makeApi({
+        api: reviewApi({
           listIssueComments: async () => [
             makeComment({
               id: 10,
@@ -2219,7 +2194,7 @@ describe("reviewPullRequest", () => {
         logger: (message: string) => {
           logs.push(message);
         },
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ body: "Fixes #12" }),
           getIssue: async () => makeIssue({ number: 12, body: "ORIGINAL_CONSTRAINT_USE_SQLITE" }),
           listPullReviews: async () => [
@@ -2363,7 +2338,7 @@ optionalEnv(resolved, "DATABASE_URL");
 
   function personalJumiApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     const repo = makeRepo({ name: "jumi", owner: makeUser({ login: "personal" }), full_name: "personal/jumi" });
-    return makeApi({
+    return reviewApi({
       getRepo: async () => repo,
       getPR: async () =>
         makePR({
@@ -2508,7 +2483,7 @@ optionalEnv(resolved, "DATABASE_URL");
       const reviews: Array<{ body?: string }> = [];
       await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createPullReview: async (_owner, _repo, _index, review) => {
             reviews.push(review);
@@ -2531,7 +2506,7 @@ optionalEnv(resolved, "DATABASE_URL");
       let task = "";
       const result = await reviewPullRequest({
         ...reviewOptions(workspace),
-        api: makeApi({
+        api: reviewApi({
           listCommitStatuses: async () => {
             calls.statuses++;
             return [
@@ -2592,7 +2567,7 @@ optionalEnv(resolved, "DATABASE_URL");
           },
         ],
         ciHeadSha: "headsha",
-        api: makeApi({
+        api: reviewApi({
           listCommitStatuses: async () => {
             calls.statuses++;
             return [];
@@ -2656,7 +2631,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       expectedHeadSha: "oldsha",
       resultMarkdown: "src/foo.ts:12: 🔴 bug: stale.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ head: makeBranch({ sha: "newsha" }) }),
         createIssueComment: async (_owner, _repo, _index, body) => {
           created = true;
@@ -2683,7 +2658,7 @@ describe("publishReviewResult", () => {
     const first = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "first\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: reviews.length };
@@ -2695,7 +2670,7 @@ describe("publishReviewResult", () => {
     const second = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "💡 simpler: second\n<!-- jumi-check: success; 1 suggestion -->",
-      api: makeApi({
+      api: reviewApi({
         findStickyIssueComment: async () => ({ id: 44 }),
         updateIssueComment: async () => {
           throw new Error("should not update sticky");
@@ -2722,7 +2697,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
       resultRunner: "_Jumi · claude · claude-opus-5 (high)_",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: reviews.length };
@@ -2741,7 +2716,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultReason: "Incomplete review: no output",
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           comments.push(body);
           return makeComment({ body });
@@ -2771,7 +2746,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       error: marker,
-      api: makeApi({
+      api: reviewApi({
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
           return status;
@@ -2791,7 +2766,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultReason: marker,
-      api: makeApi({
+      api: reviewApi({
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
           return status;
@@ -2812,7 +2787,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       error: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -2843,7 +2818,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       error: `Jumi review failed: opencode exited with code 143:\n${stderr}`,
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async () => {
           reviews.push(true);
           return { id: 1 };
@@ -2882,7 +2857,7 @@ describe("publishReviewResult", () => {
         "plain prose without a location",
         "<!-- jumi-check: failure; 1 blocking -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -2924,7 +2899,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "L12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })],
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -2956,7 +2931,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "L12: 🔴 bug: null deref. Guard it.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         getPRFiles: async () => [makeFile({ filename: "a.ts" }), makeFile({ filename: "b.ts" })],
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -2985,7 +2960,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3029,7 +3004,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () =>
           batchRejected && !pendingSubmitted ? [{ id: 99, state: "PENDING", user: makeUser({ login: "jumi" }) }] : [],
         listPullReviewComments: async () =>
@@ -3095,7 +3070,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3140,7 +3115,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3207,7 +3182,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3274,7 +3249,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => (pendingSubmitted ? [{ ...pendingReview, state: "COMMENTED" }] : [pendingReview]),
         listPullReviewComments: async () => [pendingComment],
         submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
@@ -3315,7 +3290,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       logger: (message) => logs.push(message),
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3373,7 +3348,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => [
           { id: 5, commit_id: "headsha", user: makeUser({ login: "jumi" }) },
           { id: 6, commit_id: "headsha", user: makeUser({ login: "alice" }) },
@@ -3433,7 +3408,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:18: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => [{ id: 5, commit_id: "oldsha", user: makeUser({ login: "jumi" }) }],
         listPullReviewComments: async () => [
           {
@@ -3469,7 +3444,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => [{ id: 5, commit_id: "headsha", user: makeUser({ login: "jumi" }) }],
         listPullReviewComments: async () => [
           {
@@ -3508,7 +3483,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:40: 🟡 risk: second.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => [
           {
             ...makeComment({
@@ -3560,7 +3535,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => (pendingSubmitted ? [] : [pendingReview]),
         submitPullReview: async (_owner, _repo, _index, reviewId, body) => {
           expect(body).toBe("<!-- jumi-review:kirmanak/demo#7 -->");
@@ -3592,7 +3567,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () =>
           batchRejected ? [{ id: 99, state: "PENDING", commit_id: "oldsha", user: makeUser({ login: "jumi" }) }] : [],
         submitPullReview: async (_owner, _repo, _index, reviewId) => {
@@ -3623,7 +3598,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3648,7 +3623,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -3663,7 +3638,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "jumi" }) }),
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -3687,7 +3662,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       logger: (message) => logs.push(message),
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           if (review.event === "APPROVED") throw new Error("not allowed to approve your own pull request");
@@ -3715,7 +3690,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviews: async () => [
           { id: 9, state: "REQUEST_CHANGES", user: makeUser({ login: "jumi" }) },
           { id: 10, state: "REQUEST_CHANGES", dismissed: true, user: makeUser({ login: "jumi" }) },
@@ -3740,7 +3715,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => [
           {
             ...makeComment({
@@ -3790,7 +3765,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:18: 🔴 bug: first.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => [
           {
             ...makeComment({
@@ -3834,7 +3809,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "jumi" }) }),
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
@@ -3864,7 +3839,7 @@ describe("publishReviewResult", () => {
         "No blocking findings on this SHA.",
         "<!-- jumi-check: success -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -3894,7 +3869,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown,
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -3920,7 +3895,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown,
-      api: makeApi({
+      api: reviewApi({
         createIssueComment: async (_owner, _repo, _index, body) => {
           sticky = body;
           return makeComment({ id: 44, body });
@@ -3939,7 +3914,7 @@ describe("publishReviewResult", () => {
     await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -3960,7 +3935,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
@@ -3983,7 +3958,7 @@ describe("publishReviewResult", () => {
         "src/bar.ts:7: ❓ question: was the upgrade validated?",
         "<!-- jumi-check: success -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -4007,7 +3982,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: ["renovate-bot"],
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "alice" }) }),
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -4030,7 +4005,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: ["Renovate-Bot"],
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
@@ -4047,7 +4022,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: ["renovate-bot"],
       resultMarkdown: "Verified the timeout against the upstream changelog.\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
@@ -4068,7 +4043,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:12: ❓ q: was the coordinator-drop recovery re-checked against the new zigbee-herdsman?",
         "<!-- jumi-check: success -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
           statuses.push(status);
@@ -4085,7 +4060,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: [],
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "repo-bot" }) }),
         getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
@@ -4103,7 +4078,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: [],
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "alice" }) }),
         getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
@@ -4121,7 +4096,7 @@ describe("publishReviewResult", () => {
       ...publishOpts,
       blockingQuestionAuthors: ["renovate-bot"],
       resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         getPR: async () => makePR({ user: makeUser({ login: "renovate-bot" }) }),
         getRepoFile: async () => ({ found: true, content: "blocking_question_authors:\n  - repo-bot\n" }),
         createCommitStatus: async (_owner, _repo, _sha, status) => {
@@ -4142,7 +4117,7 @@ describe("publishReviewResult", () => {
         "renovate.json:37: 🟡 risk: the tag could drop the `rust-v` prefix.",
         "<!-- jumi-check: failure; 1 risk -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => inlines,
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
@@ -4177,7 +4152,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "src/foo.ts:12: 🔴 bug: null deref. Guard it.\n<!-- jumi-check: failure -->",
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => [
           {
             ...makeComment({
@@ -4212,7 +4187,7 @@ describe("publishReviewResult", () => {
         "src/b.ts:2: 🟡 risk: second slips.",
         "<!-- jumi-check: failure -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         listPullReviewComments: async () => [
           {
             ...makeComment({
@@ -4248,7 +4223,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           reviews.push(review);
           return { id: 1 };
@@ -4276,7 +4251,7 @@ describe("publishReviewResult", () => {
         "src/bar.ts:7: 💡 simpler: drop the wrapper.",
         "<!-- jumi-check: failure; 2 blocking -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async () => {
           posted = true;
           return { id: 1 };
@@ -4303,7 +4278,7 @@ describe("publishReviewResult", () => {
         "src/foo.ts:12: ❓ q: is the timeout intentional?",
         "<!-- jumi-check: failure; 1 blocking -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async () => {
           posted = true;
           return { id: 1 };
@@ -4330,7 +4305,7 @@ describe("publishReviewResult", () => {
         "  The earlier deny-predicate finding is fixed and dropped. The remaining symlink variant is reported below as the one blocking finding.",
         "<!-- jumi-check: failure; 1 blocking -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           if (review.body) bodies.push(review.body);
           return { id: 1 };
@@ -4357,7 +4332,7 @@ describe("publishReviewResult", () => {
         "src/a.ts:3: 🔴 bug: second null deref. Guard it.",
         "<!-- jumi-check: failure; 1 blocking -->",
       ].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           if (review.body) bodies.push(review.body);
           return { id: 1 };
@@ -4380,7 +4355,7 @@ describe("publishReviewResult", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: ["src/a.ts:2: 🟡 risk: race on retry.", "<!-- jumi-check: failure; needs work -->"].join("\n"),
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           if (review.body) bodies.push(review.body);
           return { id: 1 };
@@ -4414,7 +4389,7 @@ describe("suggestion hold", () => {
     settingsContent: string | undefined,
     headSha = "headsha"
   ) {
-    return makeApi({
+    return reviewApi({
       getPR: async () => makePR({ head: makeBranch({ sha: headSha }) }),
       getPRFiles: async () => [makeFile()],
       getRepoFile: async () =>
@@ -4542,7 +4517,7 @@ describe("check trailer reason sanitization", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: markdown,
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           if (typeof review.body === "string") bodies.push(review.body);
           return { id: 1 };
@@ -4578,7 +4553,7 @@ describe("check trailer reason sanitization", () => {
     const result = await publishReviewResult({
       ...publishOpts,
       resultMarkdown: "Looks good.\n<!-- jumi-check: success -->",
-      api: makeApi({
+      api: reviewApi({
         createPullReview: async (_owner, _repo, _index, review) => {
           if (typeof review.body === "string") bodies.push(review.body);
           return { id: 1 };

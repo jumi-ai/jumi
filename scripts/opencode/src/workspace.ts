@@ -5,6 +5,7 @@ import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 export { GITHUB_GIT_USERNAME } from "./github_auth.ts";
 
@@ -493,7 +494,7 @@ export async function prepareGradleSeed(
   try {
     entries = await readdir(seedHome);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = errorMessage(err);
     log?.(`gradle seed unavailable: ${seedHome} unreadable (${detail}), continuing without cache`);
     return {};
   }
@@ -536,7 +537,7 @@ export async function prepareGradleSeed(
         await cp(staging, dest, { recursive: true });
       }
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       log?.(`gradle seed copy failed: ${src} (${detail}), continuing without cache`);
       return {};
     } finally {

@@ -1,5 +1,6 @@
 import { looksLikeProviderAuthDeath } from "./auth.ts";
 import { EngineFailedError } from "./engine.ts";
+import { errorMessage } from "./util/error.ts";
 
 const PROVIDER_UNAVAILABLE_RE =
   /rate[\s_-]*limit|too many requests|resource[_\s-]*exhausted|out of quota|\b429\b|insufficient[_\s-]*quota|quota[_\s-]*(?:exceeded|exhausted)|usage[_\s-]*limit|hit your (?:usage|free|session) limit|overloaded|\b(?:500|502|503|504)\b|bad gateway|gateway timeout|internal[\s_-]*server[\s_-]*error|service unavailable|provider(?: returned)?(?: error| (?:is )?unavailable)|model (?:not found|does not exist|unavailable|is not available|gone|not available)|unknown model|no such model|not a valid model|is not supported when using[^\n]{0,200}account/i;
@@ -46,7 +47,7 @@ export function classifyOpenCodeInfra(input: {
 
 export function isInfraFailure(err: unknown): boolean {
   if (err instanceof EngineFailedError) return err.infra;
-  const text = err instanceof Error ? err.message : String(err);
+  const text = errorMessage(err);
   if (looksLikeProviderAuthDeath(text)) return false;
   return looksLikeInfraStderr(text);
 }

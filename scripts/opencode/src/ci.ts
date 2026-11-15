@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
 import { type CiGateWait, DEFAULT_CI_GATE_WAIT, effectiveCiGateWait, loadRepoSettings } from "./repo_settings.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { errorMessage } from "./util/error.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
 
@@ -370,7 +371,7 @@ export async function resolveRequiredCiContexts(
       baseBranch = pr?.base?.ref;
     } catch (err) {
       opts.log?.(
-        `CI required checks unreadable for ${label}: base branch unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+        `CI required checks unreadable for ${label}: base branch unreadable (${errorMessage(err)}); falling back to any-check pending`
       );
       return undefined;
     }
@@ -390,7 +391,7 @@ export async function resolveRequiredCiContexts(
     branch = await api.getBranch(opts.owner, opts.repo, baseBranch);
   } catch (err) {
     opts.log?.(
-      `CI required checks unreadable for ${label}: ${baseBranch} unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+      `CI required checks unreadable for ${label}: ${baseBranch} unreadable (${errorMessage(err)}); falling back to any-check pending`
     );
     return undefined;
   }
@@ -572,18 +573,31 @@ function stripGiteaLogTimestamp(line: string): string {
 const FAIL_OR_ERROR_LINE =
   /^(?:\(fail\)|##\[error\]|Error:|fatal:|dpkg:|Error response from daemon:|ERROR:|helm:|Failed to connect\b|Could not resolve host\b|(?:tofu|terraform)\b|reading manifest\b)/;
 
-function failOrErrorEvidence(capped: string): string {
+function failOrErrorLines(capped: string): string[] {
   return capped
     .split(/\r?\n/)
     .map(stripGiteaLogTimestamp)
-    .filter((line) => !line.startsWith("(pass)") && FAIL_OR_ERROR_LINE.test(line))
-    .join("\n");
+    .filter((line) => !line.startsWith("(pass)") && FAIL_OR_ERROR_LINE.test(line));
+}
+
+function isGenericCiFooter(line: string): boolean {
+  return /process completed with exit code/i.test(line);
 }
 
 export function classifyInfraFlake(capped: string): string | undefined {
-  const evidence = failOrErrorEvidence(capped);
-  if (!evidence) return undefined;
-  return infraFlakeReason(evidence);
+  const lines = failOrErrorLines(capped);
+  if (lines.length === 0) return undefined;
+  // A failing test is a real failure even if its title contains infra words.
+  if (lines.some((line) => line.startsWith("(fail)"))) return undefined;
+  const substantive = lines.filter((line) => !isGenericCiFooter(line));
+  if (substantive.length === 0) return undefined;
+  let first: string | undefined;
+  for (const line of substantive) {
+    const reason = infraFlakeReason(line);
+    if (!reason) return undefined;
+    first ??= reason;
+  }
+  return first;
 }
 
 export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string): boolean {
@@ -781,7 +795,7 @@ export async function inspectCi(opts: {
   let lookupFailed = false;
   const noteLookupFailure = (err: unknown) => {
     lookupFailed = true;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     opts.log?.(`CI lookup failed for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${message}`);
   };
   let statuses: Check[] = [];
@@ -959,9 +973,7 @@ export async function resolveCiGate(
       const branch = info?.default_branch?.trim() ? (info.default_branch as string).trim() : "";
       if (branch) settingsRef = branch;
     } catch (err) {
-      opts.log?.(
-        `ci gate settings unreadable for ${opts.owner}/${opts.repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      opts.log?.(`ci gate settings unreadable for ${opts.owner}/${opts.repo}: ${errorMessage(err)}`);
     }
   }
   if (settingsRef && typeof api.getRepoFile === "function") {
@@ -973,9 +985,7 @@ export async function resolveCiGate(
         wait = effectiveCiGateWait(load);
       }
     } catch (err) {
-      opts.log?.(
-        `ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      opts.log?.(`ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${errorMessage(err)}`);
     }
   }
   if (wait === "all" || wait === "none") return { wait };

@@ -6,7 +6,8 @@ import type { IssueApi } from "../src/gitea_issues.ts";
 import { GithubAPI } from "../src/github_api.ts";
 import { implementIssue } from "../src/implement.ts";
 import { type GitAuth, type GitRunner, gitAuthResolverFor } from "../src/workspace.ts";
-import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo } from "./fixtures.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
+import { makeIssueJob, makePR } from "./fixtures.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -14,13 +15,8 @@ function stripGitConfigArgs(args: string[]): string[] {
   return result;
 }
 
-function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
+function gitApi(overrides: Partial<IssueApi> = {}): IssueApi {
+  return makeIssueApi({
     createPullRequest: async (_owner, _repo, pull) =>
       makePR({
         number: 3,
@@ -28,17 +24,8 @@ function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
         body: pull.body,
         html_url: "https://github.com/kirmanak/jumi/pull/3",
       }),
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
-    updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
@@ -69,7 +56,7 @@ describe("GitHub git clone/push", () => {
       let extraEnv: Record<string, string> | undefined;
 
       const result = await implementIssue({
-        api: makeApi(),
+        api: gitApi(),
         job: makeIssueJob({
           cloneUrl: "https://github.com/kirmanak/jumi.git",
           htmlUrl: "https://github.com/kirmanak/jumi/issues/12",
@@ -166,7 +153,7 @@ describe("GitHub git clone/push", () => {
 
       const giteaAuth = await gitAuthResolverFor(
         { giteaUrl: "https://gitea.kirmanak.stream", giteaToken: "bot-token", botUsername: "jumi" },
-        makeApi()
+        gitApi()
       )();
       expect(giteaAuth).toEqual({
         giteaUrl: "https://gitea.kirmanak.stream",
