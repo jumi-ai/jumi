@@ -1680,7 +1680,13 @@ describe("worker prompts", () => {
       expect(prompt).not.toContain("Do not run git");
       expect(prompt).not.toContain("The only Jumi files to read are");
     }
-    expect(buildImplementPrompt()).toContain("JUMI_PR.md");
+    expect(buildImplementPrompt()).toContain("set_pr_body");
+    expect(buildImplementPrompt()).toContain("set_handoff");
+    expect(buildImplementPrompt()).toContain("`skip`");
+    expect(buildImplementPrompt()).not.toContain("JUMI_PR.md");
+    expect(buildImplementPrompt()).not.toContain("JUMI_SKIP.md");
+    expect(buildImplementPrompt()).not.toContain("JUMI_BLOCKED.md");
+    expect(buildImplementPrompt()).not.toContain("write JUMI_HANDOFF.md");
   });
 
   test("workers commit per logical step and never push", () => {
@@ -1745,8 +1751,11 @@ describe("worker prompts", () => {
 
   test("first-run may yield a queue id then stop", () => {
     expect(buildImplementYieldPrompt()).toContain("JUMI_QUEUE.md");
-    expect(buildImplementYieldPrompt()).toContain("JUMI_BLOCKED.md");
-    expect(buildImplementYieldPrompt()).toContain("<!-- jumi-blocked-by: #N -->");
+    expect(buildImplementYieldPrompt()).toContain("blocked_on");
+    expect(buildImplementYieldPrompt()).toContain("#N");
+    expect(buildImplementYieldPrompt()).toContain("owner/repo#N");
+    expect(buildImplementYieldPrompt()).not.toContain("JUMI_BLOCKED.md");
+    expect(buildImplementYieldPrompt()).not.toContain("jumi-blocked-by");
     expect(buildImplementYieldPrompt()).toContain("Do not commit");
     expect(buildImplementYieldPrompt()).toContain("Do not push");
     expect(buildImplementYieldPrompt()).toContain("Do not implement a guess");
@@ -1754,15 +1763,36 @@ describe("worker prompts", () => {
     expect(buildImplementYieldPrompt()).toContain("cluster pin");
     expect(buildImplementYieldPrompt()).toContain("live image");
     expect(buildBlockedByRejectedPrompt().startsWith("blocked-by rejected, implement")).toBe(true);
-    expect(buildImplementPrompt()).not.toContain("JUMI_BLOCKED.md");
+    expect(buildImplementPrompt()).not.toContain("blocked_on");
+    expect(buildBlockedByRejectedPrompt()).toContain("blocked_on");
+    expect(buildBlockedByRejectedPrompt()).not.toContain("JUMI_BLOCKED.md");
   });
 
-  test("first-run skip is JUMI_SKIP.md; follow-up and conflict must not skip", () => {
-    expect(buildImplementPrompt()).toContain("JUMI_SKIP.md");
-    expect(buildImplementYieldPrompt()).toContain("JUMI_SKIP.md");
-    expect(buildBlockedByRejectedPrompt()).toContain("JUMI_SKIP.md");
+  test("first-run skip is the skip tool; follow-up and conflict must not skip", () => {
+    expect(buildImplementPrompt()).toContain("`skip`");
+    expect(buildImplementYieldPrompt()).toContain("`skip`");
+    expect(buildBlockedByRejectedPrompt()).toContain("`skip`");
+    expect(buildImplementPrompt()).not.toContain("JUMI_SKIP.md");
+    expect(buildImplementYieldPrompt()).not.toContain("JUMI_SKIP.md");
+    expect(buildBlockedByRejectedPrompt()).not.toContain("JUMI_SKIP.md");
     expect(buildFollowupPrompt()).not.toContain("JUMI_SKIP.md");
     expect(buildConflictPrompt()).not.toContain("JUMI_SKIP.md");
+    expect(buildFollowupPrompt()).not.toContain("`skip`");
+    expect(buildConflictPrompt()).not.toContain("`skip`");
+  });
+
+  test("worker results go through tools, not JUMI_*.md files", () => {
+    for (const prompt of [buildImplementPrompt(), buildFollowupPrompt(), buildConflictPrompt()]) {
+      expect(prompt).toContain("set_handoff");
+      expect(prompt).not.toContain("write JUMI_PR.md");
+      expect(prompt).not.toContain("write JUMI_SKIP.md");
+      expect(prompt).not.toContain("write JUMI_BLOCKED.md");
+      expect(prompt).not.toContain("write JUMI_HANDOFF.md");
+    }
+    expect(buildImplementPrompt()).toContain("set_pr_body");
+    expect(buildFollowupPrompt()).toContain("set_pr_body");
+    expect(buildFollowupPrompt()).toContain("no_changes");
+    expect(buildImplementYieldPrompt()).toContain("blocked_on");
   });
 });
 

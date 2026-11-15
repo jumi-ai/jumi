@@ -103,8 +103,12 @@ describe("handoff note", () => {
   test("prompts require the handoff and mark the previous note as stale", () => {
     const prompts = [buildImplementPrompt(), buildImplementYieldPrompt(), buildFollowupPrompt(), buildConflictPrompt()];
     for (const prompt of prompts) {
+      expect(prompt).toContain("set_handoff");
+      expect(prompt).not.toContain("write JUMI_HANDOFF.md");
+    }
+    // The previous round's notes are still injected as JUMI_HANDOFF.md for reading.
+    for (const prompt of prompts) {
       expect(prompt).toContain(HANDOFF_FILE);
-      expect(prompt).toContain("Do not commit JUMI_HANDOFF.md");
     }
     expect(buildImplementPrompt()).toContain("may be stale");
     expect(buildFollowupPrompt()).toContain("may be stale");

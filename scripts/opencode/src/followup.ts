@@ -65,7 +65,7 @@ import {
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
+import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import {
   hasIgnoreConflictsLabel,
   IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
@@ -85,8 +85,9 @@ import {
   noteProvenanceRunners,
   PR_DESCRIPTION_FILE,
   provenanceForgeFor,
-  readPullRequestDescription,
   replaceJumiPrBodyRegion,
+  resolveWorkerPrBody,
+  saveWorkerHandoff,
   seedPullRequestDescription,
   workerPublishSecrets,
 } from "./implement.ts";
@@ -1992,6 +1993,7 @@ export async function implementFollowUp(
               ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
               handoffStore,
               handoffKey,
+              chain: jobChain,
               ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
               onPid: loop.engineOnPid(opts.onPid),
               onRunner: (r) => {
@@ -2049,7 +2051,14 @@ export async function implementFollowUp(
           });
         };
         if (mergeResult.status === "stuck") {
-          await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+          await saveWorkerHandoff(
+            workerStore,
+            worktree,
+            handoffStore,
+            handoffKey,
+            workerPublishSecrets(loop.auth.token, jobChain),
+            log
+          );
           await persistConflictAttempt(mergeResult);
           await sticky("stuck: cannot resolve conflicts", pr.number);
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -2301,8 +2310,15 @@ export async function implementFollowUp(
         }
 
         throwIfAborted(opts.abortSignal);
-        const prFileContents = await readPullRequestDescription(worktree);
-        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+        const prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
+        await saveWorkerHandoff(
+          workerStore,
+          worktree,
+          handoffStore,
+          handoffKey,
+          workerPublishSecrets(loop.auth.token, jobChain),
+          log
+        );
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
         const porcelain = await worktreePorcelain(loop);
         if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
@@ -2310,6 +2326,8 @@ export async function implementFollowUp(
           const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
           const noChangesReason = workerStore.getNoChangesReason();
+          if (noChangesReason) log("worker result: no_changes from tool");
+          else log("worker result: no_changes missing (fail-open)");
           await sticky(
             buildNoChangesSticky(
               noChangesReason
