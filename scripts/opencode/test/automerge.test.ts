@@ -118,8 +118,13 @@ function makeApi(overrides: Partial<TestApi> = {}): TestApi & {
 }
 
 describe("automerge opt-in", () => {
-  test("deployment switch off: no schedule calls, no settings read", async () => {
+  test("deployment switch off with file off stays quiet", async () => {
     const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    const logs: string[] = [];
     const result = await scheduleAutomergeForPr({
       api,
       forgeKind: "gitea",
@@ -130,15 +135,18 @@ describe("automerge opt-in", () => {
       automergeRepos: [],
       automergeEnabled: false,
       botUsername: "jumi",
-      log: () => undefined,
+      log: (m) => logs.push(m),
     });
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual(["getPR", "getRepoFile"]);
     expect(api.notes).toEqual([]);
   });
 
-  test("non-listed repo makes no calls", async () => {
+  test("non-listed repo with file off stays quiet", async () => {
     const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
     const result = await scheduleAutomergeForPr({
       api,
       forgeKind: "gitea",
@@ -151,7 +159,7 @@ describe("automerge opt-in", () => {
       log: () => undefined,
     });
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual([]);
+    expect(api.notes).toEqual([]);
   });
 
   test("matching is case-insensitive", () => {
@@ -176,6 +184,258 @@ describe("automerge opt-in", () => {
     expect(isAutomergeRepo("acme", "api", ["*/*"])).toBe(true);
     expect(isAutomergeRepo("acme", "api", [" * "])).toBe(true);
     expect(isAutomergeRepo("acme", "api", ["other/repo"])).toBe(false);
+  });
+});
+
+describe("deployment-blocked automerge note", () => {
+  function baseInput(api: ReturnType<typeof makeApi>, overrides: Record<string, unknown> = {}) {
+    return {
+      api,
+      forgeKind: "gitea" as const,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"] as readonly string[],
+      botUsername: "jumi",
+      log: () => undefined,
+      ...overrides,
+    };
+  }
+
+  function withAdmittedLabel(api: ReturnType<typeof makeApi>) {
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+  }
+
+  test("switch off + file true: one note + one log", async () => {
+    const api = makeApi();
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForPr(
+      baseInput(api, { automergeEnabled: false, log: (m: string) => logs.push(m) })
+    );
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_ENABLED");
+    expect(api.notes[0]).toContain("deployer");
+    expect(logs.filter((m) => m.includes("deployment switch off"))).toHaveLength(1);
+  });
+
+  test("not-listed + file true: one note + one log", async () => {
+    const api = makeApi();
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForPr(
+      baseInput(api, { repo: "other", automergeRepos: ["kirmanak/demo"], log: (m: string) => logs.push(m) })
+    );
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(AUTOMERGE_NOTE_MARKER);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_REPOS");
+    expect(api.notes[0]).toContain("deployer");
+    expect(logs.filter((m) => m.includes("not in deployment allowlist"))).toHaveLength(1);
+  });
+
+  test("switch off + admitted label (file off): one note + one log", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    withAdmittedLabel(api);
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForPr(
+      baseInput(api, { automergeEnabled: false, log: (m: string) => logs.push(m) })
+    );
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_ENABLED");
+    expect(logs.filter((m) => m.includes("deployment switch off"))).toHaveLength(1);
+  });
+
+  test("not-listed + admitted label (file off): one note + one log", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    withAdmittedLabel(api);
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForPr(
+      baseInput(api, {
+        repo: "other",
+        automergeRepos: ["kirmanak/demo"],
+        log: (m: string) => logs.push(m),
+      })
+    );
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_REPOS");
+    expect(logs.filter((m) => m.includes("not in deployment allowlist"))).toHaveLength(1);
+  });
+
+  test("no note when file missing", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: false };
+    };
+    const result = await scheduleAutomergeForPr(baseInput(api, { automergeEnabled: false }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toEqual([]);
+    const api2 = makeApi();
+    api2.getRepoFile = async () => {
+      api2.calls.push("getRepoFile");
+      return { found: false };
+    };
+    const result2 = await scheduleAutomergeForPr(baseInput(api2, { repo: "other", automergeRepos: ["kirmanak/demo"] }));
+    expect(result2).toEqual({ scheduled: false });
+    expect(api2.notes).toEqual([]);
+  });
+
+  test("no note when file false and no label", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    const result = await scheduleAutomergeForPr(baseInput(api, { automergeEnabled: false }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toEqual([]);
+  });
+
+  test("no note when no-automerge present, even with file true", async () => {
+    const api = makeApi();
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["no-automerge"] as never });
+    };
+    const result = await scheduleAutomergeForPr(baseInput(api, { automergeEnabled: false }));
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toEqual([]);
+    const api2 = makeApi();
+    api2.getPR = async (_o: string, _r: string, index: number) => {
+      api2.calls.push("getPR");
+      return makePR({ number: index, labels: ["no-automerge"] as never });
+    };
+    const result2 = await scheduleAutomergeForPr(baseInput(api2, { repo: "other", automergeRepos: ["kirmanak/demo"] }));
+    expect(result2).toEqual({ scheduled: false });
+    expect(api2.notes).toEqual([]);
+  });
+
+  test("no note when automerge label untrusted", async () => {
+    const api = makeApi();
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "mallory" } }];
+    };
+    api.getCollaboratorPermission = async () => ({ permission: "read" });
+    const result = await scheduleAutomergeForPr(
+      baseInput(api, { automergeEnabled: false, trustedSenderLogins: ["alice"] })
+    );
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toEqual([]);
+  });
+
+  test("switch off + issue label admitted (via copy): one note + one log", async () => {
+    const { scheduleAutomergeForNewPr } = await import("../src/automerge.ts");
+    const api = makeApi();
+    api.getIssue = async () => {
+      api.calls.push("getIssue");
+      return { labels: ["automerge"], number: 12 } as never;
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+    const added: string[] = [];
+    api.addIssueLabel = async (_o: string, _r: string, _n: number, label: string) => {
+      api.calls.push("addIssueLabel");
+      added.push(label);
+      return {};
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForNewPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      automergeEnabled: false,
+      botUsername: "jumi",
+      issueNumber: 12,
+      log: (m: string) => logs.push(m),
+    } as never);
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_ENABLED");
+    expect(logs.filter((m) => m.includes("deployment switch off"))).toHaveLength(1);
+  });
+
+  test("not-listed + issue label admitted (via copy): one note + one log", async () => {
+    const { scheduleAutomergeForNewPr } = await import("../src/automerge.ts");
+    const api = makeApi();
+    api.getIssue = async () => {
+      api.calls.push("getIssue");
+      return { labels: ["automerge"], number: 12 } as never;
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+    api.addIssueLabel = async () => {
+      api.calls.push("addIssueLabel");
+      return {};
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForNewPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "other",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      issueNumber: 12,
+      log: (m: string) => logs.push(m),
+    } as never);
+    expect(result).toEqual({ scheduled: false });
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_REPOS");
+    expect(logs.filter((m) => m.includes("not in deployment allowlist"))).toHaveLength(1);
   });
 });
 
@@ -888,14 +1148,21 @@ describe("automerge override labels", () => {
 
   test("non-empty deployer list still narrows even with the file on", async () => {
     const api = makeApi();
-    const result = await scheduleAutomergeForPr(labelInput(api, { automergeRepos: ["other/repo"] }));
+    const logs: string[] = [];
+    const result = await scheduleAutomergeForPr(
+      labelInput(api, { automergeRepos: ["other/repo"], log: (m: string) => logs.push(m) })
+    );
     expect(result).toEqual({ scheduled: false });
-    expect(api.calls).toEqual([]);
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("JUMI_AUTOMERGE_REPOS");
+    expect(logs.filter((m) => m.includes("not in deployment allowlist"))).toHaveLength(1);
   });
 
   test("switch off schedules nothing; automerge label gets the disabled note", async () => {
     const api = makeApi();
     withPrLabels(api, ["automerge"]);
+    withTimeline(api, [{ label: "automerge", actor: "alice", event: "labeled" }]);
     const result = await scheduleAutomergeForPr(labelInput(api, { automergeEnabled: false }));
     expect(result).toEqual({ scheduled: false });
     expect(api.calls).not.toContain("scheduleAutoMerge");

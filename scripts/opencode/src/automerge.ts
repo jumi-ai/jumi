@@ -261,7 +261,16 @@ function cancelledExcludedFilesNote(excludedFiles: readonly string[]): string {
 export function automergeDisabledNote(): string {
   return (
     `Jumi did not schedule auto-merge on this pull request because auto-merge is turned off ` +
-    `for this Jumi deployment (\`JUMI_AUTOMERGE_ENABLED\` is off). A person needs to merge once reviews and CI are green.`
+    `for this Jumi deployment (\`JUMI_AUTOMERGE_ENABLED\` is off). The deployer needs to change that; ` +
+    `until then a person needs to merge once reviews and CI are green.`
+  );
+}
+
+export function automergeRepoNotListedNote(): string {
+  return (
+    `Jumi did not schedule auto-merge on this pull request because this repository is not listed ` +
+    `for auto-merge on this Jumi deployment (\`JUMI_AUTOMERGE_REPOS\` does not allow it). ` +
+    `The deployer needs to change that; until then a person needs to merge once reviews and CI are green.`
   );
 }
 
@@ -594,6 +603,92 @@ async function loadPrLabels(
 }
 
 /**
+ * Whether the repository opted in, for the deployment-blocked note path.
+ * Opt-in is a valid default-branch file with `automerge: true`, or an
+ * admitted `automerge` label on the PR (the copy from the worked issue
+ * carries its verdict via `copiedTrusted`/`issueNumber`). `no-automerge`
+ * present means opted out even when the file is on. Missing/`false`/invalid
+ * files alone never opt in. Unreadable PRs fail closed with the generic
+ * unreadable note so callers stay silent otherwise.
+ */
+async function maybeNoteDeploymentBlocked(opts: {
+  api: AutomergeApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  baseBranch: string;
+  botUsername: string;
+  trustedSenderLogins?: readonly string[];
+  issueNumber?: number;
+  copiedTrusted?: boolean;
+  prLabelsPrefetch?: AutomergeLabelList | null;
+  log: (message: string) => void;
+  gate: "disabled" | "not-listed";
+}): Promise<{ posted: boolean }> {
+  const { api, owner, repo, prNumber, baseBranch, botUsername, log, gate } = opts;
+  let settings: RepoSettingsLoad | undefined;
+  try {
+    settings = await loadRepoSettings(api, owner, repo, baseBranch);
+  } catch {
+    settings = undefined;
+  }
+  const names =
+    settings?.state === "valid"
+      ? { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel }
+      : { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
+  const labels = await loadPrLabels(api, owner, repo, prNumber, opts.prLabelsPrefetch, log);
+  if (labels === undefined) {
+    log(`automerge pull unreadable for ${owner}/${repo}#${prNumber}: failing closed`);
+    await postAutomergeNote(
+      api,
+      owner,
+      repo,
+      prNumber,
+      botUsername,
+      `Jumi did not schedule auto-merge on this pull request: the pull request could not be read. A person needs to merge once reviews and CI are green.`
+    );
+    return { posted: true };
+  }
+  if (hasLabelCaseInsensitive(labels, names.noAutomergeLabel)) return { posted: false };
+  if (settings?.state === "valid" && settings.automerge === true) {
+    if (gate === "not-listed") {
+      log(`automerge skipped for ${owner}/${repo}#${prNumber}: repository not in deployment allowlist`);
+      await postAutomergeNote(api, owner, repo, prNumber, botUsername, automergeRepoNotListedNote());
+    } else {
+      log(`automerge skipped for ${owner}/${repo}#${prNumber}: deployment switch off`);
+      await postAutomergeNote(api, owner, repo, prNumber, botUsername, automergeDisabledNote());
+    }
+    return { posted: true };
+  }
+  if (!hasLabelCaseInsensitive(labels, names.automergeLabel)) return { posted: false };
+  const effectiveTrusted =
+    settings !== undefined
+      ? effectiveTrustedSenderLogins(opts.trustedSenderLogins, settings)
+      : opts.trustedSenderLogins;
+  const verdict = await isAutomergeLabelAdmitted({
+    api,
+    owner,
+    repo,
+    prNumber,
+    issueNumber: opts.issueNumber,
+    automergeLabel: names.automergeLabel,
+    botUsername,
+    trustedSenderLogins: effectiveTrusted,
+    copiedTrusted: opts.copiedTrusted,
+    log,
+  });
+  if (!verdict.admitted) return { posted: false };
+  if (gate === "not-listed") {
+    log(`automerge skipped for ${owner}/${repo}#${prNumber}: repository not in deployment allowlist`);
+    await postAutomergeNote(api, owner, repo, prNumber, botUsername, automergeRepoNotListedNote());
+  } else {
+    log(`automerge skipped for ${owner}/${repo}#${prNumber}: deployment switch off`);
+    await postAutomergeNote(api, owner, repo, prNumber, botUsername, automergeDisabledNote());
+  }
+  return { posted: true };
+}
+
+/**
  * Schedule the forge's native auto-merge on a pull request Jumi opened.
  * Two switches are required: the deployment must allow auto-merge
  * (`JUMI_AUTOMERGE_ENABLED`, default on; `JUMI_AUTOMERGE_REPOS` still narrows
@@ -617,37 +712,27 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
   const enabled = input.automergeEnabled ?? true;
   const api = input.api as AutomergeApi;
 
-  // Deployment narrowing first: a non-empty list still narrows exactly as today.
-  if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return { scheduled: false };
-
-  // Disabled deployment: labels do nothing except the automerge-label note.
-  if (!enabled) {
-    const labels = await loadPrLabels(api, input.owner, input.repo, input.prNumber, input.prLabels, log);
-    if (labels === undefined) {
-      log(`automerge pull unreadable for ${input.owner}/${input.repo}#${input.prNumber}: failing closed`);
-      await postAutomergeNote(
-        api,
-        input.owner,
-        input.repo,
-        input.prNumber,
-        input.botUsername,
-        `Jumi did not schedule auto-merge on this pull request: the pull request could not be read. A person needs to merge once reviews and CI are green.`
-      );
-      return { scheduled: false };
-    }
-    let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
-    try {
-      const settings = await loadRepoSettings(api, input.owner, input.repo, input.baseBranch);
-      if (settings.state === "valid") {
-        names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
-      }
-    } catch {
-      // Best-effort: default label names still drive the disabled note.
-    }
-    if (hasLabelCaseInsensitive(labels, names.automergeLabel)) {
-      log(`automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: deployment switch off`);
-      await postAutomergeNote(api, input.owner, input.repo, input.prNumber, input.botUsername, automergeDisabledNote());
-    }
+  // Deployment gates first. When the repository opted in (valid file with
+  // `automerge: true`, or an admitted `automerge` label on the PR carrying
+  // the worked issue's verdict) but the deployment blocks, post one sticky
+  // note saying the deployer has to act. Otherwise stay silent as today:
+  // no file, `automerge: false`, or `no-automerge` never notes.
+  if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos) || !enabled) {
+    const gate = !isAutomergeRepo(input.owner, input.repo, input.automergeRepos) ? "not-listed" : "disabled";
+    await maybeNoteDeploymentBlocked({
+      api,
+      owner: input.owner,
+      repo: input.repo,
+      prNumber: input.prNumber,
+      baseBranch: input.baseBranch,
+      botUsername: input.botUsername,
+      trustedSenderLogins: input.trustedSenderLogins,
+      issueNumber: input.issueNumber,
+      copiedTrusted: input.copiedAutomergeTrusted,
+      prLabelsPrefetch: input.prLabels,
+      log,
+      gate,
+    });
     return { scheduled: false };
   }
 
@@ -1473,7 +1558,6 @@ export async function handleAutomergeLabelChange(opts: {
   log?: (message: string) => void;
 }): Promise<{ action: "scheduled" | "cancelled" | "none" }> {
   const log = opts.log ?? (() => undefined);
-  if (!isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos)) return { action: "none" };
   let prLabels: AutomergeLabelList = [];
   try {
     const pr = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
@@ -1485,33 +1569,27 @@ export async function handleAutomergeLabelChange(opts: {
     );
     return { action: "none" };
   }
+  const listed = isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos);
   const enabled = opts.automergeEnabled ?? true;
-  if (!enabled) {
-    // Mirror the open-time disabled branch in scheduleAutomergeForPr: when the
-    // PR carries the (possibly custom) automerge label while the deployment
-    // switch is off, leave one sticky disabled note.
-    let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
-    try {
-      const settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.baseBranch);
-      if (settings.state === "valid") {
-        names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
-      }
-    } catch {
-      // Best-effort: default label names still drive the disabled note.
-    }
-    if (hasLabelCaseInsensitive(prLabels, names.automergeLabel)) {
-      log(`automerge skipped for ${opts.owner}/${opts.repo}#${opts.prNumber}: deployment switch off`);
-      await postAutomergeNote(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        opts.prNumber,
-        opts.botUsername,
-        automergeDisabledNote()
-      );
-      return { action: "cancelled" };
-    }
-    return { action: "none" };
+  if (!listed || !enabled) {
+    // Mirror the open-time deployment-blocked path: when the repository opted
+    // in (file on, or an admitted `automerge` label) but the deployment
+    // blocks, leave one sticky note saying the deployer has to act.
+    const gate = !listed ? ("not-listed" as const) : ("disabled" as const);
+    const res = await maybeNoteDeploymentBlocked({
+      api: opts.api,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber: opts.prNumber,
+      baseBranch: opts.baseBranch,
+      botUsername: opts.botUsername,
+      trustedSenderLogins: opts.trustedSenderLogins,
+      issueNumber: opts.issueNumber,
+      prLabelsPrefetch: prLabels,
+      log,
+      gate,
+    });
+    return { action: res.posted ? "cancelled" : "none" };
   }
   let settings: RepoSettingsLoad;
   try {
