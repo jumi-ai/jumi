@@ -66,104 +66,99 @@ export interface RepoReviewBudget {
   maxFiles?: number;
   maxPatchBytes?: number;
 }
-export interface RepoSettings {
-  automerge: boolean;
-  /** Label that opts one Jumi PR into auto-merge. Case-insensitive. Default `automerge`. */
-  automergeLabel: string;
-  /** Label that opts one Jumi PR out of auto-merge. Case-insensitive. Default `no-automerge`. */
-  noAutomergeLabel: string;
-  timeouts: RepoTimeouts;
+/**
+ * One top-level `.jumi.yml` key, declared exactly once. `REPO_SETTINGS_REGISTRY`
+ * below holds one entry per key in today's parser order; `parseRepoSettingsText`
+ * is a loop over it, and `RepoSettings`, `KNOWN_KEYS`, and the
+ * `loadRepoSettings` output are all derived from it. Adding a key means adding
+ * one entry here (plus its `effective*` consumer and a `docs/repo-settings.md`
+ * row).
+ */
+export type RepoSettingResult<Value> = { ok: true; value: Value } | { ok: false; error: string };
+
+/**
+ * Presence of a field on the parsed settings object. `required` fields are
+ * always present (an absent key takes the entry default); `optional` fields are
+ * present only when the YAML key is present; `always` fields are type-optional
+ * but always present, possibly `undefined` (the legacy `allowed_runners` /
+ * `trusted_senders` / `followup_ignore_logins` quirk: the old copy spread them
+ * unconditionally, so `in` sees them on every load).
+ */
+export type RepoSettingPresence = "required" | "optional" | "always";
+
+export interface RepoSettingDef<Field extends string, Value> {
+  /** The exact YAML spelling (snake_case). */
+  readonly key: string;
+  /** The `RepoSettings` field this key fills. */
+  readonly field: Field;
+  /** One-line summary for readers adding a key. */
+  readonly doc: string;
+  /** Value used when the key is absent (`undefined` keeps an optional field absent). */
+  readonly defaultValue: Value | undefined;
+  readonly presence: RepoSettingPresence;
   /**
-   * Runner allow-list for the repository. `undefined` (key absent) means no
-   * restriction: the repository uses the full active chain. A defined list
-   * (possibly empty) narrows every job for the repository to chain entries
-   * whose name is on the list. Narrowing only: names outside the active
-   * chain grant nothing.
+   * Legacy output-order quirk: `early` entries assemble first (in registry
+   * order), `late` entries assemble last; everything else assembles in
+   * registry order. Only the identity labels (`early`) and
+   * `suggestions_hold_merge` (`late`) need it. It reproduces the legacy
+   * `loadRepoSettings` key order exactly, so
+   * `{ state: "valid", ...parsed.settings }` keeps identical keys.
    */
-  allowedRunners?: string[];
-  reviewExclude: string[];
-  followupOnSuggestions: boolean;
-  maxFollowupRounds?: number;
-  maxConflictRounds?: number;
-  /**
-   * Hold the merge for one suggestion follow-up round in auto-merge
-   * repositories. `undefined` (key absent) means follow `automerge`: holding
-   * when `automerge` is `true`, never otherwise. An explicit `false` turns
-   * the hold off even when `automerge` is `true`.
-   */
-  suggestionsHoldMerge?: boolean;
-  takeoverAuthors: string[];
-  ignoreConflictsAuthors: string[];
-  /** PR-author logins whose open ❓ questions block the review status in this repository. */
-  blockingQuestionAuthors: string[];
-  /**
-   * Trusted senders for the repository. `undefined` (key absent) means no
-   * repository list: the deployment list (or write access when unset) decides.
-   * A defined list narrows a set deployment list (intersection) and never
-   * widens it. An explicitly empty list is invalid.
-   */
-  trustedSenders?: string[];
-  /** Extra follow-up ignore logins for this repository. Union with the deployment list. */
-  followupIgnoreLogins?: string[];
-  /** Override for `IGNORE_CONFLICTS_LABEL` in this repository. `undefined` means the deployment value. */
-  ignoreConflictsLabel?: string;
-  /** Override for the GitHub pickup label in this repository. `undefined` means `jumi`. Gitea ignores it. */
-  pickupLabel?: string;
-  /**
-   * Repository lockfile regenerate commands. `undefined` (key absent) means
-   * no repository entries: only the built-in helm locks regenerate. A
-   * present list maps a lock basename to the shell command that rebuilds it.
-   */
-  conflictRegenerate?: ConflictRegenerateEntry[];
-  /** Repository mode: full work, reviews only, or everything off. Absent means full. */
-  mode: RepoMode;
-  /** Review draft PRs and `WIP:`-titled PRs. Absent means false (skip drafts, as today). */
-  reviewDrafts: boolean;
-  /** Cap for 💡 findings in this repository. Absent means the deployment ceiling. */
-  maxSuggestions?: number;
-  /** Review size budget overrides. Absent keys run with the deployment value. */
-  reviewBudget: RepoReviewBudget;
-  /**
-   * CI gate wait mode. `undefined` (key absent) means `required`: wait only
-   * for the base branch's required checks, falling back to every check when
-   * protection can't be read. `all` waits for every non-Jumi check whatever
-   * branch protection says. `none` never waits for pending or absent CI.
-   */
-  ciGate?: { wait: CiGateWait };
-  /**
-   * Branch prefix for issue branches. `undefined` (key absent) means `jumi`:
-   * `<prefix>/issue-<N>-<slug>`. One or more path segments of `[a-z0-9._-]`.
-   */
-  branchPrefix?: string;
-  /**
-   * Pull-request title template for forge issues. `undefined` means `{title}`.
-   * Only `{title}` and `{issue}` placeholders are allowed.
-   */
-  prTitle?: string;
-  /**
-   * Commit message template for the parent's leftover commit. `undefined`
-   * means `Implement #{issue}: {title}`. Only `{title}` and `{issue}` allowed.
-   */
-  commitMessage?: string;
-  /**
-   * Closing keyword behavior. `undefined` (key absent) means `closes`.
-   * `refs` uses a non-closing `Refs #N` reference instead.
-   */
-  closingKeyword?: RepoClosingKeyword;
-  /**
-   * Merge method Jumi schedules with. `undefined` (key absent) keeps today's
-   * behavior (first allowed method on GitHub, default style on Gitea).
-   * A present value must be one the repository allows; otherwise nothing is
-   * scheduled.
-   */
-  automergeMethod?: RepoAutomergeMethod;
-  /**
-   * Repository preparation command. `undefined` (key absent) means no setup:
-   * the job runs as today. Present only from the default branch, never from a
-   * pull request head.
-   */
-  setup?: RepoSetup;
+  readonly placement?: "early" | "late";
+  readonly parse: (raw: unknown) => RepoSettingResult<Value>;
 }
+
+/** An entry for a field that is always present. The author passes the absent-value default. */
+function requiredSetting<Field extends string, Value>(def: {
+  key: string;
+  field: Field;
+  doc: string;
+  defaultValue: Value;
+  parse: (raw: unknown) => RepoSettingResult<Value>;
+  placement?: "early" | "late";
+}): RepoSettingDef<Field, Value> & { readonly presence: "required" } {
+  return { ...def, presence: "required" };
+}
+
+/** An entry for a field that is present only when the YAML key is present. */
+function optionalSetting<Field extends string, Value>(def: {
+  key: string;
+  field: Field;
+  doc: string;
+  parse: (raw: unknown) => RepoSettingResult<Value>;
+  placement?: "early" | "late";
+}): RepoSettingDef<Field, Value> & { readonly presence: "optional" } {
+  return { ...def, defaultValue: undefined, presence: "optional" };
+}
+
+/**
+ * An entry for a type-optional field that is still always present (possibly
+ * `undefined`). Only for the three legacy unconditional copies.
+ */
+function alwaysPresentSetting<Field extends string, Value>(def: {
+  key: string;
+  field: Field;
+  doc: string;
+  parse: (raw: unknown) => RepoSettingResult<Value>;
+  placement?: "early" | "late";
+}): RepoSettingDef<Field, Value> & { readonly presence: "always" } {
+  return { ...def, defaultValue: undefined, presence: "always" };
+}
+
+type RegistryEntry = (typeof REPO_SETTINGS_REGISTRY)[number];
+
+type SettingValue<Entry> = Entry extends RepoSettingDef<string, infer Value> ? Value : never;
+
+/**
+ * `RepoSettings` derived from the registry: every `required` entry is a
+ * required field, every other entry an optional one. Field value types come
+ * from each entry's parser.
+ */
+export type RepoSettings = {
+  [Entry in RegistryEntry as Entry extends { presence: "required" } ? Entry["field"] : never]: SettingValue<Entry>;
+} & {
+  [Entry in RegistryEntry as Entry extends { presence: "required" } ? never : Entry["field"]]?: SettingValue<Entry>;
+};
 
 export type RepoClosingKeyword = "closes" | "refs";
 
@@ -191,38 +186,6 @@ export const REPO_MODE_OFF_REASON = "repository mode is off";
 export const REPO_MODE_REVIEW_ONLY_REASON = "repository mode is review-only";
 
 export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: false; error: string };
-
-export const KNOWN_KEYS = new Set([
-  "automerge",
-  "automerge_label",
-  "automerge_method",
-  "no_automerge_label",
-  "allowed_runners",
-  "timeouts",
-  "setup",
-  "review_exclude",
-  "followup_on_suggestions",
-  "suggestions_hold_merge",
-  "max_followup_rounds",
-  "max_conflict_rounds",
-  "takeover_authors",
-  "ignore_conflicts_authors",
-  "blocking_question_authors",
-  "trusted_senders",
-  "followup_ignore_logins",
-  "ignore_conflicts_label",
-  "pickup_label",
-  "conflict_regenerate",
-  "mode",
-  "branch_prefix",
-  "pr_title",
-  "commit_message",
-  "closing_keyword",
-  "review_drafts",
-  "max_suggestions",
-  "review_budget",
-  "ci_gate",
-]);
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
 export const TIMEOUT_KEYS = ["review", "implement", "followup", "conflict"] as const;
@@ -259,6 +222,383 @@ export const DEFAULT_COMMIT_MESSAGE_TEMPLATE = "Implement #{issue}: {title}";
 export const DEFAULT_CLOSING_KEYWORD: RepoClosingKeyword = "closes";
 
 export const REPO_CLOSING_KEYWORDS: readonly RepoClosingKeyword[] = ["closes", "refs"];
+
+/**
+ * One entry per top-level `.jumi.yml` key, in today's parser order: the first
+ * invalid key decides the error text, so `parseRepoSettingsText` iterates
+ * this array in order. Each entry reuses today's helpers and inline checks
+ * with their exact error strings.
+ */
+export const REPO_SETTINGS_REGISTRY = [
+  requiredSetting({
+    key: "automerge",
+    field: "automerge",
+    doc: "Schedule the forge's native auto-merge on opened pull requests once every other gate passes.",
+    defaultValue: false,
+    placement: "early",
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
+  requiredSetting({
+    key: "timeouts",
+    field: "timeouts",
+    doc: "Per-kind run timeouts in whole minutes; absent keys run with the deployment timeout.",
+    defaultValue: {} as RepoTimeouts,
+    parse: (raw): RepoSettingResult<RepoTimeouts> => {
+      const parsed = parseTimeoutsValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.timeouts };
+    },
+  }),
+  alwaysPresentSetting({
+    key: "allowed_runners",
+    field: "allowedRunners",
+    doc: "Runner allow-list: every job for the repository narrows to chain entries on the list.",
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "allowed_runners", {
+        notListError: `"allowed_runners" must be a list of runner names`,
+      });
+      if (!parsed.ok) return parsed;
+      if (parsed.values.length === 0) {
+        return {
+          ok: false,
+          error: `"allowed_runners" is empty, so no runner could work on the repository; use mode: off or mode: review-only`,
+        };
+      }
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  requiredSetting({
+    key: "review_exclude",
+    field: "reviewExclude",
+    doc: "Changed files matching these globs are left out of the review (patch withheld).",
+    defaultValue: [] as string[],
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "review_exclude", {
+        notListError: `"review_exclude" must be a list of glob strings`,
+        dedupe: false,
+      });
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  requiredSetting({
+    key: "followup_on_suggestions",
+    field: "followupOnSuggestions",
+    doc: "Follow up on success-with-suggestions reviews; false leaves them as-is.",
+    defaultValue: true,
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"followup_on_suggestions" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
+  optionalSetting({
+    key: "suggestions_hold_merge",
+    field: "suggestionsHoldMerge",
+    doc: "Hold the merge for one suggestion follow-up round in auto-merge repositories.",
+    placement: "late",
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"suggestions_hold_merge" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
+  optionalSetting({
+    key: "max_followup_rounds",
+    field: "maxFollowupRounds",
+    doc: "Cap follow-up rounds per pull request; 0 means no follow-up rounds.",
+    parse: (raw): RepoSettingResult<number> => {
+      if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0)
+        return { ok: false, error: `"max_followup_rounds" must be a non-negative integer` };
+      return { ok: true, value: raw };
+    },
+  }),
+  optionalSetting({
+    key: "max_conflict_rounds",
+    field: "maxConflictRounds",
+    doc: "Cap consecutive failed conflict-resolution rounds per issue; 0 means none.",
+    parse: (raw): RepoSettingResult<number> => {
+      if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0)
+        return { ok: false, error: `"max_conflict_rounds" must be a non-negative integer` };
+      return { ok: true, value: raw };
+    },
+  }),
+  requiredSetting({
+    key: "takeover_authors",
+    field: "takeoverAuthors",
+    doc: "Pull requests opened by these logins are taken over like a manual handover.",
+    defaultValue: [] as string[],
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "takeover_authors", {
+        notListError: `"takeover_authors" must be a list of logins`,
+      });
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  requiredSetting({
+    key: "ignore_conflicts_authors",
+    field: "ignoreConflictsAuthors",
+    doc: "Pulls by these authors get the ignore-conflicts behavior without the label.",
+    defaultValue: [] as string[],
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "ignore_conflicts_authors", {
+        notListError: `"ignore_conflicts_authors" must be a list of logins`,
+      });
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  requiredSetting({
+    key: "automerge_label",
+    field: "automergeLabel",
+    doc: "Per-PR label opting one Jumi PR into auto-merge.",
+    defaultValue: DEFAULT_AUTOMERGE_LABEL,
+    placement: "early",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"automerge_label" must be a non-blank string` };
+      }
+      return { ok: true, value: raw.trim() };
+    },
+  }),
+  requiredSetting({
+    key: "no_automerge_label",
+    field: "noAutomergeLabel",
+    doc: "Per-PR label opting one Jumi PR out of auto-merge.",
+    defaultValue: DEFAULT_NO_AUTOMERGE_LABEL,
+    placement: "early",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"no_automerge_label" must be a non-blank string` };
+      }
+      return { ok: true, value: raw.trim() };
+    },
+  }),
+  requiredSetting({
+    key: "blocking_question_authors",
+    field: "blockingQuestionAuthors",
+    doc: "PR authors whose open questions block the review status.",
+    defaultValue: [] as string[],
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "blocking_question_authors", {
+        notListError: `"blocking_question_authors" must be a list of logins`,
+      });
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  alwaysPresentSetting({
+    key: "trusted_senders",
+    field: "trustedSenders",
+    doc: "Repository trusted-sender list; narrows a set deployment list, never widens it.",
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "trusted_senders", {
+        notListError: `"trusted_senders" must be a list of logins`,
+      });
+      if (!parsed.ok) return parsed;
+      if (parsed.values.length === 0) {
+        return {
+          ok: false,
+          error: `"trusted_senders" is empty, so no sender could work on the repository; use mode: off or mode: review-only`,
+        };
+      }
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  alwaysPresentSetting({
+    key: "followup_ignore_logins",
+    field: "followupIgnoreLogins",
+    doc: "Extra follow-up ignore logins for this repository (union with the deployer list).",
+    parse: (raw): RepoSettingResult<string[]> => {
+      const parsed = parseStringList(raw, "followup_ignore_logins", {
+        notListError: `"followup_ignore_logins" must be a list of logins`,
+      });
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.values };
+    },
+  }),
+  optionalSetting({
+    key: "ignore_conflicts_label",
+    field: "ignoreConflictsLabel",
+    doc: "Override for the deployment ignore-conflicts label.",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"ignore_conflicts_label" must be a non-blank string` };
+      }
+      return { ok: true, value: raw.trim() };
+    },
+  }),
+  optionalSetting({
+    key: "pickup_label",
+    field: "pickupLabel",
+    doc: "Override for the GitHub pickup label (Gitea ignores it).",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"pickup_label" must be a non-blank string` };
+      }
+      return { ok: true, value: raw.trim() };
+    },
+  }),
+  optionalSetting({
+    key: "conflict_regenerate",
+    field: "conflictRegenerate",
+    doc: "Lockfiles the conflict job rebuilds with a shell command instead of the model.",
+    parse: (raw): RepoSettingResult<ConflictRegenerateEntry[]> => {
+      const parsed = parseConflictRegenerateValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.entries };
+    },
+  }),
+  requiredSetting({
+    key: "mode",
+    field: "mode",
+    doc: "Repository mode: full work, reviews only, or everything off.",
+    defaultValue: "full" as RepoMode,
+    parse: (raw): RepoSettingResult<RepoMode> => {
+      if (typeof raw !== "string" || !(REPO_MODES as readonly string[]).includes(raw)) {
+        return { ok: false, error: `"mode" must be one of "full", "review-only", "off"` };
+      }
+      return { ok: true, value: raw as RepoMode };
+    },
+  }),
+  optionalSetting({
+    key: "branch_prefix",
+    field: "branchPrefix",
+    doc: "Branch prefix for issue branches (<prefix>/issue-<N>-<slug>).",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"branch_prefix" must be a non-blank string` };
+      }
+      const validated = validateBranchPrefix(raw);
+      if (!validated.ok) return validated;
+      return { ok: true, value: validated.prefix };
+    },
+  }),
+  optionalSetting({
+    key: "pr_title",
+    field: "prTitle",
+    doc: "Pull-request title template for forge issues ({title} and {issue} only).",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"pr_title" must be a non-blank string` };
+      }
+      const validated = validatePrTemplate("pr_title", raw);
+      if (!validated.ok) return validated;
+      return { ok: true, value: validated.template };
+    },
+  }),
+  optionalSetting({
+    key: "commit_message",
+    field: "commitMessage",
+    doc: "Commit message template for the parent's leftover commit.",
+    parse: (raw): RepoSettingResult<string> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"commit_message" must be a non-blank string` };
+      }
+      const validated = validatePrTemplate("commit_message", raw);
+      if (!validated.ok) return validated;
+      return { ok: true, value: validated.template };
+    },
+  }),
+  optionalSetting({
+    key: "closing_keyword",
+    field: "closingKeyword",
+    doc: "Closing keyword behavior: closes (Fixes #N) or refs (non-closing Refs #N).",
+    parse: (raw): RepoSettingResult<RepoClosingKeyword> => {
+      if (typeof raw !== "string" || !raw.trim()) {
+        return { ok: false, error: `"closing_keyword" must be a non-blank string` };
+      }
+      const trimmed = raw.trim();
+      if (!(REPO_CLOSING_KEYWORDS as readonly string[]).includes(trimmed)) {
+        return { ok: false, error: `"closing_keyword" must be one of "closes", "refs"` };
+      }
+      return { ok: true, value: trimmed as RepoClosingKeyword };
+    },
+  }),
+  requiredSetting({
+    key: "review_drafts",
+    field: "reviewDrafts",
+    doc: "Review draft PRs and WIP:-titled PRs on every review-dispatch path.",
+    defaultValue: false,
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"review_drafts" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
+  optionalSetting({
+    key: "max_suggestions",
+    field: "maxSuggestions",
+    doc: "Cap for suggestion findings in this repository; 0 means no suggestions.",
+    parse: (raw): RepoSettingResult<number> => {
+      if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0)
+        return { ok: false, error: `"max_suggestions" must be a non-negative integer` };
+      return { ok: true, value: raw };
+    },
+  }),
+  requiredSetting({
+    key: "review_budget",
+    field: "reviewBudget",
+    doc: "Review size budget overrides (max_files, max_patch_bytes).",
+    defaultValue: {} as RepoReviewBudget,
+    parse: (raw): RepoSettingResult<RepoReviewBudget> => {
+      const parsed = parseReviewBudgetValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.reviewBudget };
+    },
+  }),
+  optionalSetting({
+    key: "ci_gate",
+    field: "ciGate",
+    doc: "CI gate wait mode: required, all, or none.",
+    parse: (raw): RepoSettingResult<{ wait: CiGateWait } | undefined> => {
+      const parsed = parseCiGateValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.ciGate };
+    },
+  }),
+  optionalSetting({
+    key: "automerge_method",
+    field: "automergeMethod",
+    doc: "Merge method Jumi schedules with.",
+    parse: (raw): RepoSettingResult<RepoAutomergeMethod> => {
+      if (typeof raw !== "string" || !(AUTOMERGE_METHODS as readonly string[]).includes(raw)) {
+        return {
+          ok: false,
+          error: `"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"`,
+        };
+      }
+      return { ok: true, value: raw as RepoAutomergeMethod };
+    },
+  }),
+  optionalSetting({
+    key: "setup",
+    field: "setup",
+    doc: "Repository preparation command run once per job before the first engine spawn.",
+    parse: (raw): RepoSettingResult<RepoSetup | undefined> => {
+      const parsed = parseSetupValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.setup };
+    },
+  }),
+];
+
+/**
+ * Output order for the parsed settings object: registry order, except `early`
+ * entries assemble first and `late` entries assemble last. This reproduces the
+ * legacy `loadRepoSettings` key order exactly (the identity labels parsed late
+ * but output early; `suggestions_hold_merge` parsed early but output late), so
+ * `{ state: "valid", ...parsed.settings }` keeps identical keys.
+ */
+const REPO_SETTINGS_ASSEMBLY_ORDER: readonly RegistryEntry[] = [
+  ...REPO_SETTINGS_REGISTRY.filter((def) => def.placement === "early"),
+  ...REPO_SETTINGS_REGISTRY.filter((def) => def.placement === undefined),
+  ...REPO_SETTINGS_REGISTRY.filter((def) => def.placement === "late"),
+];
+
+/** Every top-level `.jumi.yml` key, derived from the registry (registry order). */
+export const KNOWN_KEYS = new Set(REPO_SETTINGS_REGISTRY.map((def) => def.key));
 
 /**
  * Validate a `branch_prefix` value. One or more path segments of
@@ -360,29 +700,6 @@ export function validatePrTemplate(
 /** Render a validated title/commit template for one forge issue. */
 export function renderIssueTemplate(template: string, title: string, issueNumber: number): string {
   return template.replaceAll("{title}", title).replaceAll("{issue}", String(issueNumber));
-}
-
-/** Default settings: every site that needs default values uses this. */
-function defaultRepoSettings(): RepoSettings {
-  return {
-    automerge: false,
-    automergeLabel: DEFAULT_AUTOMERGE_LABEL,
-    noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL,
-    timeouts: {},
-    allowedRunners: undefined,
-    reviewExclude: [],
-    followupOnSuggestions: true,
-    takeoverAuthors: [],
-    ignoreConflictsAuthors: [],
-    blockingQuestionAuthors: [],
-    trustedSenders: undefined,
-    followupIgnoreLogins: undefined,
-    ignoreConflictsLabel: undefined,
-    pickupLabel: undefined,
-    mode: "full",
-    reviewDrafts: false,
-    reviewBudget: {},
-  };
 }
 
 /**
@@ -608,6 +925,37 @@ function parserErrorMessage(err: unknown): string {
 }
 
 /**
+ * Record one absent key's default: `required` fields take the entry default,
+ * `always` fields are present with `undefined`, `optional` fields stay absent.
+ */
+function applyAbsentDefault(def: RegistryEntry, values: Map<string, unknown>, present: Set<string>): void {
+  if (def.presence === "required") {
+    values.set(def.field, def.defaultValue);
+    present.add(def.field);
+  } else if (def.presence === "always") {
+    values.set(def.field, undefined);
+    present.add(def.field);
+  }
+}
+
+/** Build the settings object in assembly order from validated values. */
+function assembleSettings(values: Map<string, unknown>, present: Set<string>): RepoSettings {
+  const settings: Record<string, unknown> = {};
+  for (const def of REPO_SETTINGS_ASSEMBLY_ORDER) {
+    if (present.has(def.field)) settings[def.field] = values.get(def.field);
+  }
+  return settings as RepoSettings;
+}
+
+/** Defaults for a missing or empty file: required defaults plus always-present undefineds. */
+function defaultRepoSettingsFromRegistry(): RepoSettings {
+  const values = new Map<string, unknown>();
+  const present = new Set<string>();
+  for (const def of REPO_SETTINGS_REGISTRY) applyAbsentDefault(def, values, present);
+  return assembleSettings(values, present);
+}
+
+/**
  * Parse raw `.jumi.yml` text. Absent `automerge` (or `false`) means off;
  * absent `automerge_label` means `automerge`; absent `no_automerge_label`
  * means `no-automerge`; a blank, non-string, or identical (case-insensitive)
@@ -658,7 +1006,7 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
   } catch (err) {
     return { ok: false, error: parserErrorMessage(err) };
   }
-  if (parsed === null || parsed === undefined) return { ok: true, settings: defaultRepoSettings() };
+  if (parsed === null || parsed === undefined) return { ok: true, settings: defaultRepoSettingsFromRegistry() };
   if (typeof parsed !== "object" || Array.isArray(parsed)) {
     return { ok: false, error: "top-level value must be a mapping" };
   }
@@ -666,255 +1014,28 @@ export function parseRepoSettingsText(text: string): RepoSettingsParse {
     if (!KNOWN_KEYS.has(key)) return { ok: false, error: unknownKeyError(key, [...KNOWN_KEYS]) };
   }
   const record = parsed as Record<string, unknown>;
-  let automerge = false;
-  if ("automerge" in record && record.automerge !== undefined) {
-    if (typeof record.automerge !== "boolean") return { ok: false, error: `"automerge" must be a boolean` };
-    automerge = record.automerge;
-  }
-  let timeouts: RepoTimeouts = {};
-  if ("timeouts" in record && record.timeouts !== undefined) {
-    const timeoutsParsed = parseTimeoutsValue(record.timeouts);
-    if (!timeoutsParsed.ok) return timeoutsParsed;
-    timeouts = timeoutsParsed.timeouts;
-  }
-  let allowedRunners: string[] | undefined;
-  if ("allowed_runners" in record && record.allowed_runners !== undefined) {
-    const parsed = parseStringList(record.allowed_runners, "allowed_runners", {
-      notListError: `"allowed_runners" must be a list of runner names`,
-    });
-    if (!parsed.ok) return parsed;
-    if (parsed.values.length === 0) {
-      return {
-        ok: false,
-        error: `"allowed_runners" is empty, so no runner could work on the repository; use mode: off or mode: review-only`,
-      };
+  const values = new Map<string, unknown>();
+  const present = new Set<string>();
+  for (const def of REPO_SETTINGS_REGISTRY) {
+    if (def.key in record && record[def.key] !== undefined) {
+      const result = def.parse(record[def.key]);
+      if (!result.ok) return result;
+      values.set(def.field, result.value);
+      present.add(def.field);
+      // Preserved cross-field rule (checked right after `no_automerge_label`
+      // parses, before `blocking_question_authors`): the pair must differ.
+      if (def.key === "no_automerge_label") {
+        const automergeLabel = values.get("automergeLabel") as string;
+        const noAutomergeLabel = values.get("noAutomergeLabel") as string;
+        if (automergeLabel.toLowerCase() === noAutomergeLabel.toLowerCase()) {
+          return { ok: false, error: `"automerge_label" and "no_automerge_label" must be different` };
+        }
+      }
+      continue;
     }
-    allowedRunners = parsed.values;
+    applyAbsentDefault(def, values, present);
   }
-  let reviewExclude: string[] = [];
-  if ("review_exclude" in record && record.review_exclude !== undefined) {
-    const parsed = parseStringList(record.review_exclude, "review_exclude", {
-      notListError: `"review_exclude" must be a list of glob strings`,
-      dedupe: false,
-    });
-    if (!parsed.ok) return parsed;
-    reviewExclude = parsed.values;
-  }
-  if (
-    "followup_on_suggestions" in record &&
-    record.followup_on_suggestions !== undefined &&
-    typeof record.followup_on_suggestions !== "boolean"
-  )
-    return { ok: false, error: `"followup_on_suggestions" must be a boolean` };
-  if (
-    "suggestions_hold_merge" in record &&
-    record.suggestions_hold_merge !== undefined &&
-    typeof record.suggestions_hold_merge !== "boolean"
-  )
-    return { ok: false, error: `"suggestions_hold_merge" must be a boolean` };
-  for (const key of ["max_followup_rounds", "max_conflict_rounds"] as const) {
-    if (key in record && record[key] !== undefined) {
-      const value = record[key];
-      if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
-        return { ok: false, error: `"${key}" must be a non-negative integer` };
-    }
-  }
-  const takeover = parseAuthorList(record, "takeover_authors");
-  if (!takeover.ok) return takeover;
-  const ignoreConflicts = parseAuthorList(record, "ignore_conflicts_authors");
-  if (!ignoreConflicts.ok) return ignoreConflicts;
-  let automergeLabel = DEFAULT_AUTOMERGE_LABEL;
-  if ("automerge_label" in record && record.automerge_label !== undefined) {
-    if (typeof record.automerge_label !== "string" || !record.automerge_label.trim()) {
-      return { ok: false, error: `"automerge_label" must be a non-blank string` };
-    }
-    automergeLabel = record.automerge_label.trim();
-  }
-  let noAutomergeLabel = DEFAULT_NO_AUTOMERGE_LABEL;
-  if ("no_automerge_label" in record && record.no_automerge_label !== undefined) {
-    if (typeof record.no_automerge_label !== "string" || !record.no_automerge_label.trim()) {
-      return { ok: false, error: `"no_automerge_label" must be a non-blank string` };
-    }
-    noAutomergeLabel = record.no_automerge_label.trim();
-  }
-  if (automergeLabel.toLowerCase() === noAutomergeLabel.toLowerCase()) {
-    return { ok: false, error: `"automerge_label" and "no_automerge_label" must be different` };
-  }
-  let blockingQuestionAuthors: string[] = [];
-  if ("blocking_question_authors" in record && record.blocking_question_authors !== undefined) {
-    const parsed = parseStringList(record.blocking_question_authors, "blocking_question_authors", {
-      notListError: `"blocking_question_authors" must be a list of logins`,
-    });
-    if (!parsed.ok) return parsed;
-    blockingQuestionAuthors = parsed.values;
-  }
-  let trustedSenders: string[] | undefined;
-  if ("trusted_senders" in record && record.trusted_senders !== undefined) {
-    const parsed = parseStringList(record.trusted_senders, "trusted_senders", {
-      notListError: `"trusted_senders" must be a list of logins`,
-    });
-    if (!parsed.ok) return parsed;
-    if (parsed.values.length === 0) {
-      return {
-        ok: false,
-        error: `"trusted_senders" is empty, so no sender could work on the repository; use mode: off or mode: review-only`,
-      };
-    }
-    trustedSenders = parsed.values;
-  }
-  let followupIgnoreLogins: string[] | undefined;
-  if ("followup_ignore_logins" in record && record.followup_ignore_logins !== undefined) {
-    const parsed = parseStringList(record.followup_ignore_logins, "followup_ignore_logins", {
-      notListError: `"followup_ignore_logins" must be a list of logins`,
-    });
-    if (!parsed.ok) return parsed;
-    followupIgnoreLogins = parsed.values;
-  }
-  let ignoreConflictsLabel: string | undefined;
-  if ("ignore_conflicts_label" in record && record.ignore_conflicts_label !== undefined) {
-    if (typeof record.ignore_conflicts_label !== "string" || !record.ignore_conflicts_label.trim()) {
-      return { ok: false, error: `"ignore_conflicts_label" must be a non-blank string` };
-    }
-    ignoreConflictsLabel = record.ignore_conflicts_label.trim();
-  }
-  let pickupLabel: string | undefined;
-  if ("pickup_label" in record && record.pickup_label !== undefined) {
-    if (typeof record.pickup_label !== "string" || !record.pickup_label.trim()) {
-      return { ok: false, error: `"pickup_label" must be a non-blank string` };
-    }
-    pickupLabel = record.pickup_label.trim();
-  }
-  let conflictRegenerate: ConflictRegenerateEntry[] | undefined;
-  if ("conflict_regenerate" in record && record.conflict_regenerate !== undefined) {
-    const parsed = parseConflictRegenerateValue(record.conflict_regenerate);
-    if (!parsed.ok) return parsed;
-    conflictRegenerate = parsed.entries;
-  }
-  let mode: RepoMode = "full";
-  if ("mode" in record && record.mode !== undefined) {
-    if (typeof record.mode !== "string" || !(REPO_MODES as readonly string[]).includes(record.mode)) {
-      return { ok: false, error: `"mode" must be one of "full", "review-only", "off"` };
-    }
-    mode = record.mode as RepoMode;
-  }
-  let branchPrefix: string | undefined;
-  if ("branch_prefix" in record && record.branch_prefix !== undefined) {
-    if (typeof record.branch_prefix !== "string" || !record.branch_prefix.trim()) {
-      return { ok: false, error: `"branch_prefix" must be a non-blank string` };
-    }
-    const validated = validateBranchPrefix(record.branch_prefix);
-    if (!validated.ok) return validated;
-    branchPrefix = validated.prefix;
-  }
-  let prTitle: string | undefined;
-  if ("pr_title" in record && record.pr_title !== undefined) {
-    if (typeof record.pr_title !== "string" || !record.pr_title.trim()) {
-      return { ok: false, error: `"pr_title" must be a non-blank string` };
-    }
-    const validated = validatePrTemplate("pr_title", record.pr_title);
-    if (!validated.ok) return validated;
-    prTitle = validated.template;
-  }
-  let commitMessage: string | undefined;
-  if ("commit_message" in record && record.commit_message !== undefined) {
-    if (typeof record.commit_message !== "string" || !record.commit_message.trim()) {
-      return { ok: false, error: `"commit_message" must be a non-blank string` };
-    }
-    const validated = validatePrTemplate("commit_message", record.commit_message);
-    if (!validated.ok) return validated;
-    commitMessage = validated.template;
-  }
-  let closingKeyword: RepoClosingKeyword | undefined;
-  if ("closing_keyword" in record && record.closing_keyword !== undefined) {
-    if (typeof record.closing_keyword !== "string" || !record.closing_keyword.trim()) {
-      return { ok: false, error: `"closing_keyword" must be a non-blank string` };
-    }
-    const trimmed = record.closing_keyword.trim();
-    if (!(REPO_CLOSING_KEYWORDS as readonly string[]).includes(trimmed)) {
-      return { ok: false, error: `"closing_keyword" must be one of "closes", "refs"` };
-    }
-    closingKeyword = trimmed as RepoClosingKeyword;
-  }
-  let reviewDrafts = false;
-  if ("review_drafts" in record && record.review_drafts !== undefined) {
-    if (typeof record.review_drafts !== "boolean") return { ok: false, error: `"review_drafts" must be a boolean` };
-    reviewDrafts = record.review_drafts;
-  }
-  if ("max_suggestions" in record && record.max_suggestions !== undefined) {
-    const value = record.max_suggestions;
-    if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
-      return { ok: false, error: `"max_suggestions" must be a non-negative integer` };
-  }
-  let reviewBudget: RepoReviewBudget = {};
-  if ("review_budget" in record && record.review_budget !== undefined) {
-    const parsed = parseReviewBudgetValue(record.review_budget);
-    if (!parsed.ok) return parsed;
-    reviewBudget = parsed.reviewBudget;
-  }
-  let ciGate: { wait: CiGateWait } | undefined;
-  if ("ci_gate" in record && record.ci_gate !== undefined) {
-    const parsed = parseCiGateValue(record.ci_gate);
-    if (!parsed.ok) return parsed;
-    ciGate = parsed.ciGate;
-  }
-  let automergeMethod: RepoAutomergeMethod | undefined;
-  if ("automerge_method" in record && record.automerge_method !== undefined) {
-    if (
-      typeof record.automerge_method !== "string" ||
-      !(AUTOMERGE_METHODS as readonly string[]).includes(record.automerge_method)
-    ) {
-      return {
-        ok: false,
-        error: `"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"`,
-      };
-    }
-    automergeMethod = record.automerge_method as RepoAutomergeMethod;
-  }
-  let setup: RepoSetup | undefined;
-  if ("setup" in record && record.setup !== undefined) {
-    const parsed = parseSetupValue(record.setup);
-    if (!parsed.ok) return parsed;
-    setup = parsed.setup;
-  }
-  const settings: RepoSettings = {
-    automerge,
-    automergeLabel,
-    noAutomergeLabel,
-    timeouts,
-    allowedRunners,
-    reviewExclude,
-    followupOnSuggestions:
-      "followup_on_suggestions" in record && record.followup_on_suggestions !== undefined
-        ? record.followup_on_suggestions === true
-        : true,
-    takeoverAuthors: takeover.authors,
-    ignoreConflictsAuthors: ignoreConflicts.authors,
-    blockingQuestionAuthors,
-    trustedSenders,
-    followupIgnoreLogins,
-    ...(ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel } : {}),
-    ...(pickupLabel !== undefined ? { pickupLabel } : {}),
-    ...(conflictRegenerate !== undefined ? { conflictRegenerate } : {}),
-    mode,
-    ...(branchPrefix !== undefined ? { branchPrefix } : {}),
-    ...(prTitle !== undefined ? { prTitle } : {}),
-    ...(commitMessage !== undefined ? { commitMessage } : {}),
-    ...(closingKeyword !== undefined ? { closingKeyword } : {}),
-    reviewDrafts,
-    reviewBudget,
-    ...(ciGate !== undefined ? { ciGate } : {}),
-    ...(automergeMethod !== undefined ? { automergeMethod } : {}),
-    ...(setup !== undefined ? { setup } : {}),
-  };
-  if ("max_followup_rounds" in record && record.max_followup_rounds !== undefined)
-    settings.maxFollowupRounds = record.max_followup_rounds as number;
-  if ("max_conflict_rounds" in record && record.max_conflict_rounds !== undefined)
-    settings.maxConflictRounds = record.max_conflict_rounds as number;
-  if ("max_suggestions" in record && record.max_suggestions !== undefined)
-    settings.maxSuggestions = record.max_suggestions as number;
-  if ("suggestions_hold_merge" in record && record.suggestions_hold_merge !== undefined)
-    settings.suggestionsHoldMerge = record.suggestions_hold_merge as boolean;
-  return { ok: true, settings };
+  return { ok: true, settings: assembleSettings(values, present) };
 }
 
 /**
@@ -941,50 +1062,9 @@ function parseStringList(
   return { ok: true, values };
 }
 
-function parseAuthorList(
-  record: Record<string, unknown>,
-  key: string
-): { ok: true; authors: string[] } | { ok: false; error: string } {
-  if (!(key in record) || record[key] === undefined) return { ok: true, authors: [] };
-  const parsed = parseStringList(record[key], key, { notListError: `"${key}" must be a list of logins` });
-  if (!parsed.ok) return parsed;
-  return { ok: true, authors: parsed.values };
-}
-
 export type RepoSettingsLoad =
   | { state: "missing" }
-  | {
-      state: "valid";
-      automerge: boolean;
-      automergeLabel: string;
-      noAutomergeLabel: string;
-      timeouts: RepoTimeouts;
-      setup?: RepoSetup;
-      allowedRunners?: string[];
-      reviewExclude: string[];
-      followupOnSuggestions: boolean;
-      maxFollowupRounds?: number;
-      maxConflictRounds?: number;
-      suggestionsHoldMerge?: boolean;
-      takeoverAuthors: string[];
-      ignoreConflictsAuthors: string[];
-      blockingQuestionAuthors: string[];
-      trustedSenders?: string[];
-      followupIgnoreLogins?: string[];
-      ignoreConflictsLabel?: string;
-      pickupLabel?: string;
-      conflictRegenerate?: ConflictRegenerateEntry[];
-      mode: RepoMode;
-      branchPrefix?: string;
-      prTitle?: string;
-      commitMessage?: string;
-      closingKeyword?: RepoClosingKeyword;
-      reviewDrafts: boolean;
-      maxSuggestions?: number;
-      reviewBudget: RepoReviewBudget;
-      ciGate?: { wait: CiGateWait };
-      automergeMethod?: RepoAutomergeMethod;
-    }
+  | ({ state: "valid" } & RepoSettings)
   | { state: "invalid"; error: string };
 
 /** Ledger kind to repository timeout key: `follow-up` reads `followup`. */
@@ -1244,48 +1324,7 @@ export async function loadRepoSettings(
   if (file.found !== true || typeof file.content !== "string") return { state: "missing" };
   const parsed = parseRepoSettingsText(file.content);
   if (!parsed.ok) return { state: "invalid", error: parsed.error };
-  return {
-    state: "valid",
-    automerge: parsed.settings.automerge,
-    automergeLabel: parsed.settings.automergeLabel,
-    noAutomergeLabel: parsed.settings.noAutomergeLabel,
-    timeouts: parsed.settings.timeouts,
-    allowedRunners: parsed.settings.allowedRunners,
-    reviewExclude: parsed.settings.reviewExclude,
-    followupOnSuggestions: parsed.settings.followupOnSuggestions,
-    ...(parsed.settings.maxFollowupRounds !== undefined
-      ? { maxFollowupRounds: parsed.settings.maxFollowupRounds }
-      : {}),
-    ...(parsed.settings.maxConflictRounds !== undefined
-      ? { maxConflictRounds: parsed.settings.maxConflictRounds }
-      : {}),
-    takeoverAuthors: parsed.settings.takeoverAuthors,
-    ignoreConflictsAuthors: parsed.settings.ignoreConflictsAuthors,
-    blockingQuestionAuthors: parsed.settings.blockingQuestionAuthors,
-    trustedSenders: parsed.settings.trustedSenders,
-    followupIgnoreLogins: parsed.settings.followupIgnoreLogins,
-    ...(parsed.settings.ignoreConflictsLabel !== undefined
-      ? { ignoreConflictsLabel: parsed.settings.ignoreConflictsLabel }
-      : {}),
-    ...(parsed.settings.pickupLabel !== undefined ? { pickupLabel: parsed.settings.pickupLabel } : {}),
-    ...(parsed.settings.conflictRegenerate !== undefined
-      ? { conflictRegenerate: parsed.settings.conflictRegenerate }
-      : {}),
-    mode: parsed.settings.mode,
-    ...(parsed.settings.branchPrefix !== undefined ? { branchPrefix: parsed.settings.branchPrefix } : {}),
-    ...(parsed.settings.prTitle !== undefined ? { prTitle: parsed.settings.prTitle } : {}),
-    ...(parsed.settings.commitMessage !== undefined ? { commitMessage: parsed.settings.commitMessage } : {}),
-    ...(parsed.settings.closingKeyword !== undefined ? { closingKeyword: parsed.settings.closingKeyword } : {}),
-    reviewDrafts: parsed.settings.reviewDrafts,
-    ...(parsed.settings.maxSuggestions !== undefined ? { maxSuggestions: parsed.settings.maxSuggestions } : {}),
-    reviewBudget: parsed.settings.reviewBudget,
-    ...(parsed.settings.ciGate !== undefined ? { ciGate: parsed.settings.ciGate } : {}),
-    ...(parsed.settings.automergeMethod !== undefined ? { automergeMethod: parsed.settings.automergeMethod } : {}),
-    ...(parsed.settings.setup !== undefined ? { setup: parsed.settings.setup } : {}),
-    ...(parsed.settings.suggestionsHoldMerge !== undefined
-      ? { suggestionsHoldMerge: parsed.settings.suggestionsHoldMerge }
-      : {}),
-  };
+  return { state: "valid", ...parsed.settings };
 }
 
 /**
