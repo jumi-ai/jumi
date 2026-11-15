@@ -2544,17 +2544,19 @@ async function handleImplementKick(
         const getRepo = forgeApi.getRepo;
         const getRepoFile = forgeApi.getRepoFile;
         if (typeof getRepo === "function" && typeof getRepoFile === "function") {
-          const { loadRepoSettings, effectivePickupLabel } = await import("./repo_settings.ts");
+          const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
           const info = await getRepo.call(forgeApi, item.owner, item.repo).catch(() => undefined);
           const defaultBranch =
             info && typeof info.default_branch === "string" && info.default_branch.trim()
               ? info.default_branch.trim()
               : "";
           if (defaultBranch) {
-            const loaded = await loadRepoSettings(forgeApi as never, item.owner, item.repo, defaultBranch).catch(
-              () => ({ state: "missing" }) as const
-            );
-            pickupLabel = effectivePickupLabel(loaded);
+            const policy = await resolveRepoPolicy(
+              { api: forgeApi, owner: item.owner, repo: item.repo, ref: defaultBranch },
+              fallbackPolicyDeployment(),
+              { onUnreadable: "fallback" }
+            ).catch(() => undefined);
+            pickupLabel = policy?.pickupLabel ?? "jumi";
           }
         }
       } catch {

@@ -1,7 +1,8 @@
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
 import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
-import { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { effectivePickupLabel, effectiveTrustedSenderLogins } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -97,9 +98,13 @@ export async function loadTakeoverAuthors(
   try {
     if (!api || typeof api.getRepoFile !== "function") return [];
     if (typeof defaultBranch !== "string" || !defaultBranch.trim()) return [];
-    const loaded = await loadRepoSettings(api, owner, repo, defaultBranch.trim());
-    if (loaded.state !== "valid") return [];
-    return [...(loaded.takeoverAuthors ?? [])];
+    const policy = await resolveRepoPolicy(
+      { api, owner, repo, ref: defaultBranch.trim() },
+      fallbackPolicyDeployment(),
+      { onUnreadable: "throw" }
+    );
+    if (policy.status !== "ok") return [];
+    return [...policy.takeoverAuthors];
   } catch (err) {
     logger?.(`takeover authors unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return [];
@@ -130,7 +135,11 @@ async function loadTakeoverRepoPolicy(
   try {
     const branch = typeof defaultBranch === "string" ? defaultBranch.trim() : "";
     if (!branch || !api || typeof api.getRepoFile !== "function") return fallback;
-    const loaded = await loadRepoSettings(api as never, owner, repo, branch);
+    const loaded = (
+      await resolveRepoPolicy({ api, owner, repo, ref: branch }, fallbackPolicyDeployment({ trustedSenderLogins }), {
+        onUnreadable: "throw",
+      })
+    ).load;
     if (loaded.state !== "valid") {
       return preloadedAuthors === undefined ? { ...fallback, authors: [] } : fallback;
     }
