@@ -1993,6 +1993,7 @@ export async function implementFollowUp(
               ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
               handoffStore,
               handoffKey,
+              chain: jobChain,
               ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
               onPid: loop.engineOnPid(opts.onPid),
               onRunner: (r) => {

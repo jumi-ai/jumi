@@ -212,6 +212,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   workerMcp?: { url: string; token: string };
   /** In-memory worker result store backing `workerMcp` (tool-first handoff). */
   workerStore?: import("./worker_mcp.ts").WorkerResultStore;
+  /** Runner chain for secret scrubbing (Claude keys) before the handoff store write. */
+  chain?: readonly import("./runners.ts").NamedRunner[];
 }
 
 function logDefault(message: string) {
@@ -900,7 +902,11 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
       if (toolHandoff != null) {
         log("worker result: handoff from tool");
         const { capHandoffNote } = await import("./handoff.ts");
-        const capped = capHandoffNote(toolHandoff);
+        const { redactGitSecrets } = await import("./workspace.ts");
+        const { workerPublishSecrets } = await import("./implement.ts");
+        const capped = capHandoffNote(
+          redactGitSecrets(toolHandoff, workerPublishSecrets(opts.loop.auth.token, opts.chain))
+        );
         if (capped.trim()) {
           try {
             await opts.handoffStore.put(opts.handoffKey, capped);
@@ -1363,6 +1369,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             handoffKey,
             workerMcp: conflictWorkerMcpRef,
             workerStore: conflictWorkerStore,
+            chain: jobChain,
             ...(conflictSetupBlock ? { repoSetupBlock: conflictSetupBlock } : {}),
             onPid: loop.engineOnPid(opts.onPid),
             onRunner: (r) => {
