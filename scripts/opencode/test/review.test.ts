@@ -31,6 +31,8 @@ import { buildCheckTrailer } from "../src/verdict.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { frozenGit } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
@@ -61,36 +63,6 @@ const skipOptions = {
   workspacePreparer: async () => undefined,
   logger: () => undefined,
 };
-
-function frozenGit(opts: { head?: string; porcelain?: string; baseReviewMd?: string } = {}): GitRunner {
-  const head = opts.head ?? "headsha";
-  const porcelain = opts.porcelain ?? "?? JUMI_REVIEW.md";
-  return async (args) => {
-    if (args[0] === "rev-parse") return head;
-    if (args[0] === "status") return porcelain;
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    if (args[0] === "ls-tree") {
-      if (opts.baseReviewMd === undefined) return "";
-      const size = Buffer.byteLength(opts.baseReviewMd, "utf8");
-      return `100644 blob ${"b".repeat(40)} ${size}\tREVIEW.md`;
-    }
-    if (args[0] === "show") {
-      if (opts.baseReviewMd === undefined) throw new Error(`unexpected git ${args.join(" ")}`);
-      return opts.baseReviewMd;
-    }
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
-}
-
-async function withWorkspace(run: (workspace: string) => Promise<void>) {
-  const workspace = await mkdtemp(join(tmpdir(), "jumi-review-"));
-  try {
-    await run(workspace);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
-}
 
 async function writeReview(workspace: string, contents: string) {
   await writeFile(join(workspace, "JUMI_REVIEW.md"), contents);
@@ -397,8 +369,7 @@ describe("reviewPullRequest", () => {
   });
 
   test("stuck repeated finding skips OpenCode without failing jumi/opencode-review", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-review-stuck-"));
-    try {
+    await withWorkspace(async (home) => {
       const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
       await writeStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7), {
         fingerprints: [
@@ -434,14 +405,11 @@ describe("reviewPullRequest", () => {
       expect(openCode).toBe(0);
       expect(statuses.some((status) => status.state === "failure")).toBe(false);
       expect(comments.at(-1)).toContain("stuck: repeated action");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("records a review finding fingerprint after a failure artifact", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-review-fp-"));
-    try {
+    await withWorkspace(async (home) => {
       await withWorkspace(async (workspace) => {
         await reviewPullRequest({
           ...reviewOptions(workspace),
@@ -462,9 +430,7 @@ describe("reviewPullRequest", () => {
           },
         ]);
       });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("posts the pull-review writeup from JUMI_REVIEW.md, not OpenCode stdout", async () => {
@@ -1159,6 +1125,34 @@ describe("reviewPullRequest", () => {
       expect(comments.some((body) => body.includes(INCOMPLETE_REVIEW_STUCK))).toBe(false);
       expect(tasks[1]).toContain("check trailer");
       expect(tasks[1]).toContain("last non-empty line");
+      expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
+    });
+  });
+
+  test("publishes a legacy artifact with -> in the trailer reason without retry", async () => {
+    await withWorkspace(async (workspace) => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      let ran = 0;
+      const result = await reviewPullRequest({
+        ...reviewOptionsWithSha(workspace),
+        api: reviewApi({
+          getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
+          createCommitStatus: async (_owner, _repo, _sha, status) => {
+            statuses.push(status);
+            return status;
+          },
+        }),
+        openCodeRunner: async () => {
+          ran++;
+          await writeReview(
+            workspace,
+            "Looks good\n<!-- jumi-check: success; bumps codex 0.167.1->0.167.2, patch only -->"
+          );
+          return { status: "ok" };
+        },
+      });
+      expect(ran).toBe(1);
+      expect(result).toEqual({ status: "posted" });
       expect(statuses.map((status) => status.state)).toEqual(["pending", "success"]);
     });
   });

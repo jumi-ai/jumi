@@ -55,7 +55,7 @@ const MAX_FINDING_LINE = 1_000_000;
 const FILE_LINE_RE = /^(.+?):(\d+):\s+(\S.*)$/;
 const L_LINE_RE = /^L(\d+):\s+(\S.*)$/;
 
-const CHECK_LINE_RE = /^<!--\s*jumi-check:\s*(success|failure)(?:\s*;\s*([^>]*?))?\s*-->$/i;
+const CHECK_LINE_RE = /^<!--\s*jumi-check:\s*(success|failure)(?:\s*;\s*((?:(?!-->).)*?))?\s*-->$/i;
 
 /**
  * Make a free-text trailer reason safe for the single-line `jumi-check`
@@ -76,7 +76,7 @@ export function buildCheckTrailer(state: "success" | "failure", reason?: string)
   return safe ? `<!-- jumi-check: ${state}; ${safe} -->` : `<!-- jumi-check: ${state} -->`;
 }
 
-function lastNonEmptyLine(text: string): string {
+export function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
@@ -90,7 +90,7 @@ export function parseCheckLine(line: string): { state: "success" | "failure"; re
   if (!match) return undefined;
   return {
     state: match[1].toLowerCase() === "success" ? "success" : "failure",
-    reason: (match[2] ?? "").trim(),
+    reason: sanitizeCheckReason(match[2] ?? ""),
   };
 }
 
@@ -103,7 +103,7 @@ export function trailerSuggestionCount(reason: string): number {
 
 function stripCheckComments(text: string): string {
   return text
-    .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*[^>]*?)?\s*-->/gi, "")
+    .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -191,6 +191,11 @@ function isHeadingLine(line: string): boolean {
 
 function isCheckTrailerLine(line: string): boolean {
   return parseCheckLine(line.trim()) !== undefined;
+}
+
+/** A line that looks like a `jumi-check` trailer, whether or not it parses. */
+export function isTrailerShapedLine(line: string): boolean {
+  return /<!--\s*jumi-check:/i.test(line);
 }
 
 function isFindingLine(original: string, opts?: { singleFilePath?: string }): boolean {
@@ -534,7 +539,9 @@ export function parseReviewOutput(output: string): ParsedReviewOutput {
     };
   }
 
-  const description = check.reason || (check.state === "success" ? "No blocking issues" : "Review requested changes");
+  const description =
+    sanitizeCheckReason(check.reason) ||
+    (check.state === "success" ? "No blocking issues" : "Review requested changes");
   return {
     comment,
     checkLine: lastLine,

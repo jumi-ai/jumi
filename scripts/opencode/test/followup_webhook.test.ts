@@ -9,11 +9,8 @@ import {
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "../src/followup_webhook.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
-import type { IssueJob } from "../src/types.ts";
-import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
 import {
-  encodeJson,
   makeIssue,
   makeIssueCommentPayload,
   makePayload,
@@ -22,8 +19,8 @@ import {
   makeUser,
   makeWorkerConfig,
   responseJson,
-  signBody,
 } from "./fixtures.ts";
+import { makeQueue, workerIssueCommentRequest } from "./harness/webhook.ts";
 
 const policy = {
   giteaUrl: "https://gitea.kirmanak.stream",
@@ -59,37 +56,6 @@ function reviewCommentPayload() {
       },
     }),
     review: { id: 9, body: "please change this" },
-  });
-}
-
-function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
-  const jobs: IssueJob[] = [];
-  return {
-    jobs,
-    enqueue(job) {
-      jobs.push(job);
-      return { key: `${job.owner}/${job.repo}#${job.issueNumber}`, queued: true };
-    },
-  };
-}
-
-async function signedRequest(
-  body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string } = {}
-): Promise<Request> {
-  const raw = encodeJson(body);
-  const secret = overrides.secret ?? "webhook-secret";
-  const signature = await signBody(raw, secret);
-  const headers = new Headers(overrides.headers);
-  headers.set("content-type", "application/json");
-  headers.set("x-gitea-signature", signature);
-  headers.set("x-gitea-event", overrides.event ?? "issue_comment");
-  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
-  headers.set("x-gitea-delivery", "delivery-1");
-  return new Request("https://worker.test/webhooks/gitea", {
-    method: overrides.method ?? "POST",
-    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
-    headers,
   });
 }
 
@@ -1041,7 +1007,9 @@ describe("createWorkerFetchHandler follow-up events", () => {
       logger: (message) => logs.push(message),
     });
     const response = await handler(
-      await signedRequest(makeIssueCommentPayload({ sender: makeUser({ login: "tapio" }) }), { event: "issue_comment" })
+      await workerIssueCommentRequest(makeIssueCommentPayload({ sender: makeUser({ login: "tapio" }) }), {
+        event: "issue_comment",
+      })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender ignored" });
@@ -1052,7 +1020,9 @@ describe("createWorkerFetchHandler follow-up events", () => {
   test("enqueues issue_comment created on a jumi PR", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
-    const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
+    const response = await handler(
+      await workerIssueCommentRequest(makeIssueCommentPayload(), { event: "issue_comment" })
+    );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs[0]?.mode).toBe("follow-up");
@@ -1063,7 +1033,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
-      await signedRequest(
+      await workerIssueCommentRequest(
         makePayload({
           action: "reviewed",
           pull_request: makePR({
@@ -1090,7 +1060,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
   test("skips X-Gitea-Event: pull_request opened", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
-    const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
+    const response = await handler(await workerIssueCommentRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "author not listed for takeover" });
     expect(queue.jobs).toHaveLength(0);
@@ -1100,7 +1070,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
-      await signedRequest(reviewCommentPayload(), {
+      await workerIssueCommentRequest(reviewCommentPayload(), {
         event: "pull_request_comment",
         eventType: "pull_request_review_comment",
       })
@@ -1115,7 +1085,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: writeApi });
     const response = await handler(
-      await signedRequest(
+      await workerIssueCommentRequest(
         makePayload({
           action: "reviewed",
           pull_request: makePR({
@@ -1147,7 +1117,7 @@ describe("createWorkerFetchHandler follow-up events", () => {
     const body = reviewCommentPayload();
     expect("issue" in body).toBe(false);
     expect("comment" in body).toBe(false);
-    const response = await handler(await signedRequest(body, { event: "pull_request_comment" }));
+    const response = await handler(await workerIssueCommentRequest(body, { event: "pull_request_comment" }));
     expect(response.status).toBe(202);
     const json = await responseJson(response);
     expect(json).not.toHaveProperty("error");
@@ -1158,7 +1128,9 @@ describe("createWorkerFetchHandler follow-up events", () => {
   test("skips issue_comment from a reader without write access", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: readApi });
-    const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
+    const response = await handler(
+      await workerIssueCommentRequest(makeIssueCommentPayload(), { event: "issue_comment" })
+    );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
     expect(queue.jobs).toHaveLength(0);
@@ -1167,7 +1139,9 @@ describe("createWorkerFetchHandler follow-up events", () => {
   test("skips issue_comment when permission lookup is unavailable (fail-closed)", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
-    const response = await handler(await signedRequest(makeIssueCommentPayload(), { event: "issue_comment" }));
+    const response = await handler(
+      await workerIssueCommentRequest(makeIssueCommentPayload(), { event: "issue_comment" })
+    );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
     expect(queue.jobs).toHaveLength(0);

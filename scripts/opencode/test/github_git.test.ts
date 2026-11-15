@@ -8,6 +8,7 @@ import { implementIssue } from "../src/implement.ts";
 import { type GitAuth, type GitRunner, gitAuthResolverFor } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeIssueJob, makePR } from "./fixtures.ts";
+import { withDirs } from "./harness/temp.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -26,17 +27,6 @@ function gitApi(overrides: Partial<IssueApi> = {}): IssueApi {
       }),
     ...overrides,
   });
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-gh-git-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-gh-git-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 describe("GitHub git clone/push", () => {

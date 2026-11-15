@@ -1,6 +1,4 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AUTH_DEATH_REASON, providerAuthDeathForRun } from "../src/auth.ts";
 import { auditChildEnv } from "../src/child_env.ts";
@@ -25,6 +23,7 @@ import {
 import { formatRunnerStamp, parseRunnersCatalog, runnerNameForStamp, runnerStamp } from "../src/runners.ts";
 import { recordClaudeUsage, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 import { redactGitSecrets } from "../src/workspace.ts";
+import { withFakeClaude } from "./harness/bins.ts";
 
 const SAVED = { ...process.env };
 
@@ -327,23 +326,6 @@ describe("redaction", () => {
     expect(message).toContain(AUTH_DEATH_REASON);
   });
 });
-
-async function withFakeClaude(script: string, run: (workdir: string) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), "fake-claude-apikey-"));
-  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-claude-apikey-work-")));
-  const originalPath = process.env.PATH;
-  try {
-    const bin = join(dir, "claude");
-    await writeFile(bin, script);
-    await chmod(bin, 0o755);
-    process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run(workdir);
-  } finally {
-    process.env.PATH = originalPath ?? "";
-    await rm(dir, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
-}
 
 describe("runClaude with api-key runners", () => {
   test("child receives ANTHROPIC_API_KEY and not the subscription token", async () => {

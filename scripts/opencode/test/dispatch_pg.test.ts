@@ -14,68 +14,11 @@ import {
 import { createBunSqlClient, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { makeIssueJob } from "./fixtures.ts";
+import { createFakeK8s } from "./harness/k8s.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
 const describePg = databaseUrl ? describe : describe.skip;
-
-interface FakeK8s {
-  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
-  jobs: Map<string, K8sJobObject & { creationMs: number }>;
-  pods: Map<string, K8sPodObject[]>;
-  deleteUrls: string[];
-}
-
-function createFakeK8s(): FakeK8s {
-  const jobs = new Map<string, K8sJobObject & { creationMs: number }>();
-  const pods = new Map<string, K8sPodObject[]>();
-  const deleteUrls: string[] = [];
-  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
-    const url = String(input);
-    const method = (init?.method ?? "GET").toUpperCase();
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "POST") {
-      const manifest = JSON.parse(String(init?.body ?? "{}")) as K8sJobObject;
-      const name = manifest.metadata?.name ?? "";
-      if (jobs.has(name)) {
-        return new Response(JSON.stringify({ reason: "AlreadyExists" }), {
-          status: 409,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      jobs.set(name, {
-        ...manifest,
-        metadata: { ...(manifest.metadata ?? {}), creationTimestamp: new Date().toISOString() },
-        status: manifest.status ?? {},
-        creationMs: Date.now(),
-      } as K8sJobObject & { creationMs: number });
-      return new Response(JSON.stringify({ metadata: { name } }), { status: 201 });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.includes("/jobs/") && method === "DELETE") {
-      const name = decodeURIComponent(url.split("/jobs/")[1]?.split("?")[0] ?? "");
-      deleteUrls.push(url);
-      if (!url.includes("propagationPolicy=Background")) {
-        return new Response("propagationPolicy required", { status: 400 });
-      }
-      jobs.delete(name);
-      pods.delete(name);
-      return new Response(JSON.stringify({}), { status: 200 });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "GET") {
-      const items = [...jobs.entries()].map(([name, job]) => ({
-        metadata: { name, creationTimestamp: new Date(job.creationMs).toISOString() },
-        spec: (job as K8sJobObject).spec,
-        status: (job as K8sJobObject).status ?? {},
-      }));
-      return new Response(JSON.stringify({ items }), { status: 200 });
-    }
-    if (url.includes("/api/v1/namespaces/") && url.includes("/pods") && method === "GET") {
-      const selector = decodeURIComponent(url.split("labelSelector=")[1] ?? "");
-      const jobName = selector.split("job-name=")[1]?.split("&")[0] ?? "";
-      return new Response(JSON.stringify({ items: pods.get(jobName) ?? [] }), { status: 200 });
-    }
-    return new Response("not found", { status: 404 });
-  };
-  return { fetchImpl, jobs, pods, deleteUrls };
-}
 
 function baseTemplate(): Record<string, unknown> {
   return {
@@ -143,8 +86,7 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
   });
 
   test("scale from zero", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
@@ -157,14 +99,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(results[0].created).toBe(2);
       expect(fake.jobs.size).toBe(2);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("cap is respected", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
@@ -178,14 +117,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(results[0].created).toBe(2);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_active_jobs{role="worker"} 2');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod for a backoff row", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -200,14 +136,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(results[0].created).toBe(0);
       expect(fake.jobs.size).toBe(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod for a same-issue held row", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 12, delivery: "first" }));
@@ -225,14 +158,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       const parsed = parseDispatchJobName(name)!;
       const row = await store.get(parsed.rowId);
       expect(row?.issueNumber).toBe(13);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod during a cooldown", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -245,14 +175,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(results[0].created).toBe(0);
       expect(fake.jobs.size).toBe(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("repeated create returns AlreadyExists", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -268,14 +195,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       expect(second[0].created).toBe(0);
       expect(fake.jobs.size).toBe(1);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_errors_total{role="worker",op="create"} 0');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("failed Job expires the lease and counts an attempt", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -293,14 +217,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       const reclaimed = await store.reclaimExpired(2, new Date(), 1000, WORKER_JOB_KINDS);
       expect(reclaimed.requeued.length).toBe(1);
       expect(reclaimed.requeued[0].attempt).toBe(1);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("stale failed Job does not expire the replacement run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -328,14 +249,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       expect(row?.state).toBe("leased");
       expect(row?.attempt).toBe(1);
       expect(row?.leasedUntil).toBeGreaterThan(Date.now());
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("never-started pod is deleted with no attempt used", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -362,14 +280,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       expect(row?.state).toBe("queued");
       expect(row?.attempt).toBe(0);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_never_started_total{role="worker"} 1');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("row run twice gets a fresh name", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -390,14 +305,11 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(second[0].created).toBe(1);
       expect(fake.jobs.size).toBe(2);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("finished Jobs leave no pods and the queue still drains", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-pg-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
@@ -420,8 +332,6 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       });
       expect(next[0].created).toBe(1);
       expect(fake.jobs.size).toBe(1);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });

@@ -45,6 +45,7 @@ import type {
 } from "./ports.ts";
 import {
   buildIncompleteWritePrompt,
+  buildMalformedTrailerWritePrompt,
   buildMcpIncompletePrompt,
   buildMcpNoFindingsPrompt,
   buildMcpNoVerdictPrompt,
@@ -148,7 +149,9 @@ import {
   hasBlockingFindings,
   hasColonEndingFinding,
   isBlockingQuestionAuthor,
+  isTrailerShapedLine,
   keepReviewFindingLines,
+  lastNonEmptyLine,
   MAX_SUGGESTION_FINDINGS,
   openQuestionDescription,
   parseCheckLine,
@@ -2822,9 +2825,11 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
             log(`Incomplete review: no check verdict; write-only OpenCode retry (${extrasUsed}/${extraCap})`);
             await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
             const continueSessionNoTrailer = await hasResumableSession(opts.workspace);
-            const writePromptNoTrailer = buildNoTrailerWritePrompt(
-              continueSessionNoTrailer ? undefined : artifact.content
-            );
+            const lastLine = lastNonEmptyLine(artifact.content);
+            const malformedTrailer = isTrailerShapedLine(lastLine) && !parseCheckLine(lastLine);
+            const writePromptNoTrailer = malformedTrailer
+              ? buildMalformedTrailerWritePrompt(continueSessionNoTrailer ? undefined : artifact.content)
+              : buildNoTrailerWritePrompt(continueSessionNoTrailer ? undefined : artifact.content);
             lastStdout = (
               await runOpenCode({ prompt: writePromptNoTrailer, continueSession: continueSessionNoTrailer })
             ).stdout;

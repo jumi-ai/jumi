@@ -15,22 +15,14 @@ import {
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import { makeConfig, makeFile, makeIssue, makeIssueJob, makeJob, makeRepo, makeWorkerConfig } from "./fixtures.ts";
+import { frozenGitRunner } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function jobReviewApi() {
   return makeSharedReviewApi({
     getPRFiles: async () => [makeFile()],
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   });
-}
-
-function frozenGitRunner() {
-  return async (args: string[]) => {
-    if (args[0] === "rev-parse") return "headsha";
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
 }
 
 describe("parseJobId", () => {
@@ -49,8 +41,7 @@ describe("one-shot lease conditions", () => {
     const taken = await store.lease("other-holder", 60_000);
     expect(taken).toBeDefined();
     const logs: string[] = [];
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-taken-"));
-    try {
+    await withWorkspace(async (workspace) => {
       let ran = false;
       const result = await runOneShotJob({
         store,
@@ -72,9 +63,7 @@ describe("one-shot lease conditions", () => {
       expect(result.exitCode).toBe(0);
       expect(ran).toBe(false);
       expect(logs.join("\n")).toMatch(/already leased|not queued|is leased/i);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 
   test("failed job still exits 0", async () => {
@@ -83,8 +72,7 @@ describe("one-shot lease conditions", () => {
     const leased = await store.lease("probe", 60_000);
     expect(leased).toBeDefined();
     await store.releaseLease(leased!.id, "probe");
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-failed-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const result = await runOneShotJob({
         store,
         jobId: leased!.id,
@@ -106,9 +94,7 @@ describe("one-shot lease conditions", () => {
       expect(result.exitCode).toBe(0);
       const row = await store.get(leased!.id);
       expect(row?.state).toBe("failed");
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 
   test("unreachable ledger exits non-zero", async () => {
@@ -150,8 +136,7 @@ describe("one-shot lease conditions", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     }) as unknown as MemoryReviewJobStore;
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-ledger-down-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const result = await runOneShotJob({
         store: down,
         jobId: probe!.id,
@@ -168,9 +153,7 @@ describe("one-shot lease conditions", () => {
       expect(result.exitCode).toBe(1);
       const row = await base.get(probe!.id);
       expect(row?.state).toBe("leased");
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -277,8 +260,7 @@ describe("one-shot xAI OAuth refusal", () => {
       // past the gate (here to a skip, exit 0).
       process.env.OPENCODE_API_KEY_FILE = configPath;
       try {
-        const workspace = await mkdtemp(join(tmpdir(), "jumi-job-xai-static-"));
-        try {
+        await withWorkspace(async (workspace) => {
           const withKey = await runOneShotJob({
             store,
             jobId: row.id,
@@ -293,9 +275,7 @@ describe("one-shot xAI OAuth refusal", () => {
             },
           });
           expect(withKey.exitCode).toBe(0);
-        } finally {
-          await rm(workspace, { recursive: true, force: true });
-        }
+        });
       } finally {
         delete process.env.OPENCODE_API_KEY_FILE;
       }
@@ -411,8 +391,7 @@ describe("one-shot Antigravity refusal", () => {
     await store.enqueue(makeJob());
     const row = (await store.lease("probe", 60_000))!;
     await store.releaseLease(row.id, "probe");
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-job-no-agy-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const result = await runOneShotJob({
         store,
         jobId: row.id,
@@ -427,9 +406,7 @@ describe("one-shot Antigravity refusal", () => {
         },
       });
       expect(result.exitCode).toBe(0);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 });
 

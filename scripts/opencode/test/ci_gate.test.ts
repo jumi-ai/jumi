@@ -22,6 +22,8 @@ import { MemoryReviewJobStore, REVIEW_KIND, renderQueueMetrics } from "../src/re
 import { processEngineTick } from "../src/server.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeConfig, makeFile, makeIssue, makeJob, makePR, makeRepo } from "./fixtures.ts";
+import { createFakeK8s } from "./harness/k8s.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function makeCiApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   return makeReviewApi({
@@ -49,53 +51,6 @@ function emptyApi(): ReviewApi {
     listCheckRuns: async () => [],
     listActionJobs: async () => [],
   });
-}
-
-interface FakeK8s {
-  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
-  jobs: Map<string, K8sJobObject & { creationMs: number }>;
-  creates: string[];
-}
-
-function createFakeK8s(): FakeK8s {
-  const jobs = new Map<string, K8sJobObject & { creationMs: number }>();
-  const creates: string[] = [];
-  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
-    const url = String(input);
-    const method = (init?.method ?? "GET").toUpperCase();
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "POST") {
-      const manifest = JSON.parse(String(init?.body ?? "{}")) as K8sJobObject;
-      const name = manifest.metadata?.name ?? "";
-      creates.push(name);
-      if (jobs.has(name)) {
-        return new Response(JSON.stringify({ reason: "AlreadyExists" }), { status: 409 });
-      }
-      jobs.set(name, {
-        ...manifest,
-        metadata: { ...(manifest.metadata ?? {}), creationTimestamp: new Date().toISOString() },
-        status: {},
-        creationMs: Date.now(),
-      } as K8sJobObject & { creationMs: number });
-      return new Response(JSON.stringify({ metadata: { name } }), { status: 201 });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "GET") {
-      const items = [...jobs.entries()].map(([name, job]) => ({
-        metadata: { name, creationTimestamp: new Date(job.creationMs).toISOString() },
-        status: (job as K8sJobObject).status ?? {},
-      }));
-      return new Response(JSON.stringify({ items }), { status: 200 });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.includes("/jobs/") && method === "DELETE") {
-      const name = decodeURIComponent(url.split("/jobs/")[1]?.split("?")[0] ?? "");
-      jobs.delete(name);
-      return new Response(JSON.stringify({}), { status: 200 });
-    }
-    if (url.includes("/api/v1/namespaces/") && url.includes("/pods")) {
-      return new Response(JSON.stringify({ items: [] }), { status: 200 });
-    }
-    return new Response(JSON.stringify({}), { status: 200 });
-  };
-  return { fetchImpl, jobs, creates };
 }
 
 function baseTemplate(): Record<string, unknown> {
@@ -471,8 +426,7 @@ describe("CI gate: skip-only metric", () => {
   });
 
   test("job-mode CI pending skip emits a diag line", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-ci-skip-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
       const api = makeCiApi({
@@ -493,8 +447,6 @@ describe("CI gate: skip-only metric", () => {
       expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
       expect(lines.some((l) => l.includes("ci_pending_skip"))).toBe(true);
       expect(await store.countCiPendingSkips()).toBe(1);
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 });

@@ -6,6 +6,8 @@ import { buildPROpenedPrompt } from "../src/prompt.ts";
 import { publishReviewResult, type ReviewApi, reviewPullRequest } from "../src/review.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeFile, makePR, makeRepo } from "./fixtures.ts";
+import { frozenGit } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function excludesApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   return makeReviewApi({
@@ -30,28 +32,6 @@ const skipOptions = {
   workspacePreparer: async () => undefined,
   logger: () => undefined,
 };
-
-function frozenGit(opts: { head?: string; porcelain?: string } = {}) {
-  const head = opts.head ?? "headsha";
-  const porcelain = opts.porcelain ?? "?? JUMI_REVIEW.md";
-  return async (args: string[]) => {
-    if (args[0] === "rev-parse") return head;
-    if (args[0] === "status") return porcelain;
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    if (args[0] === "ls-tree") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
-}
-
-async function withWorkspace(run: (workspace: string) => Promise<void>) {
-  const workspace = await mkdtemp(join(tmpdir(), "jumi-review-excl-"));
-  try {
-    await run(workspace);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
-}
 
 describe("review_exclude end to end", () => {
   test("an excluded patch is absent from the prompt but the file stays listed as left out", async () => {

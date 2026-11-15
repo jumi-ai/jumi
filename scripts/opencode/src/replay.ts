@@ -11,6 +11,7 @@ import { resolvePermissions } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullFile, PullReview, Repo, ReviewApi, Task } from "./ports.ts";
 import {
   buildIncompleteWritePrompt,
+  buildMalformedTrailerWritePrompt,
   buildNoFindingsWritePrompt,
   buildNoTrailerWritePrompt,
   buildPROpenedPrompt,
@@ -23,7 +24,15 @@ import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./rev
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
 import { errorMessage } from "./util/error.ts";
 import { isRecord } from "./util/object.ts";
-import { hasBlockingFindings, keepReviewFindingLines, parseReviewFindings, parseReviewOutput } from "./verdict.ts";
+import {
+  hasBlockingFindings,
+  isTrailerShapedLine,
+  keepReviewFindingLines,
+  lastNonEmptyLine,
+  parseCheckLine,
+  parseReviewFindings,
+  parseReviewOutput,
+} from "./verdict.ts";
 import {
   checkoutPullRequestWorkspace,
   type GitAuthResolver,
@@ -1015,9 +1024,14 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
           extrasUsed++;
           await rm(join(workdir, "JUMI_REVIEW.md"), { recursive: true, force: true }).catch(() => undefined);
           const continued = await hasResumableSession(workdir);
+          const lastLine = lastNonEmptyLine(artifact.content);
+          const malformed = isTrailerShapedLine(lastLine) && !parseCheckLine(lastLine);
+          const retryPrompt = malformed
+            ? buildMalformedTrailerWritePrompt(continued ? undefined : artifact.content)
+            : buildNoTrailerWritePrompt(continued ? undefined : artifact.content);
           try {
             await runOnce({
-              prompt: buildNoTrailerWritePrompt(continued ? undefined : artifact.content),
+              prompt: retryPrompt,
               continueSession: continued,
             });
           } catch (err) {

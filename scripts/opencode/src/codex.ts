@@ -413,7 +413,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       if (opts.reviewMcp && reviewHome) {
         const { appendFile } = await import("node:fs/promises");
         const home: string = reviewHome;
-        const entry = `\n[mcp_servers.jumi-review]\nurl = ${JSON.stringify(opts.reviewMcp.url)}\nhttp_headers = ${JSON.stringify({ Authorization: `Bearer ${opts.reviewMcp.token}` })}\n`;
+        const entry = `\n[mcp_servers.jumi-review]\nurl = ${JSON.stringify(opts.reviewMcp.url)}\nhttp_headers = { Authorization = ${JSON.stringify(`Bearer ${opts.reviewMcp.token}`)} }\n`;
         await appendFile(join(home, "config.toml"), entry).catch(async () => {
           const { writeFile } = await import("node:fs/promises");
           await writeFile(join(home, "config.toml"), `${entry}\n`).catch(() => undefined);

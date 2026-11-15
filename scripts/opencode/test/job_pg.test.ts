@@ -20,6 +20,8 @@ import {
   makeRepo,
   makeWorkerConfig,
 } from "./fixtures.ts";
+import { frozenGitRunner } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
 const describePg = databaseUrl ? describe : describe.skip;
@@ -29,16 +31,6 @@ function jobPgReviewApi() {
     getPRFiles: async () => [makeFile()],
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   });
-}
-
-function frozenGitRunner() {
-  return async (args: string[]) => {
-    if (args[0] === "rev-parse") return "headsha";
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
 }
 
 describePg("one-shot jobs against real postgres", () => {
@@ -64,8 +56,7 @@ describePg("one-shot jobs against real postgres", () => {
     await store.enqueue(makeJob());
     const reviewIds = (await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`)) as Array<{ id: unknown }>;
     const reviewId = Number(reviewIds[0]?.id);
-    const reviewWorkspace = await mkdtemp(join(tmpdir(), "jumi-job-pg-review-"));
-    try {
+    await withWorkspace(async (reviewWorkspace) => {
       const result = await runOneShotJob({
         store,
         jobId: reviewId,
@@ -86,9 +77,7 @@ describePg("one-shot jobs against real postgres", () => {
       expect(result.exitCode).toBe(0);
       const row = await store.get(reviewId);
       expect(["skipped", "succeeded", "failed"].includes(row?.state ?? "")).toBe(true);
-    } finally {
-      await rm(reviewWorkspace, { recursive: true, force: true });
-    }
+    });
 
     // Worker row.
     await store.enqueueIssue(makeIssueJob());
@@ -231,8 +220,7 @@ describePg("one-shot jobs against real postgres", () => {
       ...emptyCiMethods(),
     } as never;
 
-    const home = await mkdtemp(join(tmpdir(), "jumi-job-pg-cancel-queued-"));
-    try {
+    await withWorkspace(async (home) => {
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store);
       expect((await store.get(jobId))?.state).toBe("cancelled");
 
@@ -255,8 +243,6 @@ describePg("one-shot jobs against real postgres", () => {
       expect(ran).toBe(false);
       expect((await store.get(jobId))?.state).toBe("cancelled");
       expect(comments.some((body) => body.includes("stopped"))).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });

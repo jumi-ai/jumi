@@ -17,6 +17,7 @@ import {
 } from "../src/codex_auth.ts";
 import { EngineFailedError } from "../src/engine.ts";
 import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 const originalEnv = process.env[CODEX_AUTH_FILE_ENV];
 const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
@@ -96,8 +97,7 @@ describe("codex published auth path and budget", () => {
 
 describe("ensureCodexPublishedAuth", () => {
   test("valid file symlinks $HOME/.codex/auth.json at the published file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = join(dir, "home");
       const published = join(dir, "published-auth.json");
       await writeFile(published, `${JSON.stringify(tokenDoc(), null, 2)}\n`);
@@ -111,14 +111,11 @@ describe("ensureCodexPublishedAuth", () => {
       expect(await readlink(dest)).toBe(published);
       expect((await lstat(join(home, ".codex"))).isDirectory()).toBe(true);
       expect(await readFile(dest, "utf8")).toBe(await readFile(published, "utf8"));
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("expired token cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const expired = accessToken(Math.floor(Date.now() / 1000) - 3600);
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ access: expired })));
@@ -131,14 +128,11 @@ describe("ensureCodexPublishedAuth", () => {
           env: { [CODEX_AUTH_FILE_ENV]: published },
         })
       ).rejects.toThrow("expired");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("token too short for the budget cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const soon = accessToken(Math.floor(Date.now() / 1000) + 600);
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ access: soon })));
@@ -151,26 +145,20 @@ describe("ensureCodexPublishedAuth", () => {
           env: { [CODEX_AUTH_FILE_ENV]: published },
         })
       ).rejects.toThrow("too short for budget");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("missing file cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const missing = join(dir, "does-not-exist.json");
       await expect(
         ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: missing } })
       ).rejects.toThrow("missing");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("malformed file cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const published = join(dir, "auth.json");
       await writeFile(published, "not json {");
       await expect(
@@ -180,14 +168,11 @@ describe("ensureCodexPublishedAuth", () => {
       await expect(
         ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
       ).rejects.toThrow();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a refresh token in the published file is an error", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ refresh: "secret-refresh" })));
       const doc = JSON.parse(await readFile(published, "utf8")) as unknown;
@@ -195,26 +180,20 @@ describe("ensureCodexPublishedAuth", () => {
       await expect(
         ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
       ).rejects.toThrow("refresh token present");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("unset published file is local mode with no symlink", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const out = await ensureCodexPublishedAuth({ home: join(dir, "home"), env: {} });
       expect(out.mode).toBe("local");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("isCodexChatGptPresent in published mode", () => {
   test("reports the published file, not the HOME file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-presence-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = join(dir, "home");
       await mkdir(join(home, ".codex"), { recursive: true });
       const published = join(dir, "published.json");
@@ -223,14 +202,11 @@ describe("isCodexChatGptPresent in published mode", () => {
       await writeFile(published, JSON.stringify({ OPENAI_API_KEY: "sk-x" }));
       expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published })).toBe(false);
       expect(await isCodexChatGptPresent(home, {})).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("unrunnable published files report absent", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-presence-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = join(dir, "home");
       const published = join(dir, "published.json");
       const expired = accessToken(Math.floor(Date.now() / 1000) - 60);
@@ -251,16 +227,13 @@ describe("isCodexChatGptPresent in published mode", () => {
       expect(await isCodexChatGptPresent(home, { [CODEX_AUTH_FILE_ENV]: published }, { timeoutMs: 3_600_000 })).toBe(
         true
       );
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("published validation matches the pinned binary", () => {
   test("missing last_refresh cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ lastRefresh: null })));
       const doc = JSON.parse(await readFile(published, "utf8")) as unknown;
@@ -268,14 +241,11 @@ describe("published validation matches the pinned binary", () => {
       await expect(
         ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
       ).rejects.toThrow("malformed");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("two-part id_token cannot run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ id: "only.two" })));
       const doc = JSON.parse(await readFile(published, "utf8")) as unknown;
@@ -283,14 +253,11 @@ describe("published validation matches the pinned binary", () => {
       await expect(
         ensureCodexPublishedAuth({ home: join(dir, "home"), env: { [CODEX_AUTH_FILE_ENV]: published } })
       ).rejects.toThrow("malformed");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("published path pointing at the destination throws without deleting it", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = join(dir, "home");
       const dest = codexAuthPath(home);
       await mkdir(join(home, ".codex"), { recursive: true });
@@ -299,14 +266,11 @@ describe("published validation matches the pinned binary", () => {
         ensureCodexPublishedAuth({ home, timeoutMs: 60_000, env: { [CODEX_AUTH_FILE_ENV]: dest } })
       ).rejects.toThrow("destination itself");
       expect(JSON.parse(await readFile(dest, "utf8"))).toMatchObject({ tokens: expect.anything() });
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("an already-correct symlink is left alone", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-pub-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = join(dir, "home");
       const published = join(dir, "published-auth.json");
       await writeFile(published, `${JSON.stringify(tokenDoc(), null, 2)}\n`);
@@ -323,16 +287,13 @@ describe("published validation matches the pinned binary", () => {
       });
       expect(second.mode).toBe("published");
       expect(await readlink(codexAuthPath(home))).toBe(published);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("published auth failures hop as auth", () => {
   test("the auth-death message matches the Codex classifier", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-codex-hop-"));
-    try {
+    await withWorkspace(async (dir) => {
       const expired = accessToken(Math.floor(Date.now() / 1000) - 60);
       const published = join(dir, "auth.json");
       await writeFile(published, JSON.stringify(tokenDoc({ access: expired })));
@@ -359,9 +320,7 @@ describe("published auth failures hop as auth", () => {
       expect(looksLikeCodexAuthDeath(message)).toBe(true);
       const authErr = new EngineFailedError(message, false, { auth: true });
       expect(authErr.auth).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("expired published file hops from codex to the next runner", async () => {

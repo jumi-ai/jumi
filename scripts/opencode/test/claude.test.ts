@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "../src/auth.ts";
@@ -25,8 +24,8 @@ import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { SEARXNG_CLAUDE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { omitClaudeConfigWarning } from "../src/status_description.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
+import { withFakeClaude } from "./harness/bins.ts";
 
-const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
 const originalOauth = process.env.CLAUDE_CODE_OAUTH_TOKEN;
 const originalXdg = process.env.XDG_CONFIG_HOME;
@@ -42,7 +41,6 @@ afterEach(() => {
   else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
   if (originalAgent === undefined) delete process.env.AGENT_INSTANCE;
   else process.env.AGENT_INSTANCE = originalAgent;
-  process.env.PATH = originalPath;
   if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
   else process.env.GITEA_BOT_TOKEN = originalSecret;
   if (originalOauth === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
@@ -50,21 +48,6 @@ afterEach(() => {
   if (originalXdg === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = originalXdg;
 });
-
-async function withFakeClaude(script: string, run: (workdir: string) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), "fake-claude-"));
-  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-claude-work-")));
-  try {
-    const bin = join(dir, "claude");
-    await writeFile(bin, script);
-    await chmod(bin, 0o755);
-    process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run(workdir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
-}
 
 describe("inspectClaudeUsageLimit", () => {
   test("classifies Claude session and usage limits as resetting", () => {

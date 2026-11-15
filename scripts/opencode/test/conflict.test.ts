@@ -22,6 +22,7 @@ import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { withDirs } from "./harness/temp.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
@@ -78,17 +79,6 @@ function conflictApi(
     ...overrides,
   });
   return Object.assign(fake, { comments, pulls, commentIndexes });
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-cf-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-cf-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 function conflictJob(overrides: Parameters<typeof makeIssueJob>[0] = {}) {

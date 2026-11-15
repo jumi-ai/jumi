@@ -6,8 +6,6 @@ import {
 } from "../src/ci_webhook.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
-import type { IssueJob } from "../src/types.ts";
-import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import {
@@ -19,8 +17,8 @@ import {
   makeWorkerConfig,
   makeWorkflowJobPayload,
   responseJson,
-  signBody,
 } from "./fixtures.ts";
+import { makeQueue, workerWorkflowJobRequest } from "./harness/webhook.ts";
 
 const policy = {
   giteaUrl: "https://gitea.kirmanak.stream",
@@ -53,38 +51,6 @@ function webhookApi(overrides: Partial<IssueApi> = {}) {
     listOpenPulls: async () => [jumiPr()],
     getIssue: async () => makeIssue(),
     ...overrides,
-  });
-}
-
-function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
-  const jobs: IssueJob[] = [];
-  return {
-    jobs,
-    enqueue(job) {
-      jobs.push(job);
-      return { key: `${job.owner}/${job.repo}#${job.issueNumber}`, queued: true };
-    },
-  };
-}
-
-async function signedRequest(
-  body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string; raw?: Uint8Array } = {}
-): Promise<Request> {
-  const raw = overrides.raw ?? encodeJson(body);
-  const secret = overrides.secret ?? "webhook-secret";
-  const signature = await signBody(raw, secret);
-  const headers = new Headers(overrides.headers);
-  headers.set("content-type", "application/json");
-  headers.set("x-gitea-signature", signature);
-  if (overrides.event !== undefined) headers.set("x-gitea-event", overrides.event);
-  else if (!overrides.eventType) headers.set("x-gitea-event", "workflow_job");
-  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
-  headers.set("x-gitea-delivery", "delivery-1");
-  return new Request("https://worker.test/webhooks/gitea", {
-    method: overrides.method ?? "POST",
-    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
-    headers,
   });
 }
 
@@ -388,7 +354,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
   test("enqueues on X-Gitea-Event workflow_job", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: webhookApi() });
-    const response = await handler(await signedRequest(makeWorkflowJobPayload()));
+    const response = await handler(await workerWorkflowJobRequest(makeWorkflowJobPayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
     expect(queue.jobs[0]?.mode).toBe("follow-up");
@@ -397,7 +363,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
 
   test("malformed payload is 202 skip never 400", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue(), api: webhookApi() });
-    const response = await handler(await signedRequest({ zen: "nope" }));
+    const response = await handler(await workerWorkflowJobRequest({ zen: "nope" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "malformed workflow_job payload" });
   });
@@ -409,7 +375,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
       api: webhookApi(),
       logger: (message) => logs.push(message),
     });
-    const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "status" }));
+    const response = await handler(await workerWorkflowJobRequest(makeWorkflowJobPayload(), { event: "status" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
     expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
@@ -424,7 +390,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
       logger: (message) => logs.push(message),
     });
     const response = await handler(
-      await signedRequest(
+      await workerWorkflowJobRequest(
         makeWorkflowJobPayload({
           action: "in_progress",
           workflow_job: {
@@ -455,7 +421,7 @@ describe("createWorkerFetchHandler workflow_job", () => {
         getIssue: async () => makeIssue(),
       },
     });
-    await handler(await signedRequest({ not: "a job" }));
+    await handler(await workerWorkflowJobRequest({ not: "a job" }));
     expect(listed).toBe(0);
   });
 });
