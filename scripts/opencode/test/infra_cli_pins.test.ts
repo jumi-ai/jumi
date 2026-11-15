@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { allowedVersionsToRegExp, parseEnv, requireEnvValue, validateArchPin } from "./tool_pin_helpers.ts";
 
 const repoRoot = join(process.cwd(), "../..");
 const toolVersions = readFileSync(join(repoRoot, ".gitea/tool-versions.env"), "utf8");
@@ -14,67 +15,96 @@ const renovate = JSON.parse(renovateRaw) as {
   }[];
 };
 
-// Official stable pins verified against the upstream release checksum files.
-const PROMTOOL_VERSION = "3.16.0";
-const PROMTOOL_TAG = "v3.16.0";
-const PROMTOOL_SHA256_AMD64 = "68727009472a2c02e1ff7f062fd5b3e637285bffc8fc2d340c76fb449d6e0f34";
-const PROMTOOL_SHA256_ARM64 = "fd8571b8162f4020232d886f17340bcf92e1722985ae3b4c1d096157826c0fbe";
-const TOFU_VERSION = "1.13.9";
-const TOFU_TAG = "v1.13.9";
-const TOFU_SHA256_AMD64 = "bc44eb6b06446ba83bd4072114891987f590f66cca712737a7f1147c50c539ce";
-const TOFU_SHA256_ARM64 = "04f7c93828b859d420269ed30f923ffebf09157b5d7fb95bf8d88a4d208b7fa3";
-const KUBECONFORM_VERSION = "0.8.0";
-const KUBECONFORM_TAG = "v0.8.0";
-const KUBECONFORM_SHA256_AMD64 = "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883";
-const KUBECONFORM_SHA256_ARM64 = "1f53fc8e81258197a35e8603054162a5af1de8c5af13746c71ab680d9534ed87";
-const KUBECTL_VERSION = "1.37.2";
-const KUBECTL_TAG = "v1.37.2";
-const KUBECTL_SHA256_AMD64 = "c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4";
-const KUBECTL_SHA256_ARM64 = "fcc16f63186659d9722014b7e02d5fdd2d4e669cb8c0ab66365d7d3b8ba03509";
+const TOOLS = [
+  { prefix: "PROMTOOL", depName: "prometheus/prometheus", tagScheme: "v" as const },
+  { prefix: "TOFU", depName: "opentofu/opentofu", tagScheme: "v" as const },
+  { prefix: "KUBECONFORM", depName: "yannh/kubeconform", tagScheme: "v" as const },
+  { prefix: "KUBECTL", depName: "kubernetes/kubernetes", tagScheme: "v" as const },
+];
+
+function readToolPin(prefix: string, content: string) {
+  const env = parseEnv(content);
+  return {
+    version: requireEnvValue(env, `${prefix}_VERSION`),
+    amdTag: requireEnvValue(env, `${prefix}_AMD64_TAG`),
+    armTag: requireEnvValue(env, `${prefix}_ARM64_TAG`),
+    amdSha: requireEnvValue(env, `${prefix}_SHA256_AMD64`),
+    armSha: requireEnvValue(env, `${prefix}_SHA256_ARM64`),
+  };
+}
 
 describe("infra CLI pin coherence", () => {
   test("tool-versions.env carries each pin with per-arch sha256", () => {
-    expect(toolVersions).toContain(`PROMTOOL_VERSION=${PROMTOOL_VERSION}`);
-    expect(toolVersions).toContain(`PROMTOOL_AMD64_TAG=${PROMTOOL_TAG}`);
-    expect(toolVersions).toContain(`PROMTOOL_ARM64_TAG=${PROMTOOL_TAG}`);
-    expect(toolVersions).toContain(`PROMTOOL_SHA256_AMD64=${PROMTOOL_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`PROMTOOL_SHA256_ARM64=${PROMTOOL_SHA256_ARM64}`);
-    expect(toolVersions).toContain(`TOFU_VERSION=${TOFU_VERSION}`);
-    expect(toolVersions).toContain(`TOFU_AMD64_TAG=${TOFU_TAG}`);
-    expect(toolVersions).toContain(`TOFU_ARM64_TAG=${TOFU_TAG}`);
-    expect(toolVersions).toContain(`TOFU_SHA256_AMD64=${TOFU_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`TOFU_SHA256_ARM64=${TOFU_SHA256_ARM64}`);
-    expect(toolVersions).toContain(`KUBECONFORM_VERSION=${KUBECONFORM_VERSION}`);
-    expect(toolVersions).toContain(`KUBECONFORM_AMD64_TAG=${KUBECONFORM_TAG}`);
-    expect(toolVersions).toContain(`KUBECONFORM_ARM64_TAG=${KUBECONFORM_TAG}`);
-    expect(toolVersions).toContain(`KUBECONFORM_SHA256_AMD64=${KUBECONFORM_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`KUBECONFORM_SHA256_ARM64=${KUBECONFORM_SHA256_ARM64}`);
-    expect(toolVersions).toContain(`KUBECTL_VERSION=${KUBECTL_VERSION}`);
-    expect(toolVersions).toContain(`KUBECTL_AMD64_TAG=${KUBECTL_TAG}`);
-    expect(toolVersions).toContain(`KUBECTL_ARM64_TAG=${KUBECTL_TAG}`);
-    expect(toolVersions).toContain(`KUBECTL_SHA256_AMD64=${KUBECTL_SHA256_AMD64}`);
-    expect(toolVersions).toContain(`KUBECTL_SHA256_ARM64=${KUBECTL_SHA256_ARM64}`);
+    for (const { prefix, tagScheme } of TOOLS) {
+      const pin = readToolPin(prefix, toolVersions);
+      expect(() => validateArchPin({ ...pin, tagScheme })).not.toThrow();
+    }
   });
 
   test("tags stay paired with the numeric versions", () => {
-    for (const [versionName, tagPrefix] of [
-      ["PROMTOOL_VERSION", "v"],
-      ["TOFU_VERSION", "v"],
-      ["KUBECONFORM_VERSION", "v"],
-      ["KUBECTL_VERSION", "v"],
-    ] as const) {
-      const prefix = versionName.replace(/_VERSION$/, "");
-      const version = new RegExp(`^${versionName}=(?<v>[^\\s]+)$`, "m").exec(toolVersions)?.groups?.v;
-      const amd = new RegExp(`^${prefix}_AMD64_TAG=(?<t>[^\\s]+)$`, "m").exec(toolVersions)?.groups?.t;
-      const arm = new RegExp(`^${prefix}_ARM64_TAG=(?<t>[^\\s]+)$`, "m").exec(toolVersions)?.groups?.t;
-      expect(version).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
-      expect(amd).toBe(`${tagPrefix}${version}`);
-      expect(arm).toBe(`${tagPrefix}${version}`);
-      for (const arch of ["AMD64", "ARM64"] as const) {
-        const sha = new RegExp(`^${prefix}_SHA256_${arch}=(?<s>[0-9a-f]{64})$`, "m").exec(toolVersions)?.groups?.s;
-        expect(sha?.length).toBe(64);
-      }
+    const env = parseEnv(toolVersions);
+    for (const { prefix, tagScheme } of TOOLS) {
+      const pin = readToolPin(prefix, toolVersions);
+      const expected = tagScheme === "v" ? `v${pin.version}` : pin.version;
+      expect(env[`${prefix}_VERSION`]).toMatch(/^[0-9]+\.[0-9]+\.[0-9]+$/);
+      expect(pin.amdTag).toBe(expected);
+      expect(pin.armTag).toBe(expected);
     }
+  });
+
+  test("versions match the allowed-versions rule from renovate.json", () => {
+    const parsed = JSON.parse(renovateRaw) as {
+      packageRules?: { matchPackageNames?: string[]; matchDatasources?: string[]; allowedVersions?: string }[];
+    };
+    for (const { depName } of TOOLS) {
+      const rule = parsed.packageRules?.find(
+        (r) => r.matchPackageNames?.includes(depName) && r.matchDatasources?.includes("github-releases")
+      );
+      expect(rule?.allowedVersions).toBe("/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+      const allowed = allowedVersionsToRegExp(rule?.allowedVersions ?? "/^[0-9]+\\.[0-9]+\\.[0-9]+$/");
+      const prefix = TOOLS.find((t) => t.depName === depName)?.prefix ?? "";
+      const pin = readToolPin(prefix, toolVersions);
+      expect(allowed.test(pin.version)).toBe(true);
+      expect(allowed.test("0.0.1-alpha.1")).toBe(false);
+    }
+  });
+
+  test("a non-stable version fails coherence", () => {
+    const pin = readToolPin("TOFU", toolVersions);
+    expect(() =>
+      validateArchPin({
+        ...pin,
+        version: "0.0.1-alpha.1",
+        amdTag: "v0.0.1-alpha.1",
+        armTag: "v0.0.1-alpha.1",
+        tagScheme: "v",
+      })
+    ).toThrow();
+  });
+
+  test("a version that does not match the tag fails coherence", () => {
+    const pin = readToolPin("TOFU", toolVersions);
+    expect(() => validateArchPin({ ...pin, amdTag: "v0.0.2", tagScheme: "v" })).toThrow();
+  });
+
+  test("mismatched arch tags fail coherence", () => {
+    const pin = readToolPin("PROMTOOL", toolVersions);
+    expect(() => validateArchPin({ ...pin, armTag: "v0.0.2", tagScheme: "v" })).toThrow();
+  });
+
+  test("a short digest fails coherence", () => {
+    const pin = readToolPin("KUBECONFORM", toolVersions);
+    expect(() => validateArchPin({ ...pin, amdSha: "a".repeat(63), tagScheme: "v" })).toThrow();
+  });
+
+  test("a non-hex digest fails coherence", () => {
+    const pin = readToolPin("KUBECTL", toolVersions);
+    expect(() => validateArchPin({ ...pin, armSha: "Z".repeat(64), tagScheme: "v" })).toThrow();
+  });
+
+  test("identical arch digests fail coherence", () => {
+    const pin = readToolPin("TOFU", toolVersions);
+    expect(() => validateArchPin({ ...pin, armSha: pin.amdSha, tagScheme: "v" })).toThrow();
   });
 });
 
@@ -128,7 +158,6 @@ describe("infra CLI build consumes one effective pin and fails closed", () => {
     ]) {
       expect(dockerfile).toContain(fragment);
     }
-    // No kubeconfig or credentials are baked in: kubectl stays client-only.
     expect(dockerfile).not.toMatch(/KUBECONFIG/);
     expect(dockerfile).not.toMatch(/\.kube/);
   });
@@ -215,11 +244,6 @@ describe("renovate tracks each infra CLI pin", () => {
         expect(() => new RegExp(m?.matchStrings?.[0] ?? "", "g")).not.toThrow();
       }
     }
-    // kubectl is version-only: kubernetes/kubernetes releases carry no kubectl
-    // binary attachment, so no attachment manager can resolve the dl.k8s.io
-    // hash. KUBECTL_VERSION stays Renovate-tracked via github-releases while
-    // the per-arch SHAs follow manually (NOTE(kubectl)), with the image-build
-    // sha256sum -c as the fail-closed backstop.
     const kubectlManagers = managers?.filter((m) => m.depNameTemplate === "kubernetes/kubernetes");
     expect(kubectlManagers?.length).toBe(0);
     expect(toolVersions).toContain(
