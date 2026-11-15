@@ -1501,12 +1501,7 @@ describe("GithubAPI automerge gate", () => {
 
     const branch = await api().getBranch("owner", "repo", "main");
     expect(branch.enableStatusCheck).toBe(true);
-    expect(branch.requiredContexts).toEqual([
-      "jumi/opencode-review",
-      "checks",
-      "image-build",
-      "worker-image-build",
-    ]);
+    expect(branch.requiredContexts).toEqual(["jumi/opencode-review", "checks", "image-build", "worker-image-build"]);
   });
 
   test("throws when classic 403s and branch rules are unreadable", async () => {
