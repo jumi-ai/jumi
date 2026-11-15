@@ -1169,7 +1169,7 @@ describe("reviewPullRequest", () => {
       let ran = 0;
       const result = await reviewPullRequest({
         ...reviewOptionsWithSha(workspace),
-        api: makeApi({
+        api: reviewApi({
           getPR: async () => makePR({ head: makeBranch({ sha: REVIEW_SHA }) }),
           createCommitStatus: async (_owner, _repo, _sha, status) => {
             statuses.push(status);
