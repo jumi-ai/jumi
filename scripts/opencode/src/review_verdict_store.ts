@@ -41,6 +41,23 @@ export interface ReviewMcpVerdict {
   reason?: string;
 }
 
+export interface ReviewRecordFinding {
+  id: string;
+  path?: string;
+  line?: number;
+  severity: ReviewMcpSeverity;
+  title: string;
+  body: string;
+}
+
+export interface ReviewRecord {
+  version: 1;
+  state: "success" | "failure" | "incomplete";
+  reason?: string;
+  findings: ReviewRecordFinding[];
+  counts: { bug: number; risk: number; question: number; suggestion: number };
+}
+
 export type ReviewMcpError = { ok: false; error: string };
 export type ReviewMcpOk<T> = { ok: true } & T;
 
@@ -329,5 +346,38 @@ export class ReviewVerdictStore {
       ? buildCheckTrailer(verdict.state, verdict.reason)
       : "<!-- jumi-check: failure; Incomplete review: no verdict -->";
     return [...lines, trailer].join("\n");
+  }
+
+  /**
+   * Typed equivalent of `toMarkdown()`: the same verdict state and findings
+   * as structured data, using the stored (unsanitized) reason. `incomplete`
+   * is the no-verdict case. It carries no runtime-policy output (which
+   * question authors block, suggestion caps, contract-env findings): only
+   * what the store knows.
+   */
+  toRecord(): ReviewRecord {
+    const counts = { bug: 0, risk: 0, question: 0, suggestion: 0 };
+    const findings: ReviewRecordFinding[] = [];
+    for (const finding of this.findings.values()) {
+      counts[finding.severity] += 1;
+      findings.push({
+        id: finding.id,
+        ...(finding.path ? { path: finding.path } : {}),
+        ...(finding.line != null ? { line: finding.line } : {}),
+        severity: finding.severity,
+        title: finding.title,
+        body: finding.body,
+      });
+    }
+    if (!this.verdict) {
+      return { version: 1, state: "incomplete", findings, counts };
+    }
+    return {
+      version: 1,
+      state: this.verdict.state,
+      ...(this.verdict.reason ? { reason: this.verdict.reason } : {}),
+      findings,
+      counts,
+    };
   }
 }

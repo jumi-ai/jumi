@@ -93,7 +93,7 @@ import {
   type ReviewSuggestionCounts,
   runnerLabelForStamp,
 } from "./review_suggestions.ts";
-import { ReviewVerdictStore } from "./review_verdict_store.ts";
+import { type ReviewRecord, ReviewVerdictStore } from "./review_verdict_store.ts";
 import type { RunnerCooldownConfig, RunnerCooldownStore } from "./runner_cooldown.ts";
 import {
   appendRunnerStamp,
@@ -307,7 +307,7 @@ export interface ReviewOptions {
 }
 
 export type PersistReviewResult =
-  | { kind: "markdown"; markdown: string; runner?: string }
+  | { kind: "markdown"; markdown: string; runner?: string; record?: ReviewRecord }
   | { kind: "skip"; reason: string }
   | { kind: "error"; error: string };
 
@@ -2674,7 +2674,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }
-      return await publishMarkdownVerdict(gated);
+      // The stored record is only valid for the exact markdown the store
+      // produced. Any post-processing above (contract-env gate, secret
+      // redaction, the no-CI note, or the trailer repair branch) means the
+      // persisted markdown no longer matches the record, so persist no
+      // record: a stored record must never disagree with the stored markdown.
+      const record = gated === markdown ? verdictStore.toRecord() : undefined;
+      return await publishMarkdownVerdict(gated, record);
     };
     const artifactPath = join(opts.workspace, REVIEW_ARTIFACT);
     // A stale JUMI_REVIEW.md planted before this run must not count as this
@@ -2700,8 +2706,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     };
     // Shared publish tail for the MCP-verdict and file-artifact branches:
     // gated markdown in, quota-state bookkeeping and forge publish out.
-    const publishMarkdownVerdict = async (gatedMarkdown: string): Promise<ReviewResult> => {
-      await persistOutcome({ kind: "markdown", markdown: gatedMarkdown, ...(runner ? { runner } : {}) });
+    const publishMarkdownVerdict = async (gatedMarkdown: string, record?: ReviewRecord): Promise<ReviewResult> => {
+      await persistOutcome({
+        kind: "markdown",
+        markdown: gatedMarkdown,
+        ...(runner ? { runner } : {}),
+        ...(record ? { record } : {}),
+      });
       if (opts.home || opts.skipLatches || process.env.DATABASE_URL) {
         const stuckRef = {
           home: opts.home,

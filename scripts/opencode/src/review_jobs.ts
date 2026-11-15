@@ -7,6 +7,7 @@ import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { BODY_ONLY_REVIEW_ACTION, isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
 import type { ReviewSuggestionCounts, ReviewSuggestionTotalsRow } from "./review_suggestions.ts";
+import type { ReviewRecord } from "./review_verdict_store.ts";
 import {
   CLOSED_PULLS_SCHEMA_SQL,
   MemoryRouterSitStore,
@@ -109,6 +110,13 @@ export interface ReviewJobRecord {
   resultMarkdown: string | null;
   /** Formatted runner stamp for the spawn that produced `resultMarkdown`. */
   resultRunner?: string | null;
+  /**
+   * Typed form of `resultMarkdown` as produced by `ReviewVerdictStore.toRecord()`.
+   * Only present when the persisted markdown is byte-identical to the store's
+   * `toMarkdown()`; otherwise the row omits it. Old rows predate the column
+   * and read as absent. Nothing reads it yet.
+   */
+  resultJson?: ReviewRecord | null;
   resultReason: string | null;
   error: string | null;
   pendingStatusAt: number | null;
@@ -606,6 +614,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'rev
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS issue_number INTEGER;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_runner TEXT;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_json JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
 
@@ -1358,15 +1367,22 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       if (result.kind === "markdown") {
         row.resultMarkdown = result.markdown;
         row.resultRunner = result.runner ?? null;
+        if (result.record !== undefined) {
+          row.resultJson = result.record;
+        } else {
+          delete row.resultJson;
+        }
         row.resultReason = null;
         row.error = null;
       } else if (result.kind === "skip") {
         row.resultReason = result.reason;
         row.resultMarkdown = null;
+        delete row.resultJson;
       } else {
         row.error = result.error;
         row.resultReason = result.error;
         row.resultMarkdown = null;
+        delete row.resultJson;
       }
       row.updatedAt = Date.now();
     });
@@ -2542,6 +2558,7 @@ type ReviewJobRow = {
   leased_until: unknown;
   result_markdown: unknown;
   result_runner?: unknown;
+  result_json?: unknown;
   result_reason: unknown;
   error: unknown;
   pending_status_at: unknown;
@@ -2611,6 +2628,20 @@ function epochRequired(value: unknown): number {
   return epoch(value) ?? Date.now();
 }
 
+function parseResultJson(value: unknown): ReviewRecord | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") {
+    if (!value) return undefined;
+    try {
+      return JSON.parse(value) as ReviewRecord;
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value === "object") return value as ReviewRecord;
+  return undefined;
+}
+
 function mapRow(row: ReviewJobRow): ReviewJobRecord {
   return {
     id: num(row.id),
@@ -2629,6 +2660,9 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     leasedUntil: epoch(row.leased_until),
     resultMarkdown: strOrNull(row.result_markdown),
     resultRunner: strOrNull(row.result_runner),
+    // Old rows predate the column and read as absent: omit the field instead
+    // of setting null so existing whole-row assertions do not change.
+    ...(row.result_json == null ? {} : { resultJson: parseResultJson(row.result_json) ?? null }),
     resultReason: strOrNull(row.result_reason),
     error: strOrNull(row.error),
     pendingStatusAt: epoch(row.pending_status_at),
@@ -2675,6 +2709,7 @@ const REQUIRED_REVIEW_JOB_COLUMNS = [
   "issue_number",
   "payload",
   "result_runner",
+  "result_json",
   "rewake_requested",
   "cancel_requested",
 ] as const;
@@ -3269,20 +3304,31 @@ export class PgReviewJobStore implements ReviewJobStore {
   async saveResult(id: number, leasedBy: string, result: PersistReviewResult): Promise<void> {
     let rows: { id: unknown }[];
     if (result.kind === "markdown") {
+      // A record serialization problem degrades to NULL: it must never turn
+      // a successful publish into a failure beyond what the markdown write
+      // already does.
+      let recordJson: string | null = null;
+      if (result.record !== undefined) {
+        try {
+          recordJson = JSON.stringify(result.record);
+        } catch {
+          recordJson = null;
+        }
+      }
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_markdown = $3, result_runner = $4, result_reason = NULL, error = NULL, updated_at = NOW()
+           SET result_markdown = $3, result_runner = $4, result_json = $5::jsonb, result_reason = NULL, error = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
-          [id, leasedBy, result.markdown, result.runner ?? null]
+          [id, leasedBy, result.markdown, result.runner ?? null, recordJson]
         )
       );
     } else if (result.kind === "skip") {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET result_reason = $3, result_markdown = NULL, updated_at = NOW()
+           SET result_reason = $3, result_markdown = NULL, result_json = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
           [id, leasedBy, result.reason]
@@ -3292,7 +3338,7 @@ export class PgReviewJobStore implements ReviewJobStore {
       rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
           `UPDATE review_jobs
-           SET error = $3, result_reason = $3, result_markdown = NULL, updated_at = NOW()
+           SET error = $3, result_reason = $3, result_markdown = NULL, result_json = NULL, updated_at = NOW()
            WHERE id = $1 AND leased_by = $2 AND state = 'leased'
            RETURNING id`,
           [id, leasedBy, result.error]
