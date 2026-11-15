@@ -1,5 +1,6 @@
 import { mkdir, readFile, readlink, rm, symlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Published token-only Codex auth.
@@ -217,9 +218,7 @@ export async function ensureCodexPublishedAuth(opts: EnsureCodexPublishedAuthOpt
     if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") {
       throw new Error(`Codex published auth file is missing: ${published}`);
     }
-    throw new Error(
-      `Codex published auth file is unreadable: ${published}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    throw new Error(`Codex published auth file is unreadable: ${published}: ${errorMessage(err)}`);
   }
   if (!raw.trim()) throw new Error(`Codex published auth file is malformed: ${published}`);
   let parsed: unknown;

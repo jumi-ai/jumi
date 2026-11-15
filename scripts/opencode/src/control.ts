@@ -27,6 +27,7 @@ import { renderDispatchMetrics, runDispatchTick } from "./dispatch.ts";
 import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import { openPgReviewJobStoreForJob, type ReviewJobStore } from "./review_jobs.ts";
 import { installProcessShutdown } from "./shutdown.ts";
+import { errorMessage } from "./util/error.ts";
 
 function log(message: string) {
   console.log(`[control] ${message}`);
@@ -128,7 +129,7 @@ async function resolveK8sCa(deps: Pick<ControlTickDeps, "k8sCa" | "k8sCaFile">):
 }
 
 function isK8sAuthFailure(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   return message.includes("(401)") || message.includes("(403)");
 }
 
@@ -406,7 +407,7 @@ export async function startControl(
     if (published) logger("control: published the token-only Codex Secret at startup");
   } catch (err) {
     // A failed publish is retried on the loop; startup still continues.
-    logger(`control: startup publish failed (will retry): ${err instanceof Error ? err.message : String(err)}`);
+    logger(`control: startup publish failed (will retry): ${errorMessage(err)}`);
   }
 
   let server: ReturnType<typeof Bun.serve> | undefined;
@@ -439,7 +440,7 @@ export async function startControl(
         `device login listening on ${deviceLoginServer.hostname}:${ORDINAL_DEVICE_LOGIN_PORT} role=control ordinal=${ordinal}`
       );
     } catch (err) {
-      logger(`device login unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`device login unavailable: ${errorMessage(err)}`);
     }
   }
 
@@ -457,7 +458,7 @@ export async function startControl(
         if (shutdown.signal.aborted || deps.signal?.aborted) return;
         // Login death is already recorded; transport/refresh/publish errors
         // retry on the next poll. Never log tokens.
-        logger(`control tick failed: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`control tick failed: ${errorMessage(err)}`);
       }
       await sleep(config.pollMs, shutdown.signal).catch(() => undefined);
       if (deps.signal?.aborted) return;
@@ -483,9 +484,7 @@ export async function startControl(
               try {
                 store = await openPgReviewJobStoreForJob(config.databaseUrl as string);
               } catch (err) {
-                logger(
-                  `dispatch: ledger unavailable (will retry): ${err instanceof Error ? err.message : String(err)}`
-                );
+                logger(`dispatch: ledger unavailable (will retry): ${errorMessage(err)}`);
                 await sleep(config.dispatchPollMs, shutdown.signal).catch(() => undefined);
                 if (deps.signal?.aborted) return;
                 continue;
@@ -498,14 +497,14 @@ export async function startControl(
                 logger,
               });
             } catch (err) {
-              logger(`dispatch tick failed: ${err instanceof Error ? err.message : String(err)}`);
+              logger(`dispatch tick failed: ${errorMessage(err)}`);
               // A lost ledger surfaces on the next tick via the store calls;
               // drop it so the loop re-opens job-mode instead of reusing it.
               store = undefined;
             }
           } catch (err) {
             if (shutdown.signal.aborted || deps.signal?.aborted) return;
-            logger(`dispatch tick failed: ${err instanceof Error ? err.message : String(err)}`);
+            logger(`dispatch tick failed: ${errorMessage(err)}`);
             store = undefined;
           }
           await sleep(config.dispatchPollMs, shutdown.signal).catch(() => undefined);

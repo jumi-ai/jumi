@@ -58,6 +58,7 @@ import {
   suggestionHoldSkippedDescription,
 } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
@@ -145,7 +146,7 @@ async function checkWorkerMode(
     try {
       await upsertWorkerComment(api, owner, repo, issueNumber, botUsername, REPO_MODE_DISABLED_NOTE);
     } catch (err) {
-      logger(`mode note failed ${noteKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`mode note failed ${noteKey}: ${errorMessage(err)}`);
     }
   }
   return mode;
@@ -502,14 +503,12 @@ export async function reclaimExpiredWorkerJobs(
         else logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
       }
     } catch (err) {
-      logger(`reclaim-publish failed ${row.jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
       try {
         if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
         await store.expireLease(row.id, row.leasedBy);
       } catch (expireErr) {
-        logger(
-          `reclaim expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-        );
+        logger(`reclaim expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
       }
     }
   }
@@ -806,12 +805,12 @@ export async function processWorkerTick(
         killPid: () => undefined,
       });
     } catch (err) {
-      logger(`cancel cleanup failed ${jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`cancel cleanup failed ${jobKey}: ${errorMessage(err)}`);
     }
     try {
       await store.markCancelled(rowId, leasedBy);
     } catch (err) {
-      logger(`cancel settle failed ${jobKey}: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`cancel settle failed ${jobKey}: ${errorMessage(err)}`);
       return true;
     }
     logger(`${jobKey} cancelled`);
@@ -845,7 +844,7 @@ export async function processWorkerTick(
             killPid: () => undefined,
           });
         } catch (err) {
-          logger(`cancel cleanup failed ${issueJobKey(job)}: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`cancel cleanup failed ${issueJobKey(job)}: ${errorMessage(err)}`);
         }
         logger(`${issueJobKey(job)} cancelled`);
         return "processed";
@@ -1066,7 +1065,7 @@ export async function processWorkerTick(
           killPid: () => undefined,
         });
       } catch (err) {
-        logger(`cancel cleanup failed ${issueJobKey(job)}: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`cancel cleanup failed ${issueJobKey(job)}: ${errorMessage(err)}`);
       }
       logger(`${issueJobKey(job)} cancelled`);
       return "processed";
@@ -1098,9 +1097,7 @@ export async function processWorkerTick(
           logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after-push mergeable=false`);
         }
       } catch (enqueueErr) {
-        logger(
-          `after-push conflict enqueue failed: ${enqueueErr instanceof Error ? enqueueErr.message : String(enqueueErr)}`
-        );
+        logger(`after-push conflict enqueue failed: ${errorMessage(enqueueErr)}`);
       }
     }
     return "processed";
@@ -1134,7 +1131,7 @@ export async function processWorkerTick(
       return "processed";
     }
     {
-      const baseMessage = err instanceof Error ? err.message : String(err);
+      const baseMessage = errorMessage(err);
       const triedSuffix = describeTriedRunnersSuffix(err);
       logger(`worker job ${row.jobKey} failed: ${baseMessage}${triedSuffix ? ` ${triedSuffix}` : ""}`);
     }
@@ -1166,15 +1163,11 @@ export async function processWorkerTick(
         });
         logger(`quota-wait ${row.jobKey} backoff=${err.backoffMs} n=${err.count}`);
       } catch (quotaErr) {
-        logger(
-          `worker quota requeue failed ${row.jobKey}: ${quotaErr instanceof Error ? quotaErr.message : String(quotaErr)}`
-        );
+        logger(`worker quota requeue failed ${row.jobKey}: ${errorMessage(quotaErr)}`);
         try {
           await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
-          logger(
-            `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-          );
+          logger(`worker expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
         }
       }
       return "processed";
@@ -1204,9 +1197,7 @@ export async function processWorkerTick(
                   killPid: () => undefined,
                 });
               } catch (cancelErr) {
-                logger(
-                  `cancel cleanup failed ${row.jobKey}: ${cancelErr instanceof Error ? cancelErr.message : String(cancelErr)}`
-                );
+                logger(`cancel cleanup failed ${row.jobKey}: ${errorMessage(cancelErr)}`);
               }
             }
             logger(`${row.jobKey} cancelled`);
@@ -1234,15 +1225,11 @@ export async function processWorkerTick(
           logger(`infra-retry ${row.jobKey} backoff=${decision.backoffMs} n=${decision.count}`);
         }
       } catch (infraErr) {
-        logger(
-          `worker infra requeue failed ${row.jobKey}: ${infraErr instanceof Error ? infraErr.message : String(infraErr)}`
-        );
+        logger(`worker infra requeue failed ${row.jobKey}: ${errorMessage(infraErr)}`);
         try {
           await store.expireLease(row.id, leasedBy, new Date(), failedRunner);
         } catch (expireErr) {
-          logger(
-            `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-          );
+          logger(`worker expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
         }
       }
       return "processed";
@@ -1252,9 +1239,7 @@ export async function processWorkerTick(
     try {
       await store.expireLease(row.id, leasedBy, new Date(), failedRunnerNameForWorkerRetry(config, err));
     } catch (expireErr) {
-      logger(
-        `worker expire failed ${row.jobKey}: ${expireErr instanceof Error ? expireErr.message : String(expireErr)}`
-      );
+      logger(`worker expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
     }
     return "processed";
   } finally {

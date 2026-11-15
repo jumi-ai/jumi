@@ -56,6 +56,7 @@ import { CLAUDE_ALLOWED_TOOLS, CLAUDE_PERMISSION_MODE, claudeArgv, stripAnsi } f
 import { claudeTracingEnv } from "./claude_tracing.ts";
 import { ClaudeStreamParser } from "./claude_usage.ts";
 import { CLAUDE_EFFORT_LEVELS } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Text the stub answers with; seeing it means the session really completed. */
 const PROBE_MARKER = "JUMI-CLAUDE-FLAG-PROBE-OK";
@@ -941,7 +942,7 @@ async function main(): Promise<number> {
         results.push({
           name: "review shell hook plugin is readable",
           ok: false,
-          observed: err instanceof Error ? err.message : String(err),
+          observed: errorMessage(err),
         });
       }
       const reviewArgv = [

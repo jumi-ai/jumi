@@ -10,7 +10,9 @@
  */
 
 import { logDiagnostic } from "./diagnostics.ts";
+import { isNotFoundError } from "./forge_errors.ts";
 import { globToRegExp } from "./review_md.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const REPO_SETTINGS_PATH = ".jumi.yml";
 
@@ -600,7 +602,7 @@ function parseCiGateValue(value: unknown): CiGateParse {
 }
 
 function parserErrorMessage(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   const single = message.replace(/\s+/g, " ").trim();
   return single.length > 500 ? `${single.slice(0, 497)}...` : single || "could not be parsed";
 }
@@ -1106,9 +1108,7 @@ export async function loadReviewDraftsEnabled(
     if (settings.state !== "valid") return false;
     return isReviewDraftsEnabled(settings);
   } catch (err) {
-    log?.(
-      `review drafts settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`review drafts settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return false;
   }
 }
@@ -1178,9 +1178,7 @@ export async function loadEffectiveReviewBudget(
     if (settings.state !== "valid") return fallback;
     return effectiveReviewBudget(settings, deployment);
   } catch (err) {
-    log?.(
-      `review budget settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`review budget settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return fallback;
   }
 }
@@ -1213,9 +1211,7 @@ export async function loadEffectiveSuggestionCap(
     if (settings.state !== "valid") return ceiling;
     return effectiveSuggestionCap(settings, ceiling);
   } catch (err) {
-    log?.(
-      `suggestion settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`suggestion settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return ceiling;
   }
 }
@@ -1223,10 +1219,6 @@ export async function loadEffectiveSuggestionCap(
 export interface RepoSettingsFileApi {
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
   getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
-}
-
-function isNotFoundError(err: unknown): boolean {
-  return err instanceof Error && /→ 404\b/.test(err.message);
 }
 
 /**
@@ -1317,7 +1309,7 @@ export async function loadDefaultBranchSettings(
       const info = await getRepo.call(api, owner, repo);
       ref = info?.default_branch;
     } catch (err) {
-      log?.(`settings timeouts unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+      log?.(`settings timeouts unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
       return { load: { state: "missing" }, ref: undefined };
     }
     if (!ref) return { load: { state: "missing" }, ref: undefined };
@@ -1329,9 +1321,7 @@ export async function loadDefaultBranchSettings(
     }
     return { load, ref };
   } catch (err) {
-    log?.(
-      `settings timeouts unreadable for ${owner}/${repo}@${ref}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`settings timeouts unreadable for ${owner}/${repo}@${ref}: ${errorMessage(err)}`);
     return { load: { state: "missing" }, ref };
   }
 }
@@ -1375,9 +1365,7 @@ export async function loadRepoMode(
   try {
     settings = await loadRepoSettings(api, owner, repo, defaultBranch);
   } catch (err) {
-    log?.(
-      `mode settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`mode settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return "full";
   }
   if (settings.state === "invalid") {
@@ -1409,7 +1397,7 @@ export async function resolveRepoMode(
     if (!defaultBranch) return "full";
     return await loadRepoMode(api, owner, repo, defaultBranch, log);
   } catch (err) {
-    log?.(`mode settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    log?.(`mode settings unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return "full";
   }
 }
@@ -1488,9 +1476,7 @@ export async function loadRepoFollowupPolicy(
       maxConflictRounds: effectiveConflictRounds(deployment.maxConflictRounds, load),
     };
   } catch (err) {
-    log?.(
-      `follow-up settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`follow-up settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return fallback;
   }
 }
@@ -1537,9 +1523,7 @@ export async function loadEffectiveBlockingQuestionAuthors(
   try {
     settings = await loadRepoSettings(api, owner, repo, defaultBranch);
   } catch (err) {
-    log?.(
-      `blocking settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`blocking settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return [...(deployerAuthors ?? [])];
   }
   if (settings.state === "invalid") {
@@ -1593,9 +1577,7 @@ export async function loadEffectiveTrustedSenderLogins(
   try {
     settings = await loadRepoSettings(api, owner, repo, defaultBranch);
   } catch (err) {
-    log?.(
-      `trusted sender settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`trusted sender settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     const deployer = [...(deployerLogins ?? [])].filter((entry) => entry.trim() !== "");
     return deployer.length > 0 ? deployer : undefined;
   }
@@ -1648,9 +1630,7 @@ export async function loadEffectiveFollowupIgnoreLogins(
   try {
     settings = await loadRepoSettings(api, owner, repo, defaultBranch);
   } catch (err) {
-    log?.(
-      `followup ignore settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`followup ignore settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return [...(deployerLogins ?? [])];
   }
   if (settings.state === "invalid") {
@@ -1698,9 +1678,7 @@ export async function loadEffectiveIgnoreConflictsLabel(
     }
     return effectiveIgnoreConflictsLabel(deployerLabel, settings);
   } catch (err) {
-    log?.(
-      `ignore-conflicts label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`ignore-conflicts label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return fallback;
   }
 }
@@ -1735,9 +1713,7 @@ export async function loadEffectivePickupLabel(
     }
     return effectivePickupLabel(settings);
   } catch (err) {
-    log?.(
-      `pickup label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`pickup label settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return DEFAULT_PICKUP_LABEL;
   }
 }
@@ -1814,9 +1790,7 @@ export async function loadRepoConventions(
     }
     return conventionsFromLoad(settings);
   } catch (err) {
-    log?.(
-      `pr convention settings unreadable for ${owner}/${repo}@${defaultBranch}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log?.(`pr convention settings unreadable for ${owner}/${repo}@${defaultBranch}: ${errorMessage(err)}`);
     return fallback;
   }
 }
@@ -1954,7 +1928,7 @@ export async function applyRepoChain<T extends { name: string }>(opts: {
     });
   } catch (err) {
     const context = opts.unreadableContext ?? `${opts.owner}/${opts.repo}`;
-    opts.log?.(`runner settings unreadable for ${context}: ${err instanceof Error ? err.message : String(err)}`);
+    opts.log?.(`runner settings unreadable for ${context}: ${errorMessage(err)}`);
     return { failedClosed: false, chain: base, narrowed: false };
   }
   if (resolution.state === "invalid" || resolution.state === "empty") {

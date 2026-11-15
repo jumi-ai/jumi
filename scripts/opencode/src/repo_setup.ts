@@ -21,6 +21,7 @@ import {
   resolveSetupTimeoutMaxMs,
   setupForKind,
 } from "./repo_settings.ts";
+import { errorMessage } from "./util/error.ts";
 import type { GitAuth, GitRunner } from "./workspace.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
@@ -235,7 +236,7 @@ export async function runRepoSetupScript(opts: {
     return {
       status: "failed",
       exitCode: null,
-      output: redactSetupOutput(err instanceof Error ? err.message : String(err)),
+      output: redactSetupOutput(errorMessage(err)),
       durationMs: Date.now() - startedAt,
     };
   }
@@ -377,10 +378,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
       closeProxy = () => proxy.close();
     } catch (err) {
       const durationMs = 0;
-      const tail = tailBytes(
-        redactSetupOutput(err instanceof Error ? err.message : String(err)),
-        SETUP_OUTPUT_TAIL_BYTES
-      );
+      const tail = tailBytes(redactSetupOutput(errorMessage(err)), SETUP_OUTPUT_TAIL_BYTES);
       const failureReason = `repository setup failed: cannot start git credential proxy`;
       logDiagnostic(log, "repo_setup", {
         kind: opts.kind,
@@ -431,7 +429,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         await opts.git(["clean", "-fd"], { cwd: opts.workdir, env: opts.gitEnv });
         return undefined;
       } catch (err) {
-        return redactSetupOutput(err instanceof Error ? err.message : String(err));
+        return redactSetupOutput(errorMessage(err));
       }
     };
     const checkPorcelain = async (): Promise<{ porcelain?: string; error?: string }> => {
@@ -439,7 +437,7 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         const status = await opts.git(["status", "--porcelain"], { cwd: opts.workdir, env: opts.gitEnv });
         return { porcelain: withoutEngineTempPorcelain(status) };
       } catch (err) {
-        return { error: redactSetupOutput(err instanceof Error ? err.message : String(err)) };
+        return { error: redactSetupOutput(errorMessage(err)) };
       }
     };
     if (result.status === "ok") {

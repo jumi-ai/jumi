@@ -2,6 +2,7 @@ import { isWipOrDraft } from "./gitea_issues.ts";
 import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
 import { effectivePickupLabel, effectiveTrustedSenderLogins, loadRepoSettings } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const TAKEOVER_NOTE_MARKER = "<!-- jumi-takeover -->";
 export const TAKEOVER_REFUSED_REASON = "takeover author not admitted";
@@ -99,7 +100,7 @@ export async function loadTakeoverAuthors(
     if (loaded.state !== "valid") return [];
     return [...(loaded.takeoverAuthors ?? [])];
   } catch (err) {
-    logger?.(`takeover authors unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`takeover authors unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return [];
   }
 }
@@ -138,7 +139,7 @@ async function loadTakeoverRepoPolicy(
       pickupLabel: effectivePickupLabel(loaded),
     };
   } catch (err) {
-    log(`takeover settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`takeover settings unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return fallback;
   }
 }
@@ -310,9 +311,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
   try {
     admitted = await senderCanSteer(input.api, input.owner, input.repo, author, effectiveTrusted);
   } catch (err) {
-    log(
-      `takeover sender check failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`takeover sender check failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     return { takeover: false, refused: false };
   }
   if (!admitted) {
@@ -343,9 +342,7 @@ export async function maybeTakeoverPr(input: TakeoverInput): Promise<TakeoverOut
       }
     }
   } catch (err) {
-    log(
-      `takeover marker failed for ${input.owner}/${input.repo}#${input.prNumber}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    log(`takeover marker failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
     // The marker is best-effort: the enqueue below still hands the pull over.
   }
   return { takeover: true, refused: false };

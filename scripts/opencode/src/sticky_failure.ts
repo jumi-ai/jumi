@@ -1,4 +1,5 @@
 import { isForgeRequestError } from "./forge_errors.ts";
+import { errorMessage } from "./util/error.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 /**
@@ -10,7 +11,7 @@ import { redactGitSecrets } from "./workspace.ts";
  */
 export function stickyFailureDetail(err: unknown, secrets: readonly (string | undefined)[] = []): string {
   if (isForgeRequestError(err)) return "forge API request failed";
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorMessage(err);
   const detail = redactGitSecrets(message, secrets);
   const suffix = describeTriedRunnersSuffix(err);
   return suffix ? `${detail} ${suffix}` : detail;

@@ -13,6 +13,7 @@ import type { ImplementOptions } from "./implement.ts";
 import type { Forge, IssueApi, Pull } from "./ports.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 export type CloserWorkMode = "follow-up" | "conflict";
 
@@ -210,7 +211,7 @@ export async function conflictJobIfUnmergeable(
   try {
     pr = await api.getPR(job.owner, job.repo, prNumber);
   } catch (err) {
-    logger?.(`mergeable lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`mergeable lookup failed: ${errorMessage(err)}`);
     return undefined;
   }
   // A merged or closed pull needs no conflict work: follow-up already ends

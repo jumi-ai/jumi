@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
 import { type CiGateWait, DEFAULT_CI_GATE_WAIT, effectiveCiGateWait, loadRepoSettings } from "./repo_settings.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { errorMessage } from "./util/error.ts";
 
 type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs" | "getActionJobLogs">;
 
@@ -370,7 +371,7 @@ export async function resolveRequiredCiContexts(
       baseBranch = pr?.base?.ref;
     } catch (err) {
       opts.log?.(
-        `CI required checks unreadable for ${label}: base branch unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+        `CI required checks unreadable for ${label}: base branch unreadable (${errorMessage(err)}); falling back to any-check pending`
       );
       return undefined;
     }
@@ -390,7 +391,7 @@ export async function resolveRequiredCiContexts(
     branch = await api.getBranch(opts.owner, opts.repo, baseBranch);
   } catch (err) {
     opts.log?.(
-      `CI required checks unreadable for ${label}: ${baseBranch} unreadable (${err instanceof Error ? err.message : String(err)}); falling back to any-check pending`
+      `CI required checks unreadable for ${label}: ${baseBranch} unreadable (${errorMessage(err)}); falling back to any-check pending`
     );
     return undefined;
   }
@@ -781,7 +782,7 @@ export async function inspectCi(opts: {
   let lookupFailed = false;
   const noteLookupFailure = (err: unknown) => {
     lookupFailed = true;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     opts.log?.(`CI lookup failed for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${message}`);
   };
   let statuses: Check[] = [];
@@ -959,9 +960,7 @@ export async function resolveCiGate(
       const branch = info?.default_branch?.trim() ? (info.default_branch as string).trim() : "";
       if (branch) settingsRef = branch;
     } catch (err) {
-      opts.log?.(
-        `ci gate settings unreadable for ${opts.owner}/${opts.repo}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      opts.log?.(`ci gate settings unreadable for ${opts.owner}/${opts.repo}: ${errorMessage(err)}`);
     }
   }
   if (settingsRef && typeof api.getRepoFile === "function") {
@@ -973,9 +972,7 @@ export async function resolveCiGate(
         wait = effectiveCiGateWait(load);
       }
     } catch (err) {
-      opts.log?.(
-        `ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      opts.log?.(`ci gate settings unreadable for ${opts.owner}/${opts.repo}@${settingsRef}: ${errorMessage(err)}`);
     }
   }
   if (wait === "all" || wait === "none") return { wait };

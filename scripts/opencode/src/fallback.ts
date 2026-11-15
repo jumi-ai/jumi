@@ -32,6 +32,7 @@ import {
   runnerStamp,
   usesEffort,
 } from "./runners.ts";
+import { isAbortError } from "./util/error.ts";
 
 export const OPENCODE_SESSION_DB = "opencode-session.db";
 /** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
@@ -241,10 +242,6 @@ function noteCooldown(
 
 function clearCooldown(hop: EngineChainOptions, runner: NamedRunner): void {
   hop.runnerCooldowns?.clear(runner.name);
-}
-
-function isAbortError(err: unknown): boolean {
-  return err instanceof Error && (err.name === "AbortError" || err.message === "cancelled");
 }
 
 function isQuotaStuckResult(result: EngineResult): boolean {

@@ -45,6 +45,8 @@ import {
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { codexSearxngArgs, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
+import { engineExitMessage } from "./util/engine.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const CODEX_SANDBOX = "danger-full-access";
 export const CODEX_APPROVAL = "never";
@@ -210,10 +212,6 @@ export function looksLikeCodexUsageLimit(text: string | null | undefined): Quota
   return "resetting";
 }
 
-function engineExitMessage(exitCode: number | null, detail: string): string {
-  return `codex exited with code ${exitCode}${detail ? `:\n${detail}` : ""}`;
-}
-
 /**
  * Log what the provider said on a non-ok exit: stderr as before, plus the
  * structured error events when they add anything. Usage limits and auth death
@@ -373,7 +371,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       const home = opts.home ?? process.env.HOME ?? opts.workdir;
       await ensureCodexPublishedAuth({ home, timeoutMs: opts.timeoutMs });
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       log(`Codex published auth unusable: ${detail}`);
       const authMessage = providerAuthDeathForRun({ ...opts, type: "codex" });
       observeEngineRun(opts, {
@@ -456,7 +454,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
           gitProxy = await startChildGitProxy(request);
         } catch (err) {
           throw new EngineFailedError(
-            `codex spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            `codex spawn refused: cannot start git credential proxy: ${errorMessage(err)}`,
             true
           );
         }
@@ -478,7 +476,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
           env: codexEnv,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         throw new EngineFailedError(message, true);
       }
     })();
@@ -547,7 +545,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     if (opts.abortSignal?.aborted) throw cancelled();
 
     if (runError) {
-      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
+      const message = redactEngineText(errorMessage(runError), opts);
       if (auth || looksLikeCodexAuthDeath(message)) {
         logCodexFailure(log, stderr, errors);
         const authMessage = providerAuthDeathForRun({ ...opts, type: "codex" });
@@ -566,7 +564,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         status: "timeout",
         exitCode,
         stdout,
-        message: engineExitMessage(exitCode, combined),
+        message: engineExitMessage("codex", exitCode, combined),
         infra: false,
         durationMs,
       });
@@ -621,7 +619,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     logCodexFailure(log, stderr, errors);
     // The message feeds the chain's hop classifier, so it is built from
     // `signal` only: agent message text stays in `stdout`.
-    const message = providerDown ? signal : engineExitMessage(exitCode, signal);
+    const message = providerDown ? signal : engineExitMessage("codex", exitCode, signal);
     return observeEngineRun(opts, {
       status: "exit",
       exitCode,
@@ -633,7 +631,7 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     if (looksLikeCodexAuthDeath(message)) {
       throw new EngineFailedError(providerAuthDeathForRun({ ...opts, type: "codex" }), false, { auth: true });
     }

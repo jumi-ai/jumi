@@ -7,6 +7,7 @@ import {
 } from "./claimed_worktree.ts";
 import { type Engine, type EngineResult, type EngineRunOptions, runEngineStamped } from "./engine.ts";
 import type { RunnerStamp } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Runtime seam: the live computer stays the standing pod.
@@ -101,26 +102,26 @@ export async function destroyRuntimeWorkspace(
   try {
     await loop.stopHeartbeat();
   } catch (err) {
-    opts.logger?.(`runtime destroy heartbeat failed: ${err instanceof Error ? err.message : String(err)}`);
+    opts.logger?.(`runtime destroy heartbeat failed: ${errorMessage(err)}`);
     if (firstErr === undefined) firstErr = err;
   }
   if (!opts.pushLanded) {
     try {
       await loop.forgetSerialized();
     } catch (err) {
-      opts.logger?.(`runtime destroy forget failed: ${err instanceof Error ? err.message : String(err)}`);
+      opts.logger?.(`runtime destroy forget failed: ${errorMessage(err)}`);
       if (firstErr === undefined) firstErr = err;
     }
   } else {
     await loop.forgetSerialized().catch((err: unknown) => {
-      opts.logger?.(`runtime destroy forget failed: ${err instanceof Error ? err.message : String(err)}`);
+      opts.logger?.(`runtime destroy forget failed: ${errorMessage(err)}`);
     });
   }
   try {
     await loop.detachWorktree();
   } catch (err) {
     // Best effort on the way out; a push that already landed stays landed.
-    opts.logger?.(`runtime destroy detach failed: ${err instanceof Error ? err.message : String(err)}`);
+    opts.logger?.(`runtime destroy detach failed: ${errorMessage(err)}`);
     if (firstErr === undefined) firstErr = err;
   }
   if (firstErr !== undefined && !opts.pushLanded) throw firstErr;

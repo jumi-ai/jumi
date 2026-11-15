@@ -1,6 +1,7 @@
 import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, sep } from "node:path";
 import type { TraceKind } from "./engine.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Shared pack in the image. Reviewer and worker skills stay separate files. */
 export const IMAGE_SKILLS_ROOT = "/app/review-skills";
@@ -73,7 +74,7 @@ export async function stageImageSkillsForClaude(
     );
     return dest;
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log(`[claude] image skills not staged: ${reason}`);
     return undefined;
   }
@@ -137,12 +138,12 @@ export async function stageWorkdirImageSkills(
         await copyTree(src, dest);
         staged.push(dest);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const reason = errorMessage(err);
         log(`[skills] image skill ${name} not staged: ${reason}`);
       }
     }
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     log(`[skills] image skills not staged: ${reason}`);
   }
   const cleanup = async (): Promise<void> => {

@@ -9,12 +9,9 @@
  */
 
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
+import { isRecord } from "./util/object.ts";
 
 type JsonObject = Record<string, unknown>;
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
@@ -35,10 +32,10 @@ function modelLabel(value: unknown, fallback = "unknown"): string {
 }
 
 export function parseClaudeModelUsage(modelUsage: unknown): ModelTokenUsage | undefined {
-  if (!isObject(modelUsage)) return undefined;
+  if (!isRecord(modelUsage)) return undefined;
   const usage: ModelTokenUsage = new Map();
   for (const [key, value] of Object.entries(modelUsage)) {
-    if (!isObject(value)) continue;
+    if (!isRecord(value)) continue;
     addTokens(usage, modelLabel(value.canonicalModel, modelLabel(key)), {
       input: count(value.inputTokens),
       cached_input: count(value.cacheReadInputTokens),
@@ -97,7 +94,7 @@ export class ClaudeStreamParser {
       this.textParts.push(line);
       return;
     }
-    if (!isObject(event) || typeof event.type !== "string") {
+    if (!isRecord(event) || typeof event.type !== "string") {
       this.textParts.push(line);
       return;
     }
@@ -106,12 +103,12 @@ export class ClaudeStreamParser {
       this.resultUsage = parseClaudeModelUsage(event.modelUsage) ?? this.resultUsage;
       return;
     }
-    if (event.type === "assistant" && isObject(event.message)) this.recordAssistant(event.message);
+    if (event.type === "assistant" && isRecord(event.message)) this.recordAssistant(event.message);
   }
 
   private recordAssistant(message: JsonObject): void {
     const usage = message.usage;
-    if (!isObject(usage)) return;
+    if (!isRecord(usage)) return;
     // stream-json repeats one message per content block with the same id and
     // usage; keep the latest copy rather than summing duplicates.
     const id = typeof message.id === "string" && message.id ? message.id : `anonymous-${this.anonymousMessages++}`;

@@ -1,6 +1,7 @@
 import { upsertWorkerComment } from "./gitea_issues.ts";
 import type { IssueApi, Task } from "./ports.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 export const ISSUE_CLOSED_NO_PR_COMMENT = "Not opening a PR because the issue was closed.";
 export const ISSUE_CLOSED_CLOSER_COMMENT = "Closing this PR because the issue was closed.";
@@ -105,7 +106,7 @@ export async function gateShipAfterOpenCode(opts: {
     try {
       issue = await opts.api.getIssue(opts.owner, opts.repo, opts.issueNumber);
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = errorMessage(err);
       await sticky(
         opts.api,
         opts.owner,

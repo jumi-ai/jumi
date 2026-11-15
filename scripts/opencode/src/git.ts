@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   looksLikeProviderAuthDeath,
@@ -92,6 +92,9 @@ export interface OpenCodeRunOptions extends EngineRunOptions {
 
 import { withInstalledTools } from "./installed_tools.ts";
 import { TOOL_INSTALL_RULE } from "./prompt.ts";
+import { engineExitMessage } from "./util/engine.ts";
+import { errorMessage } from "./util/error.ts";
+import { pathExists } from "./util/fs.ts";
 
 const WORKER_SCOPE_BASE = `Stay in this clone. Start from the parent-injected files named in the injected-files line below; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the files listed as injected.`;
@@ -248,15 +251,6 @@ export function rewordReviewGuidanceForRunner(text: string, runnerType?: string)
     if (variant !== want && out.includes(variant)) out = out.split(variant).join(want);
   }
   return out;
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export const WORKER_INJECTED_FILES = [
@@ -481,7 +475,7 @@ async function resolveXaiChildCredential(
     const resolved = await ensureXaiCredentialForJob({ home, timeoutMs: opts.timeoutMs, logger: log });
     return resolved?.child;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     log(`xAI credential unusable for a ${opts.model} run: ${message}`);
     // Same shape as an auth death the child reports: the public message names
     // the role and runner, the reason stays in the log.
@@ -529,7 +523,7 @@ export function resolveOpenCodeApiKey(env: Record<string, string | undefined> = 
     }
     return { key: undefined, filePath, fileError: "empty" };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     if (envKey) {
       return { key: envKey, filePath, fileError: reason };
     }
@@ -750,10 +744,6 @@ function countToolishLines(stderr: string): number {
   return n;
 }
 
-function engineExitMessage(exitCode: number | null, stderr: string): string {
-  return `opencode exited with code ${exitCode}${stderr ? `:\n${stderr}` : ""}`;
-}
-
 export interface OpenCodeArgOptions {
   model: string;
   variant?: string;
@@ -837,7 +827,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           gitProxy = await startChildGitProxy(request);
         } catch (err) {
           throw new EngineFailedError(
-            `opencode spawn refused: cannot start git credential proxy: ${err instanceof Error ? err.message : String(err)}`,
+            `opencode spawn refused: cannot start git credential proxy: ${errorMessage(err)}`,
             true
           );
         }
@@ -927,7 +917,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         await writeFile(globalPath, JSON.stringify(parsed), { mode: 0o600 });
       } catch (err) {
         throw new EngineFailedError(
-          `opencode review spawn refused: cannot register shell sandbox plugin: ${err instanceof Error ? err.message : String(err)}`,
+          `opencode review spawn refused: cannot register shell sandbox plugin: ${errorMessage(err)}`,
           false
         );
       }
@@ -945,7 +935,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
           env: childEnv,
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = errorMessage(err);
         throw new EngineFailedError(message, true);
       }
     })();
@@ -1132,9 +1122,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opencode_db_bytes: dbAfter,
       opencode_db_h: formatBytes(dbAfter),
       opencode_db_delta_bytes: dbBefore !== null && dbAfter !== null ? dbAfter - dbBefore : null,
-      run_error: runError
-        ? redactEngineText(runError instanceof Error ? runError.message : String(runError), opts).slice(0, 200)
-        : null,
+      run_error: runError ? redactEngineText(errorMessage(runError), opts).slice(0, 200) : null,
       infra,
       auth,
       quota,
@@ -1163,7 +1151,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     }
 
     if (runError) {
-      const message = redactEngineText(runError instanceof Error ? runError.message : String(runError), opts);
+      const message = redactEngineText(errorMessage(runError), opts);
       if (auth || looksLikeProviderAuthDeath(message)) {
         if (stderr) log(`[opencode stderr] ${stderr}`);
         const authMessage = providerAuthDeathForRun(opts);
@@ -1180,7 +1168,7 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
         status: "timeout",
         exitCode,
         stdout,
-        message: engineExitMessage(exitCode, stderr),
+        message: engineExitMessage("opencode", exitCode, stderr),
         infra,
         durationMs,
       });
@@ -1214,14 +1202,14 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       status: "exit",
       exitCode,
       stdout,
-      message: engineExitMessage(exitCode, stderr),
+      message: engineExitMessage("opencode", exitCode, stderr),
       infra,
       durationMs,
     });
   } catch (err) {
     if (err instanceof EngineFailedError) throw err;
     if (err instanceof Error && (err.name === "AbortError" || err.message === "cancelled")) throw err;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     if (looksLikeProviderAuthDeath(message)) {
       throw new EngineFailedError(providerAuthDeathForRun(opts), false, { auth: true });
     }

@@ -11,6 +11,7 @@ import {
   resolveRunnerSelection,
 } from "./runners.ts";
 import { searxngUrlFromEnv } from "./searxng.ts";
+import { csvEnv, intEnv, optionalEnv } from "./util/env.ts";
 
 export type JumiRole = "router" | "engine";
 
@@ -122,29 +123,6 @@ function requireEnv(env: Env, name: string): string {
   const value = env[name];
   if (!value) throw new Error(`Missing required environment variable: ${name}`);
   return value;
-}
-
-function optionalEnv(env: Env, name: string, fallback?: string): string | undefined {
-  return env[name] || fallback;
-}
-
-function intEnv(env: Env, name: string, fallback: number): number {
-  const value = env[name];
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`Invalid positive integer for ${name}: ${value}`);
-  }
-  return parsed;
-}
-
-function csvEnv(env: Env, name: string, fallback: string[] = []): string[] {
-  const value = env[name];
-  if (!value) return fallback;
-  return value
-    .split(",")
-    .map((part) => part.trim())
-    .filter(Boolean);
 }
 
 export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";

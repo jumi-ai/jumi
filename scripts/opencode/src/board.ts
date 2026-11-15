@@ -31,6 +31,7 @@ import {
   stuckIdempotencyMismatch,
 } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
+import { errorMessage } from "./util/error.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
 /**
@@ -1736,7 +1737,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         try {
           groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
         } catch (err) {
-          logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`board unavailable: ${errorMessage(err)}`);
           return json(503, { error: "queue unavailable" });
         }
         const grant = getGrant();
@@ -1764,7 +1765,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
       try {
         groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
       } catch (err) {
-        logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`board unavailable: ${errorMessage(err)}`);
         return json(503, { error: "queue unavailable" });
       }
       const grant = getGrant();
@@ -1796,7 +1797,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peer;
       } catch (err) {
         // No invented token, no crash: an unset or unreachable peer is unavailable.
-        logger(`peer board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+        logger(`peer board unavailable: ${errorMessage(err)}`);
         (body.peers as Record<string, BoardPeerStatus>)[PEER_FORGE] = peerUnavailable();
       }
       return json(200, body);
@@ -1812,7 +1813,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         try {
           groups = withForgeGroups(await buildBoardGroups(deps.store, localForge), localForge);
         } catch (err) {
-          logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+          logger(`board unavailable: ${errorMessage(err)}`);
           return json(503, { error: "queue unavailable" });
         }
         return json(200, {
@@ -1956,10 +1957,10 @@ async function handleKick(
     });
   } catch (err) {
     if (isQueueUnavailable(err)) {
-      logger(`kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
-    logger(`kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`kick failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
 }
@@ -2003,9 +2004,7 @@ async function handleForwardedKick(
     try {
       prior = await store.getKickByIdempotencyKey(idempotencyKey);
     } catch (err) {
-      logger(
-        `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      logger(`kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (prior) {
@@ -2056,7 +2055,7 @@ async function handleForwardedKick(
     });
   } catch (err) {
     logger(
-      `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)}: ${err instanceof Error ? err.message : String(err)}`
+      `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords} kick=${JSON.stringify(kickLabel)}: ${errorMessage(err)}`
     );
     return json(503, { error: "peer unavailable" });
   } finally {
@@ -2125,9 +2124,7 @@ async function handleForwardedKick(
         }
         return replayForwardedPrior(prior);
       }
-      logger(
-        `kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      logger(`kick forward unavailable actor=${actor} forge=${PEER_FORGE} ${coords}: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
   }
@@ -2182,7 +2179,7 @@ async function handleReopenKick(
     try {
       prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
     } catch (err) {
-      logger(`reopen kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`reopen kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (prior) {
@@ -2221,7 +2218,7 @@ async function handleReopenKick(
       });
     }
     logger(
-      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${errorMessage(err)}`
     );
     return json(503, { error: "forge unavailable" });
   }
@@ -2249,9 +2246,7 @@ async function handleReopenKick(
         return reopenKeyConflictResponse(prior, item);
       }
     } catch (err) {
-      logger(
-        `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
-      );
+      logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     logger(`reopen kick noop-open actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
@@ -2284,7 +2279,7 @@ async function handleReopenKick(
       });
     }
     logger(
-      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
+      `reopen kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${errorMessage(err)}`
     );
     return json(503, { error: "forge unavailable" });
   }
@@ -2296,9 +2291,7 @@ async function handleReopenKick(
       return reopenKeyConflictResponse(prior, item);
     }
   } catch (err) {
-    logger(
-      `reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    logger(`reopen kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.number}: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   logger(`reopen kick ok actor=${actor} ${item.owner}/${item.repo}#${item.number}`);
@@ -2441,7 +2434,7 @@ async function recordReopenBestEffort(
     return await recordReopenLogged(store, parsed, actor, commit, result);
   } catch (err) {
     if (isQueueUnavailable(err)) {
-      logger(`reopen kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`reopen kick unavailable: ${errorMessage(err)}`);
       return "ok";
     }
     throw err;
@@ -2478,7 +2471,7 @@ async function handleImplementKick(
     try {
       prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
     } catch (err) {
-      logger(`implement kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`implement kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (prior) {
@@ -2513,7 +2506,7 @@ async function handleImplementKick(
     });
   } catch (err) {
     if (isQueueUnavailable(err)) {
-      logger(`implement kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`implement kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (parsed.idempotencyKey && isUniqueViolation(err)) {
@@ -2534,7 +2527,7 @@ async function handleImplementKick(
       }
       return await replayImplementPrior(store, prior, item);
     }
-    logger(`implement kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`implement kick failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
 
@@ -2570,7 +2563,7 @@ async function handleImplementKick(
       await forgeApi.addIssueLabel(item.owner, item.repo, item.issueNumber, pickupLabel);
     } catch (err) {
       logger(
-        `implement kick label failed actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: ${err instanceof Error ? err.message : String(err)}`
+        `implement kick label failed actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: ${errorMessage(err)}`
       );
     }
     logger(
@@ -2710,7 +2703,7 @@ async function handleSitClear(
   try {
     sit = await store.sits.get(owner, repo, number);
   } catch (err) {
-    logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`board unavailable: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   if (!sit) return json(404, { error: "sit not found" });
@@ -2732,7 +2725,7 @@ async function handleSitClear(
   try {
     await store.sits.clear(owner, repo, number);
   } catch (err) {
-    logger(`board unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`board unavailable: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
   // The username attached after the edge check is what the kick log records.
@@ -2771,7 +2764,7 @@ async function handleStuckKick(
     try {
       prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
     } catch (err) {
-      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`stuck kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (prior) {
@@ -2815,7 +2808,7 @@ async function handleStuckKick(
     });
   } catch (err) {
     if (isQueueUnavailable(err)) {
-      logger(`stuck kick unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      logger(`stuck kick unavailable: ${errorMessage(err)}`);
       return json(503, { error: "queue unavailable" });
     }
     if (parsed.idempotencyKey && isUniqueViolation(err)) {
@@ -2836,7 +2829,7 @@ async function handleStuckKick(
       }
       return await replayStuckPrior(store, prior);
     }
-    logger(`stuck kick failed: ${err instanceof Error ? err.message : String(err)}`);
+    logger(`stuck kick failed: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
   }
 

@@ -21,8 +21,8 @@ import {
   SEARXNG_SERVER_NAME,
   SEARXNG_SERVER_URL_ENV,
   SEARXNG_TOOL_NAME,
-  SearxngError,
 } from "./searxng.ts";
+import { errorMessage } from "./util/error.ts";
 
 const server = new McpServer({ name: SEARXNG_SERVER_NAME, version: "1.0.0" });
 
@@ -49,7 +49,7 @@ server.registerTool(
     try {
       max = normalizeMaxResults(max_results);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       return { content: [{ type: "text" as const, text: `SearXNG search failed: ${message}` }], isError: true };
     }
     try {
@@ -66,7 +66,7 @@ server.registerTool(
         ],
       };
     } catch (err) {
-      const message = err instanceof SearxngError || err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       return { content: [{ type: "text" as const, text: message }], isError: true };
     }
   }

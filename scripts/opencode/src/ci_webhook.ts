@@ -9,6 +9,8 @@ import {
 } from "./gitea_issues.ts";
 import { loadRepoSettings } from "./repo_settings.ts";
 import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
+import { isObjectLike } from "./util/object.ts";
 import type { WebhookPolicy } from "./webhook.ts";
 import { assertRepositoryPolicy } from "./webhook.ts";
 
@@ -18,10 +20,6 @@ export type CiWebhookDecision =
   | { type: "enqueue"; jobs: Omit<IssueJob, "delivery" | "receivedAt">[] }
   | { type: "skip"; reason: string };
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new Error(`Invalid webhook payload: missing ${name}`);
   return value;
@@ -29,13 +27,13 @@ function requireString(value: unknown, name: string): string {
 
 export function parseWorkflowJobPayload(rawBody: Uint8Array): GiteaWorkflowJobPayload {
   const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-  if (!isObject(parsed)) throw new Error("Invalid webhook payload: expected object");
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
   const repository = parsed.repository;
-  if (!isObject(repository)) throw new Error("Invalid webhook payload: missing repository");
+  if (!isObjectLike(repository)) throw new Error("Invalid webhook payload: missing repository");
   requireString(repository.full_name, "repository.full_name");
   requireString(repository.default_branch, "repository.default_branch");
   requireString(repository.clone_url, "repository.clone_url");
-  if (parsed.workflow_job != null && !isObject(parsed.workflow_job)) {
+  if (parsed.workflow_job != null && !isObjectLike(parsed.workflow_job)) {
     throw new Error("Invalid webhook payload: missing workflow_job");
   }
   return parsed as unknown as GiteaWorkflowJobPayload;
@@ -86,7 +84,7 @@ export async function shouldEnqueueWorkflowJobFollowUp(
   try {
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
-    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`repository not allowed: ${errorMessage(err)}`);
     return { type: "skip", reason: "repository not allowed" };
   }
 
@@ -196,9 +194,7 @@ async function resolveReviewDrafts(
     if (load.state !== "valid") return false;
     return load.reviewDrafts === true;
   } catch (err) {
-    logger?.(
-      `review drafts settings unreadable for ${owner}/${repo}: ${err instanceof Error ? err.message : String(err)}`
-    );
+    logger?.(`review drafts settings unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return false;
   }
 }
@@ -215,7 +211,7 @@ export async function shouldEnqueueWorkflowJobReview(
   try {
     ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
   } catch (err) {
-    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`repository not allowed: ${errorMessage(err)}`);
     return { type: "skip", reason: "repository not allowed" };
   }
 
@@ -279,7 +275,7 @@ function readStatusRepository(
   parsed: Record<string, unknown>
 ): { full_name: string; html_url?: string; clone_url?: string } | undefined {
   const repository = parsed.repository;
-  if (!isObject(repository)) return undefined;
+  if (!isObjectLike(repository)) return undefined;
   const fullName = stringField(repository.full_name);
   if (!fullName) return undefined;
   return {
@@ -302,7 +298,7 @@ function parseStatusFinish(parsed: Record<string, unknown>): SiblingCheckFinish 
 function parseCheckRunFinish(parsed: Record<string, unknown>): SiblingCheckFinish | { skip: string } {
   const action = stringField(parsed.action) ?? "";
   const run = parsed.check_run;
-  if (!isObject(run)) return { skip: "malformed check_run payload" };
+  if (!isObjectLike(run)) return { skip: "malformed check_run payload" };
   const status = stringField(run.status) ?? "";
   if (action !== "completed" && status !== "completed") {
     return { skip: action ? `check_run ${action}` : "check_run not completed" };
@@ -311,7 +307,7 @@ function parseCheckRunFinish(parsed: Record<string, unknown>): SiblingCheckFinis
   if (!conclusion) return { skip: "check_run not completed" };
   const sha = stringField(run.head_sha);
   if (!sha) return { skip: "malformed check_run payload" };
-  const suite = isObject(run.check_suite) ? run.check_suite : undefined;
+  const suite = isObjectLike(run.check_suite) ? run.check_suite : undefined;
   return {
     sha,
     branch: suite ? stringField(suite.head_branch) : undefined,
@@ -334,7 +330,7 @@ export async function shouldEnqueueSiblingCheckReview(
   } catch {
     return { type: "skip", reason: "malformed status payload" };
   }
-  if (!isObject(parsed)) return { type: "skip", reason: "malformed status payload" };
+  if (!isObjectLike(parsed)) return { type: "skip", reason: "malformed status payload" };
   const repository = readStatusRepository(parsed);
   if (!repository) return { type: "skip", reason: "malformed status payload" };
 
@@ -348,7 +344,7 @@ export async function shouldEnqueueSiblingCheckReview(
   try {
     ({ owner, repo } = assertRepositoryPolicy(repository, policy));
   } catch (err) {
-    logger?.(`repository not allowed: ${err instanceof Error ? err.message : String(err)}`);
+    logger?.(`repository not allowed: ${errorMessage(err)}`);
     return { type: "skip", reason: "repository not allowed" };
   }
 

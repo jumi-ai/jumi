@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { forgeDenyHost } from "./forge_webfetch.ts";
 import { AGY_RUNNER_TYPE, CLAUDE_RUNNER_TYPE, CODEX_RUNNER_TYPE, OPENCODE_RUNNER_TYPE } from "./runner_types.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * One deployer setting for web search on every runner.
@@ -144,7 +145,7 @@ export async function querySearxng(
     if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
       throw new SearxngError(`SearXNG search failed: timed out querying ${baseUrl}`);
     }
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     throw new SearxngError(`SearXNG search failed: cannot reach ${baseUrl} (${reason})`);
   }
   if (!response.ok) {

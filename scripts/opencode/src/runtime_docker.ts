@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Test-only Docker computer. Proves the runtime port is real.
@@ -223,7 +224,7 @@ export async function destroyPreservingPush(
   try {
     await destroy();
   } catch (err) {
-    opts.logger?.(`docker destroy failed: ${err instanceof Error ? err.message : String(err)}`);
+    opts.logger?.(`docker destroy failed: ${errorMessage(err)}`);
     if (!opts.pushLanded) throw err;
   }
 }

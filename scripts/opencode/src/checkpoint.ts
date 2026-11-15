@@ -2,6 +2,7 @@ import { tipTracksAttachments, tipTracksEngineScratch } from "./engine_scratch.t
 import { tipAddedSentinels } from "./sentinels.ts";
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 import type { GitRunner } from "./workspace.ts";
 
 export const CHECKPOINT_REF_PREFIX = "refs/jumi/wip/";
@@ -140,7 +141,7 @@ export async function pushCheckpointRef(
   try {
     head = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: loop.worktree, env: loop.env })).trim();
   } catch (err) {
-    return { pushed: false, reason: `cannot read HEAD: ${err instanceof Error ? err.message : String(err)}` };
+    return { pushed: false, reason: `cannot read HEAD: ${errorMessage(err)}` };
   }
   if (!head || /^0+$/.test(head)) return { pushed: false, reason: "no HEAD" };
   if (opts.expectedSha && head === opts.expectedSha) return { pushed: false, reason: "unchanged" };
@@ -148,7 +149,7 @@ export async function pushCheckpointRef(
     const guard = await tipGuards(loop, { defaultBranch: opts.defaultBranch });
     if (guard) return { pushed: false, reason: guard };
   } catch (err) {
-    return { pushed: false, reason: `guard lookup failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { pushed: false, reason: `guard lookup failed: ${errorMessage(err)}` };
   }
   try {
     await loop.refreshGitAuth?.();
@@ -162,7 +163,7 @@ export async function pushCheckpointRef(
     await pushOnce(["push", "origin", `HEAD:${ref}`]);
     return { pushed: true, sha: head };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     if (isRefNamespaceRefusal(message)) {
       return { pushed: false, disabled: true, reason: message };
     }
@@ -173,7 +174,7 @@ export async function pushCheckpointRef(
         await pushOnce(["push", `--force-with-lease=${ref}:${opts.expectedSha}`, "origin", `HEAD:${ref}`]);
         return { pushed: true, sha: head };
       } catch (retryErr) {
-        const retryMessage = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        const retryMessage = errorMessage(retryErr);
         if (isRefNamespaceRefusal(retryMessage)) {
           return { pushed: false, disabled: true, reason: retryMessage };
         }
@@ -207,7 +208,7 @@ export async function deleteCheckpointRef(
   try {
     await loop.runConfiguredGit(["push", "origin", `:${ref}`], { cwd: loop.barePath, env: loop.env });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     if (isMissingRemoteRef(message)) {
       // Fall through to local cleanup.
     } else {
@@ -302,7 +303,7 @@ export async function restoreCheckpoint(
     } catch (err) {
       return {
         restored: false,
-        reason: `cannot stage checkpoint: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `cannot stage checkpoint: ${errorMessage(err)}`,
       };
     }
     return { restored: true, sha: checkpointSha };
@@ -325,7 +326,7 @@ export async function restoreCheckpoint(
     } catch (err) {
       return {
         restored: false,
-        reason: `cannot stage checkpoint: ${err instanceof Error ? err.message : String(err)}`,
+        reason: `cannot stage checkpoint: ${errorMessage(err)}`,
       };
     }
     return { restored: true, sha: checkpointSha };
@@ -431,9 +432,7 @@ export function startCheckpointTicker(loop: CheckpointLoop, opts: CheckpointTick
     } catch (err) {
       if (!failureLogged) {
         failureLogged = true;
-        opts.log?.(
-          `checkpoint failed for ${opts.ref}: ${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`
-        );
+        opts.log?.(`checkpoint failed for ${opts.ref}: ${errorMessage(err).split("\n")[0]}`);
       }
     } finally {
       inFlight = false;
@@ -691,9 +690,7 @@ export async function deleteCheckpointRefViaForge(
     await (deleteGitRef as (owner: string, repo: string, ref: string) => Promise<void>).call(api, owner, repo, ref);
   } catch (err) {
     if (isForgeDeleteUnsupportedError(err)) return;
-    opts.log?.(
-      `checkpoint delete failed for ${ref}: ${(err instanceof Error ? err.message : String(err)).split("\n")[0]}`
-    );
+    opts.log?.(`checkpoint delete failed for ${ref}: ${errorMessage(err).split("\n")[0]}`);
   }
 }
 

@@ -13,6 +13,7 @@
  */
 
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
+import { isRecord } from "./util/object.ts";
 
 type JsonObject = Record<string, unknown>;
 
@@ -21,10 +22,6 @@ export interface AgyResultEnvelope {
   response?: string;
   error?: string;
   deniedActions: string[];
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function count(value: unknown): number {
@@ -41,7 +38,7 @@ function eventName(event: JsonObject): string | undefined {
 
 function nestedPayload(event: JsonObject, key: string): JsonObject {
   const nested = event[key];
-  return isObject(nested) ? nested : event;
+  return isRecord(nested) ? nested : event;
 }
 
 function pickString(payload: JsonObject, event: JsonObject, key: string): string | undefined {
@@ -49,7 +46,7 @@ function pickString(payload: JsonObject, event: JsonObject, key: string): string
 }
 
 export function parseAgyUsage(usage: unknown): Record<TokenType, number> | undefined {
-  if (!isObject(usage)) return undefined;
+  if (!isRecord(usage)) return undefined;
   const tokens: Record<TokenType, number> = {
     input: count(usage.input_tokens),
     cached_input: count(usage.cache_read_tokens),
@@ -61,7 +58,7 @@ export function parseAgyUsage(usage: unknown): Record<TokenType, number> | undef
 }
 
 function errorText(value: unknown): string | undefined {
-  if (isObject(value)) return nonEmptyString(value.message) ?? JSON.stringify(value);
+  if (isRecord(value)) return nonEmptyString(value.message) ?? JSON.stringify(value);
   return nonEmptyString(value);
 }
 
@@ -69,7 +66,7 @@ function deniedActions(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((entry) => {
     if (typeof entry === "string") return entry;
-    if (isObject(entry)) return nonEmptyString(entry.tool) ?? nonEmptyString(entry.name) ?? JSON.stringify(entry);
+    if (isRecord(entry)) return nonEmptyString(entry.tool) ?? nonEmptyString(entry.name) ?? JSON.stringify(entry);
     return String(entry);
   });
 }
@@ -138,8 +135,8 @@ export class AgyStreamParser {
       this.textParts.push(line);
       return;
     }
-    const name = isObject(event) ? eventName(event) : undefined;
-    if (!isObject(event) || !name) {
+    const name = isRecord(event) ? eventName(event) : undefined;
+    if (!isRecord(event) || !name) {
       this.textParts.push(line);
       return;
     }
@@ -176,7 +173,7 @@ export class AgyStreamParser {
   private recordStep(event: JsonObject): void {
     const payload = nestedPayload(event, "step_update");
     this.conversation ??= nonEmptyString(payload.conversation_id);
-    const step = isObject(payload.step) ? payload.step : isObject(event.step) ? event.step : undefined;
+    const step = isRecord(payload.step) ? payload.step : isRecord(event.step) ? event.step : undefined;
     const tokens = parseAgyUsage(payload.usage) ?? parseAgyUsage(event.usage) ?? parseAgyUsage(step?.usage);
     if (!tokens) return;
     const index =

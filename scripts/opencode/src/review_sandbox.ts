@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineRunOptions } from "./engine.ts";
 import { EngineFailedError } from "./engine.ts";
 import { childScratchDir } from "./engine_scratch.ts";
+import { errorMessage } from "./util/error.ts";
 
 /**
  * Landlock sandbox for review spawns (jumi#531, part 2 jumi#550).
@@ -350,7 +351,7 @@ function probeWrapper(wrapperPath: string): ReviewSandboxProbe {
   } catch (err) {
     return {
       available: false,
-      reason: `sandbox wrapper would not start: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `sandbox wrapper would not start: ${errorMessage(err)}`,
     };
   }
   const out = String(proc.stdout ?? "");

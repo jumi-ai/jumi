@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { OPENCODE_WELLKNOWN_DISABLED } from "./opencode_auth.ts";
 import { AGY_RUNNER_TYPE, type IndependentReviewConfig, type NamedRunner } from "./runners.ts";
+import { errorMessage } from "./util/error.ts";
 import { isXaiModel } from "./xai_auth.ts";
 
 /**
@@ -196,7 +197,7 @@ export async function refuseXaiOAuth(input: RefuseXaiOAuthInput): Promise<XaiRef
   } catch (err) {
     return {
       refused: true,
-      reason: `xAI OAuth refused: cannot read OpenCode config ${input.opencodeConfigPath}: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `xAI OAuth refused: cannot read OpenCode config ${input.opencodeConfigPath}: ${errorMessage(err)}`,
     };
   }
   if (local !== undefined && openCodeConfigUsesXai(local)) {
@@ -213,7 +214,7 @@ export async function refuseXaiOAuth(input: RefuseXaiOAuthInput): Promise<XaiRef
   } catch (err) {
     return {
       refused: true,
-      reason: `xAI OAuth refused: cannot fetch well-known config ${input.wellKnownUrl}: ${err instanceof Error ? err.message : String(err)}`,
+      reason: `xAI OAuth refused: cannot fetch well-known config ${input.wellKnownUrl}: ${errorMessage(err)}`,
     };
   }
   if (remote !== undefined && openCodeConfigUsesXai(remote)) {

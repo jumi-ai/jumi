@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { ATTACHMENTS_DIR } from "./engine_scratch.ts";
+import { errorMessage, isEnoent } from "./util/error.ts";
 
 export { ATTACHMENTS_DIR };
 export const ATTACHMENTS_MANIFEST = "JUMI_ATTACHMENTS.md";
@@ -35,10 +36,6 @@ export interface AttachmentApi {
   listIssueCommentAttachments?(owner: string, repo: string, commentId: number): Promise<ForgeAttachment[]>;
   downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
   listIssueComments?(owner: string, repo: string, index: number): Promise<Array<{ id: number; body: string }>>;
-}
-
-function isEnoent(err: unknown): boolean {
-  return typeof err === "object" && err != null && "code" in err && (err as { code?: string }).code === "ENOENT";
 }
 
 function sanitizeBase(name: string): string {
@@ -250,7 +247,7 @@ async function listAllForgeAttachments(
       const listed = await api.listIssueAttachments(owner, repo, index);
       for (const attachment of listed ?? []) push(attachment);
     } catch (err) {
-      log?.(`attachments: list ${owner}/${repo}#${index} failed: ${err instanceof Error ? err.message : String(err)}`);
+      log?.(`attachments: list ${owner}/${repo}#${index} failed: ${errorMessage(err)}`);
     }
     if (typeof api.listIssueComments !== "function" || typeof api.listIssueCommentAttachments !== "function") {
       continue;
@@ -348,13 +345,7 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       stagedFiles += 1;
       records.push({ name, size: bytes.byteLength, sha256, url, staged: true, source: sources[0] });
     } catch (err) {
-      noteUnstaged(
-        nameHint,
-        attachment.size,
-        url,
-        `download failed: ${err instanceof Error ? err.message : String(err)}`,
-        sources[0]
-      );
+      noteUnstaged(nameHint, attachment.size, url, `download failed: ${errorMessage(err)}`, sources[0]);
     }
   }
 
@@ -394,13 +385,7 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       stagedFiles += 1;
       records.push({ name, size: bytes.byteLength, sha256, url, staged: true, source: sources[0] });
     } catch (err) {
-      noteUnstaged(
-        fallback,
-        0,
-        url,
-        `download failed: ${err instanceof Error ? err.message : String(err)}`,
-        sources[0]
-      );
+      noteUnstaged(fallback, 0, url, `download failed: ${errorMessage(err)}`, sources[0]);
     }
   }
 

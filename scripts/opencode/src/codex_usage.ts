@@ -10,8 +10,7 @@
  */
 
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
-
-type JsonObject = Record<string, unknown>;
+import { isRecord } from "./util/object.ts";
 
 export interface CodexItem {
   type: string;
@@ -37,10 +36,6 @@ export interface CodexTraceEvent {
 
 export type CodexTokens = Record<TokenType, number>;
 
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
@@ -65,7 +60,7 @@ function modelLabel(value: unknown): string | undefined {
  * buckets do not.
  */
 function usageFrom(value: unknown): CodexTokens | undefined {
-  if (!isObject(value)) return undefined;
+  if (!isRecord(value)) return undefined;
   const cached = count(value.cached_input_tokens);
   const cacheWrite = count(value.cache_write_input_tokens);
   const reasoning = count(value.reasoning_output_tokens);
@@ -90,14 +85,14 @@ function tokensSince(total: CodexTokens, previous: CodexTokens | undefined): Cod
 
 /** A persisted thread total, or undefined when it is not one. */
 export function codexTokensFrom(value: unknown): CodexTokens | undefined {
-  if (!isObject(value)) return undefined;
+  if (!isRecord(value)) return undefined;
   const tokens = emptyTokens();
   for (const tokenType of TOKEN_TYPES) tokens[tokenType] = count(value[tokenType]);
   return tokens;
 }
 
 function itemFrom(value: unknown): CodexItem | undefined {
-  if (!isObject(value) || typeof value.type !== "string") return undefined;
+  if (!isRecord(value) || typeof value.type !== "string") return undefined;
   const item: CodexItem = { type: value.type };
   if (typeof value.id === "string") item.id = value.id;
   if (typeof value.text === "string") item.text = value.text;
@@ -113,7 +108,7 @@ function itemFrom(value: unknown): CodexItem | undefined {
 
 function errorText(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
-  if (!isObject(value)) return undefined;
+  if (!isRecord(value)) return undefined;
   if (typeof value.message === "string" && value.message.trim()) return value.message.trim();
   if (typeof value.error === "string" && value.error.trim()) return value.error.trim();
   return undefined;
@@ -196,7 +191,7 @@ export class CodexStreamParser {
       this.textParts.push(line);
       return;
     }
-    if (!isObject(event) || typeof event.type !== "string") {
+    if (!isRecord(event) || typeof event.type !== "string") {
       this.textParts.push(line);
       return;
     }
