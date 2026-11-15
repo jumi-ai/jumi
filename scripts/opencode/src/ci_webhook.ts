@@ -7,7 +7,7 @@ import {
   isInScopeJumiPR,
   isWipOrDraft,
 } from "./gitea_issues.ts";
-import { loadRepoSettings } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import type { GiteaWorkflowJobPayload, IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { isObjectLike } from "./util/object.ts";
@@ -183,16 +183,10 @@ async function resolveReviewDrafts(
       branch = info?.default_branch?.trim() ?? "";
     }
     if (!branch || typeof getFile !== "function") return false;
-    const load = await loadRepoSettings(
-      api as {
-        getRepoFile(o: string, r: string, p: string, ref: string): Promise<{ found: boolean; content?: string }>;
-      },
-      owner,
-      repo,
-      branch
-    );
-    if (load.state !== "valid") return false;
-    return load.reviewDrafts === true;
+    const policy = await resolveRepoPolicy({ api, owner, repo, ref: branch }, fallbackPolicyDeployment(), {
+      onUnreadable: "throw",
+    });
+    return policy.reviewDrafts;
   } catch (err) {
     logger?.(`review drafts settings unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return false;

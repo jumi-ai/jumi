@@ -17,7 +17,7 @@ import {
   buildPROpenedPrompt,
 } from "./prompt.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
-import { effectiveReviewBudget, loadRepoSettings } from "./repo_settings.ts";
+import { effectiveReviewBudget } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
@@ -512,15 +512,13 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
     const defaultBranch = repo.default_branch?.trim() ? repo.default_branch : "";
     const getFile = (opts.api as { getRepoFile?: unknown }).getRepoFile;
     if (defaultBranch && typeof getFile === "function") {
-      const load = await loadRepoSettings(
-        opts.api as {
-          getRepoFile(o: string, r: string, p: string, ref: string): Promise<{ found: boolean; content?: string }>;
-        },
-        reviewCase.owner,
-        reviewCase.repo,
-        defaultBranch
+      const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+      const policy = await resolveRepoPolicy(
+        { api: opts.api, owner: reviewCase.owner, repo: reviewCase.repo, ref: defaultBranch },
+        fallbackPolicyDeployment(),
+        { onUnreadable: "throw" }
       );
-      const budget = effectiveReviewBudget(load, {
+      const budget = effectiveReviewBudget(policy.load, {
         maxFiles: deploymentMaxFiles,
         maxFilesMax: deploymentMaxFilesMax,
         maxPatchBytes: deploymentMaxPatchBytes,

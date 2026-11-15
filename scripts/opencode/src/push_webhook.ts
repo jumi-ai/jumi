@@ -90,10 +90,14 @@ export async function shouldEnqueuePushConflicts(
   // Missing, invalid, or unreadable falls back to the deployment value.
   let ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
   try {
-    const { effectiveIgnoreConflictsLabel, loadRepoSettings } = await import("./repo_settings.ts");
+    const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
     if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
-      const loaded = await loadRepoSettings(api, owner, repo, payload.repository.default_branch);
-      ignoreLabel = effectiveIgnoreConflictsLabel(policy.ignoreConflictsLabel, loaded);
+      const repoPolicy = await resolveRepoPolicy(
+        { api, owner, repo, ref: payload.repository.default_branch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: policy.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (repoPolicy !== undefined) ignoreLabel = repoPolicy.ignoreConflictsLabel;
     }
   } catch {
     // Fail-open to the deployment value.
