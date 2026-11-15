@@ -39,6 +39,7 @@ import { writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { emptyCiMethods, makeComment, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function ciApi(overrides: Partial<IssueApi> = {}): IssueApi {
   return makeIssueApi({ ...overrides });
@@ -272,8 +273,7 @@ describe("jobMatchesCheck", () => {
 
 describe("inspectCi", () => {
   test("ignores jumi/opencode-review, skips when another context is pending", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [
@@ -290,14 +290,11 @@ describe("inspectCi", () => {
       });
       expect(inspection.pending).toBe(true);
       expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("treats in-progress Actions jobs as pending when statuses have not appeared", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }],
@@ -311,14 +308,11 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(true);
       expect(inspection.empty).toBe(false);
       expect(inspection.failed).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("treats completed failed Actions jobs as red when statuses have not appeared", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listActionJobs: async () => [
@@ -336,14 +330,11 @@ describe("inspectCi", () => {
       expect(inspection.empty).toBe(false);
       expect(inspection.failed.map((c) => c.name)).toEqual(["build"]);
       expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("treats live failed jobs as red even when a matching forge status is still green", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "success" }],
@@ -362,14 +353,11 @@ describe("inspectCi", () => {
       expect(inspection.empty).toBe(false);
       expect(inspection.failed.map((c) => c.name)).toEqual(["ci.yml / build (pull_request)"]);
       expect(reviewSkipReasonForCi(inspection)).toBe(CI_FAILED_REASON);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("completed live success clears a lagging pending forge status", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [
@@ -389,14 +377,11 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.failed).toEqual([]);
       expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("green rerun clears a stale failed forge status", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "failure" }],
@@ -414,14 +399,11 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.failed).toEqual([]);
       expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("unmatched pending forge context still keeps CI pending", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "codecov", status: "pending" }],
@@ -436,14 +418,11 @@ describe("inspectCi", () => {
         issueNumber: 12,
       });
       expect(inspection.pending).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a thrown forge list call is lookupFailed, not empty success", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       let listed: { headSha?: string } | undefined;
       const inspection = await inspectCi({
         api: ciApi({
@@ -462,14 +441,11 @@ describe("inspectCi", () => {
       expect(inspection.empty).toBe(true);
       expect(inspection.lookupFailed).toBe(true);
       expect(reviewSkipReasonForCi(inspection)).toBe(CI_LOOKUP_FAILED_REASON);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("logs why a forge list call threw", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const lines: string[] = [];
       await inspectCi({
         api: ciApi({
@@ -491,14 +467,11 @@ describe("inspectCi", () => {
         "CI lookup failed for kirmanak/demo#12: statuses → 500",
         "CI lookup failed for kirmanak/demo#12: Gitea actions jobs list is incomplete: fetched 2000 of 3823",
       ]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("partial list failure is not green", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
@@ -517,14 +490,11 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.failed).toEqual([]);
       expect(reviewSkipReasonForCi(inspection)).toBe(CI_LOOKUP_FAILED_REASON);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no other checks and no matching jobs is empty", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi(),
         owner: "kirmanak",
@@ -538,15 +508,12 @@ describe("inspectCi", () => {
       expect(inspection.lookupFailed).toBeFalsy();
       expect(reviewSkipReasonForCi(inspection)).toBe(CI_ABSENT_REASON);
       expect(inspection.failed).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("skipped completed jobs are not pending or red", async () => {
     expect(actionJobCheckState({ id: 1, name: "build", status: "completed", conclusion: "skipped" })).toBe("success");
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listActionJobs: async () => [
@@ -562,14 +529,11 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.empty).toBe(false);
       expect(inspection.failed).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("prefers job id from target_url over listActionJobs match", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const requested: number[] = [];
       const inspection = await inspectCi({
         api: ciApi({
@@ -596,14 +560,11 @@ describe("inspectCi", () => {
       expect(requested).toEqual([42]);
       expect(inspection.unhandled[0]?.capped).toContain("latest attempt");
       expect(inspection.unhandled[0]?.jobId).toBe(42);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("matches Gitea 1.27 context via listActionJobs when target_url is missing", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "failure" }],
@@ -618,14 +579,11 @@ describe("inspectCi", () => {
       });
       expect(inspection.unhandled[0]?.capped).toContain("from jobs list");
       expect(inspection.unhandled[0]?.jobId).toBe(9);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("classifies Helm schema rate limiting in the capped window as a flake", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "deploy", status: "failure" }],
@@ -640,14 +598,11 @@ describe("inspectCi", () => {
         issueNumber: 12,
       });
       expect(inspection.unhandled[0]?.flake).toContain("Helm");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("does not treat bun fixture rate-limit text as an infra flake", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "test", status: "failure" }],
@@ -669,14 +624,11 @@ describe("inspectCi", () => {
       });
       expect(inspection.unhandled).toHaveLength(1);
       expect(inspection.unhandled[0]?.flake).toBeUndefined();
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("fetches logs, caps, and treats unknown red as unhandled", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure", target_url: "/jobs/9" }],
@@ -706,14 +658,11 @@ describe("inspectCi", () => {
           issueNumber: 12,
         })
       ).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("same sha+check+hash is handled; log hash change is not", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const check = {
         name: "build",
         state: "failure" as const,
@@ -746,14 +695,11 @@ describe("inspectCi", () => {
           hashText("##[error]b")
         )
       ).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("GitHub failed check-run is unhandled when statuses are only jumi/opencode-review", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const requested: number[] = [];
       const inspection = await inspectCi({
         api: ciApi({
@@ -784,14 +730,11 @@ describe("inspectCi", () => {
       expect(inspection.unhandled.map((c) => c.name)).toEqual(["checks"]);
       expect(inspection.unhandled[0]?.capped).toContain("lint/typecheck/tests");
       expect(requested).toEqual([4]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("log fetch failure still treats a failed GitHub check-run as unhandled", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
@@ -820,14 +763,11 @@ describe("inspectCi", () => {
       expect(inspection.unhandled[0]?.name).toBe("checks");
       expect(inspection.unhandled[0]?.capped).toContain("Process completed with exit code 1.");
       expect(inspection.unhandled[0]?.capped).toContain("https://github.com/kirmanak/jumi/actions/runs/9/job/4");
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("pending GitHub check-run sibling skips; skipped jobs are not red", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const pending = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
@@ -878,14 +818,11 @@ describe("inspectCi", () => {
       });
       expect(done.pending).toBe(false);
       expect(done.unhandled.map((c) => c.name)).toEqual(["checks"]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("does not share budget with follow-up comment rounds", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
         round: 3,
@@ -908,9 +845,7 @@ describe("inspectCi", () => {
           issueNumber: 12,
         })
       ).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -999,8 +934,7 @@ describe("buildCiMarkdown", () => {
 
 describe("ci check summaries", () => {
   test("gitea green head reports deduped non-Jumi checks with duration and url", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [
@@ -1053,14 +987,11 @@ describe("ci check summaries", () => {
           url: "https://gitea.example/owner/repo/actions/runs/42038/jobs/92861",
         },
       ]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("github check runs and statuses share the same shape", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
@@ -1102,9 +1033,7 @@ describe("ci check summaries", () => {
           url: "https://github.com/kirmanak/demo/actions/runs/9/job/12",
         },
       ]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("summarizeCiChecks keeps non-success entries first and drops the Jumi context", () => {
@@ -1177,8 +1106,7 @@ describe("required-context pending", () => {
   });
 
   test("required success with an optional pending check is not pending", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [
@@ -1196,14 +1124,11 @@ describe("required-context pending", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.pendingOptional).toEqual(["optional"]);
       expect(reviewSkipReasonForCi(inspection)).toBeUndefined();
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a pending required context still waits", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [
@@ -1220,14 +1145,11 @@ describe("required-context pending", () => {
       });
       expect(inspection.pending).toBe(true);
       expect(inspection.pendingOptional).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a required context that never reported still waits", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
-    try {
+    await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
           listCommitStatuses: async () => [{ id: 2, context: "optional", status: "success" }],
@@ -1241,14 +1163,11 @@ describe("required-context pending", () => {
       });
       expect(inspection.pending).toBe(true);
       expect(inspection.pendingOptional).toEqual([]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no required set keeps today's any-check pending behaviour", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
-    try {
+    await withWorkspace(async (home) => {
       const statuses = [{ id: 1, context: "build", status: "success" as const }];
       const pendingOnly = [{ id: 2, context: "optional", status: "pending" as const }];
       const withSet = await inspectCi({
@@ -1270,9 +1189,7 @@ describe("required-context pending", () => {
         requiredContexts: ["build"],
       });
       expect(narrowed.pending).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 

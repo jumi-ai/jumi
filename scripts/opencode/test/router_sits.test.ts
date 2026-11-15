@@ -1,20 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MemoryRouterSitStore, PgRouterSitStore, ROUTER_SIT_LIST_LIMIT } from "../src/router_sits.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-
-function recordingSql(): { sql: SqlClient; queries: string[] } {
-  const queries: string[] = [];
-  const sql: SqlClient = {
-    async unsafe(query: string) {
-      queries.push(query);
-      return [];
-    },
-    async begin() {
-      throw new Error("router sit list does not open a transaction");
-    },
-  };
-  return { sql, queries };
-}
+import { recordingSql } from "./harness/sql.ts";
 
 describe("router sit list cap", () => {
   test("memory list and listClosedPulls keep the same 500-row prefix Postgres keeps", async () => {
@@ -47,7 +34,7 @@ describe("router sit list cap", () => {
   });
 
   test("postgres list and listClosedPulls use the same LIMIT 500 and order", async () => {
-    const { sql, queries } = recordingSql();
+    const { sql, queries } = recordingSql({ throwOnBegin: true });
     const store = new PgRouterSitStore(sql);
     expect(await store.list()).toEqual([]);
     expect(await store.listClosedPulls()).toEqual([]);

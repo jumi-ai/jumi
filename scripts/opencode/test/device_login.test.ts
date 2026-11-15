@@ -17,6 +17,7 @@ import {
   SUPERGROK_SUBSCRIPTION_METHOD,
   stripAnsiSequences,
 } from "../src/device_login.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 describe("device login parsing", () => {
   test("parses Go to plus Enter code", () => {
@@ -134,8 +135,7 @@ describe("device login parsing", () => {
 
 describe("device login status", () => {
   test("presence is oauth object only, no provider call", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-device-home-"));
-    try {
+    await withWorkspace(async (home) => {
       expect(await isXaiOAuthPresent(home)).toBe(false);
       const dir = join(home, ".local", "share", "opencode");
       await mkdir(dir, { recursive: true });
@@ -146,9 +146,7 @@ describe("device login status", () => {
       expect(await isXaiOAuthPresent(home)).toBe(true);
       await writeFile(join(dir, "auth.json"), JSON.stringify({ xai: { type: "api", key: "k" } }));
       expect(await isXaiOAuthPresent(home)).toBe(false);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -161,8 +159,7 @@ describe("codex credential presence", () => {
   });
 
   test("reads $HOME/.codex/auth.json without calling the provider", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-codex-home-"));
-    try {
+    await withWorkspace(async (home) => {
       expect(await isCodexChatGptPresent(home)).toBe(false);
       const dir = join(home, ".codex");
       await mkdir(dir, { recursive: true });
@@ -173,9 +170,7 @@ describe("codex credential presence", () => {
         JSON.stringify({ tokens: { access_token: "a", refresh_token: "r", id_token: "i" } })
       );
       expect(await isCodexChatGptPresent(home)).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -530,9 +525,8 @@ describe("ordinal listener", () => {
       hasXaiRunner: false,
       isLeased: () => false,
       logger: () => {},
-      // Test seam: this sandbox already holds the constant 3010, so bind a
-      // free port. Production engine/worker callers never set it.
-      port: 31012,
+      // Let the OS pick a free port; the test reads it back from `server.port`.
+      port: 0,
     });
     try {
       const base = `http://127.0.0.1:${server.port}`;
@@ -574,9 +568,8 @@ describe("ordinal listener", () => {
       hasCodexRunner: false,
       isLeased: () => false,
       logger: () => {},
-      // Test seam: this sandbox already holds the constant 3010, so bind a
-      // free port. Production engine/worker callers never set it.
-      port: 31011,
+      // Let the OS pick a free port; the test reads it back from `server.port`.
+      port: 0,
     });
     try {
       const base = `http://127.0.0.1:${server.port}`;

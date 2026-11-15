@@ -20,7 +20,6 @@ import {
 import { processEngineTick, reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { processWorkerTick } from "../src/worker.ts";
-import type { GitRunner } from "../src/workspace.ts";
 import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import {
   makeComment,
@@ -33,6 +32,7 @@ import {
   makeRepo,
   makeWorkerConfig,
 } from "./fixtures.ts";
+import { frozenGitRunner } from "./harness/git.ts";
 
 // The ledger invariants below live in Postgres, not in TypeScript: partial unique
 // indexes, `FOR UPDATE SKIP LOCKED`, `ON CONFLICT ... WHERE`, and the migration that
@@ -504,16 +504,6 @@ describePg("PgReviewJobStore against real postgres", () => {
       getPRFiles: async () => [makeFile()],
       listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     });
-  }
-
-  function frozenGitRunner(): GitRunner {
-    return async (args) => {
-      if (args[0] === "rev-parse") return "headsha";
-      if (args[0] === "status") return "?? JUMI_REVIEW.md";
-      if (args[0] === "ls-files") return "";
-      if (args[0] === "checkout") return "";
-      throw new Error(`unexpected git ${args.join(" ")}`);
-    };
   }
 
   function secondStore(): { sql2: SqlClient; store2: PgReviewJobStore; close: () => Promise<void> } {

@@ -15,6 +15,7 @@ import {
 import { type ReviewApi, reviewPullRequest } from "../src/review.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { emptyCiMethods, makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 function chain() {
   return [
@@ -202,15 +203,6 @@ function repoRunnersApi(overrides: Partial<ReviewApi> = {}) {
   return { api: fake, statuses };
 }
 
-async function withWorkspace(run: (workspace: string) => Promise<void>) {
-  const workspace = await mkdtemp(join(tmpdir(), "jumi-repo-runners-"));
-  try {
-    await run(workspace);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
-}
-
 describe("review runner allow-list", () => {
   test("invalid default-branch file posts failure and runs no runner", async () => {
     await withWorkspace(async (workspace) => {
@@ -315,9 +307,7 @@ describe("review runner allow-list", () => {
 
 describe("worker runner allow-list", () => {
   test("invalid file posts once and runs no runner", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-impl-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-impl-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const comments: string[] = [];
       const api = {
         getRepo: async () => makeRepo(),
@@ -368,16 +358,11 @@ describe("worker runner allow-list", () => {
       expect(ran).toBe(0);
       expect(result).toEqual({ status: "skipped", reason: expect.stringContaining(".jumi.yml is invalid") });
       expect(comments.some((c) => c.includes(".jumi.yml is invalid"))).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("empty allow-list posts once and runs no runner", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-impl-home-"));
-    const workdir = await mkdtemp(join(tmpdir(), "jumi-impl-work-"));
-    try {
+    await withDirs(async (home, workdir) => {
       const comments: string[] = [];
       const api = {
         getRepo: async () => makeRepo(),
@@ -428,10 +413,7 @@ describe("worker runner allow-list", () => {
         reason: expect.stringContaining("repository settings left no eligible runner"),
       });
       expect(comments.some((c) => c.includes("repository settings left no eligible runner"))).toBe(true);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-      await rm(workdir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("writer-only allow-list refuses independent review like an empty eligible set", async () => {

@@ -24,7 +24,6 @@ import {
 import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { isQuotaStuck, readStuckState, stuckMarker } from "../src/stuck.ts";
-import type { GitRunner } from "../src/workspace.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import {
   makeBranch,
@@ -37,6 +36,8 @@ import {
   makeRepo,
   makeUser,
 } from "./fixtures.ts";
+import { frozenGit } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function engineApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   comments: string[];
@@ -70,16 +71,6 @@ function engineApi(overrides: Partial<ReviewApi> = {}): ReviewApi & {
   return Object.assign(fake, { comments, reviews, statuses });
 }
 
-function frozenGit(): GitRunner {
-  return async (args) => {
-    if (args[0] === "rev-parse") return "headsha";
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
-}
-
 function hangUntilAbort(signal: AbortSignal | undefined): Promise<never> {
   return new Promise((_, reject) => {
     const fail = () => {
@@ -90,15 +81,6 @@ function hangUntilAbort(signal: AbortSignal | undefined): Promise<never> {
     if (signal?.aborted) fail();
     else signal?.addEventListener("abort", fail, { once: true });
   });
-}
-
-async function withWorkspace<T>(run: (workspace: string) => Promise<T>): Promise<T> {
-  const workspace = await mkdtemp(join(tmpdir(), "jumi-engine-"));
-  try {
-    return await run(workspace);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
 }
 
 afterEach(() => {

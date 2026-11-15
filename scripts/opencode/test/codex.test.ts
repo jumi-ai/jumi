@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AUTH_DEATH_REASON } from "../src/auth.ts";
 import {
@@ -18,22 +17,17 @@ import { renderRunMetrics, resetControlMetricsForTests } from "../src/control_me
 import { registeredEngine, runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { codexThreadPath, withEngineChain } from "../src/fallback.ts";
 import { exportOtlpSpans, setTraceFetchForTests, setTraceLimitsForTests, traceExportErrors } from "../src/phoenix.ts";
-import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { CODEX_DEFAULT_EFFORT, formatRunnerStamp, type NamedRunner, runnerStamp } from "../src/runners.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
+import { fakeBin, withFakeBins } from "./harness/bins.ts";
 
-const originalPath = process.env.PATH;
 const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
 const originalApiKey = process.env.OPENAI_API_KEY;
 const originalCodexKey = process.env.CODEX_API_KEY;
-const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 
 afterEach(() => {
   resetControlMetricsForTests();
   resetTokenMetricsForTests();
-  process.env.PATH = originalPath;
-  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
-  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
   if (originalPhoenix === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
   else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
   if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -42,52 +36,7 @@ afterEach(() => {
   else process.env.CODEX_API_KEY = originalCodexKey;
 });
 
-interface FakeEnv {
-  workdir: string;
-  home: string;
-  argsLog: string;
-}
-
 /** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
-const SANDBOX_STUB = `#!/bin/sh
-if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
-while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
-[ "$1" = "--" ] && shift
-exec "$@"
-`;
-
-async function withFakeBins(bins: Record<string, string>, run: (env: FakeEnv) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), "fake-codex-"));
-  const workdir = await mkdtemp(join(tmpdir(), "fake-codex-work-"));
-  const home = await mkdtemp(join(tmpdir(), "fake-codex-home-"));
-  try {
-    for (const [name, script] of Object.entries(bins)) {
-      const bin = join(dir, name);
-      await writeFile(bin, script);
-      await chmod(bin, 0o755);
-    }
-    // Review spawns exec through the sandbox wrapper; the stub keeps the
-    // wrapped path under test without applying real Landlock rules.
-    const stub = join(dir, "jumi-sandbox-stub");
-    await writeFile(stub, SANDBOX_STUB);
-    await chmod(stub, 0o755);
-    process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
-    process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run({ workdir, home, argsLog: join(dir, "args.log") });
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-    await rm(home, { recursive: true, force: true });
-  }
-}
-
-function fakeBin(name: string, body: string): string {
-  return `#!/bin/sh
-printf '${name} %s\\n' "$*" >> "$ARGS_LOG"
-${body}
-`;
-}
-
 async function argLines(argsLog: string): Promise<string[]> {
   try {
     return (await readFile(argsLog, "utf8")).trim().split("\n").filter(Boolean);

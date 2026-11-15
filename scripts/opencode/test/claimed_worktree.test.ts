@@ -26,19 +26,9 @@ import { type Engine, EngineFailedError } from "../src/engine.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssue, makeIssueJob, makeUser, stripGitConfigArgs } from "./fixtures.ts";
+import { withDirs } from "./harness/temp.ts";
 
 const fallbackEngine: Engine = async () => ({ status: "ok" });
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-claimed-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-claimed-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
-}
 
 describe("beginClaimedWorktree", () => {
   test("lays out worktree and bare paths and resolves engine", async () => {

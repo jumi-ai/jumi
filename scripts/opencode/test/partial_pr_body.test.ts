@@ -12,17 +12,7 @@ import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import type { ReviewJob } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-partial-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-partial-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
-}
+import { withDirs } from "./harness/temp.ts";
 
 function jumiPr() {
   const repo = makeRepo();

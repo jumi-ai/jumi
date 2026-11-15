@@ -3,11 +3,8 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { MemoryReviewJobStore, QueueUnavailableError } from "../src/review_jobs.ts";
 import { MemoryRouterSitStore } from "../src/router_sits.ts";
-import type { IssueJob } from "../src/types.ts";
-import type { WorkerQueueLike } from "../src/worker.ts";
 import { createWorkerFetchHandler } from "../src/worker_server.ts";
 import {
-  encodeJson,
   makeIssue,
   makeIssuePayload,
   makeLinkedIssue,
@@ -18,39 +15,8 @@ import {
   makeWorkerConfig,
   pushApi,
   responseJson,
-  signBody,
 } from "./fixtures.ts";
-
-function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
-  const jobs: IssueJob[] = [];
-  return {
-    jobs,
-    enqueue(job) {
-      jobs.push(job);
-      return { key: `${job.owner}/${job.repo}#${job.issueNumber}`, queued: true };
-    },
-  };
-}
-
-async function signedRequest(
-  body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string } = {}
-): Promise<Request> {
-  const raw = encodeJson(body);
-  const secret = overrides.secret ?? "webhook-secret";
-  const signature = await signBody(raw, secret);
-  const headers = new Headers(overrides.headers);
-  headers.set("content-type", "application/json");
-  headers.set("x-gitea-signature", signature);
-  headers.set("x-gitea-event", overrides.event ?? "issues");
-  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
-  headers.set("x-gitea-delivery", "delivery-1");
-  return new Request("https://worker.test/webhooks/gitea", {
-    method: overrides.method ?? "POST",
-    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
-    headers,
-  });
-}
+import { makeQueue, workerIssuesRequest } from "./harness/webhook.ts";
 
 describe("createWorkerFetchHandler", () => {
   test("serves healthz and basic HTTP errors", async () => {
@@ -82,12 +48,12 @@ describe("createWorkerFetchHandler", () => {
 
   test("rejects invalid signatures", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    expect((await handler(await signedRequest(makeIssuePayload(), { secret: "wrong" }))).status).toBe(401);
+    expect((await handler(await workerIssuesRequest(makeIssuePayload(), { secret: "wrong" }))).status).toBe(401);
   });
 
   test("returns ok for ping events", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ zen: "pong" }, { event: "ping" }));
+    const response = await handler(await workerIssuesRequest({ zen: "pong" }, { event: "ping" }));
     expect(response.status).toBe(200);
     expect(await responseJson(response)).toEqual({ ok: true });
   });
@@ -98,7 +64,7 @@ describe("createWorkerFetchHandler", () => {
       queue: makeQueue(),
       logger: (message) => logs.push(message),
     });
-    const response = await handler(await signedRequest(makeIssuePayload(), { event: "status" }));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload(), { event: "status" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event status" });
     expect(logs.some((line) => line.includes("skipped unsupported event status"))).toBe(true);
@@ -116,7 +82,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("skips X-Gitea-Event: pull_request opened", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest(makePayload(), { event: "pull_request" }));
+    const response = await handler(await workerIssuesRequest(makePayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "author not listed for takeover" });
   });
@@ -125,7 +91,7 @@ describe("createWorkerFetchHandler", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(
-      await signedRequest(makePayload({ action: "synchronize" }), { event: "pull_request" })
+      await workerIssuesRequest(makePayload({ action: "synchronize" }), { event: "pull_request" })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported action synchronize" });
@@ -134,7 +100,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("skips malformed non-assign pull_request 202 never 400", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ action: "synchronize" }, { event: "pull_request" }));
+    const response = await handler(await workerIssuesRequest({ action: "synchronize" }, { event: "pull_request" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported action synchronize" });
   });
@@ -144,7 +110,7 @@ describe("createWorkerFetchHandler", () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const repository = makePayload().repository;
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -195,7 +161,7 @@ describe("createWorkerFetchHandler", () => {
     });
     const repository = makePayload().repository;
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -238,7 +204,7 @@ describe("createWorkerFetchHandler", () => {
     });
     const repository = makePayload().repository;
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -281,7 +247,7 @@ describe("createWorkerFetchHandler", () => {
     });
     const repository = makePayload().repository;
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -320,7 +286,7 @@ describe("createWorkerFetchHandler", () => {
     });
     const repository = makePayload().repository;
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "unassigned",
           pull_request: makePR({
@@ -349,7 +315,10 @@ describe("createWorkerFetchHandler", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues", eventType: "issue_assign" })
+      await workerIssuesRequest(makeIssuePayload({ action: "assigned" }), {
+        event: "issues",
+        eventType: "issue_assign",
+      })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
@@ -363,7 +332,7 @@ describe("createWorkerFetchHandler", () => {
       api: pushApi({ getCollaboratorPermission: async () => ({ permission: "none" }) }),
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "alice" }) }))
+      await workerIssuesRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "alice" }) }))
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
@@ -376,7 +345,7 @@ describe("createWorkerFetchHandler", () => {
       api: pushApi(),
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "mallory" }) }))
+      await workerIssuesRequest(makeIssuePayload({ action: "assigned", sender: makeUser({ login: "mallory" }) }))
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender not on trusted list" });
@@ -389,7 +358,7 @@ describe("createWorkerFetchHandler", () => {
       queue,
       api: pushApi({ getCollaboratorPermission: async () => ({ permission: "read" }) }),
     });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "sender lacks write access" });
     expect(queue.jobs).toHaveLength(0);
@@ -398,7 +367,7 @@ describe("createWorkerFetchHandler", () => {
   test("enqueues assigned issue events", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
-    const response = await handler(await signedRequest(makeIssuePayload()));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs).toHaveLength(1);
@@ -416,7 +385,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makeIssuePayload({
           action: "unassigned",
           issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
@@ -432,7 +401,7 @@ describe("createWorkerFetchHandler", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ issue: makeIssue({ pull_request: { merged_at: null } }) }))
+      await workerIssuesRequest(makeIssuePayload({ issue: makeIssue({ pull_request: { merged_at: null } }) }))
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "pull request issue" });
@@ -470,7 +439,9 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+      await workerIssuesRequest(
+        makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) })
+      )
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#206", queued: true });
@@ -486,7 +457,9 @@ describe("createWorkerFetchHandler", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+      await workerIssuesRequest(
+        makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) })
+      )
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
@@ -509,7 +482,9 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) }))
+      await workerIssuesRequest(
+        makeIssuePayload({ action: "closed", issue: makeIssue({ number: 196, state: "closed" }) })
+      )
     );
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
@@ -534,7 +509,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
+      await workerIssuesRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
     );
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "failed to wake waiting issues" });
@@ -562,7 +537,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           pull_request: makePR({
@@ -619,7 +594,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           pull_request: makePR({
@@ -673,7 +648,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "unassigned",
           assignee: makeUser({ login: "jumi" }),
@@ -726,7 +701,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "unassigned",
           pull_request: makePR({
@@ -773,7 +748,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           pull_request: makePR({
@@ -828,7 +803,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "unassigned",
           assignee: makeUser({ login: "jumi" }),
@@ -877,7 +852,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           pull_request: makePR({
@@ -926,7 +901,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           pull_request: makePR({
@@ -971,7 +946,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest({ action: "closed", repository: makeRepo() }, { event: "pull_request" })
+      await workerIssuesRequest({ action: "closed", repository: makeRepo() }, { event: "pull_request" })
     );
     expect(response.status).toBe(400);
     expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
@@ -992,7 +967,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(
+      await workerIssuesRequest(
         makePayload({
           action: "closed",
           repository: other,
@@ -1022,9 +997,12 @@ describe("createWorkerFetchHandler", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue });
     const response = await handler(
-      await signedRequest(makePayload({ action: "closed", pull_request: makePR({ state: "closed", merged: true }) }), {
-        event: "pull_request",
-      })
+      await workerIssuesRequest(
+        makePayload({ action: "closed", pull_request: makePR({ state: "closed", merged: true }) }),
+        {
+          event: "pull_request",
+        }
+      )
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported action closed" });
@@ -1049,7 +1027,7 @@ describe("createWorkerFetchHandler", () => {
       },
     });
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
+      await workerIssuesRequest(makeIssuePayload({ action: "reopened", issue: makeIssue({ number: 196 }) }))
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#196", "kirmanak/demo#206"] });
@@ -1058,7 +1036,7 @@ describe("createWorkerFetchHandler", () => {
 
   test("returns bad request for valid signatures with invalid payloads", async () => {
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ action: "assigned" }));
+    const response = await handler(await workerIssuesRequest({ action: "assigned" }));
     expect(response.status).toBe(400);
     expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
   });
@@ -1066,7 +1044,7 @@ describe("createWorkerFetchHandler", () => {
   test("first-run assign still 202s on the in-memory queue without a store", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushApi() });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#12", queued: true });
     expect(queue.jobs[0]?.mode).toBeUndefined();
@@ -1078,7 +1056,7 @@ describe("createWorkerFetchHandler", () => {
       queue: { enqueue: (job) => store.enqueueIssue(job) },
       api: pushApi(),
     });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
     expect(store.rows[0]?.kind).toBe("implement");
@@ -1094,7 +1072,7 @@ describe("createWorkerFetchHandler", () => {
         },
       },
     });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" })));
+    const response = await handler(await workerIssuesRequest(makeIssuePayload({ action: "assigned" })));
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
   });

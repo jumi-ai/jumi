@@ -15,6 +15,7 @@ import {
 } from "../src/review_jobs.ts";
 import { ISSUE_SKIP_LATCHES_SCHEMA_SQL } from "../src/skip_latches.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
+import { recordingSql } from "./harness/sql.ts";
 
 describe("MemoryReviewJobStore", () => {
   test("cancel marks leased rows and cancels queued ones for the same issue", async () => {
@@ -536,26 +537,6 @@ type FakeSql = {
   unsafe(query: string, params?: unknown[]): Promise<unknown>;
   begin<T>(fn: (tx: FakeSql) => Promise<T>): Promise<T>;
 };
-
-function recordingSql(opts: { insertRows?: unknown[]; inflightRows?: unknown[]; doneRows?: unknown[] } = {}): {
-  sql: FakeSql;
-  queries: string[];
-} {
-  const queries: string[] = [];
-  const sql: FakeSql = {
-    async unsafe(query: string) {
-      queries.push(query);
-      if (query.includes("INSERT")) return opts.insertRows ?? [];
-      if (query.includes("FOR UPDATE") && !query.includes("SKIP LOCKED")) return opts.inflightRows ?? [];
-      if (query.includes("succeeded")) return opts.doneRows ?? [];
-      return [];
-    },
-    async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
-      return fn(sql);
-    },
-  };
-  return { sql, queries };
-}
 
 describe("PgReviewJobStore.enqueue", () => {
   test("retry of an in-flight job_key does not cancel queued successors", async () => {
