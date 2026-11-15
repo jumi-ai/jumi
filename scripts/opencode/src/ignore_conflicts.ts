@@ -219,10 +219,14 @@ export async function loadIgnoreConflictsAuthors(
   try {
     if (!api || typeof api.getRepoFile !== "function") return [];
     if (typeof defaultBranch !== "string" || !defaultBranch.trim()) return [];
-    const { loadRepoSettings } = await import("./repo_settings.ts");
-    const loaded = await loadRepoSettings(api, owner, repo, defaultBranch.trim());
-    if (loaded.state !== "valid") return [];
-    return [...(loaded.ignoreConflictsAuthors ?? [])];
+    const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+    const policy = await resolveRepoPolicy(
+      { api, owner, repo, ref: defaultBranch.trim() },
+      fallbackPolicyDeployment(),
+      { onUnreadable: "throw" }
+    );
+    if (policy.status !== "ok") return [];
+    return [...policy.ignoreConflictsAuthors];
   } catch (err) {
     logger?.(`ignore-conflicts authors unreadable for ${owner}/${repo}: ${errorMessage(err)}`);
     return undefined;

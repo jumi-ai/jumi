@@ -146,8 +146,10 @@ describe("implement prompt", () => {
     expect(prompt).toContain("Do not amend or rebase commits already on the remote branch");
     expect(prompt).toContain("Do not ask questions");
     expect(prompt).not.toContain("Do not run git");
-    expect(prompt).toContain("JUMI_PR.md");
-    expect(prompt).toContain("JUMI_SKIP.md");
+    expect(prompt).toContain("set_pr_body");
+    expect(prompt).toContain("`skip`");
+    expect(prompt).not.toContain("JUMI_PR.md");
+    expect(prompt).not.toContain("JUMI_SKIP.md");
     expect(prompt).toContain("Do not open the pull request");
     expect(prompt).toContain("Stay in this clone");
     expect(prompt).toContain("Do not webfetch this Gitea host");

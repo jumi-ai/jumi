@@ -83,13 +83,8 @@ import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
-import {
-  applyRepoChain,
-  type ConflictRegenerateEntry,
-  effectiveIgnoreConflictsLabel,
-  loadRepoFollowupPolicy,
-  loadRepoSettings,
-} from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { applyRepoChain, type ConflictRegenerateEntry, loadRepoFollowupPolicy } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -210,6 +205,10 @@ export interface MergeDefaultIntoWorktreeOpts {
   onRunner?: (runner: RunnerStamp, chainIndex?: number) => void;
   /** Parent-owned worker MCP server for conflict spawns (tool wiring only). */
   workerMcp?: { url: string; token: string };
+  /** In-memory worker result store backing `workerMcp` (tool-first handoff). */
+  workerStore?: import("./worker_mcp.ts").WorkerResultStore;
+  /** Runner chain for secret scrubbing (Claude keys) before the handoff store write. */
+  chain?: readonly import("./runners.ts").NamedRunner[];
 }
 
 function logDefault(message: string) {
@@ -282,17 +281,17 @@ export async function needsConflict(opts: {
 }): Promise<boolean> {
   let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
   if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
-    try {
-      const loaded = await loadRepoSettings(
-        { getRepoFile: opts.getRepoFile },
-        opts.owner,
-        opts.repo,
-        opts.defaultBranch
-      );
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
-    } catch {
-      // Fail-open to the deployment value.
-    }
+    const policy = await resolveRepoPolicy(
+      {
+        api: { getRepoFile: opts.getRepoFile },
+        owner: opts.owner,
+        repo: opts.repo,
+        ref: opts.defaultBranch,
+      },
+      fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
+      { onUnreadable: "fallback" }
+    ).catch(() => undefined);
+    if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
   }
   if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
   if (opts.pr.mergeable !== false) return false;
@@ -541,21 +540,18 @@ async function resolveConflictRegenerateEntries(opts: {
   const getFile = opts.api?.getRepoFile;
   if (typeof getFile !== "function" || !opts.defaultBranch.trim()) return [];
   try {
-    const load = await loadRepoSettings(
-      { getRepoFile: getFile.bind(opts.api) },
-      opts.owner,
-      opts.repo,
-      opts.defaultBranch
+    const policy = await resolveRepoPolicy(
+      { api: { getRepoFile: getFile.bind(opts.api) }, owner: opts.owner, repo: opts.repo, ref: opts.defaultBranch },
+      fallbackPolicyDeployment(),
+      { onUnreadable: "throw" }
     );
-    if (load.state !== "valid") {
-      if (load.state === "invalid") {
-        opts.log?.(
-          `conflict regenerate settings invalid for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${load.error}`
-        );
-      }
+    if (policy.status === "invalid") {
+      opts.log?.(
+        `conflict regenerate settings invalid for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${policy.error}`
+      );
       return [];
     }
-    return load.conflictRegenerate ?? [];
+    return [...policy.conflictRegenerate];
   } catch (err) {
     opts.log?.(
       `conflict regenerate settings unreadable for ${opts.owner}/${opts.repo}@${opts.defaultBranch}: ${errorMessage(err)}`
@@ -894,7 +890,27 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     mergeNarrowed = engineResult.contributors;
     throwIfEngineFailed(engineResult);
     if (opts.handoffStore && opts.handoffKey) {
-      await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
+      const toolHandoff = opts.workerStore?.getHandoff() ?? null;
+      if (toolHandoff != null) {
+        log("worker result: handoff from tool");
+        const { capHandoffNote } = await import("./handoff.ts");
+        const { redactGitSecrets } = await import("./workspace.ts");
+        const { workerPublishSecrets } = await import("./implement.ts");
+        const capped = capHandoffNote(
+          redactGitSecrets(toolHandoff, workerPublishSecrets(opts.loop.auth.token, opts.chain))
+        );
+        if (capped.trim()) {
+          try {
+            await opts.handoffStore.put(opts.handoffKey, capped);
+          } catch (err) {
+            const { errorMessage } = await import("./util/error.ts");
+            log(`handoff store unavailable: ${errorMessage(err)}`);
+          }
+        }
+      } else {
+        await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
+        log("worker result: handoff from file fallback");
+      }
     }
     await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
@@ -970,8 +986,12 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   try {
     const branch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch.trim() : "";
     if (branch) {
-      const loaded = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, branch);
-      effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, loaded);
+      const policy = await resolveRepoPolicy(
+        { api: opts.api, owner: opts.job.owner, repo: opts.job.repo, ref: branch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
     }
   } catch {
     // Fail-open to the deployment value.
@@ -1167,158 +1187,443 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
       ? { ref: conflictCheckpointRef, intervalMs: conflictCheckpointIntervalMs }
       : undefined;
 
-  const conflictResult: ConflictResult = await runClaimedLoop(
-    loop,
-    opts.abortSignal,
-    async () => {
-      const runtime = opts.runtime ?? standingPodRuntime;
-      await runtime.ensureBareCache(loop, {
-        cloneUrl: opts.job.cloneUrl,
-        giteaUrl: opts.giteaUrl,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await sweepCheckpointsBestEffort(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs,
-        api: opts.api,
-        owner,
-        repo,
-        log,
-        exclude: conflictCheckpoint ? [conflictCheckpoint.ref] : undefined,
-      });
-      const attached = await runtime.attachPrWorktree(loop, {
-        branch,
-        defaultBranch: opts.job.defaultBranch,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      if (isClaimedEarlyResult(attached)) return attached;
-      const { headSha, baseSha } = attached;
-      attemptedHeadSha = headSha;
-      attemptedBaseSha = baseSha;
-      await loop.stampHeadSha(headSha);
-      if (conflictCheckpoint) {
-        const restored = await restoreCheckpoint(loop, conflictCheckpoint.ref, {
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          log,
-        }).catch(() => undefined);
-        if (restored?.restored && restored.sha) {
-          await loop
-            .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
-            .catch(() => undefined);
+  const { WorkerResultStore: ConflictWorkerStore, startWorkerMcpServer: startConflictWorkerMcp } = await import(
+    "./worker_mcp.ts"
+  );
+  const conflictWorkerStore = new ConflictWorkerStore();
+  const conflictWorkerServer = await startConflictWorkerMcp({ store: conflictWorkerStore });
+  const conflictWorkerMcpRef = { url: conflictWorkerServer.url, token: conflictWorkerServer.token };
+  const saveConflictHandoff = async (store: HandoffStore, key: HandoffKey, worktree: string) => {
+    const tool = conflictWorkerStore.getHandoff() ?? null;
+    if (tool != null) {
+      log("worker result: handoff from tool");
+      const { capHandoffNote } = await import("./handoff.ts");
+      const { redactGitSecrets } = await import("./workspace.ts");
+      const { workerPublishSecrets } = await import("./implement.ts");
+      const capped = capHandoffNote(redactGitSecrets(tool, workerPublishSecrets(loop.auth.token, jobChain)));
+      if (capped.trim()) {
+        try {
+          await store.put(key, capped);
+        } catch (err) {
+          log(`handoff store unavailable: ${errorMessage(err)}`);
         }
-        beginCheckpointing(loop, {
-          ref: conflictCheckpoint.ref,
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          intervalMs: conflictCheckpoint.intervalMs,
-          enabled: true,
+      }
+      return capped.trim() ? capped : null;
+    }
+    const saved = await saveWorktreeHandoff(worktree, store, key, log);
+    if (saved != null) log("worker result: handoff from file fallback");
+    else log("worker result: handoff missing");
+    return saved;
+  };
+
+  let conflictResult: ConflictResult;
+  try {
+    conflictResult = await runClaimedLoop(
+      loop,
+      opts.abortSignal,
+      async () => {
+        const runtime = opts.runtime ?? standingPodRuntime;
+        await runtime.ensureBareCache(loop, {
+          cloneUrl: opts.job.cloneUrl,
+          giteaUrl: opts.giteaUrl,
+          abortSignal: opts.abortSignal,
           log,
         });
-      }
-      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
-      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
-      await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
-
-      if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: "same head and base already attempted" };
-      }
-
-      const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
-      const taskJob: IssueJob = {
-        ...opts.job,
-        title: currentIssue.title,
-        body: currentIssue.body ?? "",
-        htmlUrl: currentIssue.html_url,
-      };
-      let conflictSetupBlock: string | undefined;
-      {
-        const setup = await runRepoSetupForKind({
+        await sweepCheckpointsBestEffort(loop, {
+          maxAgeMs: opts.checkpointMaxAgeMs,
           api: opts.api,
-          kind: "conflict",
-          workdir: worktree,
-          defaultBranch: opts.job.defaultBranch || undefined,
-          auth: loop.auth,
           owner,
           repo,
-          home: opts.home,
-          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
-          git: loop.runConfiguredGit,
-          gitEnv: loop.env,
-          runScript: opts.repoSetupRunScript,
+          exclude: conflictCheckpoint ? [conflictCheckpoint.ref] : undefined,
         });
-        if (setup.ran) {
-          conflictSetupBlock = setup.promptBlock;
-          if (setup.failureReason) {
-            await sticky(setup.failureReason, pr.number);
-            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-            return { status: "skipped", reason: setup.failureReason };
+        const attached = await runtime.attachPrWorktree(loop, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          abortSignal: opts.abortSignal,
+          log,
+        });
+        if (isClaimedEarlyResult(attached)) return attached;
+        const { headSha, baseSha } = attached;
+        attemptedHeadSha = headSha;
+        attemptedBaseSha = baseSha;
+        await loop.stampHeadSha(headSha);
+        if (conflictCheckpoint) {
+          const restored = await restoreCheckpoint(loop, conflictCheckpoint.ref, {
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            log,
+          }).catch(() => undefined);
+          if (restored?.restored && restored.sha) {
+            await loop
+              .runConfiguredGit(["reset", "--hard", restored.sha], { cwd: worktree, env: loop.env })
+              .catch(() => undefined);
           }
+          beginCheckpointing(loop, {
+            ref: conflictCheckpoint.ref,
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            intervalMs: conflictCheckpoint.intervalMs,
+            enabled: true,
+            log,
+          });
         }
-      }
-      let ciMarkdown: string | undefined;
-      try {
-        const ci = await inspectCi({
-          api: opts.api,
-          owner,
-          repo,
-          sha: pr.head.sha,
-          home: opts.home,
-          issueNumber,
-          skipLatches: latches,
-          log,
-        });
-        if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
-      } catch (err) {
-        log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
-      }
+        const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+        const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
-      let mergeResult: MergeDefaultResult;
-      try {
-        mergeResult = await mergeDefaultIntoWorktree({
-          git: loop.runConfiguredGit,
-          env: loop.env,
-          worktree,
-          runtime,
-          loop,
-          defaultBranch: opts.job.defaultBranch,
-          headRef: branch,
-          skipCleanMerge: true,
-          job: taskJob,
-          pr,
-          api: opts.api,
-          model: opts.model,
-          variant: opts.variant,
-          home: opts.home,
-          sanitizeOpenCodeEnv: sanitizeEnv,
-          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+        if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "same head and base already attempted" };
+        }
+
+        const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
+        const taskJob: IssueJob = {
+          ...opts.job,
+          title: currentIssue.title,
+          body: currentIssue.body ?? "",
+          htmlUrl: currentIssue.html_url,
+        };
+        let conflictSetupBlock: string | undefined;
+        {
+          const setup = await runRepoSetupForKind({
+            api: opts.api,
+            kind: "conflict",
+            workdir: worktree,
+            defaultBranch: opts.job.defaultBranch || undefined,
+            auth: loop.auth,
             owner,
             repo,
+            home: opts.home,
+            timeoutMaxMs: opts.setupTimeoutMaxMs,
+            log,
+            git: loop.runConfiguredGit,
+            gitEnv: loop.env,
+            runScript: opts.repoSetupRunScript,
+          });
+          if (setup.ran) {
+            conflictSetupBlock = setup.promptBlock;
+            if (setup.failureReason) {
+              await sticky(setup.failureReason, pr.number);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "skipped", reason: setup.failureReason };
+            }
+          }
+        }
+        let ciMarkdown: string | undefined;
+        try {
+          const ci = await inspectCi({
+            api: opts.api,
+            owner,
+            repo,
+            sha: pr.head.sha,
+            home: opts.home,
+            issueNumber,
+            skipLatches: latches,
+            log,
+          });
+          if (ci.failed.length) ciMarkdown = buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed });
+        } catch (err) {
+          log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
+        }
+
+        let mergeResult: MergeDefaultResult;
+        try {
+          mergeResult = await mergeDefaultIntoWorktree({
+            git: loop.runConfiguredGit,
+            env: loop.env,
+            worktree,
+            runtime,
+            loop,
+            defaultBranch: opts.job.defaultBranch,
+            headRef: branch,
+            skipCleanMerge: true,
+            job: taskJob,
+            pr,
+            api: opts.api,
+            model: opts.model,
+            variant: opts.variant,
+            home: opts.home,
+            sanitizeOpenCodeEnv: sanitizeEnv,
+            extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+              owner,
+              repo,
+              logger: log,
+            }),
+            maxOutputBytes: opts.maxOutputBytes,
+            timeoutMs,
+            openCodeRunner: activeEngine,
+            helmRunner: opts.helmRunner,
+            conflictRegenerate: opts.conflictRegenerate,
+            regenRunner: opts.regenRunner,
+            regenTimeoutMs: opts.regenTimeoutMs,
             logger: log,
-          }),
-          maxOutputBytes: opts.maxOutputBytes,
-          timeoutMs,
-          openCodeRunner: activeEngine,
-          helmRunner: opts.helmRunner,
-          conflictRegenerate: opts.conflictRegenerate,
-          regenRunner: opts.regenRunner,
-          regenTimeoutMs: opts.regenTimeoutMs,
-          logger: log,
-          abortSignal: opts.abortSignal,
-          ciMarkdown,
-          jobId: opts.jobId ?? opts.job.delivery,
-          handoffStore,
-          handoffKey,
-          ...(conflictSetupBlock ? { repoSetupBlock: conflictSetupBlock } : {}),
-          onPid: loop.engineOnPid(opts.onPid),
-          onRunner: (r) => {
-            runner = r;
+            abortSignal: opts.abortSignal,
+            ciMarkdown,
+            jobId: opts.jobId ?? opts.job.delivery,
+            handoffStore,
+            handoffKey,
+            workerMcp: conflictWorkerMcpRef,
+            workerStore: conflictWorkerStore,
+            chain: jobChain,
+            ...(conflictSetupBlock ? { repoSetupBlock: conflictSetupBlock } : {}),
+            onPid: loop.engineOnPid(opts.onPid),
+            onRunner: (r) => {
+              runner = r;
+            },
+          });
+        } catch (err: unknown) {
+          if (isQuotaError(err)) {
+            throwIfQuotaWait({
+              err,
+              model: opts.model,
+              fallbackModel: opts.fallbackModel,
+              chain: jobChain,
+              previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+            });
+            const quotaReason = quotaStuckReasonForText(errorMessage(err));
+            await sticky(quotaReason, pr.number);
+            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+            // The stuck outcome is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "stuck" };
+          }
+          mergeDefaultThrew = true;
+          throw err;
+        }
+
+        runner = mergeResult.runner;
+        if (mergeResult.contributors && mergeResult.contributors.length > 0) {
+          provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
+        } else if (mergeResult.runner) {
+          provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
+        }
+        await noteProvenanceRunners(opts, provenanceCollector, log);
+        if (mergeResult.status === "up-to-date") {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "up-to-date" };
+        }
+
+        if (mergeResult.status === "stuck") {
+          await saveConflictHandoff(handoffStore, handoffKey, worktree);
+          await sticky("stuck: cannot resolve conflicts", pr.number);
+          await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "stuck" };
+        }
+
+        let gate: ShipGate;
+        try {
+          gate = await gateShipAfterOpenCode({
+            api: opts.api,
+            owner,
+            repo,
+            issueNumber,
+            botUsername: opts.botUsername,
+            snapshot: snapshotFromJob(taskJob),
+            closerPrNumber: pr.number,
+            continueOpenCode: async (issue) => {
+              throwIfAborted(opts.abortSignal);
+              const continuedTaskMarkdown = conflictSetupBlock
+                ? `${buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))}\n${conflictSetupBlock}\n`
+                : buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api));
+              await writeFile(join(worktree, "JUMI_TASK.md"), continuedTaskMarkdown);
+              await stageIssueAttachments({
+                api: opts.api,
+                owner,
+                repo,
+                indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
+                bodies: [issue.body ?? taskJob.body, pr.body],
+                worktree,
+                log,
+              }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
+              log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
+              const continuedOpts: EngineRunOptions = {
+                model: opts.model,
+                variant: opts.variant,
+                workdir: worktree,
+                home: opts.home,
+                sanitizeEnv,
+                extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+                  owner,
+                  repo,
+                  logger: log,
+                }),
+                timeoutMs,
+                maxOutputBytes: opts.maxOutputBytes,
+                reviewLabel: `${owner}/${repo}#${issueNumber}`,
+                continueSession: true,
+                trace: {
+                  kind: "follow-up",
+                  owner,
+                  repo,
+                  sha: mergeResult.headSha,
+                  jobId: opts.jobId ?? opts.job.delivery,
+                },
+                workerMcp: conflictWorkerMcpRef,
+                logger: log,
+                abortSignal: opts.abortSignal,
+                onPid: loop.engineOnPid(opts.onPid),
+              };
+              runner = undefined;
+              const runtime = opts.runtime ?? standingPodRuntime;
+              let continued: EngineResult;
+              try {
+                continued = await runtime.runRuntimeEngine(loop, activeEngine, continuedOpts, (r) => {
+                  runner = r;
+                });
+              } catch (err) {
+                provenanceCollector.noteError(err);
+                await noteProvenanceRunners(opts, provenanceCollector, log);
+                throw err;
+              }
+              provenanceCollector.noteResult(continued, { model: opts.model, variant: opts.variant });
+              await noteProvenanceRunners(opts, provenanceCollector, log);
+              // Gate on the message so a future non-quota `stuck` producer does
+              // not set the human-clear quota flag.
+              if (continued.status === "stuck" && isQuotaText(continued.message)) {
+                throwIfQuotaWait({
+                  result: continued,
+                  model: opts.model,
+                  fallbackModel: opts.fallbackModel,
+                  chain: jobChain,
+                  previousError: opts.previousError,
+                  ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+                  ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+                  ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+                });
+                const quotaReason = quotaStuckReasonForText(continued.message);
+                await sticky(quotaReason, pr.number);
+                await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+                throw new Error(quotaReason);
+              }
+              throwIfEngineFailed(continued);
+              await saveConflictHandoff(handoffStore, handoffKey, worktree);
+              await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
+            },
+          });
+        } catch (err) {
+          if (isQuotaError(err)) {
+            throwIfQuotaWait({
+              err,
+              model: opts.model,
+              fallbackModel: opts.fallbackModel,
+              chain: jobChain,
+              previousError: opts.previousError,
+              ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+              ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+              ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+            });
+            // The stuck outcome is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "stuck" };
+          }
+          throw err;
+        }
+        if (gate.action === "skip") {
+          if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: gate.reason };
+        }
+        if (gate.continued) {
+          await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
+          const { renderCommitMessage } = await import("./implement.ts");
+          await commitIfDirty(
+            loop,
+            await worktreePorcelain(loop),
+            renderCommitMessage(conventions.commitMessage, gate.snapshot.title, issueNumber)
+          );
+        }
+        await saveConflictHandoff(handoffStore, handoffKey, worktree);
+        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
+
+        if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = engineScratchTrackedReason(branch);
+          await sticky(reason, pr.number);
+          // The refusal is decided; teardown noise must not replace it.
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
+        if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = attachmentsTrackedReason(branch);
+          await sticky(reason, pr.number);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
+        {
+          const added = await tipAddedSentinels(loop.runConfiguredGit, {
+            cwd: loop.worktree,
+            env: loop.env,
+            defaultBranch: opts.job.defaultBranch,
+          });
+          if (added.length > 0) {
+            const reason = sentinelTrackedReason(branch, added);
+            await sticky(reason, pr.number);
+            // The refusal is decided; teardown noise must not replace it.
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "skipped", reason };
+          }
+        }
+
+        try {
+          await pushClaimedBranchWithAutomergeRestore(loop, branch, {
+            api: opts.api,
+            forgeKind: opts.forgeKind ?? "gitea",
+            owner,
+            repo,
+            prNumber: pr.number,
+            automergeRepos: opts.automergeRepos,
+            automergeEnabled: opts.automergeEnabled,
+            trustedSenderLogins: opts.trustedSenderLogins,
+            issueNumber: opts.job.issueNumber,
+            botUsername: opts.botUsername,
+            log,
+          });
+        } catch (err) {
+          if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason: "remote already contains default" };
+          }
+          await failProvenanceIntent(opts, errorMessage(err), undefined, log);
+          throw err;
+        }
+        if (conflictCheckpoint) {
+          await deleteCheckpointRef(loop, conflictCheckpoint.ref, { log }).catch(() => undefined);
+        }
+        throwIfAborted(opts.abortSignal);
+
+        const publishedHead = (
+          await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+        ).trim();
+        await confirmProvenancePublication(
+          opts,
+          {
+            prNumber: pr.number,
+            branch,
+            headSha: publishedHead || mergeResult.headSha,
+            collector: provenanceCollector,
           },
+          log
+        );
+        await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
+        await writeConflictLatch(latches, latchKey, {
+          prNumber: pr.number,
+          round: 0,
+          lastHeadSha: mergeResult.headSha,
+          lastBaseSha: mergeResult.baseSha,
+          updatedAt: now().toISOString(),
         });
-      } catch (err: unknown) {
+        // Push already landed; a failed destroy must not discard it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
+        return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
+      },
+      async (err) => {
+        runner = thrownRunner(err) ?? runner;
+        provenanceCollector.noteError(err);
+        await noteProvenanceRunners(opts, provenanceCollector, log);
         if (isQuotaError(err)) {
           throwIfQuotaWait({
             err,
@@ -1331,275 +1636,38 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
           });
           const quotaReason = quotaStuckReasonForText(errorMessage(err));
-          await sticky(quotaReason, pr.number);
+          await sticky(quotaReason, pr.number).catch(() => undefined);
           await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-          // The stuck outcome is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "stuck" };
-        }
-        mergeDefaultThrew = true;
-        throw err;
-      }
-
-      runner = mergeResult.runner;
-      if (mergeResult.contributors && mergeResult.contributors.length > 0) {
-        provenanceCollector.noteContributors(mergeResult.contributors, mergeResult.runner ?? null);
-      } else if (mergeResult.runner) {
-        provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
-      }
-      await noteProvenanceRunners(opts, provenanceCollector, log);
-      if (mergeResult.status === "up-to-date") {
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "up-to-date" };
-      }
-
-      if (mergeResult.status === "stuck") {
-        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-        await sticky("stuck: cannot resolve conflicts", pr.number);
-        await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "stuck" };
-      }
-
-      let gate: ShipGate;
-      try {
-        gate = await gateShipAfterOpenCode({
-          api: opts.api,
-          owner,
-          repo,
-          issueNumber,
-          botUsername: opts.botUsername,
-          snapshot: snapshotFromJob(taskJob),
-          closerPrNumber: pr.number,
-          continueOpenCode: async (issue) => {
-            throwIfAborted(opts.abortSignal);
-            const continuedTaskMarkdown = conflictSetupBlock
-              ? `${buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))}\n${conflictSetupBlock}\n`
-              : buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api));
-            await writeFile(join(worktree, "JUMI_TASK.md"), continuedTaskMarkdown);
-            await stageIssueAttachments({
-              api: opts.api,
-              owner,
-              repo,
-              indexes: pr.number === issueNumber ? [issueNumber] : [issueNumber, pr.number],
-              bodies: [issue.body ?? taskJob.body, pr.body],
-              worktree,
-              log,
-            }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
-            log(`Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`);
-            const continuedOpts: EngineRunOptions = {
-              model: opts.model,
-              variant: opts.variant,
-              workdir: worktree,
-              home: opts.home,
-              sanitizeEnv,
-              extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
-                owner,
-                repo,
-                logger: log,
-              }),
-              timeoutMs,
-              maxOutputBytes: opts.maxOutputBytes,
-              reviewLabel: `${owner}/${repo}#${issueNumber}`,
-              continueSession: true,
-              trace: {
-                kind: "follow-up",
-                owner,
-                repo,
-                sha: mergeResult.headSha,
-                jobId: opts.jobId ?? opts.job.delivery,
-              },
-              logger: log,
-              abortSignal: opts.abortSignal,
-              onPid: loop.engineOnPid(opts.onPid),
-            };
-            runner = undefined;
-            const runtime = opts.runtime ?? standingPodRuntime;
-            let continued: EngineResult;
-            try {
-              continued = await runtime.runRuntimeEngine(loop, activeEngine, continuedOpts, (r) => {
-                runner = r;
-              });
-            } catch (err) {
-              provenanceCollector.noteError(err);
-              await noteProvenanceRunners(opts, provenanceCollector, log);
-              throw err;
-            }
-            provenanceCollector.noteResult(continued, { model: opts.model, variant: opts.variant });
-            await noteProvenanceRunners(opts, provenanceCollector, log);
-            // Gate on the message so a future non-quota `stuck` producer does
-            // not set the human-clear quota flag.
-            if (continued.status === "stuck" && isQuotaText(continued.message)) {
-              throwIfQuotaWait({
-                result: continued,
-                model: opts.model,
-                fallbackModel: opts.fallbackModel,
-                chain: jobChain,
-                previousError: opts.previousError,
-                ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-                ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-                ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-              });
-              const quotaReason = quotaStuckReasonForText(continued.message);
-              await sticky(quotaReason, pr.number);
-              await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-              throw new Error(quotaReason);
-            }
-            throwIfEngineFailed(continued);
-            await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-            await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
-          },
-        });
-      } catch (err) {
-        if (isQuotaError(err)) {
-          throwIfQuotaWait({
-            err,
-            model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            chain: jobChain,
-            previousError: opts.previousError,
-            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+          await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+            pushLanded: false,
+            logger: log,
           });
-          // The stuck outcome is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "stuck" };
+          return;
         }
-        throw err;
-      }
-      if (gate.action === "skip") {
-        if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: gate.reason };
-      }
-      if (gate.continued) {
-        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
-        const { renderCommitMessage } = await import("./implement.ts");
-        await commitIfDirty(
-          loop,
-          await worktreePorcelain(loop),
-          renderCommitMessage(conventions.commitMessage, gate.snapshot.title, issueNumber)
-        );
-      }
-      await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
-
-      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = engineScratchTrackedReason(branch);
-        await sticky(reason, pr.number);
-        // The refusal is decided; teardown noise must not replace it.
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = attachmentsTrackedReason(branch);
-        await sticky(reason, pr.number);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      {
-        const added = await tipAddedSentinels(loop.runConfiguredGit, {
-          cwd: loop.worktree,
-          env: loop.env,
-          defaultBranch: opts.job.defaultBranch,
-        });
-        if (added.length > 0) {
-          const reason = sentinelTrackedReason(branch, added);
-          await sticky(reason, pr.number);
-          // The refusal is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason };
+        await sticky(
+          `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
+          pr.number
+        ).catch(() => undefined);
+        const errorHash = fingerprintError(errorMessage(err));
+        if (errorHash) {
+          await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+            () => undefined
+          );
         }
-      }
-
-      try {
-        await pushClaimedBranchWithAutomergeRestore(loop, branch, {
-          api: opts.api,
-          forgeKind: opts.forgeKind ?? "gitea",
-          owner,
-          repo,
-          prNumber: pr.number,
-          automergeRepos: opts.automergeRepos,
-          automergeEnabled: opts.automergeEnabled,
-          trustedSenderLogins: opts.trustedSenderLogins,
-          issueNumber: opts.job.issueNumber,
-          botUsername: opts.botUsername,
-          log,
-        });
-      } catch (err) {
-        if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "skipped", reason: "remote already contains default" };
+        if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
+          await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
         }
-        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
-        throw err;
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
       }
-      if (conflictCheckpoint) {
-        await deleteCheckpointRef(loop, conflictCheckpoint.ref, { log }).catch(() => undefined);
-      }
-      throwIfAborted(opts.abortSignal);
-
-      const publishedHead = (
-        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
-      ).trim();
-      await confirmProvenancePublication(
-        opts,
-        { prNumber: pr.number, branch, headSha: publishedHead || mergeResult.headSha, collector: provenanceCollector },
-        log
-      );
-      await sticky(`Pushed merge of ${opts.job.defaultBranch}.`, pr.number);
-      await writeConflictLatch(latches, latchKey, {
-        prNumber: pr.number,
-        round: 0,
-        lastHeadSha: mergeResult.headSha,
-        lastBaseSha: mergeResult.baseSha,
-        updatedAt: now().toISOString(),
-      });
-      // Push already landed; a failed destroy must not discard it.
-      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
-      return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
-    },
-    async (err) => {
-      runner = thrownRunner(err) ?? runner;
-      provenanceCollector.noteError(err);
-      await noteProvenanceRunners(opts, provenanceCollector, log);
-      if (isQuotaError(err)) {
-        throwIfQuotaWait({
-          err,
-          model: opts.model,
-          fallbackModel: opts.fallbackModel,
-          chain: jobChain,
-          previousError: opts.previousError,
-          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-        });
-        const quotaReason = quotaStuckReasonForText(errorMessage(err));
-        await sticky(quotaReason, pr.number).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-          pushLanded: false,
-          logger: log,
-        });
-        return;
-      }
-      await sticky(
-        `Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`,
-        pr.number
-      ).catch(() => undefined);
-      const errorHash = fingerprintError(errorMessage(err));
-      if (errorHash) {
-        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
-          () => undefined
-        );
-      }
-      if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
-        await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
-      }
-      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+    );
+  } finally {
+    conflictWorkerStore.close();
+    try {
+      conflictWorkerServer.close();
+    } catch {
+      // Best-effort: never replace the conflict result.
     }
-  );
+  }
   if (
     conflictCheckpoint &&
     typeof conflictResult === "object" &&

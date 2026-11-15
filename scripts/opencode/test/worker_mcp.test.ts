@@ -6,13 +6,24 @@ import {
   claudeWorkerMcpConfig,
   codexWorkerMcpTomlEntry,
   countReasonSentences,
+  MAX_WORKER_BLOCKED_REASON_CHARS,
   MAX_WORKER_NO_CHANGES_REASON_CHARS,
+  MAX_WORKER_PR_BODY_CHARS,
+  MAX_WORKER_SKIP_REASON_CHARS,
   openCodeWorkerMcpEntry,
+  parseBlockedOnRef,
+  preferWorkerTool,
   probeWorkerMcpInit,
   probeWorkerMcpServer,
   startWorkerMcpServer,
+  validateBlockedOn,
+  validateHandoffNotes,
   validateNoChangesReason,
+  validatePrBody,
+  validateSkipReason,
+  WORKER_HANDOFF_MAX_BYTES,
   WORKER_MCP_SERVER_NAME,
+  WORKER_MCP_TOOL_NAMES,
   WorkerResultStore,
 } from "../src/worker_mcp.ts";
 
@@ -127,6 +138,147 @@ describe("worker MCP server", () => {
     } finally {
       server.close();
     }
+  });
+
+  test("tool list names all five worker tools", async () => {
+    expect(new Set(WORKER_MCP_TOOL_NAMES)).toEqual(
+      new Set(["blocked_on", "no_changes", "set_handoff", "set_pr_body", "skip"])
+    );
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const res = await fetch(server.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: "Bearer tok" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      const payload = (await res.json()) as { result?: { tools?: Array<{ name?: string }> } };
+      const names = (payload.result?.tools ?? []).map((t) => t.name).sort();
+      expect(names).toEqual(["blocked_on", "no_changes", "set_handoff", "set_pr_body", "skip"]);
+    } finally {
+      server.close();
+    }
+  });
+
+  test("set_pr_body round-trips and validates", async () => {
+    expect(validatePrBody(undefined).ok).toBe(false);
+    expect(validatePrBody("   ").ok).toBe(false);
+    expect(validatePrBody("What changed.\n\nFixes #12").ok).toBe(true);
+    expect(validatePrBody("x".repeat(MAX_WORKER_PR_BODY_CHARS + 1)).ok).toBe(false);
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const bad = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", { markdown: "" });
+      expect(bad.ok).toBe(false);
+      const out = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", {
+        markdown: "Did the thing.\n\nFixes #12",
+      });
+      expect(out.ok).toBe(true);
+      expect(store.getPrBody()).toContain("Did the thing");
+      expect(store.hasPrBody()).toBe(true);
+      const second = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", { markdown: "Second body." });
+      expect(second.ok).toBe(true);
+      expect(store.getPrBody()).toBe("Second body.");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("skip round-trips and validates", async () => {
+    expect(validateSkipReason(undefined).ok).toBe(false);
+    expect(validateSkipReason("").ok).toBe(false);
+    expect(validateSkipReason("Nothing to change here.").ok).toBe(true);
+    expect(validateSkipReason("x".repeat(MAX_WORKER_SKIP_REASON_CHARS + 1)).ok).toBe(false);
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const out = await probeWorkerMcpServer(server.url, "tok", "skip", { reason: "Already fixed on main." });
+      expect(out.ok).toBe(true);
+      expect(store.getSkipReason()).toBe("Already fixed on main.");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("blocked_on round-trips and validates refs", async () => {
+    expect(parseBlockedOnRef("#12", "o", "r").ok).toBe(true);
+    expect(parseBlockedOnRef("o/r#12").ok).toBe(true);
+    expect(parseBlockedOnRef("bogus").ok).toBe(false);
+    expect(validateBlockedOn({ ref: "#12" }).ok).toBe(false);
+    expect(validateBlockedOn({ ref: "#12", reason: "waiting" }).ok).toBe(true);
+    expect(validateBlockedOn({ ref: "o/r#12", reason: "x".repeat(MAX_WORKER_BLOCKED_REASON_CHARS + 1) }).ok).toBe(
+      false
+    );
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const bad = await probeWorkerMcpServer(server.url, "tok", "blocked_on", { ref: "nope", reason: "waiting" });
+      expect(bad.ok).toBe(false);
+      expect(store.hasBlockedOn()).toBe(false);
+      const out = await probeWorkerMcpServer(server.url, "tok", "blocked_on", {
+        ref: "other/repo#34",
+        reason: "Need that fix first.",
+      });
+      expect(out.ok).toBe(true);
+      expect(store.getBlockedOn()).toMatchObject({ ref: "other/repo#34", number: 34, reason: "Need that fix first." });
+      const local = await probeWorkerMcpServer(server.url, "tok", "blocked_on", { ref: "#12", reason: "Second." });
+      expect(local.ok).toBe(true);
+      expect(store.getBlockedOn()?.ref).toBe("#12");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("set_handoff round-trips, caps at 16 KiB, and closes with the spawn", async () => {
+    expect(WORKER_HANDOFF_MAX_BYTES).toBe(16 * 1024);
+    expect(validateHandoffNotes(undefined).ok).toBe(false);
+    expect(validateHandoffNotes("   ").ok).toBe(false);
+    expect(validateHandoffNotes("key files: src/a.ts").ok).toBe(true);
+    expect(validateHandoffNotes("x".repeat(WORKER_HANDOFF_MAX_BYTES + 1)).ok).toBe(false);
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const out = await probeWorkerMcpServer(server.url, "tok", "set_handoff", { notes: "key files: src/a.ts" });
+      expect(out.ok).toBe(true);
+      expect(store.getHandoff()).toContain("src/a.ts");
+      expect(store.hasHandoff()).toBe(true);
+    } finally {
+      server.close();
+    }
+    const closed = new WorkerResultStore();
+    const closedServer = await startWorkerMcpServer({ store: closed, token: "tok" });
+    closed.close();
+    try {
+      for (const tool of ["no_changes", "set_pr_body", "skip", "blocked_on", "set_handoff"] as const) {
+        const out = await probeWorkerMcpServer(closedServer.url, "tok", tool, {
+          reason: "one sentence.",
+          markdown: "body",
+          ref: "#1",
+          notes: "notes",
+        });
+        expect(out.ok).toBe(false);
+        expect(out.text).toMatch(/spawn ended/);
+      }
+    } finally {
+      closedServer.close();
+    }
+  });
+
+  test("preferWorkerTool prefers the tool and logs the path", async () => {
+    const logs: string[] = [];
+    const log = (m: string) => logs.push(m);
+    expect(preferWorkerTool("pr_body", "tool body", "file body", log)).toEqual({
+      value: "tool body",
+      source: "tool",
+    });
+    expect(logs.at(-1)).toContain("from tool");
+    expect(preferWorkerTool("pr_body", null, "file body", log)).toEqual({
+      value: "file body",
+      source: "file fallback",
+    });
+    expect(logs.at(-1)).toContain("file fallback");
+    expect(preferWorkerTool("pr_body", null, null, log)).toEqual({ value: null, source: "missing" });
+    expect(logs.at(-1)).toContain("missing");
   });
 });
 

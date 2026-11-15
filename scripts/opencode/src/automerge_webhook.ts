@@ -1,6 +1,7 @@
 import { handleAutomergeLabelChange } from "./automerge.ts";
 import { isJumiPrIdentity } from "./gitea_issues.ts";
-import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL, loadRepoSettings } from "./repo_settings.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL } from "./repo_settings.ts";
 import { loginEquals } from "./util/login.ts";
 import { assertRepositoryPolicy, type WebhookPolicy } from "./webhook.ts";
 
@@ -174,11 +175,15 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   let automergeLabel = DEFAULT_AUTOMERGE_LABEL;
   let noAutomergeLabel = DEFAULT_NO_AUTOMERGE_LABEL;
   try {
-    const settings = await loadRepoSettings(api as never, parsed.owner, parsed.repo, baseBranch);
-    if (settings.state === "valid") {
-      automergeLabel = settings.automergeLabel;
-      noAutomergeLabel = settings.noAutomergeLabel;
-    } else if (settings.state === "invalid") {
+    const repoPolicy = await resolveRepoPolicy(
+      { api, owner: parsed.owner, repo: parsed.repo, ref: baseBranch },
+      fallbackPolicyDeployment({ trustedSenderLogins: policy.trustedSenderLogins }),
+      { onUnreadable: "fallback" }
+    );
+    if (repoPolicy.status === "ok") {
+      automergeLabel = repoPolicy.automergeLabel;
+      noAutomergeLabel = repoPolicy.noAutomergeLabel;
+    } else if (repoPolicy.status === "invalid") {
       // Still handle: the change handler posts the invalid note.
     }
   } catch {

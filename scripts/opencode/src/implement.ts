@@ -63,6 +63,7 @@ import {
   visibleClosingText,
 } from "./gitea_issues.ts";
 import {
+  type HandoffKey,
   type HandoffStore,
   handoffKeyForJob,
   handoffsFor,
@@ -113,6 +114,7 @@ import {
 } from "./tracker.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
+import { preferWorkerTool, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import {
   type GitAuthResolver,
   type GitRunner,
@@ -167,6 +169,142 @@ export async function readValidatedSkip(worktree: string): Promise<string | null
   } catch {
     return null;
   }
+}
+
+/**
+ * Tool-first PR body: `set_pr_body` wins, `JUMI_PR.md` is the one-release
+ * file fallback. Logs which path was used so the fallback can be removed.
+ */
+export async function resolveWorkerPrBody(
+  workerStore: WorkerResultStore,
+  worktree: string,
+  log?: (message: string) => void
+): Promise<string | null> {
+  const tool = workerStore.getPrBody() ?? null;
+  if (tool != null) {
+    log?.("worker result: pr_body from tool");
+    return tool;
+  }
+  const file = await readPullRequestDescription(worktree);
+  const picked = preferWorkerTool("pr_body", null, file, undefined);
+  if (picked.source === "file fallback") log?.("worker result: pr_body from file fallback");
+  else log?.("worker result: pr_body missing");
+  return picked.value;
+}
+
+/**
+ * Tool-first skip reason: `skip` wins, `JUMI_SKIP.md` is the file fallback.
+ */
+export async function resolveWorkerSkip(
+  workerStore: WorkerResultStore,
+  worktree: string,
+  log?: (message: string) => void
+): Promise<string | null> {
+  const tool = workerStore.getSkipReason() ?? null;
+  if (tool != null) {
+    log?.("worker result: skip from tool");
+    return tool;
+  }
+  const file = await readValidatedSkip(worktree);
+  if (file != null) {
+    log?.("worker result: skip from file fallback");
+    return file;
+  }
+  log?.("worker result: skip missing");
+  return null;
+}
+
+/**
+ * Tool-first blocked ref: `blocked_on` wins, `JUMI_BLOCKED.md` is the file
+ * fallback. The tool stores a canonical `owner/repo#N` (or `#N` for a local
+ * ref without a home); the caller resolves a bare number to the job repo.
+ */
+export async function resolveWorkerBlocked(
+  workerStore: WorkerResultStore,
+  worktree: string,
+  owner: string,
+  repo: string,
+  log?: (message: string) => void
+): Promise<{
+  present: boolean;
+  parsed?: { owner: string; repo: string; number: number } | undefined;
+  source: string;
+  toolReason?: string;
+}> {
+  const tool = workerStore.getBlockedOn();
+  if (tool) {
+    log?.("worker result: blocked_on from tool");
+    const resolvedOwner = tool.owner ?? owner;
+    const resolvedRepo = tool.repo ?? repo;
+    if (tool.owner == null && tool.ref.startsWith("#")) {
+      return {
+        parsed: { owner, repo, number: tool.number },
+        present: true,
+        source: "tool",
+        toolReason: tool.reason,
+      };
+    }
+    return {
+      parsed: { owner: resolvedOwner, repo: resolvedRepo, number: tool.number },
+      present: true,
+      source: "tool",
+      toolReason: tool.reason,
+    };
+  }
+  const path = join(worktree, BLOCKED_BY_FILE);
+  let fileText: string | null = null;
+  try {
+    const info = await lstat(path);
+    if (info.isFile()) fileText = await readFile(path, "utf8");
+  } catch {
+    fileText = null;
+  }
+  const parsed = parseBlockedByArtifact(fileText, owner, repo);
+  if (parsed.present) log?.("worker result: blocked_on from file fallback");
+  else log?.("worker result: blocked_on missing");
+  return { ...parsed, source: parsed.present ? "file fallback" : "missing", toolReason: undefined };
+}
+
+/**
+ * Tool-first handoff save: `set_handoff` wins (redacted, capped), otherwise
+ * the `JUMI_HANDOFF.md` file round-trip. Secrets are scrubbed before the
+ * store write so a token echoed by the model never lands in the ledger.
+ */
+export async function saveWorkerHandoff(
+  workerStore: WorkerResultStore,
+  worktree: string,
+  store: HandoffStore,
+  key: HandoffKey,
+  secrets: readonly (string | undefined)[],
+  log?: (message: string) => void
+): Promise<string | null> {
+  const tool = workerStore.getHandoff() ?? null;
+  if (tool != null) {
+    log?.("worker result: handoff from tool");
+    const { capHandoffNote } = await import("./handoff.ts");
+    const scrubbed = redactGitSecrets(tool, secrets);
+    const capped = capHandoffNote(scrubbed);
+    if (!capped.trim()) return null;
+    try {
+      await store.put(key, capped);
+    } catch (err) {
+      log?.(`handoff store unavailable: ${errorMessage(err)}`);
+      return null;
+    }
+    // Keep the worktree file in sync for the sentinel strip (transition).
+    try {
+      const { writeHandoffToWorktree } = await import("./handoff.ts");
+      await writeHandoffToWorktree(worktree, capped);
+    } catch {
+      // Best-effort.
+    }
+    return capped;
+  }
+  const { saveWorktreeHandoff } = await import("./handoff.ts");
+  const saved = await saveWorktreeHandoff(worktree, store, key, log);
+  if (saved != null) log?.("worker result: handoff from file fallback");
+  else log?.("worker result: handoff missing");
+  return saved;
 }
 
 export type OpenCodeRunner = Engine;
@@ -826,249 +964,281 @@ async function implementExternalIssue(
     effectiveJob.defaultBranch,
     log
   );
-  const externalResult: ImplementResult | FollowUpResult | ConflictResult = await runClaimedLoop(
-    loop,
-    opts.abortSignal,
-    async () => {
-      const runtime = opts.runtime ?? standingPodRuntime;
-      await runtime.ensureBareCache(loop, {
-        cloneUrl: effectiveJob.cloneUrl,
-        giteaUrl: opts.giteaUrl,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await sweepCheckpointsBestEffort(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs,
-        api: opts.api,
-        owner,
-        repo,
-        log,
-        exclude: externalCheckpoint ? [externalCheckpoint.ref] : undefined,
-      });
-      if (externalCheckpoint) {
-        await restoreCheckpoint(loop, externalCheckpoint.ref, {
-          branch,
-          defaultBranch: effectiveJob.defaultBranch,
-          log,
-        }).catch(() => undefined);
-      }
-      const headSha = await runtime.attachIssueWorktree(loop, {
-        branch,
-        defaultBranch: effectiveJob.defaultBranch,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await loop.stampHeadSha(headSha);
-      if (externalCheckpoint) {
-        beginCheckpointing(loop, {
-          ref: externalCheckpoint.ref,
-          branch,
-          defaultBranch: effectiveJob.defaultBranch,
-          intervalMs: externalCheckpoint.intervalMs,
-          enabled: true,
+  const externalWorkerStore = new WorkerResultStore();
+  const externalWorkerServer = await startWorkerMcpServer({ store: externalWorkerStore });
+  const externalWorkerMcpRef = { url: externalWorkerServer.url, token: externalWorkerServer.token };
+  let externalResult: ImplementResult | FollowUpResult | ConflictResult;
+  try {
+    externalResult = await runClaimedLoop(
+      loop,
+      opts.abortSignal,
+      async () => {
+        const runtime = opts.runtime ?? standingPodRuntime;
+        await runtime.ensureBareCache(loop, {
+          cloneUrl: effectiveJob.cloneUrl,
+          giteaUrl: opts.giteaUrl,
+          abortSignal: opts.abortSignal,
           log,
         });
-      }
-      await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
-      throwIfAborted(opts.abortSignal);
-      let repoSetupBlock: string | undefined;
-      {
-        const setup = await runRepoSetupForKind({
-          api: forge,
-          kind: "implement",
-          workdir: worktree,
-          defaultBranch: effectiveJob.defaultBranch || undefined,
-          auth: loop.auth,
+        await sweepCheckpointsBestEffort(loop, {
+          maxAgeMs: opts.checkpointMaxAgeMs,
+          api: opts.api,
           owner,
           repo,
-          home: opts.home,
-          timeoutMaxMs: opts.setupTimeoutMaxMs,
           log,
-          git: loop.runConfiguredGit,
-          gitEnv: loop.env,
-          runScript: opts.repoSetupRunScript,
+          exclude: externalCheckpoint ? [externalCheckpoint.ref] : undefined,
         });
-        if (setup.ran) {
-          repoSetupBlock = setup.promptBlock;
-          if (setup.failureReason) {
-            if (typeof briefTracker.postBriefComment === "function") {
-              try {
-                await briefTracker.postBriefComment(ref, setup.failureReason);
-              } catch {}
+        if (externalCheckpoint) {
+          await restoreCheckpoint(loop, externalCheckpoint.ref, {
+            branch,
+            defaultBranch: effectiveJob.defaultBranch,
+            log,
+          }).catch(() => undefined);
+        }
+        const headSha = await runtime.attachIssueWorktree(loop, {
+          branch,
+          defaultBranch: effectiveJob.defaultBranch,
+          abortSignal: opts.abortSignal,
+          log,
+        });
+        await loop.stampHeadSha(headSha);
+        if (externalCheckpoint) {
+          beginCheckpointing(loop, {
+            ref: externalCheckpoint.ref,
+            branch,
+            defaultBranch: effectiveJob.defaultBranch,
+            intervalMs: externalCheckpoint.intervalMs,
+            enabled: true,
+            log,
+          });
+        }
+        await ensureProvenanceIntent(provenanceOpts, { prNumber: 0, branch }, log);
+        throwIfAborted(opts.abortSignal);
+        let repoSetupBlock: string | undefined;
+        {
+          const setup = await runRepoSetupForKind({
+            api: forge,
+            kind: "implement",
+            workdir: worktree,
+            defaultBranch: effectiveJob.defaultBranch || undefined,
+            auth: loop.auth,
+            owner,
+            repo,
+            home: opts.home,
+            timeoutMaxMs: opts.setupTimeoutMaxMs,
+            log,
+            git: loop.runConfiguredGit,
+            gitEnv: loop.env,
+            runScript: opts.repoSetupRunScript,
+          });
+          if (setup.ran) {
+            repoSetupBlock = setup.promptBlock;
+            if (setup.failureReason) {
+              if (typeof briefTracker.postBriefComment === "function") {
+                try {
+                  await briefTracker.postBriefComment(ref, setup.failureReason);
+                } catch {}
+              }
+              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+                pushLanded: false,
+                logger: log,
+              });
+              return { status: "skipped", reason: setup.failureReason };
             }
-            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-              pushLanded: false,
-              logger: log,
-            });
-            return { status: "skipped", reason: setup.failureReason };
           }
         }
-      }
-      const externalTaskMarkdown = repoSetupBlock
-        ? `${buildTaskMarkdown(effectiveJob)}\n${repoSetupBlock}\n`
-        : buildTaskMarkdown(effectiveJob);
-      await writeFile(join(worktree, "JUMI_TASK.md"), externalTaskMarkdown);
-      await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
-      await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
-      // External briefs have no stable issue number (issueNumber is always 0),
-      // so every brief targeting the same owner/repo would share
-      // forge/owner/repo#0. Skip the handoff round-trip for external jobs
-      // rather than leak notes between unrelated trackers.
-      const skipHandoff = isExternalIssueJob(job);
-      const handoffStore = skipHandoff ? undefined : handoffsFor({ home: opts.home, handoffs: opts.handoffs });
-      const handoffKey = handoffStore ? handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts)) : undefined;
-      if (handoffStore && handoffKey) {
-        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
-      }
-
-      log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
-      const runOpts: EngineRunOptions = {
-        model: opts.model,
-        variant: opts.variant,
-        workdir: worktree,
-        home: opts.home,
-        sanitizeEnv,
-        extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
-          owner: loop.owner,
-          repo: loop.repo,
-          logger: log,
-        }),
-        timeoutMs: opts.timeoutMs,
-        maxOutputBytes: opts.maxOutputBytes,
-        reviewLabel: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
-        trace: {
-          kind: "implement",
-          owner,
-          repo,
-          sha: headSha,
-          jobId: opts.jobId ?? job.delivery,
-        },
-        logger: log,
-        abortSignal: opts.abortSignal,
-        onPid: loop.engineOnPid(opts.onPid),
-      };
-      let result: EngineResult;
-      try {
-        result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
-          runner = r;
-        });
-      } catch (err) {
-        provenanceCollector.noteError(err);
-        await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
-        throw err;
-      }
-      provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
-      await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
-      throwIfEngineFailed(result);
-
-      throwIfAborted(opts.abortSignal);
-      const prFileContents = await readPullRequestDescription(worktree);
-      const validatedSkip = await readValidatedSkip(worktree);
-      if (handoffStore && handoffKey) {
-        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-      }
-      await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
-      const porcelain = await worktreePorcelain(loop);
-      if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
-        if (validatedSkip) {
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "no-changes" };
+        const externalTaskMarkdown = repoSetupBlock
+          ? `${buildTaskMarkdown(effectiveJob)}\n${repoSetupBlock}\n`
+          : buildTaskMarkdown(effectiveJob);
+        await writeFile(join(worktree, "JUMI_TASK.md"), externalTaskMarkdown);
+        await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
+        await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
+        // External briefs have no stable issue number (issueNumber is always 0),
+        // so every brief targeting the same owner/repo would share
+        // forge/owner/repo#0. Skip the handoff round-trip for external jobs
+        // rather than leak notes between unrelated trackers.
+        const skipHandoff = isExternalIssueJob(job);
+        const handoffStore = skipHandoff ? undefined : handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+        const handoffKey = handoffStore
+          ? handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts))
+          : undefined;
+        if (handoffStore && handoffKey) {
+          await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
         }
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped", reason: INCOMPLETE_IMPLEMENT };
-      }
 
-      if (branch === effectiveJob.defaultBranch) {
-        throw new Error("refusing to commit on the default branch");
-      }
-      await commitIfDirty(loop, porcelain, `${job.title}`);
-      throwIfAborted(opts.abortSignal);
-      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = engineScratchTrackedReason(branch);
-        // The refusal is decided; teardown noise must not replace it.
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = attachmentsTrackedReason(branch);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-        return { status: "skipped", reason };
-      }
-      {
-        const added = await tipAddedSentinels(loop.runConfiguredGit, {
-          cwd: loop.worktree,
-          env: loop.env,
-          defaultBranch: effectiveJob.defaultBranch,
-        });
-        if (added.length > 0) {
-          const reason = sentinelTrackedReason(branch, added);
+        log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
+        const runOpts: EngineRunOptions = {
+          model: opts.model,
+          variant: opts.variant,
+          workdir: worktree,
+          home: opts.home,
+          sanitizeEnv,
+          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+            owner: loop.owner,
+            repo: loop.repo,
+            logger: log,
+          }),
+          timeoutMs: opts.timeoutMs,
+          maxOutputBytes: opts.maxOutputBytes,
+          reviewLabel: `${owner}/${repo}@${ref.tracker}:${ref.id}`,
+          trace: {
+            kind: "implement",
+            owner,
+            repo,
+            sha: headSha,
+            jobId: opts.jobId ?? job.delivery,
+          },
+          workerMcp: externalWorkerMcpRef,
+          logger: log,
+          abortSignal: opts.abortSignal,
+          onPid: loop.engineOnPid(opts.onPid),
+        };
+        let result: EngineResult;
+        try {
+          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
+            runner = r;
+          });
+        } catch (err) {
+          provenanceCollector.noteError(err);
+          await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
+          throw err;
+        }
+        provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+        await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
+        throwIfEngineFailed(result);
+
+        throwIfAborted(opts.abortSignal);
+        const prFileContents = await resolveWorkerPrBody(externalWorkerStore, worktree, log);
+        const validatedSkip = await resolveWorkerSkip(externalWorkerStore, worktree, log);
+        if (handoffStore && handoffKey) {
+          const secrets = workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? activeChain);
+          const toolHandoff = externalWorkerStore.getHandoff() ?? null;
+          if (toolHandoff != null) {
+            log("worker result: handoff from tool");
+            const { capHandoffNote } = await import("./handoff.ts");
+            const capped = capHandoffNote(redactGitSecrets(toolHandoff, secrets));
+            if (capped.trim()) {
+              try {
+                await handoffStore.put(handoffKey, capped);
+              } catch (err) {
+                log(`handoff store unavailable: ${errorMessage(err)}`);
+              }
+            }
+          } else {
+            await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
+            log("worker result: handoff from file fallback");
+          }
+        }
+        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
+        const porcelain = await worktreePorcelain(loop);
+        if (!porcelain && (await commitsAheadOf(loop, `origin/${effectiveJob.defaultBranch}`)) <= 0) {
+          if (validatedSkip) {
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "no-changes" };
+          }
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: INCOMPLETE_IMPLEMENT };
+        }
+
+        if (branch === effectiveJob.defaultBranch) {
+          throw new Error("refusing to commit on the default branch");
+        }
+        await commitIfDirty(loop, porcelain, `${job.title}`);
+        throwIfAborted(opts.abortSignal);
+        if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = engineScratchTrackedReason(branch);
+          // The refusal is decided; teardown noise must not replace it.
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
           return { status: "skipped", reason };
         }
-      }
-      try {
-        await pushClaimedBranch(loop, branch);
-      } catch (err) {
-        await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
-        throw err;
-      }
-      if (externalCheckpoint) {
-        await deleteCheckpointRef(loop, externalCheckpoint.ref, { log }).catch(() => undefined);
-      }
-      throwIfAborted(opts.abortSignal);
+        if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = attachmentsTrackedReason(branch);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason };
+        }
+        {
+          const added = await tipAddedSentinels(loop.runConfiguredGit, {
+            cwd: loop.worktree,
+            env: loop.env,
+            defaultBranch: effectiveJob.defaultBranch,
+          });
+          if (added.length > 0) {
+            const reason = sentinelTrackedReason(branch, added);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+            return { status: "skipped", reason };
+          }
+        }
+        try {
+          await pushClaimedBranch(loop, branch);
+        } catch (err) {
+          await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
+          throw err;
+        }
+        if (externalCheckpoint) {
+          await deleteCheckpointRef(loop, externalCheckpoint.ref, { log }).catch(() => undefined);
+        }
+        throwIfAborted(opts.abortSignal);
 
-      const stamp = runner ? formatRunnerStamp(runner) : undefined;
-      let pr: Pull;
-      try {
-        pr = await forge.createPullRequest(owner, repo, {
-          title: job.title,
-          body: wrapJumiPrBody(
-            redactGitSecrets(
-              buildExternalPullRequestBody(prFileContents, ref.url, stamp),
-              workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? activeChain)
-            )
-          ),
-          head: branch,
-          base: effectiveJob.defaultBranch,
+        const stamp = runner ? formatRunnerStamp(runner) : undefined;
+        let pr: Pull;
+        try {
+          pr = await forge.createPullRequest(owner, repo, {
+            title: job.title,
+            body: wrapJumiPrBody(
+              redactGitSecrets(
+                buildExternalPullRequestBody(prFileContents, ref.url, stamp),
+                workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? activeChain)
+              )
+            ),
+            head: branch,
+            base: effectiveJob.defaultBranch,
+          });
+        } catch (err) {
+          await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
+          throw err;
+        }
+        await scheduleAutomergeForPr({
+          api: forge,
+          forgeKind: opts.forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: pr.number,
+          baseBranch: effectiveJob.defaultBranch,
+          automergeRepos: opts.automergeRepos,
+          automergeEnabled: opts.automergeEnabled,
+          trustedSenderLogins: opts.trustedSenderLogins,
+          botUsername: opts.botUsername,
+          log,
         });
-      } catch (err) {
-        await failProvenanceIntent(provenanceOpts, errorMessage(err), undefined, log);
-        throw err;
+        const publishedHead = (
+          await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+        ).trim();
+        await confirmProvenancePublication(
+          provenanceOpts,
+          { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
+          log
+        );
+        // Push already landed; a failed destroy must not discard it.
+        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
+        return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
+      },
+      async (err) => {
+        runner = thrownRunner(err) ?? runner;
+        provenanceCollector.noteError(err);
+        await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
+        await (opts.runtime ?? standingPodRuntime)
+          .destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log })
+          .catch(() => undefined);
       }
-      await scheduleAutomergeForPr({
-        api: forge,
-        forgeKind: opts.forgeKind ?? "gitea",
-        owner,
-        repo,
-        prNumber: pr.number,
-        baseBranch: effectiveJob.defaultBranch,
-        automergeRepos: opts.automergeRepos,
-        automergeEnabled: opts.automergeEnabled,
-        trustedSenderLogins: opts.trustedSenderLogins,
-        botUsername: opts.botUsername,
-        log,
-      });
-      const publishedHead = (
-        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
-      ).trim();
-      await confirmProvenancePublication(
-        provenanceOpts,
-        { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
-        log
-      );
-      // Push already landed; a failed destroy must not discard it.
-      await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
-      return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
-    },
-    async (err) => {
-      runner = thrownRunner(err) ?? runner;
-      provenanceCollector.noteError(err);
-      await noteProvenanceRunners(provenanceOpts, provenanceCollector, log);
-      await (opts.runtime ?? standingPodRuntime)
-        .destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log })
-        .catch(() => undefined);
+    );
+  } finally {
+    externalWorkerStore.close();
+    try {
+      externalWorkerServer.close();
+    } catch {
+      // Best-effort: never replace the implement result.
     }
-  );
+  }
   if (
     externalCheckpoint &&
     typeof externalResult === "object" &&
@@ -1233,409 +1403,207 @@ export async function implementIssue(
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
   const checkpoint = checkpointTickerForRun(opts, branch, opts.job.defaultBranch, log);
-  const implementResult: ImplementResult | FollowUpResult | ConflictResult = await runClaimedLoop(
-    loop,
-    opts.abortSignal,
-    async () => {
-      const runtime = opts.runtime ?? standingPodRuntime;
-      await runtime.ensureBareCache(loop, {
-        cloneUrl: opts.job.cloneUrl,
-        giteaUrl: opts.giteaUrl,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await sweepCheckpointsBestEffort(loop, {
-        maxAgeMs: opts.checkpointMaxAgeMs,
-        api: opts.api,
-        owner,
-        repo,
-        log,
-        exclude: checkpoint ? [checkpoint.ref] : undefined,
-      });
-      if (checkpoint) {
-        await restoreCheckpoint(loop, checkpoint.ref, {
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          log,
-        }).catch(() => undefined);
-      }
-      const headSha = await runtime.attachIssueWorktree(loop, {
-        branch,
-        defaultBranch: opts.job.defaultBranch,
-        abortSignal: opts.abortSignal,
-        log,
-      });
-      await loop.stampHeadSha(headSha);
-      if (checkpoint) {
-        beginCheckpointing(loop, {
-          ref: checkpoint.ref,
-          branch,
-          defaultBranch: opts.job.defaultBranch,
-          intervalMs: checkpoint.intervalMs,
-          enabled: true,
-          log,
-        });
-      }
-      await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
-
-      throwIfAborted(opts.abortSignal);
-      let repoSetupBlock: string | undefined;
-      {
-        const setup = await runRepoSetupForKind({
-          api: opts.api,
-          kind: "implement",
-          workdir: worktree,
-          defaultBranch: opts.job.defaultBranch || undefined,
-          auth: loop.auth,
-          owner,
-          repo,
-          home: opts.home,
-          timeoutMaxMs: opts.setupTimeoutMaxMs,
-          log,
-          git: loop.runConfiguredGit,
-          gitEnv: loop.env,
-          runScript: opts.repoSetupRunScript,
-        });
-        if (setup.ran) {
-          repoSetupBlock = setup.promptBlock;
-          if (setup.failureReason) {
-            await upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, setup.failureReason).catch(
-              () => undefined
-            );
-            await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-              pushLanded: false,
-              logger: log,
-            });
-            return { status: "skipped", reason: setup.failureReason };
-          }
-        }
-      }
-      const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
-      const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
-      const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
-      const restoreHandoffForFreshRun = async () => {
-        // A runner hop inside one job reuses the stored previous-round note;
-        // the hop must not inherit the failed run's partial file.
-        await writeHandoffToWorktree(worktree, injectedHandoff);
-      };
-      const writeTaskFiles = async (job: IssueJob) => {
-        const taskMarkdown = repoSetupBlock ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n` : buildTaskMarkdown(job);
-        await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
-        if (queue.length > 0) {
-          await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
-        } else {
-          await rm(join(worktree, QUEUE_FILE), { force: true }).catch(() => undefined);
-        }
-        await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
-        // Every child-written sentinel is dropped before a re-spawn, so a skip
-        // artifact can only ever describe the round that just ran.
-        await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
-        // Parent-staged issue inputs: same injection point as task/queue, with
-        // the parent's credentials. The child has no forge read access.
-        await stageIssueAttachments({
-          api: opts.api,
-          owner,
-          repo,
-          indexes: [issueNumber],
-          bodies: [job.body],
-          worktree,
-          log,
-        }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
-      };
-      await writeTaskFiles(opts.job);
-      await upsertWorkerComment(
-        opts.api,
-        owner,
-        repo,
-        issueNumber,
-        opts.botUsername,
-        "Jumi is implementing this issue."
-      );
-
-      // Set when the chain refused an incomplete hop, so no child ran at all.
-      let hopDeclined = false;
-      // Explicit worker prompts are worded for the first chain runner, but
-      // `resolveOpenCodePrompt` rewords them per attempt from the actual
-      // runner, so a hop runs under its own tool sentences.
-      const firstRunnerType = jobChain?.[0]?.type;
-      const runEngine = async (
-        label: string,
-        kind: "implement" | "follow-up" = "implement",
-        prompt?: string,
-        extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
-      ): Promise<ImplementResult | undefined> => {
-        throwIfAborted(opts.abortSignal);
-        if (!extra?.continueSession) await restoreHandoffForFreshRun();
-        log(label);
-        const runOpts: EngineRunOptions = {
-          model: opts.model,
-          variant: opts.variant,
-          workdir: worktree,
-          home: opts.home,
-          sanitizeEnv,
-          extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
-            owner,
-            repo,
-            logger: log,
-          }),
-          timeoutMs: opts.timeoutMs,
-          maxOutputBytes: opts.maxOutputBytes,
-          reviewLabel: `${owner}/${repo}#${issueNumber}`,
-          trace: {
-            kind,
-            owner,
-            repo,
-            sha: headSha,
-            jobId: opts.jobId ?? opts.job.delivery,
-          },
-          ...(prompt != null ? { prompt } : {}),
-          ...(extra?.continueSession ? { continueSession: true } : {}),
-          ...(extra?.hopFromIncomplete ? { hopFromIncomplete: true } : {}),
-          logger: log,
-          abortSignal: opts.abortSignal,
-          onPid: loop.engineOnPid(opts.onPid),
-        };
-        runner = undefined;
-        hopDeclined = false;
+  const workerStore = new WorkerResultStore();
+  const workerServer = await startWorkerMcpServer({ store: workerStore });
+  const workerMcpRef = { url: workerServer.url, token: workerServer.token };
+  let implementResult: ImplementResult | FollowUpResult | ConflictResult;
+  try {
+    implementResult = await runClaimedLoop(
+      loop,
+      opts.abortSignal,
+      async () => {
         const runtime = opts.runtime ?? standingPodRuntime;
-        let result: EngineResult;
-        try {
-          result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
-            runner = r;
-          });
-        } catch (err) {
-          provenanceCollector.noteError(err);
-          await noteProvenanceRunners(opts, provenanceCollector, log);
-          throw err;
-        }
-        provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
-        await noteProvenanceRunners(opts, provenanceCollector, log);
-        if (result.hopDeclined === true) {
-          // No spawn happened, so the stamp would name a runner that never ran.
-          runner = undefined;
-          hopDeclined = true;
-          return undefined;
-        }
-        // Gate on the message: only the quota path returns engine `stuck`
-        // today, but a future non-quota producer must not set the quota flag.
-        if (result.status === "stuck" && isQuotaText(result.message)) {
-          throwIfQuotaWait({
-            result,
-            model: opts.model,
-            fallbackModel: opts.fallbackModel,
-            chain: jobChain,
-            previousError: opts.previousError,
-            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-          });
-          const quotaReason = quotaStuckReasonForText(result.message);
-          if (
-            opts.runnerCooldowns &&
-            hasHealthyRunnerForQuota(
-              jobChain,
-              opts.runnerCooldowns,
-              opts.cooldownNowMs?.() ?? Date.now(),
-              opts.authFingerprints
-            )
-          ) {
-            throw new Error(quotaReason);
-          }
-          await diary(quotaReason);
-          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-          // The stuck outcome is decided; teardown noise must not replace it.
-          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-          return { status: "skipped", reason: quotaReason };
-        }
-        throwIfEngineFailed(result);
-        return undefined;
-      };
-
-      const addWorktreeFromDefault = async () => {
-        await clearLeftoverWorktree(loop);
-        await mkdir(dirname(worktree), { recursive: true });
-        await loop.runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${opts.job.defaultBranch}`], {
-          cwd: barePath,
-          env: loop.env,
+        await runtime.ensureBareCache(loop, {
+          cloneUrl: opts.job.cloneUrl,
+          giteaUrl: opts.giteaUrl,
+          abortSignal: opts.abortSignal,
+          log,
         });
-        await mkdir(worktree, { recursive: true });
-      };
-
-      const deleteRefIfPresent = async (ref: string) => {
-        if (!(await loop.refExists(ref))) return;
-        await loop.runConfiguredGit(["update-ref", "-d", ref], { cwd: barePath, env: loop.env });
-      };
-
-      const deletePushedIssueBranch = async () => {
-        if (branch === opts.job.defaultBranch) return;
-        await loop.detachWorktree();
-        await deleteRefIfPresent(`refs/heads/${branch}`);
-        try {
-          await loop.runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env: loop.env });
-        } catch (err) {
-          const msg = errorMessage(err);
-          if (!/remote ref does not exist/i.test(msg)) throw err;
-        }
+        await sweepCheckpointsBestEffort(loop, {
+          maxAgeMs: opts.checkpointMaxAgeMs,
+          api: opts.api,
+          owner,
+          repo,
+          log,
+          exclude: checkpoint ? [checkpoint.ref] : undefined,
+        });
         if (checkpoint) {
-          await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+          await restoreCheckpoint(loop, checkpoint.ref, {
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            log,
+          }).catch(() => undefined);
         }
-        await deleteRefIfPresent(`refs/remotes/origin/${branch}`);
-        await loop.runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
-          cwd: barePath,
-          env: loop.env,
+        const headSha = await runtime.attachIssueWorktree(loop, {
+          branch,
+          defaultBranch: opts.job.defaultBranch,
+          abortSignal: opts.abortSignal,
+          log,
         });
-        if (await loop.refExists(`refs/remotes/origin/${branch}`)) {
-          throw new Error(`failed to delete origin/${branch}`);
-        }
-      };
-
-      const readBlockedBy = async () => {
-        const path = join(worktree, BLOCKED_BY_FILE);
-        try {
-          const info = await lstat(path);
-          if (!info.isFile()) return parseBlockedByArtifact(null, owner, repo);
-          return parseBlockedByArtifact(await readFile(path, "utf8"), owner, repo);
-        } catch {
-          return parseBlockedByArtifact(null, owner, repo);
-        }
-      };
-
-      const skipBlocked = async (reason: string, comment = reason) => {
-        await diary(comment);
-        await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-        return { status: "skipped" as const, reason };
-      };
-
-      // Leaves the issue retryable: a diary so the last visible state is not the
-      // in-progress sticky, and no `stampTerminalClaim`, which #114 forbids here.
-      const skipIncomplete = () => skipBlocked(INCOMPLETE_IMPLEMENT);
-
-      const applyValidYield = async (blocker: { owner: string; repo: string; number: number }) => {
-        try {
-          await opts.api.createIssueDependency(owner, repo, issueNumber, {
-            owner: blocker.owner,
-            repo: blocker.repo,
-            number: blocker.number,
+        await loop.stampHeadSha(headSha);
+        if (checkpoint) {
+          beginCheckpointing(loop, {
+            ref: checkpoint.ref,
+            branch,
+            defaultBranch: opts.job.defaultBranch,
+            intervalMs: checkpoint.intervalMs,
+            enabled: true,
+            log,
           });
-        } catch (err) {
-          await deletePushedIssueBranch().catch(() => undefined);
-          const raw = errorMessage(err);
-          const secrets = workerPublishSecrets(loop.auth.token, jobChain);
-          return skipBlocked(
-            `failed to set dependency: ${redactGitSecrets(raw, secrets)}`,
-            `failed to set dependency: ${stickyFailureDetail(err, secrets)}`
-          );
         }
-        await deletePushedIssueBranch().catch(() => undefined);
-        return skipBlocked(blockedOnComment([blocker], owner, repo));
-      };
+        await ensureProvenanceIntent(opts, { prNumber: 0, branch }, log);
 
-      // The issue text the gate last validated. Every later round — a rejected-yield
-      // reset or the incomplete hop — starts from this, never from the pre-run job.
-      let liveJob = opts.job;
-      let snapshot = snapshotFromJob(opts.job);
-
-      const resetAfterRejectedYield = async () => {
-        await deletePushedIssueBranch();
-        // A half-deleted tree fails here, in `clearLeftoverWorktree`, before the next spawn.
-        await addWorktreeFromDefault();
-        await writeTaskFiles(liveJob);
-        await restoreHandoffForFreshRun();
-      };
-
-      const handleYield = async (rejectedOnce: boolean): Promise<ImplementResult | "continue" | "retry"> => {
-        if (queue.length === 0) return "continue";
-        const artifact = await readBlockedBy();
-        if (!artifact.present) return "continue";
-        const decision = validateYield(artifact.parsed, queue, owner, repo, issueNumber);
-        if (decision.ok) return applyValidYield(decision.blocker);
-        if (!rejectedOnce) return "retry";
-        await deletePushedIssueBranch();
-        return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
-      };
-
-      let incompleteHopped = false;
-      let prFileContents: string | null = null;
-      let porcelain = "";
-      const customConventions = hasCustomConventions(conventions);
-      const implementBasePrompt = (forQueue: boolean): string | undefined => {
-        if (!customConventions) return forQueue ? buildImplementYieldPrompt(firstRunnerType) : undefined;
-        return withPrConventions(
-          forQueue ? buildImplementYieldPrompt(firstRunnerType) : buildImplementPrompt(firstRunnerType),
-          conventions,
-          issueNumber
-        );
-      };
-      const rejectedBasePrompt = (): string =>
-        customConventions
-          ? withPrConventions(buildBlockedByRejectedPrompt(firstRunnerType), conventions, issueNumber)
-          : buildBlockedByRejectedPrompt(firstRunnerType);
-      for (;;) {
-        const quotaSkip = await runEngine(
-          incompleteHopped
-            ? `Re-running OpenCode after incomplete implement for ${owner}/${repo}#${issueNumber}`
-            : `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
-          "implement",
-          implementBasePrompt(queue.length > 0),
-          incompleteHopped ? { hopFromIncomplete: true } : undefined
-        );
-        if (quotaSkip) return quotaSkip;
-        // The chain had no runner left to hop to, so nothing ran this round: the
-        // sentinels are already stripped, so re-gating would only re-handle an
-        // issue edit and continue a session this worktree no longer has.
-        if (hopDeclined) return skipIncomplete();
-
-        const firstYield = await handleYield(false);
-        if (firstYield === "retry") {
-          log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
-          await resetAfterRejectedYield();
-          const quotaRetry = await runEngine(
-            `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
-            "implement",
-            rejectedBasePrompt()
-          );
-          if (quotaRetry) return quotaRetry;
-          const secondYield = await handleYield(true);
-          if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
-          if (secondYield !== "continue") return secondYield;
-        } else if (firstYield !== "continue") {
-          return firstYield;
+        throwIfAborted(opts.abortSignal);
+        let repoSetupBlock: string | undefined;
+        {
+          const setup = await runRepoSetupForKind({
+            api: opts.api,
+            kind: "implement",
+            workdir: worktree,
+            defaultBranch: opts.job.defaultBranch || undefined,
+            auth: loop.auth,
+            owner,
+            repo,
+            home: opts.home,
+            timeoutMaxMs: opts.setupTimeoutMaxMs,
+            log,
+            git: loop.runConfiguredGit,
+            gitEnv: loop.env,
+            runScript: opts.repoSetupRunScript,
+          });
+          if (setup.ran) {
+            repoSetupBlock = setup.promptBlock;
+            if (setup.failureReason) {
+              await upsertWorkerComment(
+                opts.api,
+                owner,
+                repo,
+                issueNumber,
+                opts.botUsername,
+                setup.failureReason
+              ).catch(() => undefined);
+              await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+                pushLanded: false,
+                logger: log,
+              });
+              return { status: "skipped", reason: setup.failureReason };
+            }
+          }
         }
-
-        let gate: ShipGate;
-        try {
-          gate = await gateShipAfterOpenCode({
+        const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
+        const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
+        const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+        const restoreHandoffForFreshRun = async () => {
+          // A runner hop inside one job reuses the stored previous-round note;
+          // the hop must not inherit the failed run's partial file.
+          await writeHandoffToWorktree(worktree, injectedHandoff);
+        };
+        const writeTaskFiles = async (job: IssueJob) => {
+          const taskMarkdown = repoSetupBlock
+            ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n`
+            : buildTaskMarkdown(job);
+          await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
+          if (queue.length > 0) {
+            await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
+          } else {
+            await rm(join(worktree, QUEUE_FILE), { force: true }).catch(() => undefined);
+          }
+          await rm(join(worktree, BLOCKED_BY_FILE), { force: true }).catch(() => undefined);
+          // Every child-written sentinel is dropped before a re-spawn, so a skip
+          // artifact can only ever describe the round that just ran.
+          await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
+          // Parent-staged issue inputs: same injection point as task/queue, with
+          // the parent's credentials. The child has no forge read access.
+          await stageIssueAttachments({
             api: opts.api,
             owner,
             repo,
-            issueNumber,
-            botUsername: opts.botUsername,
-            snapshot,
-            continueOpenCode: async (issue) => {
-              await writeTaskFiles(await withIssueAuthorPermission(jobWithIssue(opts.job, issue), opts.api));
-              const quotaContinued = await runEngine(
-                `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
-                "follow-up",
-                customConventions
-                  ? withPrConventions(
-                      queue.length > 0
-                        ? buildImplementYieldPrompt(firstRunnerType)
-                        : buildImplementPrompt(firstRunnerType),
-                      conventions,
-                      issueNumber
-                    )
-                  : queue.length > 0
-                    ? buildImplementYieldPrompt(firstRunnerType)
-                    : buildImplementPrompt(firstRunnerType),
-                { continueSession: true }
-              );
-              if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
+            indexes: [issueNumber],
+            bodies: [job.body],
+            worktree,
+            log,
+          }).catch((err) => log(`attachments staging failed: ${errorMessage(err)}`));
+        };
+        await writeTaskFiles(opts.job);
+        await upsertWorkerComment(
+          opts.api,
+          owner,
+          repo,
+          issueNumber,
+          opts.botUsername,
+          "Jumi is implementing this issue."
+        );
+
+        // Set when the chain refused an incomplete hop, so no child ran at all.
+        let hopDeclined = false;
+        // Explicit worker prompts are worded for the first chain runner, but
+        // `resolveOpenCodePrompt` rewords them per attempt from the actual
+        // runner, so a hop runs under its own tool sentences.
+        const firstRunnerType = jobChain?.[0]?.type;
+        const runEngine = async (
+          label: string,
+          kind: "implement" | "follow-up" = "implement",
+          prompt?: string,
+          extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
+        ): Promise<ImplementResult | undefined> => {
+          throwIfAborted(opts.abortSignal);
+          if (!extra?.continueSession) await restoreHandoffForFreshRun();
+          log(label);
+          const runOpts: EngineRunOptions = {
+            model: opts.model,
+            variant: opts.variant,
+            workdir: worktree,
+            home: opts.home,
+            sanitizeEnv,
+            extraEnv: await workerOpenCodeChildEnvWithGradleSeed(loop.auth, worktree, {
+              owner,
+              repo,
+              logger: log,
+            }),
+            timeoutMs: opts.timeoutMs,
+            maxOutputBytes: opts.maxOutputBytes,
+            reviewLabel: `${owner}/${repo}#${issueNumber}`,
+            trace: {
+              kind,
+              owner,
+              repo,
+              sha: headSha,
+              jobId: opts.jobId ?? opts.job.delivery,
             },
-          });
-        } catch (err) {
-          if (isQuotaError(err)) {
+            ...(prompt != null ? { prompt } : {}),
+            ...(extra?.continueSession ? { continueSession: true } : {}),
+            ...(extra?.hopFromIncomplete ? { hopFromIncomplete: true } : {}),
+            workerMcp: workerMcpRef,
+            logger: log,
+            abortSignal: opts.abortSignal,
+            onPid: loop.engineOnPid(opts.onPid),
+          };
+          runner = undefined;
+          hopDeclined = false;
+          const runtime = opts.runtime ?? standingPodRuntime;
+          let result: EngineResult;
+          try {
+            result = await runtime.runRuntimeEngine(loop, engine, runOpts, (r) => {
+              runner = r;
+            });
+          } catch (err) {
+            provenanceCollector.noteError(err);
+            await noteProvenanceRunners(opts, provenanceCollector, log);
+            throw err;
+          }
+          provenanceCollector.noteResult(result, { model: opts.model, variant: opts.variant });
+          await noteProvenanceRunners(opts, provenanceCollector, log);
+          if (result.hopDeclined === true) {
+            // No spawn happened, so the stamp would name a runner that never ran.
+            runner = undefined;
+            hopDeclined = true;
+            return undefined;
+          }
+          // Gate on the message: only the quota path returns engine `stuck`
+          // today, but a future non-quota producer must not set the quota flag.
+          if (result.status === "stuck" && isQuotaText(result.message)) {
             throwIfQuotaWait({
-              err,
+              result,
               model: opts.model,
               fallbackModel: opts.fallbackModel,
               chain: jobChain,
@@ -1644,181 +1612,433 @@ export async function implementIssue(
               ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
               ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
             });
-            const quotaReason = quotaStuckReasonForText(errorMessage(err));
+            const quotaReason = quotaStuckReasonForText(result.message);
+            if (
+              opts.runnerCooldowns &&
+              hasHealthyRunnerForQuota(
+                jobChain,
+                opts.runnerCooldowns,
+                opts.cooldownNowMs?.() ?? Date.now(),
+                opts.authFingerprints
+              )
+            ) {
+              throw new Error(quotaReason);
+            }
+            await diary(quotaReason);
+            await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
             // The stuck outcome is decided; teardown noise must not replace it.
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
-            return { status: "skipped" as const, reason: quotaReason };
+            return { status: "skipped", reason: quotaReason };
           }
-          throw err;
-        }
-        if (gate.action === "skip") {
-          if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+          throwIfEngineFailed(result);
+          return undefined;
+        };
+
+        const addWorktreeFromDefault = async () => {
+          await clearLeftoverWorktree(loop);
+          await mkdir(dirname(worktree), { recursive: true });
+          await loop.runConfiguredGit(["worktree", "add", "-B", branch, worktree, `origin/${opts.job.defaultBranch}`], {
+            cwd: barePath,
+            env: loop.env,
+          });
+          await mkdir(worktree, { recursive: true });
+        };
+
+        const deleteRefIfPresent = async (ref: string) => {
+          if (!(await loop.refExists(ref))) return;
+          await loop.runConfiguredGit(["update-ref", "-d", ref], { cwd: barePath, env: loop.env });
+        };
+
+        const deletePushedIssueBranch = async () => {
+          if (branch === opts.job.defaultBranch) return;
+          await loop.detachWorktree();
+          await deleteRefIfPresent(`refs/heads/${branch}`);
+          try {
+            await loop.runConfiguredGit(["push", "origin", "--delete", branch], { cwd: barePath, env: loop.env });
+          } catch (err) {
+            const msg = errorMessage(err);
+            if (!/remote ref does not exist/i.test(msg)) throw err;
+          }
+          if (checkpoint) {
+            await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
+          }
+          await deleteRefIfPresent(`refs/remotes/origin/${branch}`);
+          await loop.runConfiguredGit(["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
+            cwd: barePath,
+            env: loop.env,
+          });
+          if (await loop.refExists(`refs/remotes/origin/${branch}`)) {
+            throw new Error(`failed to delete origin/${branch}`);
+          }
+        };
+
+        const readBlockedBy = async () => {
+          const resolved = await resolveWorkerBlocked(workerStore, worktree, owner, repo, log);
+          if (resolved.source === "tool") {
+            return { present: true as const, parsed: resolved.parsed, toolReason: workerStore.getBlockedOn()?.reason };
+          }
+          return {
+            ...(await (async () => {
+              const path = join(worktree, BLOCKED_BY_FILE);
+              try {
+                const info = await lstat(path);
+                if (!info.isFile()) return parseBlockedByArtifact(null, owner, repo);
+                return parseBlockedByArtifact(await readFile(path, "utf8"), owner, repo);
+              } catch {
+                return parseBlockedByArtifact(null, owner, repo);
+              }
+            })()),
+            toolReason: undefined as string | undefined,
+          };
+        };
+
+        const skipBlocked = async (reason: string, comment = reason) => {
+          await diary(comment);
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "skipped" as const, reason: gate.reason };
-        }
-        liveJob = await withIssueAuthorPermission(jobWithIssue(opts.job, gate.issue), opts.api);
-        snapshot = gate.snapshot;
+          return { status: "skipped" as const, reason };
+        };
 
+        // Leaves the issue retryable: a diary so the last visible state is not the
+        // in-progress sticky, and no `stampTerminalClaim`, which #114 forbids here.
+        const skipIncomplete = () => skipBlocked(INCOMPLETE_IMPLEMENT);
+
+        const applyValidYield = async (
+          blocker: { owner: string; repo: string; number: number },
+          toolReason?: string
+        ) => {
+          try {
+            await opts.api.createIssueDependency(owner, repo, issueNumber, {
+              owner: blocker.owner,
+              repo: blocker.repo,
+              number: blocker.number,
+            });
+          } catch (err) {
+            await deletePushedIssueBranch().catch(() => undefined);
+            const raw = errorMessage(err);
+            const secrets = workerPublishSecrets(loop.auth.token, jobChain);
+            return skipBlocked(
+              `failed to set dependency: ${redactGitSecrets(raw, secrets)}`,
+              `failed to set dependency: ${stickyFailureDetail(err, secrets)}`
+            );
+          }
+          await deletePushedIssueBranch().catch(() => undefined);
+          const base = blockedOnComment([blocker], owner, repo);
+          if (toolReason) {
+            const secrets = workerPublishSecrets(loop.auth.token, jobChain);
+            const scrubbed = redactGitSecrets(toolReason, secrets).trim();
+            if (scrubbed) return skipBlocked(`${base}: ${scrubbed}`, `${base}: ${scrubbed}`);
+          }
+          return skipBlocked(base);
+        };
+
+        // The issue text the gate last validated. Every later round — a rejected-yield
+        // reset or the incomplete hop — starts from this, never from the pre-run job.
+        let liveJob = opts.job;
+        let snapshot = snapshotFromJob(opts.job);
+
+        const resetAfterRejectedYield = async () => {
+          await deletePushedIssueBranch();
+          // A half-deleted tree fails here, in `clearLeftoverWorktree`, before the next spawn.
+          await addWorktreeFromDefault();
+          await writeTaskFiles(liveJob);
+          await restoreHandoffForFreshRun();
+        };
+
+        const handleYield = async (rejectedOnce: boolean): Promise<ImplementResult | "continue" | "retry"> => {
+          if (queue.length === 0) return "continue";
+          const artifact = await readBlockedBy();
+          if (!artifact.present) return "continue";
+          const decision = validateYield(artifact.parsed, queue, owner, repo, issueNumber);
+          if (decision.ok) return applyValidYield(decision.blocker, artifact.toolReason);
+          if (!rejectedOnce) return "retry";
+          await deletePushedIssueBranch();
+          return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+        };
+
+        let incompleteHopped = false;
+        let prFileContents: string | null = null;
+        let porcelain = "";
+        const customConventions = hasCustomConventions(conventions);
+        const implementBasePrompt = (forQueue: boolean): string | undefined => {
+          if (!customConventions) return forQueue ? buildImplementYieldPrompt(firstRunnerType) : undefined;
+          return withPrConventions(
+            forQueue ? buildImplementYieldPrompt(firstRunnerType) : buildImplementPrompt(firstRunnerType),
+            conventions,
+            issueNumber
+          );
+        };
+        const rejectedBasePrompt = (): string =>
+          customConventions
+            ? withPrConventions(buildBlockedByRejectedPrompt(firstRunnerType), conventions, issueNumber)
+            : buildBlockedByRejectedPrompt(firstRunnerType);
+        for (;;) {
+          const quotaSkip = await runEngine(
+            incompleteHopped
+              ? `Re-running OpenCode after incomplete implement for ${owner}/${repo}#${issueNumber}`
+              : `Running OpenCode for ${owner}/${repo}#${issueNumber}`,
+            "implement",
+            implementBasePrompt(queue.length > 0),
+            incompleteHopped ? { hopFromIncomplete: true } : undefined
+          );
+          if (quotaSkip) return quotaSkip;
+          // The chain had no runner left to hop to, so nothing ran this round: the
+          // sentinels are already stripped, so re-gating would only re-handle an
+          // issue edit and continue a session this worktree no longer has.
+          if (hopDeclined) return skipIncomplete();
+
+          const firstYield = await handleYield(false);
+          if (firstYield === "retry") {
+            log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
+            await resetAfterRejectedYield();
+            const quotaRetry = await runEngine(
+              `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+              "implement",
+              rejectedBasePrompt()
+            );
+            if (quotaRetry) return quotaRetry;
+            const secondYield = await handleYield(true);
+            if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+            if (secondYield !== "continue") return secondYield;
+          } else if (firstYield !== "continue") {
+            return firstYield;
+          }
+
+          let gate: ShipGate;
+          try {
+            gate = await gateShipAfterOpenCode({
+              api: opts.api,
+              owner,
+              repo,
+              issueNumber,
+              botUsername: opts.botUsername,
+              snapshot,
+              continueOpenCode: async (issue) => {
+                await writeTaskFiles(await withIssueAuthorPermission(jobWithIssue(opts.job, issue), opts.api));
+                const quotaContinued = await runEngine(
+                  `Re-running OpenCode after issue change for ${owner}/${repo}#${issueNumber}`,
+                  "follow-up",
+                  customConventions
+                    ? withPrConventions(
+                        queue.length > 0
+                          ? buildImplementYieldPrompt(firstRunnerType)
+                          : buildImplementPrompt(firstRunnerType),
+                        conventions,
+                        issueNumber
+                      )
+                    : queue.length > 0
+                      ? buildImplementYieldPrompt(firstRunnerType)
+                      : buildImplementPrompt(firstRunnerType),
+                  { continueSession: true }
+                );
+                if (quotaContinued) throw new Error((quotaContinued as { reason: string }).reason);
+              },
+            });
+          } catch (err) {
+            if (isQuotaError(err)) {
+              throwIfQuotaWait({
+                err,
+                model: opts.model,
+                fallbackModel: opts.fallbackModel,
+                chain: jobChain,
+                previousError: opts.previousError,
+                ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+                ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+                ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+              });
+              const quotaReason = quotaStuckReasonForText(errorMessage(err));
+              // The stuck outcome is decided; teardown noise must not replace it.
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+              return { status: "skipped" as const, reason: quotaReason };
+            }
+            throw err;
+          }
+          if (gate.action === "skip") {
+            if (gate.keepLocalWork) return skipClaimedWork(loop, gate.reason, { detach: false });
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped" as const, reason: gate.reason };
+          }
+          liveJob = await withIssueAuthorPermission(jobWithIssue(opts.job, gate.issue), opts.api);
+          snapshot = gate.snapshot;
+
+          throwIfAborted(opts.abortSignal);
+          prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
+          const validatedSkip = await resolveWorkerSkip(workerStore, worktree, log);
+          await saveWorkerHandoff(
+            workerStore,
+            worktree,
+            handoffStore,
+            handoffKey,
+            workerPublishSecrets(loop.auth.token, jobChain),
+            log
+          );
+          await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
+          porcelain = await worktreePorcelain(loop);
+          if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
+            if (validatedSkip) {
+              await loop.stopHeartbeat();
+              await diary(skipDiaryText(validatedSkip, workerPublishSecrets(loop.auth.token, jobChain)));
+              await loop.stampTerminalClaim(opts.api);
+              await loop.detachWorktree();
+              return { status: "no-changes" };
+            }
+            if (!incompleteHopped) {
+              // The chain owns whether a hop is possible; it answers `hopDeclined`
+              // at the top of the next round when there is no runner left.
+              incompleteHopped = true;
+              await writeTaskFiles(liveJob);
+              await restoreHandoffForFreshRun();
+              continue;
+            }
+            return skipIncomplete();
+          }
+          break;
+        }
+
+        if (branch === opts.job.defaultBranch) {
+          throw new Error("refusing to commit on the default branch");
+        }
+
+        await commitIfDirty(
+          loop,
+          porcelain,
+          renderCommitMessage(conventions.commitMessage, liveJob.title, issueNumber)
+        );
         throwIfAborted(opts.abortSignal);
-        prFileContents = await readPullRequestDescription(worktree);
-        const validatedSkip = await readValidatedSkip(worktree);
-        await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-        await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
-        porcelain = await worktreePorcelain(loop);
-        if (!porcelain && (await commitsAheadOf(loop, `origin/${opts.job.defaultBranch}`)) <= 0) {
-          if (validatedSkip) {
-            await loop.stopHeartbeat();
-            await diary(skipDiaryText(validatedSkip, workerPublishSecrets(loop.auth.token, jobChain)));
-            await loop.stampTerminalClaim(opts.api);
-            await loop.detachWorktree();
-            return { status: "no-changes" };
-          }
-          if (!incompleteHopped) {
-            // The chain owns whether a hop is possible; it answers `hopDeclined`
-            // at the top of the next round when there is no runner left.
-            incompleteHopped = true;
-            await writeTaskFiles(liveJob);
-            await restoreHandoffForFreshRun();
-            continue;
-          }
-          return skipIncomplete();
-        }
-        break;
-      }
-
-      if (branch === opts.job.defaultBranch) {
-        throw new Error("refusing to commit on the default branch");
-      }
-
-      await commitIfDirty(loop, porcelain, renderCommitMessage(conventions.commitMessage, liveJob.title, issueNumber));
-      throwIfAborted(opts.abortSignal);
-      if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = engineScratchTrackedReason(branch);
-        await diary(reason);
-        await loop.stopHeartbeat();
-        await loop.stampTerminalClaim(opts.api);
-        await loop.detachWorktree();
-        return { status: "skipped", reason };
-      }
-      if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
-        const reason = attachmentsTrackedReason(branch);
-        await diary(reason);
-        await loop.stopHeartbeat();
-        await loop.stampTerminalClaim(opts.api);
-        await loop.detachWorktree();
-        return { status: "skipped", reason };
-      }
-      {
-        const added = await tipAddedSentinels(loop.runConfiguredGit, {
-          cwd: loop.worktree,
-          env: loop.env,
-          defaultBranch: opts.job.defaultBranch,
-        });
-        if (added.length > 0) {
-          const reason = sentinelTrackedReason(branch, added);
+        if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = engineScratchTrackedReason(branch);
           await diary(reason);
           await loop.stopHeartbeat();
           await loop.stampTerminalClaim(opts.api);
           await loop.detachWorktree();
           return { status: "skipped", reason };
         }
-      }
-      try {
-        await pushClaimedBranch(loop, branch);
-      } catch (err) {
-        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
-        throw err;
-      }
-      if (checkpoint) {
-        await deleteCheckpointRef(loop, checkpoint.ref, { log }).catch(() => undefined);
-      }
-      throwIfAborted(opts.abortSignal);
+        if (await tipTracksAttachments(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {
+          const reason = attachmentsTrackedReason(branch);
+          await diary(reason);
+          await loop.stopHeartbeat();
+          await loop.stampTerminalClaim(opts.api);
+          await loop.detachWorktree();
+          return { status: "skipped", reason };
+        }
+        {
+          const added = await tipAddedSentinels(loop.runConfiguredGit, {
+            cwd: loop.worktree,
+            env: loop.env,
+            defaultBranch: opts.job.defaultBranch,
+          });
+          if (added.length > 0) {
+            const reason = sentinelTrackedReason(branch, added);
+            await diary(reason);
+            await loop.stopHeartbeat();
+            await loop.stampTerminalClaim(opts.api);
+            await loop.detachWorktree();
+            return { status: "skipped", reason };
+          }
+        }
+        try {
+          await pushClaimedBranch(loop, branch);
+        } catch (err) {
+          await failProvenanceIntent(opts, errorMessage(err), undefined, log);
+          throw err;
+        }
+        if (checkpoint) {
+          await deleteCheckpointRef(loop, checkpoint.ref, { log }).catch(() => undefined);
+        }
+        throwIfAborted(opts.abortSignal);
 
-      let pr: Pull;
-      try {
-        pr = await opts.api.createPullRequest(owner, repo, {
-          title: renderPrTitle(conventions.prTitle, liveJob.title, issueNumber),
-          body: wrapJumiPrBody(
-            buildPullRequestBody(
-              issueNumber,
-              prFileContents,
-              runner,
-              workerPublishSecrets(loop.auth.token, jobChain),
-              conventions.closingKeyword
-            )
-          ),
-          head: branch,
-          base: opts.job.defaultBranch,
+        let pr: Pull;
+        try {
+          pr = await opts.api.createPullRequest(owner, repo, {
+            title: renderPrTitle(conventions.prTitle, liveJob.title, issueNumber),
+            body: wrapJumiPrBody(
+              buildPullRequestBody(
+                issueNumber,
+                prFileContents,
+                runner,
+                workerPublishSecrets(loop.auth.token, jobChain),
+                conventions.closingKeyword
+              )
+            ),
+            head: branch,
+            base: opts.job.defaultBranch,
+          });
+        } catch (err) {
+          await failProvenanceIntent(opts, errorMessage(err), undefined, log);
+          throw err;
+        }
+        await scheduleAutomergeForNewPr({
+          api: opts.api,
+          forgeKind: opts.forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: pr.number,
+          baseBranch: opts.job.defaultBranch,
+          automergeRepos: opts.automergeRepos,
+          automergeEnabled: opts.automergeEnabled,
+          trustedSenderLogins: opts.trustedSenderLogins,
+          issueNumber,
+          botUsername: opts.botUsername,
+          log,
         });
-      } catch (err) {
-        await failProvenanceIntent(opts, errorMessage(err), undefined, log);
-        throw err;
-      }
-      await scheduleAutomergeForNewPr({
-        api: opts.api,
-        forgeKind: opts.forgeKind ?? "gitea",
-        owner,
-        repo,
-        prNumber: pr.number,
-        baseBranch: opts.job.defaultBranch,
-        automergeRepos: opts.automergeRepos,
-        automergeEnabled: opts.automergeEnabled,
-        trustedSenderLogins: opts.trustedSenderLogins,
-        issueNumber,
-        botUsername: opts.botUsername,
-        log,
-      });
-      const publishedHead = (
-        await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
-      ).trim();
-      await confirmProvenancePublication(
-        opts,
-        { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
-        log
-      );
-      await diary(`Opened ${pr.html_url}`);
-      // Push already landed; a failed destroy must not discard it.
-      await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
-      return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
-    },
-    async (err) => {
-      runner = thrownRunner(err) ?? runner;
-      provenanceCollector.noteError(err);
-      await noteProvenanceRunners(opts, provenanceCollector, log);
-      if (isQuotaError(err)) {
-        throwIfQuotaWait({
-          err,
-          model: opts.model,
-          fallbackModel: opts.fallbackModel,
-          chain: jobChain,
-          previousError: opts.previousError,
-          ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
-          ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
-          ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
-        });
-        const quotaReason = quotaStuckReasonForText(errorMessage(err));
-        await diary(quotaReason).catch(() => undefined);
-        await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
-        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
-          pushLanded: false,
-          logger: log,
-        });
-        return;
-      }
-      await diary(`Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`).catch(
-        () => undefined
-      );
-      const errorHash = fingerprintError(errorMessage(err));
-      if (errorHash) {
-        await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+        const publishedHead = (
+          await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env }).catch(() => "")
+        ).trim();
+        await confirmProvenancePublication(
+          opts,
+          { prNumber: pr.number, branch, headSha: publishedHead || headSha, collector: provenanceCollector },
+          log
+        );
+        await diary(`Opened ${pr.html_url}`);
+        // Push already landed; a failed destroy must not discard it.
+        await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
+        return { status: "pr", htmlUrl: pr.html_url, prNumber: pr.number };
+      },
+      async (err) => {
+        runner = thrownRunner(err) ?? runner;
+        provenanceCollector.noteError(err);
+        await noteProvenanceRunners(opts, provenanceCollector, log);
+        if (isQuotaError(err)) {
+          throwIfQuotaWait({
+            err,
+            model: opts.model,
+            fallbackModel: opts.fallbackModel,
+            chain: jobChain,
+            previousError: opts.previousError,
+            ...(opts.runnerCooldowns ? { runnerCooldowns: opts.runnerCooldowns } : {}),
+            ...(opts.cooldownNowMs ? { nowMs: opts.cooldownNowMs() } : {}),
+            ...(opts.authFingerprints ? { cooldownFingerprints: opts.authFingerprints } : {}),
+          });
+          const quotaReason = quotaStuckReasonForText(errorMessage(err));
+          await diary(quotaReason).catch(() => undefined);
+          await markQuotaStuckLatch(latches, latchKey, quotaReason, now).catch(() => undefined);
+          await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, {
+            pushLanded: false,
+            logger: log,
+          });
+          return;
+        }
+        await diary(`Jumi failed: ${stickyFailureDetail(err, workerPublishSecrets(loop.auth.token, jobChain))}`).catch(
           () => undefined
         );
+        const errorHash = fingerprintError(errorMessage(err));
+        if (errorHash) {
+          await appendStuckLatchFingerprint(latches, latchKey, { kind: "error", hash: errorHash }, now).catch(
+            () => undefined
+          );
+        }
+        await loop.stopHeartbeat();
+        await loop.stampTerminalClaim(opts.api).catch(() => undefined);
+        await loop.detachWorktree();
       }
-      await loop.stopHeartbeat();
-      await loop.stampTerminalClaim(opts.api).catch(() => undefined);
-      await loop.detachWorktree();
+    );
+  } finally {
+    workerStore.close();
+    try {
+      workerServer.close();
+    } catch {
+      // Best-effort: never replace the implement result.
     }
-  );
+  }
   if (
     checkpoint &&
     typeof implementResult === "object" &&
