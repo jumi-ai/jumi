@@ -16,6 +16,7 @@ import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { type HandoffStore, handoffsFor } from "./handoff.ts";
@@ -208,7 +209,7 @@ export function createIssueQueue(
           ...pickupPolicyForForge(
             config.forge,
             config.botUsername,
-            config.forge === "github" ? localPolicy.pickupLabel : undefined
+            forgeCapabilities(config.forge).pickupLabelApplies ? localPolicy.pickupLabel : undefined
           ),
           followupIgnoreLogins: localPolicy.followupIgnoreLogins,
           trustedSenderLogins: localPolicy.trustedSenderLogins,
@@ -698,7 +699,7 @@ export async function processWorkerTick(
   const repoTrusted = tickPolicy.trustedSenderLogins;
   const repoFollowupIgnore = tickPolicy.followupIgnoreLogins;
   const repoIgnoreLabel = tickPolicy.ignoreConflictsLabel;
-  const repoPickup = config.forge === "github" ? tickPolicy.pickupLabel : undefined;
+  const repoPickup = forgeCapabilities(config.forge).pickupLabelApplies ? tickPolicy.pickupLabel : undefined;
   const effectiveConfig =
     effectiveImplementMs === config.opencodeTimeoutMs &&
     effectiveFollowupMs === config.followupTimeoutMs &&
@@ -707,7 +708,7 @@ export async function processWorkerTick(
     repoTrusted === config.trustedSenderLogins &&
     repoFollowupIgnore === config.followupIgnoreLogins &&
     repoIgnoreLabel === config.ignoreConflictsLabel &&
-    (config.forge !== "github" || repoPickup === undefined || repoPickup === "jumi")
+    (!forgeCapabilities(config.forge).pickupLabelApplies || repoPickup === undefined || repoPickup === "jumi")
       ? config
       : {
           ...config,

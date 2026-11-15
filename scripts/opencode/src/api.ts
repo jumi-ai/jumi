@@ -1,3 +1,4 @@
+import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
 import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
 import type {
   ActionJob,
@@ -319,6 +320,7 @@ function finishForgePage(
  * All methods throw on non-2xx responses.
  */
 export class GiteaAPI {
+  readonly capabilities: ForgeCapabilities = FORGE_CAPABILITIES.gitea;
   private readonly base: string;
   private readonly token: string;
 

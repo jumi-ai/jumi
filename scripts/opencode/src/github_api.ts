@@ -1,3 +1,4 @@
+import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
 import { forgeRequestError, isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
 import type {
@@ -581,6 +582,7 @@ function needsSelfReviewGuard(event: string | undefined): boolean {
 }
 
 export class GithubAPI {
+  readonly capabilities: ForgeCapabilities = FORGE_CAPABILITIES.github;
   private readonly staticToken: string | undefined;
   private readonly auth: GithubAuth | undefined;
   private readonly base: string;

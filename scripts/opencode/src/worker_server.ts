@@ -9,6 +9,7 @@ import {
   ORDINAL_DEVICE_LOGIN_PORT,
 } from "./device_login.ts";
 import { createForge } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { handleGithubWebhook } from "./github_webhook.ts";
 import { ensureOpenCodeWellKnownAuth } from "./opencode_auth.ts";
 import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
@@ -247,8 +248,8 @@ async function main() {
       home: config.home,
       // The isolated GitHub factory never shows the controls: its Grok hop is
       // skip-if-unauthed.
-      hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
-      hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
+      hasXaiRunner: forgeCapabilities(config.forge).runnerChainsAvailable && chainHasOpenCodeXai(config),
+      hasCodexRunner: forgeCapabilities(config.forge).runnerChainsAvailable && chainHasCodex(config),
       codexTimeoutMs: config.opencodeTimeoutMs,
       isLeased: async () => {
         if (aborts.size > 0) return true;

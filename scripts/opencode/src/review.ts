@@ -23,6 +23,7 @@ import { type Engine, type EngineRunOptions, resolveEngine, resultRunner, throwI
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { hasResumableSession, withEngineChain } from "./fallback.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import { extractClosingIssueNumbers, extractWorkingIssueNumber, isWipOrDraft } from "./gitea_issues.ts";
 import {
   isIndependentReviewRefusal,
@@ -1118,7 +1119,7 @@ async function resolveProvenanceForReview(
   if (!opts.provenance) {
     throw new Error(provenanceLookupFailureReason(headSha, "provenance store unavailable"));
   }
-  const forge = (opts.forgeKind ?? "gitea").trim() || "gitea";
+  const forge = forgeCapabilities(opts.forgeKind).kind;
   return opts.provenance.lookupForReview({
     forge,
     owner: opts.owner,

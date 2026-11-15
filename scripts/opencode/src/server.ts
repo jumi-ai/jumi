@@ -25,6 +25,7 @@ import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { thrownRunner } from "./engine.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
+import { forgeCapabilities } from "./forge_capabilities.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { upsertWorkerComment } from "./gitea_issues.ts";
 import { handleGithubWebhook, pickupPolicyForForge } from "./github_webhook.ts";
@@ -1519,8 +1520,8 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
         home: config.home,
         // The isolated GitHub factory never shows the controls: its Grok hop
         // is skip-if-unauthed.
-        hasXaiRunner: config.forge !== "github" && chainHasOpenCodeXai(config),
-        hasCodexRunner: config.forge !== "github" && chainHasCodex(config),
+        hasXaiRunner: forgeCapabilities(config.forge).runnerChainsAvailable && chainHasOpenCodeXai(config),
+        hasCodexRunner: forgeCapabilities(config.forge).runnerChainsAvailable && chainHasCodex(config),
         codexTimeoutMs: config.opencodeTimeoutMs,
         isLeased: async () => {
           try {
