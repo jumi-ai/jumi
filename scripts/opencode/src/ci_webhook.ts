@@ -183,11 +183,9 @@ async function resolveReviewDrafts(
       branch = info?.default_branch?.trim() ?? "";
     }
     if (!branch || typeof getFile !== "function") return false;
-    const policy = await resolveRepoPolicy(
-      { api, owner, repo, ref: branch },
-      fallbackPolicyDeployment(),
-      { onUnreadable: "throw" }
-    );
+    const policy = await resolveRepoPolicy({ api, owner, repo, ref: branch }, fallbackPolicyDeployment(), {
+      onUnreadable: "throw",
+    });
     return policy.reviewDrafts;
   } catch (err) {
     logger?.(`review drafts settings unreadable for ${owner}/${repo}: ${errorMessage(err)}`);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
-import { type CiGateWait, DEFAULT_CI_GATE_WAIT } from "./repo_settings.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { type CiGateWait, DEFAULT_CI_GATE_WAIT } from "./repo_settings.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { errorMessage } from "./util/error.ts";
 

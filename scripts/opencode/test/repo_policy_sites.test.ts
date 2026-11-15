@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  ensureAutomergeAfterPush,
-  handleAutomergeLabelChange,
-  scheduleAutomergeForPr,
-} from "../src/automerge.ts";
+import { ensureAutomergeAfterPush, handleAutomergeLabelChange, scheduleAutomergeForPr } from "../src/automerge.ts";
 import { IGNORE_CONFLICTS_SETTINGS_UNREADABLE, loadIgnoreConflictsAuthors } from "../src/ignore_conflicts.ts";
 import type { IssueApi } from "../src/ports.ts";
 import { shouldEnqueuePushConflicts } from "../src/push_webhook.ts";

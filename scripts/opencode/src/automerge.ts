@@ -5,6 +5,7 @@ import type { ForgeKind } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { senderCanSteer } from "./permissions.ts";
 import type { Forge, IssueApi, IssueTimelineEvent } from "./ports.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import {
   compileReviewExcludePatterns,
   DEFAULT_AUTOMERGE_LABEL,
@@ -16,7 +17,6 @@ import {
   type RepoSettingsLoad,
   repoMode,
 } from "./repo_settings.ts";
-import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 

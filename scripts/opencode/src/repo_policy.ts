@@ -1,3 +1,4 @@
+import type { Forge } from "./ports.ts";
 import {
   type CiGateWait,
   type ConflictRegenerateEntry,
@@ -18,7 +19,6 @@ import {
   type RepoSettingsLoad,
   repoMode,
 } from "./repo_settings.ts";
-import type { Forge } from "./ports.ts";
 import { errorMessage } from "./util/error.ts";
 
 /** Forge file read accepted by the resolver (the only forge surface it touches). */

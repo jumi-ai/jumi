@@ -1,7 +1,7 @@
 import { handleAutomergeLabelChange } from "./automerge.ts";
 import { isJumiPrIdentity } from "./gitea_issues.ts";
-import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL } from "./repo_settings.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL } from "./repo_settings.ts";
 import { loginEquals } from "./util/login.ts";
 import { assertRepositoryPolicy, type WebhookPolicy } from "./webhook.ts";
 

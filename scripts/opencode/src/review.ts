@@ -65,6 +65,7 @@ import {
   REVIEWER_LOADER_PATH,
   WORKER_LOADER_PATH,
 } from "./release.ts";
+import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import type { CiGateWait } from "./repo_settings.ts";
 import {
   applyRepoChain,
@@ -80,7 +81,6 @@ import {
   REPO_SETTINGS_PATH,
   type RepoSettingsLoad,
 } from "./repo_settings.ts";
-import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
@@ -1401,11 +1401,9 @@ export async function loadReviewExcludeMatchers(opts: {
   let settings: RepoSettingsLoad;
   try {
     settings = (
-      await resolveRepoPolicy(
-        { api: opts.api, owner: opts.owner, repo: opts.repo, ref },
-        fallbackPolicyDeployment(),
-        { onUnreadable: "throw" }
-      )
+      await resolveRepoPolicy({ api: opts.api, owner: opts.owner, repo: opts.repo, ref }, fallbackPolicyDeployment(), {
+        onUnreadable: "throw",
+      })
     ).load;
   } catch (err) {
     opts.log(`review excludes unreadable for ${opts.owner}/${opts.repo}@${ref}: ${errorMessage(err)}`);

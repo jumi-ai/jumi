@@ -1,8 +1,8 @@
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { isWipOrDraft } from "./gitea_issues.ts";
 import { hasTrustedSenders, isListedLogin, senderCanSteer } from "./permissions.ts";
-import { effectivePickupLabel, effectiveTrustedSenderLogins } from "./repo_settings.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
+import { effectivePickupLabel, effectiveTrustedSenderLogins } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -136,11 +136,9 @@ async function loadTakeoverRepoPolicy(
     const branch = typeof defaultBranch === "string" ? defaultBranch.trim() : "";
     if (!branch || !api || typeof api.getRepoFile !== "function") return fallback;
     const loaded = (
-      await resolveRepoPolicy(
-        { api, owner, repo, ref: branch },
-        fallbackPolicyDeployment({ trustedSenderLogins }),
-        { onUnreadable: "throw" }
-      )
+      await resolveRepoPolicy({ api, owner, repo, ref: branch }, fallbackPolicyDeployment({ trustedSenderLogins }), {
+        onUnreadable: "throw",
+      })
     ).load;
     if (loaded.state !== "valid") {
       return preloadedAuthors === undefined ? { ...fallback, authors: [] } : fallback;
