@@ -57,6 +57,25 @@ const L_LINE_RE = /^L(\d+):\s+(\S.*)$/;
 
 const CHECK_LINE_RE = /^<!--\s*jumi-check:\s*(success|failure)(?:\s*;\s*([^>]*?))?\s*-->$/i;
 
+/**
+ * Make a free-text trailer reason safe for the single-line `jumi-check`
+ * HTML comment. Collapses all whitespace (including newlines) to single
+ * spaces, then replaces `>` (so also `-->`) with a safe form: `->` becomes
+ * `→` and any remaining `>` becomes `›`. The result never contains `>` or
+ * a newline, so a trailer built with it always parses back.
+ */
+export function sanitizeCheckReason(reason: string): string {
+  const flat = reason.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  return flat.replace(/->/g, "→").replace(/>/g, "›");
+}
+
+/** Single-line `jumi-check` trailer with a sanitized reason. */
+export function buildCheckTrailer(state: "success" | "failure", reason?: string): string {
+  const safe = sanitizeCheckReason(reason ?? "");
+  return safe ? `<!-- jumi-check: ${state}; ${safe} -->` : `<!-- jumi-check: ${state} -->`;
+}
+
 function lastNonEmptyLine(text: string): string {
   const lines = text.split(/\r?\n/);
   for (let i = lines.length - 1; i >= 0; i--) {

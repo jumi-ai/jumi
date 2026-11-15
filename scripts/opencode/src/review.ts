@@ -133,6 +133,7 @@ import {
 } from "./suggestion_hold.ts";
 import type { ReviewJob } from "./types.ts";
 import {
+  buildCheckTrailer,
   buildFindingsList,
   capSuggestionFindings,
   countBugFindings,
@@ -1699,11 +1700,12 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
   // The published trailer carries the same parent-computed counts. A bare
   // model trailer (no reason of its own) stays bare; any model-written reason
-  // is replaced so stale counts never publish.
+  // is replaced so stale counts never publish. The reason is sanitized so a
+  // `>` in free text can never break the single-line trailer.
   const modelReason = parsed.checkLine ? (parseCheckLine(parsed.checkLine)?.reason ?? "") : "";
   const publishedCheckLine =
     modelReason.trim() !== ""
-      ? `<!-- jumi-check: ${effectiveVerdict.state}; ${effectiveVerdict.description} -->`
+      ? buildCheckTrailer(effectiveVerdict.state, effectiveVerdict.description)
       : parsed.checkLine;
   if (blockingQuestions > 0) {
     logDiagnostic(log, "review_blocking_questions", {
@@ -2646,6 +2648,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     };
 
     const publishMcpVerdict = async (htmlUrl?: string): Promise<ReviewResult> => {
+      const storedVerdict = verdictStore.getVerdict();
       const markdown = verdictStore.toMarkdown();
       let gated = await gatePersonalJumiContractEnv(opts.owner, opts.repo, opts.workspace, markdown);
       gated = redactGitSecrets(gated, claudeApiKeySecrets(effectiveChain));
@@ -2653,6 +2656,21 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         gated = `${opts.noCiNote}\n\n${gated}`;
       }
       const parsed = parseReviewOutput(gated);
+      if (parsed.verdict.incomplete && storedVerdict) {
+        logDiagnostic(log, "review_trailer_unparsable", {
+          review: reviewLabel,
+          stored_state: storedVerdict.state,
+          stored_reason: storedVerdict.reason ?? "",
+        });
+        // A recorded verdict must never become "no findings" because the
+        // trailer text failed to parse: republish from the stored verdict
+        // with a sanitized reason. With `toMarkdown()` sanitizing at build
+        // time this repair is unreachable; it guards future regressions.
+        const repaired = storedVerdict.reason
+          ? `${parsed.comment ? `${parsed.comment}\n` : ""}${buildCheckTrailer(storedVerdict.state, storedVerdict.reason)}`
+          : `${parsed.comment ? `${parsed.comment}\n` : ""}${buildCheckTrailer(storedVerdict.state)}`;
+        return await publishMarkdownVerdict(repaired);
+      }
       if (parsed.verdict.state === "failure" && !hasBlockingFindings(parsed.comment)) {
         return await persistSkipAndStatus(INCOMPLETE_NO_FINDINGS_REASON, htmlUrl, INCOMPLETE_REVIEW_STUCK);
       }

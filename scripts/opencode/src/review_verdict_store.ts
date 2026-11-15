@@ -9,6 +9,8 @@
  * discovering it afterwards.
  */
 
+import { buildCheckTrailer } from "./verdict.ts";
+
 export type ReviewMcpSeverity = "bug" | "risk" | "question" | "suggestion";
 
 export const REVIEW_MCP_SEVERITIES: readonly ReviewMcpSeverity[] = ["bug", "risk", "question", "suggestion"];
@@ -324,9 +326,7 @@ export class ReviewVerdictStore {
     }
     const verdict = this.verdict;
     const trailer = verdict
-      ? verdict.reason
-        ? `<!-- jumi-check: ${verdict.state}; ${verdict.reason} -->`
-        : `<!-- jumi-check: ${verdict.state} -->`
+      ? buildCheckTrailer(verdict.state, verdict.reason)
       : "<!-- jumi-check: failure; Incomplete review: no verdict -->";
     return [...lines, trailer].join("\n");
   }
