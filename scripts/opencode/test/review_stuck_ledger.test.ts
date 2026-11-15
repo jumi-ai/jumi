@@ -23,31 +23,15 @@ import {
   writeStuckState,
 } from "../src/stuck.ts";
 import { handleIssueCancel } from "../src/worker.ts";
-import { emptyCiMethods, makeComment, makeFile, makeIssue, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeComment, makeFile, makeIssue, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function stuckLedgerApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 function frozenGit(): (args: string[]) => Promise<string> {
@@ -89,7 +73,7 @@ describe("review stuck ledger survives HOME change", () => {
           ...baseOptions,
           home,
           skipLatches: store,
-          api: makeApi(),
+          api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;
@@ -121,7 +105,7 @@ describe("review stuck ledger survives HOME change", () => {
           ...baseOptions,
           home,
           skipLatches: store,
-          api: makeApi(),
+          api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;
@@ -149,7 +133,7 @@ describe("review stuck ledger survives HOME change", () => {
           ...baseOptions,
           home,
           skipLatches: store,
-          api: makeApi(),
+          api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;
@@ -193,7 +177,7 @@ describe("DATABASE_URL disables the HOME file", () => {
           workspace,
           home,
           skipLatches: store,
-          api: makeApi(),
+          api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;
@@ -233,7 +217,7 @@ describe("DATABASE_URL disables the HOME file", () => {
         ...baseOptions,
         home,
         skipLatches: store,
-        api: makeApi(),
+        api: stuckLedgerApi(),
         gitRunner: async () => {
           throw new Error("git should not be called on quota skip");
         },
@@ -274,7 +258,7 @@ describe("DATABASE_URL disables the HOME file", () => {
       const result = await reviewPullRequest({
         ...baseOptions,
         home,
-        api: makeApi(),
+        api: stuckLedgerApi(),
         gitRunner: frozenGit(),
         openCodeRunner: async () => {
           openCode++;
@@ -315,7 +299,7 @@ describe("review and worker stuck cells are isolated", () => {
           workspace,
           home,
           skipLatches: store,
-          api: makeApi(),
+          api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;

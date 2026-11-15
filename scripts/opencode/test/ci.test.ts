@@ -37,27 +37,11 @@ import {
 import { followUpStatePath } from "../src/claim.ts";
 import { writeFollowUpState } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 import { emptyCiMethods, makeComment, makeIssue, makePR, makeRepo } from "./fixtures.ts";
 
-function makeApi(overrides: Partial<IssueApi> = {}): IssueApi {
-  const defaults: IssueApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_owner, _repo, index) => makePR({ number: index }),
-    listOpenPulls: async () => [],
-    createPullRequest: async (_owner, _repo, pull) => makePR({ title: pull.title, body: pull.body }),
-    closePullRequest: async (_owner, _repo, index) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_owner, _repo, index, body) => makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
-    updateIssueComment: async (_owner, _repo, _id, body) => makeComment({ body }),
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  };
-  return { ...defaults, ...overrides };
+function ciApi(overrides: Partial<IssueApi> = {}): IssueApi {
+  return makeIssueApi({ ...overrides });
 }
 
 describe("latestStatuses", () => {
@@ -270,7 +254,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             { id: 1, context: "jumi/opencode-review", status: "failure" },
             { id: 2, context: "build", status: "failure" },
@@ -294,7 +278,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", status: "in_progress" }],
         }),
         owner: "kirmanak",
@@ -315,7 +299,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
           ],
@@ -340,7 +324,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "success" }],
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
@@ -366,7 +350,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             { id: 1, context: "ci.yml / build (pull_request)", status: "pending" },
             { id: 2, context: "codecov", status: "success" },
@@ -393,7 +377,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "failure" }],
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "failure" },
@@ -418,7 +402,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "codecov", status: "pending" }],
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "success" },
@@ -441,7 +425,7 @@ describe("inspectCi", () => {
     try {
       let listed: { headSha?: string } | undefined;
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listActionJobs: async (_owner, _repo, opts) => {
             listed = opts;
             throw new Error("rate limited");
@@ -467,7 +451,7 @@ describe("inspectCi", () => {
     try {
       const lines: string[] = [];
       await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => {
             throw new Error("statuses → 500");
           },
@@ -495,7 +479,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
           listActionJobs: async () => {
             throw new Error("rate limited");
@@ -521,7 +505,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi(),
+        api: ciApi(),
         owner: "kirmanak",
         repo: "demo",
         sha: "headsha",
@@ -543,7 +527,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listActionJobs: async () => [
             { id: 9, name: "build", head_sha: "headsha", status: "completed", conclusion: "skipped" },
           ],
@@ -567,7 +551,7 @@ describe("inspectCi", () => {
     try {
       const requested: number[] = [];
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             {
               id: 1,
@@ -600,7 +584,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "ci.yml / build (pull_request)", status: "failure" }],
           listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", conclusion: "failure" }],
           getActionJobLogs: async () => "##[error]from jobs list\n",
@@ -622,7 +606,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "deploy", status: "failure" }],
           listActionJobs: async () => [{ id: 9, name: "deploy", head_sha: "headsha", conclusion: "failure" }],
           getActionJobLogs: async () =>
@@ -644,7 +628,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "test", status: "failure" }],
           listActionJobs: async () => [{ id: 9, name: "test", head_sha: "headsha", conclusion: "failure" }],
           getActionJobLogs: async () =>
@@ -673,7 +657,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure", target_url: "/jobs/9" }],
           listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", conclusion: "failure" }],
           getActionJobLogs: async () => "##[error]Failed to find package 'platforms;android-37'\n",
@@ -690,7 +674,7 @@ describe("inspectCi", () => {
       expect(inspection.unhandled[0]?.flake).toBeUndefined();
       expect(
         await needsCiFollowUp({
-          api: makeApi({
+          api: ciApi({
             listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
             getActionJobLogs: async () => "##[error]boom\n",
           }),
@@ -751,7 +735,7 @@ describe("inspectCi", () => {
     try {
       const requested: number[] = [];
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
           listCheckRuns: async () => [
             {
@@ -788,7 +772,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
           listCheckRuns: async () => [
             {
@@ -824,7 +808,7 @@ describe("inspectCi", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const pending = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
           listCheckRuns: async () => [
             { id: 4, context: "checks", status: "failure", jobId: 4 },
@@ -841,7 +825,7 @@ describe("inspectCi", () => {
       expect(pending.failed.map((c) => c.name)).toEqual(["checks"]);
       expect(
         await needsCiFollowUp({
-          api: makeApi({
+          api: ciApi({
             listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
             listCheckRuns: async () => [
               { id: 4, context: "checks", status: "failure", jobId: 4 },
@@ -857,7 +841,7 @@ describe("inspectCi", () => {
       ).toBe(false);
 
       const done = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
           listCheckRuns: async () => [
             { id: 4, context: "checks", status: "failure", jobId: 4 },
@@ -892,7 +876,7 @@ describe("inspectCi", () => {
       });
       expect(
         await needsCiFollowUp({
-          api: makeApi({
+          api: ciApi({
             listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
             getActionJobLogs: async () => "##[error]boom\n",
           }),
@@ -997,7 +981,7 @@ describe("ci check summaries", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             {
               id: 1,
@@ -1057,7 +1041,7 @@ describe("ci check summaries", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 1, context: "jumi/opencode-review", state: "success" }],
           listCheckRuns: async () => [
             {
@@ -1175,7 +1159,7 @@ describe("required-context pending", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             { id: 1, context: "build", status: "success" },
             { id: 2, context: "optional", status: "pending" },
@@ -1200,7 +1184,7 @@ describe("required-context pending", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [
             { id: 1, context: "build", status: "pending" },
             { id: 2, context: "optional", status: "success" },
@@ -1224,7 +1208,7 @@ describe("required-context pending", () => {
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-req-"));
     try {
       const inspection = await inspectCi({
-        api: makeApi({
+        api: ciApi({
           listCommitStatuses: async () => [{ id: 2, context: "optional", status: "success" }],
         }),
         owner: "kirmanak",
@@ -1247,7 +1231,7 @@ describe("required-context pending", () => {
       const statuses = [{ id: 1, context: "build", status: "success" as const }];
       const pendingOnly = [{ id: 2, context: "optional", status: "pending" as const }];
       const withSet = await inspectCi({
-        api: makeApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
+        api: ciApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
         owner: "kirmanak",
         repo: "demo",
         sha: "headsha",
@@ -1256,7 +1240,7 @@ describe("required-context pending", () => {
       });
       expect(withSet.pending).toBe(true);
       const narrowed = await inspectCi({
-        api: makeApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
+        api: ciApi({ listCommitStatuses: async () => [...statuses, ...pendingOnly] }),
         owner: "kirmanak",
         repo: "demo",
         sha: "headsha",

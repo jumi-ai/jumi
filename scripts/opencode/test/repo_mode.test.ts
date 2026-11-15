@@ -11,8 +11,8 @@ import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { processEngineTick } from "../src/server.ts";
 import { processWorkerTick } from "../src/worker.ts";
+import { makeIssueApi, makeReviewApi } from "./fakes/forge.ts";
 import {
-  emptyCiMethods,
   makeComment,
   makeConfig,
   makeIssue,
@@ -27,18 +27,12 @@ function modeRepoFile(mode: string) {
   return async () => ({ found: true as const, content: `mode: ${mode}\n` });
 }
 
-function makeReviewApi(mode: string | undefined): ReviewApi & { statuses: unknown[]; comments: string[] } {
+function modeReviewApi(mode: string | undefined): ReviewApi & { statuses: unknown[]; comments: string[] } {
   const statuses: unknown[] = [];
   const comments: string[] = [];
-  const api = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+  const fake = makeReviewApi({
     getPRFiles: async () => [{ filename: "a.ts", status: "modified" as const, additions: 1, deletions: 0, changes: 1 }],
-    getIssue: async () => makeIssue(),
     getRepoFile: mode === undefined ? undefined : modeRepoFile(mode),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_o: string, _r: string, _i: number, body: string) => {
       comments.push(body);
       return makeComment({ body });
@@ -47,40 +41,19 @@ function makeReviewApi(mode: string | undefined): ReviewApi & { statuses: unknow
       comments.push(body);
       return makeComment({ id, body });
     },
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_o: string, _r: string, _s: string, status: unknown) => {
       statuses.push(status);
       return status as never;
     },
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" as const }],
-  } as unknown as ReviewApi & { statuses: unknown[]; comments: string[] };
-  api.statuses = statuses;
-  api.comments = comments;
-  return api;
+  });
+  return Object.assign(fake, { statuses, comments });
 }
 
-function makeIssueApi(mode: string | undefined): IssueApi & { comments: string[] } {
+function modeIssueApi(mode: string | undefined): IssueApi & { comments: string[] } {
   const comments: string[] = [];
-  const api = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getIssue: async () => makeIssue(),
-    getPR: async (_o: string, _r: string, index: number) => makePR({ number: index }),
+  const fake = makeIssueApi({
     getRepoFile: mode === undefined ? undefined : modeRepoFile(mode),
-    listOpenPulls: async () => [],
-    createPullRequest: async (_o: string, _r: string, pull: { title: string; body: string }) =>
-      makePR({ title: pull.title, body: pull.body }),
-    closePullRequest: async (_o: string, _r: string, index: number) => makePR({ number: index, state: "closed" }),
-    updatePullRequestBody: async (_o: string, _r: string, index: number, body: string) =>
-      makePR({ number: index, body }),
-    findStickyIssueComment: async () => undefined,
     createIssueComment: async (_o: string, _r: string, _i: number, body: string) => {
       comments.push(body);
       return makeComment({ body });
@@ -89,13 +62,8 @@ function makeIssueApi(mode: string | undefined): IssueApi & { comments: string[]
       comments.push(body);
       return makeComment({ body });
     },
-    listIssueComments: async () => [],
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    ...emptyCiMethods(),
-  } as unknown as IssueApi & { comments: string[] };
-  api.comments = comments;
-  return api;
+  });
+  return Object.assign(fake, { comments });
 }
 
 describe("repository mode", () => {
@@ -104,7 +72,7 @@ describe("repository mode", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeReviewApi("off");
+      const api = modeReviewApi("off");
       let ran = 0;
       const result = await processEngineTick(
         store,
@@ -138,7 +106,7 @@ describe("repository mode", () => {
     try {
       const store = new MemoryReviewJobStore();
       await store.enqueue(makeJob());
-      const api = makeReviewApi("review-only");
+      const api = modeReviewApi("review-only");
       let ran = 0;
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: async (args) => {
@@ -165,7 +133,7 @@ describe("repository mode", () => {
   test("review-only mode skips a worker job with one disabled note and no runner", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
-    const api = makeIssueApi("review-only");
+    const api = modeIssueApi("review-only");
     let ran = 0;
     const result = await processWorkerTick(store, makeWorkerConfig(), api, "worker-1", {
       implement: async () => {
@@ -184,7 +152,7 @@ describe("repository mode", () => {
   test("off mode skips a worker job silently", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob());
-    const api = makeIssueApi("off");
+    const api = modeIssueApi("off");
     let ran = 0;
     const result = await processWorkerTick(store, makeWorkerConfig(), api, "worker-1", {
       implement: async () => {

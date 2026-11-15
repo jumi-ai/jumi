@@ -24,7 +24,8 @@ import {
   runnerNameForStamp,
 } from "../src/runners.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
-import { emptyCiMethods, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
 
 const spark: NamedRunner = { name: "spark", type: "opencode", model: "provider-a/spark", variant: "xhigh" };
 const grok: NamedRunner = { name: "grok", type: "opencode", model: "provider-b/grok", variant: "high" };
@@ -454,29 +455,12 @@ describe("independent review plus selection", () => {
   });
 });
 
-function makeReviewApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  return {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function selectionApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_o, _r, _i, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_o, _r, id, body) => makeComment({ id, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_o, _r, _s, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     ...overrides,
-  } as ReviewApi;
+  });
 }
 
 describe("integrated reviewer and worker paths", () => {
@@ -487,7 +471,7 @@ describe("integrated reviewer and worker paths", () => {
       const logs: string[] = [];
       const chain: NamedRunner[] = [spark, grok, claude];
       const result = await reviewPullRequest({
-        api: makeReviewApi(),
+        api: selectionApi(),
         owner: "o",
         repo: "r",
         prNumber: 7,
@@ -532,7 +516,7 @@ describe("integrated reviewer and worker paths", () => {
     try {
       const seenModels: string[] = [];
       await reviewPullRequest({
-        api: makeReviewApi(),
+        api: selectionApi(),
         owner: "o",
         repo: "r",
         prNumber: 7,

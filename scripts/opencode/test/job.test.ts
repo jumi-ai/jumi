@@ -13,41 +13,14 @@ import {
   refuseXaiOAuth,
 } from "../src/job_requirements.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
-import {
-  emptyCiMethods,
-  makeComment,
-  makeConfig,
-  makeFile,
-  makeIssue,
-  makeIssueJob,
-  makeJob,
-  makePR,
-  makeRepo,
-  makeWorkerConfig,
-} from "./fixtures.ts";
+import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
+import { makeConfig, makeFile, makeIssue, makeIssueJob, makeJob, makeRepo, makeWorkerConfig } from "./fixtures.ts";
 
-function makeReviewApi() {
-  return {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function jobReviewApi() {
+  return makeSharedReviewApi({
     getPRFiles: async () => [makeFile()],
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async () => makeComment(),
-    updateIssueComment: async () => makeComment(),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_o: string, _r: string, _s: string, status: { state: string }) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  } as never;
+  });
 }
 
 function frozenGitRunner() {
@@ -85,7 +58,7 @@ describe("one-shot lease conditions", () => {
         engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         // biome-ignore lint/suspicious/noExplicitAny: fake forge for the lease-taken path.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
         logger: (m) => logs.push(m),
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
@@ -118,7 +91,7 @@ describe("one-shot lease conditions", () => {
         engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         // biome-ignore lint/suspicious/noExplicitAny: fake forge for the failure path.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
           workspacePreparer: async () => undefined,
@@ -152,7 +125,7 @@ describe("one-shot lease conditions", () => {
       engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
       workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
       // biome-ignore lint/suspicious/noExplicitAny: unreachable ledger never touches the forge.
-      api: makeReviewApi() as any,
+      api: jobReviewApi() as any,
     });
     expect(result.exitCode).toBe(1);
   });
@@ -185,7 +158,7 @@ describe("one-shot lease conditions", () => {
         engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
         // biome-ignore lint/suspicious/noExplicitAny: ledger-down path uses the fake forge.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
           workspacePreparer: async () => undefined,
@@ -235,7 +208,7 @@ describe("one-shot xAI OAuth refusal", () => {
       }),
       workerConfig: makeWorkerConfig(),
       // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
-      api: makeReviewApi() as any,
+      api: jobReviewApi() as any,
     });
     expect(result.exitCode).toBe(2);
     expect(result.reason).toMatch(/runner/i);
@@ -259,7 +232,7 @@ describe("one-shot xAI OAuth refusal", () => {
       }),
       workerConfig: makeWorkerConfig(),
       // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
-      api: makeReviewApi() as any,
+      api: jobReviewApi() as any,
     });
     expect(result.exitCode).toBe(2);
     expect(result.reason).toMatch(/independentReview/i);
@@ -280,7 +253,7 @@ describe("one-shot xAI OAuth refusal", () => {
         engineConfig: makeConfig({ opencodeConfig: configPath, opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig(),
         // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
       });
       expect(refused.exitCode).toBe(2);
       const allowed = await runOneShotJob({
@@ -289,7 +262,7 @@ describe("one-shot xAI OAuth refusal", () => {
         engineConfig: makeConfig({ opencodeConfig: configPath, opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig(),
         // biome-ignore lint/suspicious/noExplicitAny: static-key path still leases.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
         fetchImpl: (async () => {
           throw new Error("unused");
         }) as unknown as typeof fetch,
@@ -312,7 +285,7 @@ describe("one-shot xAI OAuth refusal", () => {
             engineConfig: makeConfig({ opencodeConfig: configPath, opencodeWellKnownUrl: "disabled" }),
             workerConfig: makeWorkerConfig(),
             // biome-ignore lint/suspicious/noExplicitAny: static key path uses the fake forge.
-            api: makeReviewApi() as any,
+            api: jobReviewApi() as any,
             engineExtras: {
               gitRunner: frozenGitRunner() as never,
               workspacePreparer: async () => undefined,
@@ -402,7 +375,7 @@ describe("one-shot Antigravity refusal", () => {
       }),
       workerConfig: makeWorkerConfig(),
       // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
-      api: makeReviewApi() as any,
+      api: jobReviewApi() as any,
     });
     expect(result.exitCode).toBe(2);
     expect(result.reason).toContain(ANTIGRAVITY_JOB_CONSTRAINT);
@@ -427,7 +400,7 @@ describe("one-shot Antigravity refusal", () => {
       }),
       workerConfig: makeWorkerConfig(),
       // biome-ignore lint/suspicious/noExplicitAny: refusal happens before the forge is touched.
-      api: makeReviewApi() as any,
+      api: jobReviewApi() as any,
     });
     expect(result.exitCode).toBe(2);
     expect(result.reason).toMatch(/independentReview/i);
@@ -446,7 +419,7 @@ describe("one-shot Antigravity refusal", () => {
         engineConfig: makeConfig({ opencodeWellKnownUrl: "disabled" }),
         workerConfig: makeWorkerConfig(),
         // biome-ignore lint/suspicious/noExplicitAny: agy-free chain uses the fake forge.
-        api: makeReviewApi() as any,
+        api: jobReviewApi() as any,
         engineExtras: {
           gitRunner: frozenGitRunner() as never,
           workspacePreparer: async () => undefined,

@@ -9,16 +9,8 @@ import type { ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
 import { findPreviousReview, loadReviewDelta } from "../src/review_delta.ts";
 import { type GitRunner, runGit } from "../src/workspace.ts";
-import {
-  emptyCiMethods,
-  makeBranch,
-  makeComment,
-  makeFile,
-  makeIssue,
-  makePR,
-  makeRepo,
-  makeUser,
-} from "./fixtures.ts";
+import { makeReviewApi } from "./fakes/forge.ts";
+import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
 const MARKER = "<!-- jumi-review:kirmanak/demo#7 -->";
 
@@ -71,29 +63,12 @@ const PULL_FILES = [
 const ESSAY = "PREVIOUS_ESSAY: the whole change reads fine apart from b.";
 const FINDING = "b.ts:1: 🟡 risk: `b` is fragile. Guard it.";
 
-function makeApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
-  const defaults: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-    getPR: async () => makePR(),
+function deltaApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
+  return makeReviewApi({
     getPRFiles: async () => PULL_FILES,
-    getIssue: async () => makeIssue(),
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ id: 1, body }),
-    updateIssueComment: async (_owner, _repo, commentId, body) => makeComment({ id: commentId, body }),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
-    createCommitStatus: async (_owner, _repo, _sha, status) => status,
-    ...emptyCiMethods(),
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-  };
-  return { ...defaults, ...overrides };
+    ...overrides,
+  });
 }
 
 /** Real git for the delta reads; the checkout bookkeeping stays stubbed. */
@@ -122,7 +97,7 @@ async function reviewPrompt(dir: string, head: string, comments: Comment[], maxT
     workspacePreparer: async () => undefined,
     logger: () => undefined,
     gitRunner: repoGit(head),
-    api: makeApi({
+    api: deltaApi({
       getPR: async () => makePR({ head: makeBranch({ sha: head }) }),
       listIssueComments: async () => comments,
     }),

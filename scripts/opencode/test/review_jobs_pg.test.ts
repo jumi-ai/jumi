@@ -21,8 +21,8 @@ import { processEngineTick, reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { processWorkerTick } from "../src/worker.ts";
 import type { GitRunner } from "../src/workspace.ts";
+import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import {
-  emptyCiMethods,
   makeComment,
   makeConfig,
   makeFile,
@@ -62,25 +62,11 @@ function failingLookupApi(pr = makePR()): {
     lists++;
     throw new Error("rate limited");
   };
-  const api: ReviewApi = {
-    getRepo: async () => makeRepo(),
-    getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
+  const api: ReviewApi = makeSharedReviewApi({
     getPR: async () => pr,
-    getPRFiles: async () => [],
     getIssue: async () => {
       throw new Error("unused");
     },
-    listIssueComments: async () => [],
-    findStickyIssueComment: async () => undefined,
-    createIssueComment: async () => makeComment(),
-    updateIssueComment: async () => makeComment(),
-    listPullReviewComments: async () => [],
-    listPullReviews: async () => [],
-    createPullReview: async () => ({ id: 1 }),
-    submitPullReview: async () => ({ id: 1 }),
-    resolvePullComment: async () => undefined,
-    unresolvePullComment: async () => undefined,
-    dismissPullReview: async () => ({ id: 1 }),
     createCommitStatus: async (_owner, _repo, _sha, status) => {
       statuses.push({ state: status.state, description: status.description });
       return status;
@@ -88,8 +74,7 @@ function failingLookupApi(pr = makePR()): {
     listCommitStatuses: boom,
     listCheckRuns: boom,
     listActionJobs: boom,
-    getActionJobLogs: async () => "",
-  };
+  });
   return { api, lists: () => lists, statuses };
 }
 
@@ -514,28 +499,11 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(await indexExists("jumi_run_usage_job_key")).toBe(true);
   });
 
-  function makeReviewApi(): ReviewApi {
-    return {
-      getRepo: async () => makeRepo(),
-      getCollaboratorPermission: async () => ({ permission: "write", role_name: "write" }),
-      getPR: async () => makePR(),
+  function pgReviewApi(): ReviewApi {
+    return makeSharedReviewApi({
       getPRFiles: async () => [makeFile()],
-      getIssue: async () => makeIssue(),
-      listIssueComments: async () => [],
-      findStickyIssueComment: async () => undefined,
-      createIssueComment: async () => makeComment(),
-      updateIssueComment: async () => makeComment(),
-      listPullReviewComments: async () => [],
-      listPullReviews: async () => [],
-      createPullReview: async () => ({ id: 1 }),
-      submitPullReview: async () => ({ id: 1 }),
-      resolvePullComment: async () => undefined,
-      unresolvePullComment: async () => undefined,
-      dismissPullReview: async () => ({ id: 1 }),
-      createCommitStatus: async (_owner, _repo, _sha, status) => status,
-      ...emptyCiMethods(),
       listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
-    };
+    });
   }
 
   function frozenGitRunner(): GitRunner {
@@ -577,7 +545,7 @@ describePg("PgReviewJobStore against real postgres", () => {
       const result = await processEngineTick(
         store2,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeReviewApi(),
+        pgReviewApi(),
         "engine-2",
         {
           gitRunner: frozenGitRunner(),
@@ -647,7 +615,7 @@ describePg("PgReviewJobStore against real postgres", () => {
       await processEngineTick(
         store,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeReviewApi(),
+        pgReviewApi(),
         "engine-1",
         {
           gitRunner: frozenGitRunner(),
@@ -664,7 +632,7 @@ describePg("PgReviewJobStore against real postgres", () => {
       const result = await processEngineTick(
         store2,
         makeConfig({ workdir: workspace, home: workspace }),
-        makeReviewApi(),
+        pgReviewApi(),
         "engine-2",
         {
           gitRunner: frozenGitRunner(),
@@ -779,7 +747,7 @@ describePg("PgReviewJobStore against real postgres", () => {
         await processEngineTick(
           store,
           makeConfig({ workdir: workspace, home: workspace }),
-          makeReviewApi(),
+          pgReviewApi(),
           "engine-1",
           extras,
           () => undefined
