@@ -476,11 +476,15 @@ describe("processWorkerTick", () => {
       seen.push(opts.job.issueNumber);
       return { status: "pr" as const, prNumber: opts.job.issueNumber, htmlUrl: "https://example" };
     };
-    const results = await Promise.all([
-      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-a", { implement }),
-      processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", { implement }),
-    ]);
-    expect(results).toEqual(["processed", "processed"]);
+    // Sequential on purpose: the golden trace harness patches the shared
+    // store per traced call, so concurrent traced ticks on one store record
+    // into each other's effect lists, and the lease order (who gets 12 vs
+    // 13) is timing-dependent. Either interleaving is a correct outcome, but
+    // the golden file can only hold one. True lease concurrency is covered by
+    // "two workers cannot double-lease the same job" above.
+    const first = await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-a", { implement });
+    const second = await processWorkerTick(store, makeWorkerConfig(), workerApi(), "worker-b", { implement });
+    expect([first, second]).toEqual(["processed", "processed"]);
     expect(seen.sort((a, b) => a - b)).toEqual([12, 13]);
     expect(store.rows.every((row) => row.state === "succeeded")).toBe(true);
   });
