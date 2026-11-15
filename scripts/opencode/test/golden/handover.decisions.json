@@ -1153,6 +1153,288 @@
     },
     "name": "enqueueFollowUpFromReview"
   },
+  "handover.test.ts::32": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/a.ts:2: 🔴 bug: null deref Guard it.\n<!-- jumi-check: failure; 1 blocking -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::33": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/a.ts:2: 🔴 bug: null deref Guard it.\n<!-- jumi-check: failure; 1 blocking -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::34": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::35": {
+    "claimExists": null,
+    "effects": [],
+    "input": {
+      "markdown": "<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::36": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "❓ q: why? explain\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::37": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "❓ q: why? explain\n<!-- jumi-check: success -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
   "handover.test.ts::4": {
     "claimExists": null,
     "effects": [],
