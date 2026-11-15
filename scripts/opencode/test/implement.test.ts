@@ -32,6 +32,7 @@ import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makeLinkedIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 const originalPath = process.env.PATH;
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -72,17 +73,6 @@ function implementApi(overrides: Partial<IssueApi> = {}): IssueApi & { comments:
     ...overrides,
   });
   return Object.assign(fake, { comments, pulls });
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-impl-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-impl-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 describe("isValidatedSkipText", () => {
@@ -2705,16 +2695,15 @@ describe("implementIssue", () => {
   test("redacts the git token from engine stderr in the failure comment and log", async () => {
     await withDirs(async (home, workdir) => {
       const token = "ghs_leaky_git_token_74";
-      const binDir = await mkdtemp(join(tmpdir(), "jumi-impl-bin-"));
-      try {
+      await withWorkspace(async (binDir) => {
         const bin = join(binDir, "opencode");
         await writeFile(
           bin,
           `#!/bin/sh
-printf 'session' > "$OPENCODE_DB"
-echo "push failed: token=$GIT_AUTH_TOKEN" >&2
-exit 1
-`
+  printf 'session' > "$OPENCODE_DB"
+  echo "push failed: token=$GIT_AUTH_TOKEN" >&2
+  exit 1
+  `
         );
         await chmod(bin, 0o755);
         process.env.PATH = `${binDir}:${originalPath ?? ""}`;
@@ -2753,9 +2742,7 @@ exit 1
         expect(stderrLog).not.toContain(token);
         expect(stderrLog).toContain("token=");
         expect(logs.some((line) => line.includes(token))).toBe(false);
-      } finally {
-        await rm(binDir, { recursive: true, force: true });
-      }
+      });
     });
   });
 

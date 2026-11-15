@@ -38,11 +38,11 @@ import {
   REVIEW_QUOTA_TTL_MS,
   readStuckState,
 } from "../src/stuck.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 /** Runs `check` against a DB with OpenCode's `session_message` columns. */
 async function withMessages(rows: Array<[type: string, data: string]>, check: (dbPath: string) => void): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "jumi-quota-"));
-  try {
+  await withWorkspace(async (dir) => {
     const dbPath = join(dir, "opencode-session.db");
     const db = new Database(dbPath);
     db.exec(
@@ -53,15 +53,12 @@ async function withMessages(rows: Array<[type: string, data: string]>, check: (d
     });
     db.close();
     check(dbPath);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  });
 }
 
 describe("checkQuotaDbSchema", () => {
   async function withDb(sql: string | undefined, check: (dbPath: string) => void): Promise<void> {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-schema-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       if (sql !== undefined) {
         const db = new Database(dbPath);
@@ -69,9 +66,7 @@ describe("checkQuotaDbSchema", () => {
         db.close();
       }
       check(dbPath);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   }
   const columns =
     "id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT";
@@ -221,8 +216,7 @@ describe("hasQuotaRetryInDb", () => {
   });
 
   test("sees an assistant sleeping on a quota retry-after while the child is alive", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-sleep-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -257,14 +251,11 @@ describe("hasQuotaRetryInDb", () => {
       const hit = inspectQuotaSleepInDb(dbPath, 0);
       expect(hit?.kind).toBe("resetting");
       expect(hit?.retryAfterMs).toBe(7_200_000);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a malformed row does not hide a sibling session's sleep", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-schema-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const writer = new Database(dbPath);
       writer.exec(
@@ -280,16 +271,13 @@ describe("hasQuotaRetryInDb", () => {
       );
       writer.close();
       expect(inspectQuotaSleepInDb(dbPath, 0)?.kind).toBe("resetting");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("sees a sleeping session behind an older session with higher seq numbers", async () => {
     // OpenCode numbers `seq` per session, so a subagent or a resumed run starts
     // low again while the session before it sits at a high number.
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-sessions-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -311,14 +299,11 @@ describe("hasQuotaRetryInDb", () => {
       );
       db.close();
       expect(inspectQuotaSleepInDb(dbPath, 0)?.kind).toBe("resetting");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a retry the same session has moved past is not a quota sleep", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-moved-on-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -333,16 +318,13 @@ describe("hasQuotaRetryInDb", () => {
       insert.run("m2", 2, JSON.stringify({ content: [] }));
       db.close();
       expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a retry left behind by a killed child does not read as this child's sleep", async () => {
     // A hard kill of the whole process tree (OOM) leaves `retry` on the row, in
     // a DB the next `--continue` run reuses. Only `sinceMs` tells them apart.
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-stale-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -354,14 +336,11 @@ describe("hasQuotaRetryInDb", () => {
       db.close();
       expect(inspectQuotaSleepInDb(dbPath, 1001)).toBeUndefined();
       expect(inspectQuotaSleepInDb(dbPath, 1000)?.kind).toBe("resetting");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a retry on an ordinary short rate limit is not a quota sleep", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-short-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -381,14 +360,11 @@ describe("hasQuotaRetryInDb", () => {
       );
       db.close();
       expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("a persisted quota error from an earlier run does not read as a live sleep", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-old-"));
-    try {
+    await withWorkspace(async (dir) => {
       const dbPath = join(dir, "opencode-session.db");
       const db = new Database(dbPath);
       db.exec(
@@ -403,9 +379,7 @@ describe("hasQuotaRetryInDb", () => {
       db.close();
       expect(inspectQuotaSleepInDb(dbPath, 0)).toBeUndefined();
       expect(hasQuotaRetryInDb(dbPath)).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("reads OpenCode's retryAfterMs as milliseconds", () => {
@@ -416,17 +390,14 @@ describe("hasQuotaRetryInDb", () => {
 
 describe("quota stuck state", () => {
   test("blocks until kill-switch deletes the file", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-quota-stuck-"));
-    try {
+    await withWorkspace(async (dir) => {
       const path = join(dir, "12.stuck.json");
       expect(isQuotaStuck(await readStuckState(path))).toBe(false);
       await markQuotaStuck(path, QUOTA_STUCK_TEXT);
       const state = await readStuckState(path);
       expect(isQuotaStuck(state)).toBe(true);
       expect(state.quota?.reason).toBe(QUOTA_STUCK_TEXT);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -445,8 +416,7 @@ describe("live quota pattern", () => {
 
 describe("reviewer quota TTL", () => {
   test("expires after the TTL instead of blocking forever", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-review-quota-"));
-    try {
+    await withWorkspace(async (dir) => {
       const path = join(dir, "37.stuck.json");
       await markQuotaStuck(path, QUOTA_STUCK_TEXT);
       const fresh = await readStuckState(path);
@@ -459,14 +429,11 @@ describe("reviewer quota TTL", () => {
       const cleared = await readStuckState(path);
       expect(isReviewQuotaStuck(cleared)).toBe(false);
       expect(isQuotaStuck(cleared)).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("reviewer cancel clears the flag", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-review-cancel-"));
-    try {
+    await withWorkspace(async (dir) => {
       const home = dir;
       const { reviewStuckStatePath } = await import("../src/claim.ts");
       const { writeFile } = await import("node:fs/promises");
@@ -479,9 +446,7 @@ describe("reviewer quota TTL", () => {
       expect(isReviewQuotaStuck(await readStuckState(stuckPath))).toBe(false);
       // Idempotent.
       await writeFile(stuckPath, "junk").catch(() => undefined);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 

@@ -15,8 +15,8 @@ import {
   makeUser,
   makeWorkerConfig,
   responseJson,
-  signBody,
 } from "./fixtures.ts";
+import { makeQueue, workerPushRequest } from "./harness/webhook.ts";
 
 const policy = {
   giteaUrl: "https://gitea.kirmanak.stream",
@@ -49,38 +49,6 @@ function pushWebhookApi(overrides: Partial<IssueApi> = {}) {
     listOpenPulls: async () => [jumiPr()],
     getIssue: async () => makeIssue(),
     ...overrides,
-  });
-}
-
-function makeQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
-  const jobs: IssueJob[] = [];
-  return {
-    jobs,
-    enqueue(job) {
-      jobs.push(job);
-      return { key: `${job.owner}/${job.repo}#${job.issueNumber}`, queued: true };
-    },
-  };
-}
-
-async function signedRequest(
-  body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string; raw?: Uint8Array } = {}
-): Promise<Request> {
-  const raw = overrides.raw ?? encodeJson(body);
-  const secret = overrides.secret ?? "webhook-secret";
-  const signature = await signBody(raw, secret);
-  const headers = new Headers(overrides.headers);
-  headers.set("content-type", "application/json");
-  headers.set("x-gitea-signature", signature);
-  if (overrides.event !== undefined) headers.set("x-gitea-event", overrides.event);
-  else if (!overrides.eventType) headers.set("x-gitea-event", "push");
-  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
-  headers.set("x-gitea-delivery", "delivery-1");
-  return new Request("https://worker.test/webhooks/gitea", {
-    method: overrides.method ?? "POST",
-    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
-    headers,
   });
 }
 
@@ -286,7 +254,7 @@ describe("push webhook HTTP", () => {
   test("enqueues X-Gitea-Event: push when a managed jumi closer exists", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
     expect(queue.jobs).toHaveLength(1);
@@ -298,7 +266,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(
-      await signedRequest(makePushPayload({ ref: "refs/heads/jumi/issue-12-x" }), { event: "push" })
+      await workerPushRequest(makePushPayload({ ref: "refs/heads/jumi/issue-12-x" }), { event: "push" })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "not the default branch" });
@@ -308,7 +276,9 @@ describe("push webhook HTTP", () => {
   test("skips refs/tags/v1", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload({ ref: "refs/tags/v1" }), { event: "push" }));
+    const response = await handler(
+      await workerPushRequest(makePushPayload({ ref: "refs/tags/v1" }), { event: "push" })
+    );
     expect(response.status).toBe(202);
     expect((await responseJson(response)).skipped).toBeTruthy();
     expect(queue.jobs).toHaveLength(0);
@@ -318,7 +288,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const zeros = await handler(
-      await signedRequest(makePushPayload({ after: "0000000000000000000000000000000000000000" }), { event: "push" })
+      await workerPushRequest(makePushPayload({ after: "0000000000000000000000000000000000000000" }), { event: "push" })
     );
     expect(zeros.status).toBe(202);
     expect(await responseJson(zeros)).toEqual({ skipped: "deleted ref" });
@@ -330,7 +300,7 @@ describe("push webhook HTTP", () => {
       queue,
       api: pushWebhookApi({ listOpenPulls: async () => [] }),
     });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "no managed jumi PRs" });
   });
@@ -343,7 +313,7 @@ describe("push webhook HTTP", () => {
         getIssue: async () => makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [] }),
       }),
     });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "no managed jumi PRs" });
   });
@@ -351,7 +321,7 @@ describe("push webhook HTTP", () => {
   test("skips X-Gitea-Event: pull_request", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "pull_request" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "pull_request" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event pull_request" });
     expect(queue.jobs).toHaveLength(0);
@@ -360,7 +330,7 @@ describe("push webhook HTTP", () => {
   test("accepts Event-Type push if Event header is missing", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "", eventType: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "", eventType: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["kirmanak/demo#12"] });
     expect(queue.jobs[0]?.mode).toBe("conflict");
@@ -370,7 +340,7 @@ describe("push webhook HTTP", () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
     const response = await handler(
-      await signedRequest({}, { event: "push", raw: new TextEncoder().encode("{not-json") })
+      await workerPushRequest({}, { event: "push", raw: new TextEncoder().encode("{not-json") })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "malformed push payload" });
@@ -389,7 +359,7 @@ describe("push webhook HTTP", () => {
         },
       }),
     });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
     const body = await responseJson(response);
     expect(body).toEqual({ error: "internal error" });
@@ -407,7 +377,7 @@ describe("push webhook HTTP", () => {
         },
       }),
     });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
     expect(await responseJson(response)).toEqual({ error: "internal error" });
     expect(queue.jobs).toHaveLength(0);
@@ -422,7 +392,7 @@ describe("push webhook HTTP", () => {
       },
     };
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(500);
     expect(await responseJson(response)).toEqual({ error: "internal error" });
   });
@@ -430,7 +400,7 @@ describe("push webhook HTTP", () => {
   test("HTTP handler does not call git / OpenCode", async () => {
     const queue = makeQueue();
     const handler = createWorkerFetchHandler(makeWorkerConfig(), { queue, api: pushWebhookApi() });
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await workerPushRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(queue.jobs[0]?.mode).toBe("conflict");
   });

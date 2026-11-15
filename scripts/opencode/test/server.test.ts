@@ -6,12 +6,10 @@ import {
   renderQueueMetrics,
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
-import type { ReviewQueueLike } from "../src/server.ts";
 import { createFetchHandler, shouldSeedOpenCodeAuth, startReviewer } from "../src/server.ts";
-import type { IssueJob, ReviewJob } from "../src/types.ts";
+import type { IssueJob } from "../src/types.ts";
 import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
 import {
-  encodeJson,
   makeBranch,
   makeComment,
   makeConfig,
@@ -28,39 +26,8 @@ import {
   makeWorkflowJobPayload,
   pushApi,
   responseJson,
-  signBody,
 } from "./fixtures.ts";
-
-function makeQueue(): ReviewQueueLike & { jobs: ReviewJob[] } {
-  const jobs: ReviewJob[] = [];
-  return {
-    jobs,
-    enqueue(job) {
-      jobs.push(job);
-      return { key: `${job.owner}/${job.repo}#${job.prNumber}:${job.headSha}`, queued: true };
-    },
-  };
-}
-
-async function signedRequest(
-  body: unknown,
-  overrides: RequestInit & { event?: string; eventType?: string; secret?: string; delivery?: string } = {}
-): Promise<Request> {
-  const raw = encodeJson(body);
-  const secret = overrides.secret ?? "webhook-secret";
-  const signature = await signBody(raw, secret);
-  const headers = new Headers(overrides.headers);
-  headers.set("content-type", "application/json");
-  headers.set("x-gitea-signature", signature);
-  if (overrides.eventType) headers.set("x-gitea-event-type", overrides.eventType);
-  headers.set("x-gitea-event", overrides.event ?? "pull_request");
-  headers.set("x-gitea-delivery", overrides.delivery ?? "delivery-1");
-  return new Request("https://reviewer.test/webhooks/gitea", {
-    method: overrides.method ?? "POST",
-    body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
-    headers,
-  });
-}
+import { makeReviewQueue as makeQueue, reviewerRequest } from "./harness/webhook.ts";
 
 afterEach(() => {
   resetControlMetricsForTests();
@@ -97,13 +64,13 @@ describe("createFetchHandler", () => {
     const config = makeConfig({ webhookAuthToken: "auth-token", maxWebhookBytes: 5 });
     const handler = createFetchHandler(config, { queue: makeQueue() });
 
-    expect((await handler(await signedRequest(makePayload()))).status).toBe(401);
+    expect((await handler(await reviewerRequest(makePayload()))).status).toBe(401);
     expect(
-      (await handler(await signedRequest({ long: "payload" }, { headers: { authorization: "Bearer auth-token" } })))
+      (await handler(await reviewerRequest({ long: "payload" }, { headers: { authorization: "Bearer auth-token" } })))
         .status
     ).toBe(413);
 
-    const badSignatureRequest = await signedRequest(makePayload(), {
+    const badSignatureRequest = await reviewerRequest(makePayload(), {
       headers: { authorization: "Bearer auth-token" },
       secret: "wrong",
     });
@@ -121,7 +88,7 @@ describe("createFetchHandler", () => {
 
   test("skips unsupported events", async () => {
     const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest(makePayload(), { event: "push" }));
+    const response = await handler(await reviewerRequest(makePayload(), { event: "push" }));
 
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event push" });
@@ -130,7 +97,7 @@ describe("createFetchHandler", () => {
 
   test("returns ok for ping events", async () => {
     const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ zen: "pong" }, { event: "ping" }));
+    const response = await handler(await reviewerRequest({ zen: "pong" }, { event: "ping" }));
     expect(response.status).toBe(200);
     expect(await responseJson(response)).toEqual({ ok: true });
     expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="ping",result="ping"} 1');
@@ -139,7 +106,7 @@ describe("createFetchHandler", () => {
   test("enqueues valid pull request events", async () => {
     const queue = makeQueue();
     const handler = createFetchHandler(makeConfig(), { queue });
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
 
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
@@ -149,7 +116,7 @@ describe("createFetchHandler", () => {
 
   test("returns bad request for valid signatures with invalid payloads", async () => {
     const handler = createFetchHandler(makeConfig(), { queue: makeQueue() });
-    const response = await handler(await signedRequest({ action: "opened" }));
+    const response = await handler(await reviewerRequest({ action: "opened" }));
 
     expect(response.status).toBe(400);
     expect(await responseJson(response)).toEqual({ error: "invalid webhook payload" });
@@ -163,7 +130,7 @@ describe("createFetchHandler", () => {
       getPR: async () => makePR({ head: makeBranch({ sha: "sha2" }) }),
     });
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makePayload({
           action: "synchronize",
           pull_request: makePR({
@@ -187,7 +154,7 @@ describe("createFetchHandler", () => {
         throw new Error("gitea down");
       },
     });
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
     expect(queue.jobs).toHaveLength(1);
@@ -201,7 +168,7 @@ describe("createFetchHandler", () => {
         throw new Error("gitea down");
       },
     });
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
     expect(store.rows).toHaveLength(1);
@@ -216,7 +183,7 @@ describe("createFetchHandler", () => {
         },
       },
     });
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
     expect(renderWebhookMetrics()).toContain('jumi_webhooks_total{event="pull_request",result="unavailable"} 1');
@@ -228,7 +195,7 @@ describe("createFetchHandler", () => {
       queue: store,
       renderMetrics: async () => `${await renderQueueMetrics(store)}${renderWebhookMetrics()}`,
     });
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
     expect(store.rows).toHaveLength(1);
@@ -248,7 +215,7 @@ describe("createFetchHandler", () => {
       queue: makeQueue(),
       webhookEnabled: false,
     });
-    expect((await handler(await signedRequest(makePayload()))).status).toBe(404);
+    expect((await handler(await reviewerRequest(makePayload()))).status).toBe(404);
   });
 });
 
@@ -384,7 +351,7 @@ describe("createFetchHandler router mailbox", () => {
   test("enqueues implement on issue assign", async () => {
     const { handler, store, logs } = mailboxHandler();
     const response = await handler(
-      await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues", eventType: "issue_assign" })
+      await reviewerRequest(makeIssuePayload({ action: "assigned" }), { event: "issues", eventType: "issue_assign" })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
@@ -398,7 +365,7 @@ describe("createFetchHandler router mailbox", () => {
     await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
     const { handler, api } = mailboxHandler(store);
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makeIssuePayload({
           action: "unassigned",
           issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
@@ -418,7 +385,7 @@ describe("createFetchHandler router mailbox", () => {
   test("does not post stopped when no worker rows were cancelled", async () => {
     const { handler, api } = mailboxHandler();
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makeIssuePayload({
           action: "unassigned",
           issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
@@ -433,7 +400,7 @@ describe("createFetchHandler router mailbox", () => {
   test("enqueues follow-up on a human PR comment", async () => {
     const { handler, store, logs } = mailboxHandler();
     const response = await handler(
-      await signedRequest(makeIssueCommentPayload({ pull_request: jumiPr() }), { event: "issue_comment" })
+      await reviewerRequest(makeIssueCommentPayload({ pull_request: jumiPr() }), { event: "issue_comment" })
     );
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "follow-up:kirmanak/demo#127:headsha", queued: true });
@@ -444,7 +411,7 @@ describe("createFetchHandler router mailbox", () => {
   test("skips follow-up for ignored comment logins", async () => {
     const { handler, store, logs } = mailboxHandler(undefined, { followupIgnoreLogins: ["tapio"] });
     const response = await handler(
-      await signedRequest(makeIssueCommentPayload({ pull_request: jumiPr(), sender: makeUser({ login: "tapio" }) }), {
+      await reviewerRequest(makeIssueCommentPayload({ pull_request: jumiPr(), sender: makeUser({ login: "tapio" }) }), {
         event: "issue_comment",
       })
     );
@@ -463,7 +430,7 @@ describe("createFetchHandler router mailbox", () => {
     });
     expect("issue" in body).toBe(false);
     expect("comment" in body).toBe(false);
-    const response = await handler(await signedRequest(body, { event: "pull_request_comment" }));
+    const response = await handler(await reviewerRequest(body, { event: "pull_request_comment" }));
     expect(response.status).toBe(202);
     const json = await responseJson(response);
     expect(json).not.toHaveProperty("error");
@@ -473,7 +440,7 @@ describe("createFetchHandler router mailbox", () => {
 
   test("enqueues conflict on default-branch push", async () => {
     const { handler, store, logs } = mailboxHandler();
-    const response = await handler(await signedRequest(makePushPayload(), { event: "push" }));
+    const response = await handler(await reviewerRequest(makePushPayload(), { event: "push" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["conflict:kirmanak/demo#127:headsha"] });
     expect(store.rows[0]?.kind).toBe("conflict");
@@ -482,7 +449,7 @@ describe("createFetchHandler router mailbox", () => {
 
   test("enqueues follow-up on workflow_job", async () => {
     const { handler, store, logs } = mailboxHandler();
-    const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
+    const response = await handler(await reviewerRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ queued: true, keys: ["follow-up:kirmanak/demo#127:headsha:99"] });
     expect(store.rows[0]?.kind).toBe("follow-up");
@@ -491,7 +458,7 @@ describe("createFetchHandler router mailbox", () => {
 
   test("workflow_job also enqueues a review for the matching PR", async () => {
     const { handler, store, logs } = mailboxHandler();
-    const response = await handler(await signedRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
+    const response = await handler(await reviewerRequest(makeWorkflowJobPayload(), { event: "workflow_job" }));
     expect(response.status).toBe(202);
     expect(store.rows.find((row) => row.kind === "review")?.jobKey).toBe("kirmanak/demo#127:headsha");
     expect(store.rows.find((row) => row.kind === "follow-up")?.state).toBe("queued");
@@ -500,7 +467,7 @@ describe("createFetchHandler router mailbox", () => {
 
   test("pull_request opened still enqueues review", async () => {
     const { handler, store } = mailboxHandler();
-    const response = await handler(await signedRequest(makePayload()));
+    const response = await handler(await reviewerRequest(makePayload()));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
     expect(store.rows[0]?.kind).toBe("review");
@@ -509,7 +476,7 @@ describe("createFetchHandler router mailbox", () => {
   test("pull_request assigned enqueues follow-up", async () => {
     const { handler, store } = mailboxHandler();
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -540,7 +507,7 @@ describe("createFetchHandler router mailbox", () => {
   test("pull_request assigned skips when the closer issue is already assigned", async () => {
     const { handler, store } = mailboxHandler();
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makePayload({
           action: "assigned",
           pull_request: makePR({
@@ -559,7 +526,7 @@ describe("createFetchHandler router mailbox", () => {
 
   test("unknown events 202-skip", async () => {
     const { handler, logs } = mailboxHandler();
-    const response = await handler(await signedRequest(makePayload(), { event: "fork" }));
+    const response = await handler(await reviewerRequest(makePayload(), { event: "fork" }));
     expect(response.status).toBe(202);
     expect(await responseJson(response)).toEqual({ skipped: "unsupported event fork" });
     expect(logs.some((line) => line.includes("skipped unsupported event fork"))).toBe(true);
@@ -568,7 +535,7 @@ describe("createFetchHandler router mailbox", () => {
   test("finished Gitea commit status wakes the matching review without a push", async () => {
     const { handler, store } = mailboxHandler();
     const pending = await handler(
-      await signedRequest(
+      await reviewerRequest(
         {
           sha: "headsha",
           state: "pending",
@@ -583,7 +550,7 @@ describe("createFetchHandler router mailbox", () => {
     expect(store.rows).toHaveLength(0);
 
     const own = await handler(
-      await signedRequest(
+      await reviewerRequest(
         {
           sha: "headsha",
           state: "success",
@@ -598,7 +565,7 @@ describe("createFetchHandler router mailbox", () => {
     expect(store.rows).toHaveLength(0);
 
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         {
           sha: "headsha",
           state: "success",
@@ -628,7 +595,9 @@ describe("createFetchHandler router mailbox", () => {
         },
       },
     });
-    const response = await handler(await signedRequest(makeIssuePayload({ action: "assigned" }), { event: "issues" }));
+    const response = await handler(
+      await reviewerRequest(makeIssuePayload({ action: "assigned" }), { event: "issues" })
+    );
     expect(response.status).toBe(503);
     expect(await responseJson(response)).toEqual({ error: "queue unavailable" });
   });
@@ -644,7 +613,7 @@ describe("createFetchHandler router mailbox", () => {
     };
     const { handler } = mailboxHandler(store, { api });
     const response = await handler(
-      await signedRequest(
+      await reviewerRequest(
         makeIssuePayload({
           action: "unassigned",
           issue: makeIssue({ assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),

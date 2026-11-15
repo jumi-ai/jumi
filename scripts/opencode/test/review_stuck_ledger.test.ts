@@ -25,6 +25,9 @@ import {
 import { handleIssueCancel } from "../src/worker.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeFile, makeIssue, makePR, makeRepo, makeWorkerConfig } from "./fixtures.ts";
+import { withEnv } from "./harness/env.ts";
+import { frozenGit } from "./harness/git.ts";
+import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
 function stuckLedgerApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
   return makeReviewApi({
@@ -32,16 +35,6 @@ function stuckLedgerApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     ...overrides,
   });
-}
-
-function frozenGit(): (args: string[]) => Promise<string> {
-  return async (args) => {
-    if (args[0] === "rev-parse") return "headsha";
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
 }
 
 const baseOptions = {
@@ -59,9 +52,7 @@ const baseOptions = {
 
 describe("review stuck ledger survives HOME change", () => {
   test("same-finding stop triggers across different HOME directories", async () => {
-    const homeA = await mkdtemp(join(tmpdir(), "jumi-ledger-a-"));
-    const homeB = await mkdtemp(join(tmpdir(), "jumi-ledger-b-"));
-    try {
+    await withTempDirs(["jumi-tmp-", "jumi-tmp-"], async (homeA, homeB) => {
       const store = new MemorySkipLatchStore();
       const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
       for (let i = 0; i < 4; i++) {
@@ -83,16 +74,11 @@ describe("review stuck ledger survives HOME change", () => {
         expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
         expect(openCode).toBe(0);
       }
-    } finally {
-      await rm(homeA, { recursive: true, force: true });
-      await rm(homeB, { recursive: true, force: true });
-    }
+    });
   });
 
   test("ping-pong stop triggers across different HOME directories", async () => {
-    const homeA = await mkdtemp(join(tmpdir(), "jumi-ledger-a-"));
-    const homeB = await mkdtemp(join(tmpdir(), "jumi-ledger-b-"));
-    try {
+    await withTempDirs(["jumi-tmp-", "jumi-tmp-"], async (homeA, homeB) => {
       const store = new MemorySkipLatchStore();
       const hashA = fingerprintReviewArtifact("src/a.ts:1: 🔴 bug: a.\n<!-- jumi-check: failure -->")!;
       const hashB = fingerprintReviewArtifact("src/b.ts:1: 🔴 bug: b.\n<!-- jumi-check: failure -->")!;
@@ -115,16 +101,11 @@ describe("review stuck ledger survives HOME change", () => {
         expect(result).toEqual({ status: "skipped", reason: "stuck: ping-pong" });
         expect(openCode).toBe(0);
       }
-    } finally {
-      await rm(homeA, { recursive: true, force: true });
-      await rm(homeB, { recursive: true, force: true });
-    }
+    });
   });
 
   test("quota flag triggers across different HOME directories", async () => {
-    const homeA = await mkdtemp(join(tmpdir(), "jumi-ledger-a-"));
-    const homeB = await mkdtemp(join(tmpdir(), "jumi-ledger-b-"));
-    try {
+    await withTempDirs(["jumi-tmp-", "jumi-tmp-"], async (homeA, homeB) => {
       const store = new MemorySkipLatchStore();
       await markReviewQuotaStuckLatch(store, "kirmanak", "demo", 7, QUOTA_STUCK_TEXT);
       for (const home of [homeA, homeB]) {
@@ -143,134 +124,114 @@ describe("review stuck ledger survives HOME change", () => {
         expect(result).toEqual({ status: "skipped", reason: QUOTA_STUCK_TEXT });
         expect(openCode).toBe(0);
       }
-    } finally {
-      await rm(homeA, { recursive: true, force: true });
-      await rm(homeB, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("DATABASE_URL disables the HOME file", () => {
   test("ledger empty + file stuck does not stop when DATABASE_URL is set", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-dburl-"));
-    const prev = process.env.DATABASE_URL;
-    process.env.DATABASE_URL = "postgres://example/db";
-    try {
-      const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
-      const stuckPath = reviewStuckStatePath(home, "kirmanak", "demo", 7);
-      await writeStuckState(stuckPath, {
-        fingerprints: [
-          { kind: "action", hash },
-          { kind: "action", hash },
-          { kind: "action", hash },
-          { kind: "action", hash },
-        ],
-        updatedAt: new Date().toISOString(),
+    await withTempDirs(["jumi-dburl-"], async (home) => {
+      await withEnv({ DATABASE_URL: "postgres://example/db" }, async () => {
+        const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
+        const stuckPath = reviewStuckStatePath(home, "kirmanak", "demo", 7);
+        await writeStuckState(stuckPath, {
+          fingerprints: [
+            { kind: "action", hash },
+            { kind: "action", hash },
+            { kind: "action", hash },
+            { kind: "action", hash },
+          ],
+          updatedAt: new Date().toISOString(),
+        });
+        const store = new MemorySkipLatchStore();
+        await withWorkspace(async (workspace) => {
+          let openCode = 0;
+          const failureMarkdown = "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->";
+          const result = await reviewPullRequest({
+            ...baseOptions,
+            workspace,
+            home,
+            skipLatches: store,
+            api: stuckLedgerApi(),
+            gitRunner: frozenGit(),
+            openCodeRunner: async () => {
+              openCode++;
+              await writeFile(join(workspace, "JUMI_REVIEW.md"), failureMarkdown);
+              return { status: "ok" };
+            },
+          });
+          expect(result.status).toBe("posted");
+          expect(openCode).toBeGreaterThan(0);
+          const ledger = await readReviewStuckLatch(store, "kirmanak", "demo", 7);
+          expect(ledger.fingerprints).toHaveLength(1);
+          const expectedHash = fingerprintReviewArtifact(failureMarkdown) as string;
+          expect(ledger.fingerprints[0]).toEqual({ kind: "action", hash: expectedHash });
+          const fileState = await readStuckState(stuckPath);
+          expect(fileState.fingerprints).toHaveLength(4);
+        });
       });
-      const store = new MemorySkipLatchStore();
-      const workspace = await mkdtemp(join(tmpdir(), "jumi-ws-"));
-      try {
+    });
+  });
+
+  test("ledger stuck stops without touching the HOME file when DATABASE_URL is set", async () => {
+    await withTempDirs(["jumi-dburl-"], async (home) => {
+      await withEnv({ DATABASE_URL: "postgres://example/db" }, async () => {
+        const store = new MemorySkipLatchStore();
+        await markReviewQuotaStuckLatch(store, "kirmanak", "demo", 7, QUOTA_STUCK_TEXT);
+        const stuckPath = reviewStuckStatePath(home, "kirmanak", "demo", 7);
+        await expect(access(stuckPath)).rejects.toThrow();
         let openCode = 0;
-        const failureMarkdown = "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->";
         const result = await reviewPullRequest({
           ...baseOptions,
-          workspace,
           home,
           skipLatches: store,
+          api: stuckLedgerApi(),
+          gitRunner: async () => {
+            throw new Error("git should not be called on quota skip");
+          },
+          openCodeRunner: async () => {
+            openCode++;
+            return { status: "ok" };
+          },
+        });
+        expect(result).toEqual({ status: "skipped", reason: QUOTA_STUCK_TEXT });
+        expect(openCode).toBe(0);
+        await expect(access(stuckPath)).rejects.toThrow();
+        const state = await readReviewStuckLatch(store, "kirmanak", "demo", 7);
+        expect(state.quota?.reason).toBe(QUOTA_STUCK_TEXT);
+      });
+    });
+  });
+
+  test("file stuck is still read when DATABASE_URL is unset and no store is passed", async () => {
+    await withTempDirs(["jumi-file-"], async (home) => {
+      await withEnv({ DATABASE_URL: undefined }, async () => {
+        const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
+        await writeStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7), {
+          fingerprints: [
+            { kind: "action", hash },
+            { kind: "action", hash },
+            { kind: "action", hash },
+            { kind: "action", hash },
+          ],
+          updatedAt: new Date().toISOString(),
+        });
+        expect((await readStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7))).fingerprints).toHaveLength(4);
+        let openCode = 0;
+        const result = await reviewPullRequest({
+          ...baseOptions,
+          home,
           api: stuckLedgerApi(),
           gitRunner: frozenGit(),
           openCodeRunner: async () => {
             openCode++;
-            await writeFile(join(workspace, "JUMI_REVIEW.md"), failureMarkdown);
             return { status: "ok" };
           },
         });
-        expect(result.status).toBe("posted");
-        expect(openCode).toBeGreaterThan(0);
-        const ledger = await readReviewStuckLatch(store, "kirmanak", "demo", 7);
-        expect(ledger.fingerprints).toHaveLength(1);
-        const expectedHash = fingerprintReviewArtifact(failureMarkdown) as string;
-        expect(ledger.fingerprints[0]).toEqual({ kind: "action", hash: expectedHash });
-        const fileState = await readStuckState(stuckPath);
-        expect(fileState.fingerprints).toHaveLength(4);
-      } finally {
-        await rm(workspace, { recursive: true, force: true });
-      }
-    } finally {
-      if (prev === undefined) delete process.env.DATABASE_URL;
-      else process.env.DATABASE_URL = prev;
-      await rm(home, { recursive: true, force: true });
-    }
-  });
-
-  test("ledger stuck stops without touching the HOME file when DATABASE_URL is set", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-dburl-"));
-    const prev = process.env.DATABASE_URL;
-    process.env.DATABASE_URL = "postgres://example/db";
-    try {
-      const store = new MemorySkipLatchStore();
-      await markReviewQuotaStuckLatch(store, "kirmanak", "demo", 7, QUOTA_STUCK_TEXT);
-      const stuckPath = reviewStuckStatePath(home, "kirmanak", "demo", 7);
-      await expect(access(stuckPath)).rejects.toThrow();
-      let openCode = 0;
-      const result = await reviewPullRequest({
-        ...baseOptions,
-        home,
-        skipLatches: store,
-        api: stuckLedgerApi(),
-        gitRunner: async () => {
-          throw new Error("git should not be called on quota skip");
-        },
-        openCodeRunner: async () => {
-          openCode++;
-          return { status: "ok" };
-        },
+        expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
+        expect(openCode).toBe(0);
       });
-      expect(result).toEqual({ status: "skipped", reason: QUOTA_STUCK_TEXT });
-      expect(openCode).toBe(0);
-      await expect(access(stuckPath)).rejects.toThrow();
-      const state = await readReviewStuckLatch(store, "kirmanak", "demo", 7);
-      expect(state.quota?.reason).toBe(QUOTA_STUCK_TEXT);
-    } finally {
-      if (prev === undefined) delete process.env.DATABASE_URL;
-      else process.env.DATABASE_URL = prev;
-      await rm(home, { recursive: true, force: true });
-    }
-  });
-
-  test("file stuck is still read when DATABASE_URL is unset and no store is passed", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-file-"));
-    const prev = process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL;
-    try {
-      const hash = fingerprintReviewArtifact("please fix the tests\n<!-- jumi-check: failure -->")!;
-      await writeStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7), {
-        fingerprints: [
-          { kind: "action", hash },
-          { kind: "action", hash },
-          { kind: "action", hash },
-          { kind: "action", hash },
-        ],
-        updatedAt: new Date().toISOString(),
-      });
-      expect((await readStuckState(reviewStuckStatePath(home, "kirmanak", "demo", 7))).fingerprints).toHaveLength(4);
-      let openCode = 0;
-      const result = await reviewPullRequest({
-        ...baseOptions,
-        home,
-        api: stuckLedgerApi(),
-        gitRunner: frozenGit(),
-        openCodeRunner: async () => {
-          openCode++;
-          return { status: "ok" };
-        },
-      });
-      expect(result).toEqual({ status: "skipped", reason: "stuck: repeated action" });
-      expect(openCode).toBe(0);
-    } finally {
-      if (prev !== undefined) process.env.DATABASE_URL = prev;
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -278,8 +239,7 @@ describe("review and worker stuck cells are isolated", () => {
   const key = { owner: "kirmanak", repo: "demo", issueNumber: 7 };
 
   test("worker fingerprints + quota do not stop review", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-isolation-"));
-    try {
+    await withWorkspace(async (home) => {
       const store = new MemorySkipLatchStore();
       const workerHash = fingerprintReviewArtifact("worker finding\n<!-- jumi-check: failure -->")!;
       for (let i = 0; i < 4; i++) {
@@ -290,8 +250,7 @@ describe("review and worker stuck cells are isolated", () => {
       expect(isQuotaStuck(await readStuckLatch(store, key))).toBe(true);
       expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(0);
 
-      const workspace = await mkdtemp(join(tmpdir(), "jumi-ws-"));
-      try {
+      await withWorkspace(async (workspace) => {
         let openCode = 0;
         const failureMarkdown = "src/foo.ts:1: 🔴 bug: please fix the tests.\n<!-- jumi-check: failure -->";
         const result = await reviewPullRequest({
@@ -313,12 +272,8 @@ describe("review and worker stuck cells are isolated", () => {
         expect((await readStuckLatch(store, key)).fingerprints).toHaveLength(4);
         expect(isQuotaStuck(await readStuckLatch(store, key))).toBe(true);
         expect((await readReviewStuckLatch(store, "kirmanak", "demo", 7)).fingerprints).toHaveLength(1);
-      } finally {
-        await rm(workspace, { recursive: true, force: true });
-      }
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+      });
+    });
   });
 
   test("review fingerprints + quota do not pollute worker state", async () => {
@@ -357,8 +312,7 @@ describe("review and worker stuck cells are isolated", () => {
   });
 
   test("worker cancel without a store clears worker cells but preserves review stuck", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-cancel-nostore-"));
-    try {
+    await withWorkspace(async (home) => {
       const shared = new MemorySkipLatchStore();
       const workerHash = fingerprintReviewArtifact("worker finding\n<!-- jumi-check: failure -->")!;
       const reviewHash = fingerprintReviewArtifact("review finding\n<!-- jumi-check: failure -->")!;
@@ -393,8 +347,6 @@ describe("review and worker stuck cells are isolated", () => {
       expect(await readReviewStuckLatch(shared, "kirmanak", "demo", 7)).toMatchObject({
         fingerprints: [{ kind: "action", hash: reviewHash }],
       });
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
+    });
   });
 });

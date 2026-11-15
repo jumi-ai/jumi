@@ -32,6 +32,8 @@ import {
   workerOpenCodeChildEnvWithGradleSeed,
 } from "../src/workspace.ts";
 import { makeBranch, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { withEnv } from "./harness/env.ts";
+import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
 function makeCheckoutFixture() {
   const repo = makeRepo({
@@ -107,8 +109,7 @@ describe("redactGitSecrets", () => {
   });
 
   test("redacts the credential-helper command, not only the token", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-redact-"));
-    try {
+    await withWorkspace(async (dir) => {
       // GIT_DIR pins git to a repository that does not exist, so the command fails wherever tmpdir lives.
       const failure = await runGit([...gitConfigArgs(), "fetch", "origin"], {
         cwd: dir,
@@ -123,9 +124,7 @@ describe("redactGitSecrets", () => {
       const comment = redactGitSecrets(`Jumi failed: git -c credential.helper=${gitConfigArgs()[3]} fetch`);
       expect(comment).not.toContain("GIT_AUTH_TOKEN");
       expect(comment).not.toContain("printf");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -175,21 +174,17 @@ describe("git author identity", () => {
 
 describe("review workspace", () => {
   test("creates a unique empty workspace under the configured root", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-workspace-test-"));
-    try {
+    await withWorkspace(async (root) => {
       const workspace = await createReviewWorkspace(
         root,
         makeJob({ owner: "personal", repo: "housing_app", prNumber: 48 })
       );
       expect(workspace.startsWith(join(root, "jumi-personal-housing_app-48-"))).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("clones the base repository, fetches target and PR refs, and checks out PR head", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -254,14 +249,11 @@ describe("review workspace", () => {
       ).toBe(true);
       expect(gitConfigValues(calls[0].args, "credential.helper").join("\n")).not.toContain("bot-token");
       expect(JSON.stringify(calls.map((call) => call.args))).not.toContain("bot-token");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("reuses an existing review mirror instead of cloning it again", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -295,14 +287,11 @@ describe("review workspace", () => {
         "https://gitea.kirmanak.stream/personal/housing_app.git",
         workdir,
       ]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("replaces a symlinked mirror instead of fetching through it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -335,14 +324,11 @@ describe("review workspace", () => {
       expect((await lstat(mirror)).isDirectory()).toBe(true);
       expect((await lstat(mirror)).isSymbolicLink()).toBe(false);
       expect((await lstat(elsewhere)).isDirectory()).toBe(true);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("reclones when the mirror directory is not a bare repository", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -372,14 +358,11 @@ describe("review workspace", () => {
       expect(calls[0]?.at(-1)).toBe(`${mirror}.incoming`);
       expect(await readFile(join(mirror, "HEAD"), "utf8")).toContain("ref:");
       await expect(readFile(join(mirror, "LEFTOVER"))).rejects.toThrow();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("replaces a symlinked owner directory instead of borrowing the cache behind it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -414,14 +397,11 @@ describe("review workspace", () => {
       expect(await realpath(dirname(mirror))).not.toBe(await realpath(cacheOwner));
       expect(await readFile(join(cacheOwner, "KEEP"), "utf8")).toBe("cache");
       expect(await readFile(join(cacheOwner, "housing_app.git", "config"), "utf8")).toContain("bare = true");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("replaces a symlinked mirror root instead of borrowing the cache behind it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const mirror = reviewMirrorPath(workdir, "personal", "housing_app");
@@ -456,14 +436,11 @@ describe("review workspace", () => {
       expect(await realpath(join(root, "_review-mirrors"))).not.toBe(await realpath(cacheRoot));
       expect(await readFile(join(cacheRoot, "KEEP"), "utf8")).toBe("cache");
       expect(await readFile(join(cacheRoot, "personal", "housing_app.git", "config"), "utf8")).toContain("bare = true");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("serializes mirror updates for one repository", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       let releaseFirst: () => void = () => {};
@@ -511,9 +488,7 @@ describe("review workspace", () => {
       await Promise.all([first, second]);
       expect(fetches).toBe(2);
       expect(bareClones).toBe(1);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("rejects an owner or repo that would escape the mirror directory", async () => {
@@ -544,8 +519,7 @@ describe("review workspace", () => {
   });
 
   test("falls back to the source repository when the base repository lacks the PR ref", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const { repo, pr } = makeCheckoutFixture();
       const calls: string[][] = [];
@@ -592,14 +566,11 @@ describe("review workspace", () => {
       expect(calls.map(stripGitConfigArgs)).toContainEqual(["checkout", "--force", "-B", "jumi/pr-48", "a".repeat(40)]);
       expect(stripGitConfigArgs(calls.at(-2) ?? [])).toEqual(["rev-parse", "HEAD"]);
       expect(stripGitConfigArgs(calls.at(-1) ?? [])).toEqual(["rev-parse", "jumi/target"]);
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 
   test("clones GitHub with x-access-token URL and does not log the token", async () => {
-    const root = await mkdtemp(join(tmpdir(), "jumi-review-ws-"));
-    try {
+    await withWorkspace(async (root) => {
       const workdir = join(root, "review-48");
       const repo = makeRepo({
         name: "jumi",
@@ -662,9 +633,7 @@ describe("review workspace", () => {
       expect(calls[0].env.GIT_COMMITTER_NAME).toBe("kirmanak-jumi[bot]");
       expect(calls[0].env.GIT_COMMITTER_EMAIL).toBe("123+kirmanak-jumi[bot]@users.noreply.github.com");
       expect(logs.join("\n")).not.toContain("ghs_install");
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
+    });
   });
 });
 
@@ -838,47 +807,27 @@ describe("workerOpenCodeChildEnv", () => {
     token: "bot-token",
   };
 
-  test("passes git auth plus JDK/Gradle env under /work, not HOME", () => {
-    const originalJavaHome = process.env.JAVA_HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalHome = process.env.HOME;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    delete process.env.JAVA_HOME;
-    delete process.env.WORKDIR;
-    delete process.env.JUMI_CACHE_DIR;
-    process.env.HOME = "/work/.home-test-unused";
-    try {
-      const env = workerOpenCodeChildEnv(auth, "/work/kirmanak/demo/12", {
-        home: "/work/kirmanak/demo/12/.jumi-tmp/probe-home",
-        workRoot: "/work",
-      });
-      expect(env.GIT_AUTH_TOKEN).toBe("bot-token");
-      expect(env.JAVA_HOME).toBe("/opt/java/openjdk");
-      expect(env.PATH.startsWith("/opt/java/openjdk/bin:")).toBe(true);
-      expect(env.JAVA_TOOL_OPTIONS).toContain("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp/scratch");
-      expect(env.TMPDIR).toBe("/work/kirmanak/demo/12/.jumi-tmp/scratch");
-      expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
-      expect(env.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
-    } finally {
-      if (originalJavaHome === undefined) delete process.env.JAVA_HOME;
-      else process.env.JAVA_HOME = originalJavaHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-    }
+  test("passes git auth plus JDK/Gradle env under /work, not HOME", async () => {
+    await withEnv(
+      { JAVA_HOME: undefined, WORKDIR: undefined, HOME: "/work/.home-test-unused", JUMI_CACHE_DIR: undefined },
+      async () => {
+        const env = workerOpenCodeChildEnv(auth, "/work/kirmanak/demo/12", {
+          home: "/work/kirmanak/demo/12/.jumi-tmp/probe-home",
+          workRoot: "/work",
+        });
+        expect(env.GIT_AUTH_TOKEN).toBe("bot-token");
+        expect(env.JAVA_HOME).toBe("/opt/java/openjdk");
+        expect(env.PATH.startsWith("/opt/java/openjdk/bin:")).toBe(true);
+        expect(env.JAVA_TOOL_OPTIONS).toContain("-Djava.io.tmpdir=/work/kirmanak/demo/12/.jumi-tmp/scratch");
+        expect(env.TMPDIR).toBe("/work/kirmanak/demo/12/.jumi-tmp/scratch");
+        expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
+        expect(env.GRADLE_OPTS).toBe("-Dorg.gradle.daemon=false");
+      }
+    );
   });
 
-  test("forwards image JAVA_HOME and WORKDIR", () => {
-    const originalJavaHome = process.env.JAVA_HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.JAVA_HOME = "/opt/custom-jdk";
-    process.env.WORKDIR = "/work";
-    delete process.env.JUMI_CACHE_DIR;
-    try {
+  test("forwards image JAVA_HOME and WORKDIR", async () => {
+    await withEnv({ JAVA_HOME: "/opt/custom-jdk", WORKDIR: "/work", JUMI_CACHE_DIR: undefined }, async () => {
       const env = workerOpenCodeChildEnv(auth, "/work/owner/repo/1", {
         home: "/work/.home-test-forward",
         workRoot: "/work",
@@ -886,44 +835,22 @@ describe("workerOpenCodeChildEnv", () => {
       expect(env.JAVA_HOME).toBe("/opt/custom-jdk");
       expect(env.PATH.startsWith("/opt/custom-jdk/bin:")).toBe(true);
       expect(env.GRADLE_USER_HOME).toBe("/work/.gradle");
-    } finally {
-      if (originalJavaHome === undefined) delete process.env.JAVA_HOME;
-      else process.env.JAVA_HOME = originalJavaHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-    }
+    });
   });
 
   test("worker child env sets -Duser.home from HOME and keeps java.io.tmpdir", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
-    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
-    const originalHome = process.env.HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.HOME = home;
-    process.env.WORKDIR = workRoot;
-    delete process.env.JUMI_CACHE_DIR;
-    try {
-      const workdir = join(workRoot, "acme", "api", "1");
-      const env = workerOpenCodeChildEnv(auth, workdir);
-      const scratch = join(workdir, ".jumi-tmp", "scratch");
-      expect(env.HOME).toBe(home);
-      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Djava.io.tmpdir=${scratch}`);
-      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Duser.home=${home}`);
-      expect(env.JAVA_TOOL_OPTIONS.match(/-Duser\.home=/g)?.length).toBe(1);
-      expect(env.JAVA_TOOL_OPTIONS.match(/-Djava\.io\.tmpdir=/g)?.length).toBe(1);
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-      await rm(home, { recursive: true, force: true });
-      await rm(workRoot, { recursive: true, force: true });
-    }
+    await withTempDirs(["jumi-home-", "jumi-work-"], async (home, workRoot) => {
+      await withEnv({ HOME: home, WORKDIR: workRoot, JUMI_CACHE_DIR: undefined }, async () => {
+        const workdir = join(workRoot, "acme", "api", "1");
+        const env = workerOpenCodeChildEnv(auth, workdir);
+        const scratch = join(workdir, ".jumi-tmp", "scratch");
+        expect(env.HOME).toBe(home);
+        expect(env.JAVA_TOOL_OPTIONS).toContain(`-Djava.io.tmpdir=${scratch}`);
+        expect(env.JAVA_TOOL_OPTIONS).toContain(`-Duser.home=${home}`);
+        expect(env.JAVA_TOOL_OPTIONS.match(/-Duser\.home=/g)?.length).toBe(1);
+        expect(env.JAVA_TOOL_OPTIONS.match(/-Djava\.io\.tmpdir=/g)?.length).toBe(1);
+      });
+    });
   });
 
   test("unwritable HOME falls back to WORKDIR/.home and logs once", async () => {
@@ -953,139 +880,85 @@ describe("workerOpenCodeChildEnv", () => {
   });
 
   test("cache env vars are per-repository under JUMI_CACHE_DIR", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
-    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
-    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
-    const originalHome = process.env.HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.HOME = home;
-    process.env.WORKDIR = workRoot;
-    process.env.JUMI_CACHE_DIR = cache;
-    try {
-      const workdir = join(workRoot, "acme", "api", "1");
-      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
-      const base = join(cache, "acme", "api");
-      expect(env.GRADLE_USER_HOME).toBe(join(base, "gradle"));
-      expect(env.ANDROID_USER_HOME).toBe(join(base, "android"));
-      expect(env.KONAN_DATA_DIR).toBe(join(base, "konan"));
-      expect(env.npm_config_cache).toBe(join(base, "npm"));
-      expect(env.BUN_INSTALL_CACHE_DIR).toBe(join(base, "bun"));
-      expect(env.UV_CACHE_DIR).toBe(join(base, "uv"));
-      expect(env.PIP_CACHE_DIR).toBe(join(base, "pip"));
-      expect(env.XDG_CACHE_HOME).toBe(join(base, "xdg"));
-      expect(env.JAVA_TOOL_OPTIONS).toContain(`-Dmaven.repo.local=${join(base, "maven")}`);
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-      await rm(home, { recursive: true, force: true });
-      await rm(workRoot, { recursive: true, force: true });
-      await rm(cache, { recursive: true, force: true });
-    }
+    await withTempDirs(["jumi-home-", "jumi-work-", "jumi-cache-"], async (home, workRoot, cache) => {
+      await withEnv({ HOME: home, WORKDIR: workRoot, JUMI_CACHE_DIR: cache }, async () => {
+        const workdir = join(workRoot, "acme", "api", "1");
+        const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+        const base = join(cache, "acme", "api");
+        expect(env.GRADLE_USER_HOME).toBe(join(base, "gradle"));
+        expect(env.ANDROID_USER_HOME).toBe(join(base, "android"));
+        expect(env.KONAN_DATA_DIR).toBe(join(base, "konan"));
+        expect(env.npm_config_cache).toBe(join(base, "npm"));
+        expect(env.BUN_INSTALL_CACHE_DIR).toBe(join(base, "bun"));
+        expect(env.UV_CACHE_DIR).toBe(join(base, "uv"));
+        expect(env.PIP_CACHE_DIR).toBe(join(base, "pip"));
+        expect(env.XDG_CACHE_HOME).toBe(join(base, "xdg"));
+        expect(env.JAVA_TOOL_OPTIONS).toContain(`-Dmaven.repo.local=${join(base, "maven")}`);
+      });
+    });
   });
 
   test("cache path rejects owner or repo with traversal segments", async () => {
-    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.JUMI_CACHE_DIR = cache;
-    try {
-      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "../evil", repo: "api" })).toThrow(
-        "Invalid owner"
-      );
-      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "acme", repo: ".." })).toThrow(
-        "Invalid repo"
-      );
-      expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "a/b", repo: "api" })).toThrow(
-        "Invalid owner"
-      );
-    } finally {
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-      await rm(cache, { recursive: true, force: true });
-    }
+    await withTempDirs(["jumi-cache-"], async (cache) => {
+      await withEnv({ JUMI_CACHE_DIR: cache }, async () => {
+        expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "../evil", repo: "api" })).toThrow(
+          "Invalid owner"
+        );
+        expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "acme", repo: ".." })).toThrow(
+          "Invalid repo"
+        );
+        expect(() => workerOpenCodeChildEnv(auth, "/work/acme/api/1", { owner: "a/b", repo: "api" })).toThrow(
+          "Invalid owner"
+        );
+      });
+    });
   });
 
   test("no cache env path is inside the worktree", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
-    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
-    const cache = await mkdtemp(join(tmpdir(), "jumi-cache-"));
-    const originalHome = process.env.HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.HOME = home;
-    process.env.WORKDIR = workRoot;
-    process.env.JUMI_CACHE_DIR = cache;
-    try {
-      const workdir = join(workRoot, "acme", "api", "1");
-      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
-      const prefix = `${workdir}${sep}`;
-      for (const key of [
-        "GRADLE_USER_HOME",
-        "ANDROID_USER_HOME",
-        "KONAN_DATA_DIR",
-        "npm_config_cache",
-        "BUN_INSTALL_CACHE_DIR",
-        "UV_CACHE_DIR",
-        "PIP_CACHE_DIR",
-        "XDG_CACHE_HOME",
-        "HOME",
-      ]) {
-        const value = env[key];
-        expect(value.startsWith(prefix) || value === workdir).toBe(false);
-      }
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-      await rm(home, { recursive: true, force: true });
-      await rm(workRoot, { recursive: true, force: true });
-      await rm(cache, { recursive: true, force: true });
-    }
+    await withTempDirs(["jumi-home-", "jumi-work-", "jumi-cache-"], async (home, workRoot, cache) => {
+      await withEnv({ HOME: home, WORKDIR: workRoot, JUMI_CACHE_DIR: cache }, async () => {
+        const workdir = join(workRoot, "acme", "api", "1");
+        const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+        const prefix = `${workdir}${sep}`;
+        for (const key of [
+          "GRADLE_USER_HOME",
+          "ANDROID_USER_HOME",
+          "KONAN_DATA_DIR",
+          "npm_config_cache",
+          "BUN_INSTALL_CACHE_DIR",
+          "UV_CACHE_DIR",
+          "PIP_CACHE_DIR",
+          "XDG_CACHE_HOME",
+          "HOME",
+        ]) {
+          const value = env[key];
+          expect(value.startsWith(prefix) || value === workdir).toBe(false);
+        }
+      });
+    });
   });
 
   test("unset JUMI_CACHE_DIR leaves GRADLE_USER_HOME under WORKDIR and adds no volume requirement", async () => {
-    const home = await mkdtemp(join(tmpdir(), "jumi-home-"));
-    const workRoot = await mkdtemp(join(tmpdir(), "jumi-work-"));
-    const originalHome = process.env.HOME;
-    const originalWorkdir = process.env.WORKDIR;
-    const originalCache = process.env.JUMI_CACHE_DIR;
-    process.env.HOME = home;
-    process.env.WORKDIR = workRoot;
-    delete process.env.JUMI_CACHE_DIR;
-    try {
-      const workdir = join(workRoot, "acme", "api", "1");
-      const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
-      expect(env.GRADLE_USER_HOME).toBe(join(workRoot, ".gradle"));
-      expect(env.GRADLE_USER_HOME.startsWith(`${workRoot}${sep}`)).toBe(true);
-      for (const key of [
-        "GRADLE_USER_HOME",
-        "ANDROID_USER_HOME",
-        "KONAN_DATA_DIR",
-        "npm_config_cache",
-        "BUN_INSTALL_CACHE_DIR",
-        "UV_CACHE_DIR",
-        "PIP_CACHE_DIR",
-        "XDG_CACHE_HOME",
-      ]) {
-        expect(env[key].startsWith(`${workRoot}${sep}`)).toBe(true);
-      }
-    } finally {
-      if (originalHome === undefined) delete process.env.HOME;
-      else process.env.HOME = originalHome;
-      if (originalWorkdir === undefined) delete process.env.WORKDIR;
-      else process.env.WORKDIR = originalWorkdir;
-      if (originalCache === undefined) delete process.env.JUMI_CACHE_DIR;
-      else process.env.JUMI_CACHE_DIR = originalCache;
-      await rm(home, { recursive: true, force: true });
-      await rm(workRoot, { recursive: true, force: true });
-    }
+    await withTempDirs(["jumi-home-", "jumi-work-"], async (home, workRoot) => {
+      await withEnv({ HOME: home, WORKDIR: workRoot, JUMI_CACHE_DIR: undefined }, async () => {
+        const workdir = join(workRoot, "acme", "api", "1");
+        const env = workerOpenCodeChildEnv(auth, workdir, { owner: "acme", repo: "api" });
+        expect(env.GRADLE_USER_HOME).toBe(join(workRoot, ".gradle"));
+        expect(env.GRADLE_USER_HOME.startsWith(`${workRoot}${sep}`)).toBe(true);
+        for (const key of [
+          "GRADLE_USER_HOME",
+          "ANDROID_USER_HOME",
+          "KONAN_DATA_DIR",
+          "npm_config_cache",
+          "BUN_INSTALL_CACHE_DIR",
+          "UV_CACHE_DIR",
+          "PIP_CACHE_DIR",
+          "XDG_CACHE_HOME",
+        ]) {
+          expect(env[key].startsWith(`${workRoot}${sep}`)).toBe(true);
+        }
+      });
+    });
   });
 });
 

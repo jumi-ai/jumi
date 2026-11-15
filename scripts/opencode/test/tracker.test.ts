@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
 import { implementIssue, issueJobKey } from "../src/implement.ts";
@@ -20,6 +19,7 @@ import {
 } from "../src/tracker.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { emptyCiMethods, makeComment, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 /** Fake tracker used only in tests. Supplies a brief and exactly one repository. Not a forge. */
 function makeFakeTracker(opts: { comments?: string[]; canComment?: boolean } = {}): BriefTracker & {
@@ -178,17 +178,6 @@ function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
   while (result[0] === "-c") result.splice(0, 2);
   return result;
-}
-
-async function withDirs(run: (home: string, workdir: string) => Promise<void>) {
-  const home = await mkdtemp(join(tmpdir(), "jumi-tracker-home-"));
-  const workdir = await mkdtemp(join(tmpdir(), "jumi-tracker-work-"));
-  try {
-    await run(home, workdir);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
 }
 
 describe("tracker reference", () => {
@@ -678,8 +667,7 @@ describe("implement and review take tracker and forge separately", () => {
     } as unknown as ReviewApi;
     expect(trackerApi).not.toBe(forgeApi);
 
-    const workspace = await mkdtemp(join(tmpdir(), "jumi-tracker-review-"));
-    try {
+    await withWorkspace(async (workspace) => {
       const result = await reviewPullRequest({
         api: forgeApi,
         tracker: trackerApi,
@@ -712,9 +700,7 @@ describe("implement and review take tracker and forge separately", () => {
       expect(result.status).toBe("posted");
       expect(forgeCalls).toContain("getPR");
       expect(trackerCalls).toContain("getIssue");
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
+    });
   });
 
   test("live git-host adapter still satisfies both when passed as both", async () => {

@@ -23,43 +23,34 @@ import { REVIEW_SANDBOX_WRAPPER_ENV } from "../src/review_sandbox.ts";
 import { SEARXNG_OPENCODE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
 import { resetXaiAuthStateForTests } from "../src/xai_auth.ts";
+import { SANDBOX_STUB } from "./harness/bins.ts";
+import { withEnv } from "./harness/env.ts";
+import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
-const originalPath = process.env.PATH;
-const originalSecret = process.env.GITEA_BOT_TOKEN;
-const originalPhoenix = process.env.PHOENIX_OTLP_ENDPOINT;
-const originalApiKey = process.env.OPENCODE_API_KEY;
-const originalApiKeyFile = process.env.OPENCODE_API_KEY_FILE;
-const originalHome = process.env.HOME;
-const originalSandboxWrapper = process.env[REVIEW_SANDBOX_WRAPPER_ENV];
 // `runOpenCode` owns the provider auth file under HOME before it spawns, so
 // every test gets a throwaway one: a real developer or CI home must never be
 // read, refreshed, or rewritten by the suite.
 let isolatedHome = "";
+let restoreTestEnv: () => void = () => {};
 
 beforeEach(async () => {
-  delete process.env.PHOENIX_OTLP_ENDPOINT;
-  delete process.env.OPENCODE_API_KEY_FILE;
   isolatedHome = await mkdtemp(join(tmpdir(), "jumi-opencode-home-"));
-  process.env.HOME = isolatedHome;
+  restoreTestEnv = withEnv({
+    PATH: process.env.PATH,
+    GITEA_BOT_TOKEN: process.env.GITEA_BOT_TOKEN,
+    PHOENIX_OTLP_ENDPOINT: undefined,
+    OPENCODE_API_KEY: process.env.OPENCODE_API_KEY,
+    OPENCODE_API_KEY_FILE: undefined,
+    HOME: isolatedHome,
+    [REVIEW_SANDBOX_WRAPPER_ENV]: process.env[REVIEW_SANDBOX_WRAPPER_ENV],
+  });
 });
 
 afterEach(async () => {
   resetControlMetricsForTests();
   resetXaiAuthStateForTests();
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  restoreTestEnv();
   if (isolatedHome) await rm(isolatedHome, { recursive: true, force: true });
-  process.env.PATH = originalPath;
-  if (originalSecret === undefined) delete process.env.GITEA_BOT_TOKEN;
-  else process.env.GITEA_BOT_TOKEN = originalSecret;
-  if (originalPhoenix === undefined) delete process.env.PHOENIX_OTLP_ENDPOINT;
-  else process.env.PHOENIX_OTLP_ENDPOINT = originalPhoenix;
-  if (originalApiKey === undefined) delete process.env.OPENCODE_API_KEY;
-  else process.env.OPENCODE_API_KEY = originalApiKey;
-  if (originalApiKeyFile === undefined) delete process.env.OPENCODE_API_KEY_FILE;
-  else process.env.OPENCODE_API_KEY_FILE = originalApiKeyFile;
-  if (originalSandboxWrapper === undefined) delete process.env[REVIEW_SANDBOX_WRAPPER_ENV];
-  else process.env[REVIEW_SANDBOX_WRAPPER_ENV] = originalSandboxWrapper;
   resetTokenMetricsForTests();
 });
 
@@ -93,18 +84,9 @@ function inlineConfig(stdout: string | undefined): Record<string, unknown> {
 
 const FREE_QUOTA_RETRY = writeAssistantRow(retryRow("Free usage exceeded, subscribe to Go"));
 
-/** Silent Landlock stub: answers `--check` like the real wrapper, then execs whatever follows `--`. */
-const SANDBOX_STUB = `#!/bin/sh
-if [ "$1" = "--check" ]; then echo "landlock-abi=7"; exit 0; fi
-while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
-[ "$1" = "--" ] && shift
-exec "$@"
-`;
-
 async function withFakeOpenCode(script: string, run: (binDir: string, workdir: string) => Promise<void>) {
-  const dir = await mkdtemp(join(tmpdir(), "fake-opencode-"));
-  const workdir = await realpath(await mkdtemp(join(tmpdir(), "fake-opencode-work-")));
-  try {
+  await withTempDirs(["fake-opencode-", "fake-opencode-work-"], async (dir, workdir) => {
+    const realWorkdir = await realpath(workdir);
     const bin = join(dir, "opencode");
     await writeFile(bin, script);
     await chmod(bin, 0o755);
@@ -113,13 +95,10 @@ async function withFakeOpenCode(script: string, run: (binDir: string, workdir: s
     const stub = join(dir, "jumi-sandbox-stub");
     await writeFile(stub, SANDBOX_STUB);
     await chmod(stub, 0o755);
-    process.env[REVIEW_SANDBOX_WRAPPER_ENV] = stub;
-    process.env.PATH = `${dir}:${originalPath ?? ""}`;
-    await run(dir, workdir);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-    await rm(workdir, { recursive: true, force: true });
-  }
+    await withEnv({ [REVIEW_SANDBOX_WRAPPER_ENV]: stub, PATH: `${dir}:${process.env.PATH ?? ""}` }, async () =>
+      run(dir, realWorkdir)
+    );
+  });
 }
 
 describe("runOpenCode", () => {
@@ -1846,17 +1825,14 @@ describe("resolveOpenCodePrompt", () => {
   });
 
   test("uses workspace files when prompt is omitted", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-prompt-"));
-    try {
+    await withWorkspace(async (dir) => {
       await writeFile(join(dir, "JUMI_TASK.md"), "task");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildImplementPrompt());
       await writeFile(join(dir, "JUMI_FEEDBACK.md"), "feedback");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildFollowupPrompt());
       await writeFile(join(dir, "JUMI_CONFLICT.md"), "conflict");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildConflictPrompt());
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 

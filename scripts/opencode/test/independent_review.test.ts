@@ -12,6 +12,8 @@ import { isTerminalSkipReason, type ReviewApi, reviewPullRequest } from "../src/
 import { parseRunnersCatalog } from "../src/runners.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeBranch, makeComment, makeFile, makeIssue, makePR, makeRepo } from "./fixtures.ts";
+import { frozenGit } from "./harness/git.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 const OPUS_CLAUDE = { type: "claude", model: "claude-opus-5", effort: "high" };
 const OPUS_OPENCODE_ALIAS = { type: "opencode", model: "anthropic/claude-opus-5", variant: "high" };
@@ -318,25 +320,6 @@ function independentApi(overrides: Partial<ReviewApi> = {}): ReviewApi {
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
     ...overrides,
   });
-}
-
-async function withWorkspace(run: (workspace: string) => Promise<void>) {
-  const workspace = await mkdtemp(join(tmpdir(), "jumi-ind-"));
-  try {
-    await run(workspace);
-  } finally {
-    await rm(workspace, { recursive: true, force: true });
-  }
-}
-
-function frozenGit(head = "head1"): (args: string[]) => Promise<string> {
-  return async (args) => {
-    if (args[0] === "rev-parse") return head;
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
 }
 
 const baseOptions = {

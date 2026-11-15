@@ -19,82 +19,8 @@ import {
 } from "../src/dispatch.ts";
 import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
-
-interface FakeK8s {
-  fetchImpl: (input: string, init?: RequestInit) => Promise<Response>;
-  jobs: Map<string, K8sJobObject & { creationMs: number }>;
-  pods: Map<string, K8sPodObject[]>;
-  deletes: string[];
-  deleteUrls: string[];
-  creates: string[];
-}
-
-function createFakeK8s(): FakeK8s {
-  const jobs = new Map<string, K8sJobObject & { creationMs: number }>();
-  const pods = new Map<string, K8sPodObject[]>();
-  const deletes: string[] = [];
-  const deleteUrls: string[] = [];
-  const creates: string[] = [];
-  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
-    const url = String(input);
-    const method = (init?.method ?? "GET").toUpperCase();
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "POST") {
-      const manifest = JSON.parse(String(init?.body ?? "{}")) as K8sJobObject;
-      const name = manifest.metadata?.name ?? "";
-      creates.push(name);
-      if (jobs.has(name)) {
-        return new Response(JSON.stringify({ reason: "AlreadyExists", message: `${name} already exists` }), {
-          status: 409,
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      const nowIso = new Date().toISOString();
-      jobs.set(name, {
-        ...manifest,
-        metadata: { ...(manifest.metadata ?? {}), creationTimestamp: nowIso },
-        status: manifest.status ?? {},
-        creationMs: Date.now(),
-      } as K8sJobObject & { creationMs: number });
-      return new Response(JSON.stringify({ metadata: { name } }), {
-        status: 201,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.includes("/jobs/") && method === "DELETE") {
-      const name = decodeURIComponent(url.split("/jobs/")[1]?.split("?")[0] ?? "");
-      deletes.push(name);
-      deleteUrls.push(url);
-      if (!url.includes("propagationPolicy=Background")) {
-        return new Response(JSON.stringify({ message: "propagationPolicy required" }), { status: 400 });
-      }
-      jobs.delete(name);
-      pods.delete(name);
-      return new Response(JSON.stringify({}), { status: 200 });
-    }
-    if (url.includes("/apis/batch/v1/namespaces/") && url.endsWith("/jobs") && method === "GET") {
-      const items = [...jobs.entries()].map(([name, job]) => ({
-        metadata: { name, creationTimestamp: new Date(job.creationMs).toISOString() },
-        spec: (job as K8sJobObject).spec,
-        status: (job as K8sJobObject).status ?? {},
-      }));
-      return new Response(JSON.stringify({ items }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    if (url.includes("/api/v1/namespaces/") && url.includes("/pods") && method === "GET") {
-      const selector = decodeURIComponent(url.split("labelSelector=")[1] ?? "");
-      const jobName = selector.split("job-name=")[1]?.split("&")[0] ?? "";
-      const items = pods.get(jobName) ?? [];
-      return new Response(JSON.stringify({ items }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
-    return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
-  };
-  return { fetchImpl, jobs, pods, deletes, deleteUrls, creates };
-}
+import { createFakeK8s } from "./harness/k8s.ts";
+import { withWorkspace } from "./harness/temp.ts";
 
 function baseTemplate(): Record<string, unknown> {
   return {
@@ -185,8 +111,7 @@ describe("dispatch enablement", () => {
   });
 
   test("disabled dispatch creates nothing", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -203,16 +128,13 @@ describe("dispatch enablement", () => {
       });
       expect(results).toEqual([]);
       expect(fake.creates).toEqual([]);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("dispatch runnable conditions", () => {
   test("scale from zero creates one Job per runnable row", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -228,14 +150,11 @@ describe("dispatch runnable conditions", () => {
       expect(results[0].created).toBe(2);
       expect(fake.jobs.size).toBe(2);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_jobs_created_total{role="worker"} 2');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("cap limits creation and counts active Jobs", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -262,14 +181,11 @@ describe("dispatch runnable conditions", () => {
       });
       expect(again[0].created).toBe(0);
       expect(again[0].skipReason).toBe("cap reached");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod for a backoff row", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -285,14 +201,11 @@ describe("dispatch runnable conditions", () => {
       });
       expect(results[0].created).toBe(0);
       expect(fake.jobs.size).toBe(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod for a same-issue held row", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -315,14 +228,11 @@ describe("dispatch runnable conditions", () => {
       const parsed = parseDispatchJobName(names[0]);
       const row = await store.get(parsed!.rowId);
       expect(row?.issueNumber).toBe(13);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod during a cooldown", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -337,14 +247,11 @@ describe("dispatch runnable conditions", () => {
       expect(results[0].created).toBe(0);
       expect(results[0].skipReason).toBe("breaker/cooldown active");
       expect(fake.jobs.size).toBe(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("no pod during a breaker open", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -360,16 +267,13 @@ describe("dispatch runnable conditions", () => {
       });
       expect(results[0].created).toBe(0);
       expect(fake.jobs.size).toBe(0);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
 describe("dispatch idempotency and failure handling", () => {
   test("repeated create returns AlreadyExists without error", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -394,14 +298,11 @@ describe("dispatch idempotency and failure handling", () => {
       });
       expect(second[0].created).toBe(0);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_errors_total{role="worker",op="create"} 0');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("failed Job expires the lease at once", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -428,14 +329,11 @@ describe("dispatch idempotency and failure handling", () => {
       const reclaimed = await store.reclaimExpired(2, new Date(), 1000, WORKER_JOB_KINDS);
       expect(reclaimed.requeued.length).toBe(1);
       expect(reclaimed.requeued[0].attempt).toBe(1);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("stale failed Job does not expire the replacement run", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -471,14 +369,11 @@ describe("dispatch idempotency and failure handling", () => {
       expect(row?.state).toBe("leased");
       expect(row?.attempt).toBe(1);
       expect(row?.leasedUntil).toBeGreaterThan(Date.now());
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("never-started pod is deleted with no attempt used", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -512,14 +407,11 @@ describe("dispatch idempotency and failure handling", () => {
       expect(row?.state).toBe("queued");
       expect(row?.attempt).toBe(0);
       expect(renderDispatchMetrics()).toContain('jumi_dispatch_never_started_total{role="worker"} 1');
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("row run twice gets a fresh name while the old Job exists", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -546,14 +438,11 @@ describe("dispatch idempotency and failure handling", () => {
       expect(fake.jobs.size).toBe(2);
       expect(new Set(fake.jobs.keys()).size).toBe(2);
       expect([...fake.jobs.keys()]).toContain(first);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("finished Jobs are cleaned and the queue still drains", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "jumi-dispatch-"));
-    try {
+    await withWorkspace(async (dir) => {
       const templateFile = join(dir, "job.json");
       await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
       const store = new MemoryReviewJobStore();
@@ -579,9 +468,7 @@ describe("dispatch idempotency and failure handling", () => {
       });
       expect(next[0].created).toBe(1);
       expect(fake.jobs.size).toBe(1);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
   test("k8s helpers pass propagationPolicy and list", async () => {

@@ -8,7 +8,6 @@ import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { processEngineTick } from "../src/server.ts";
 import { installProcessShutdown } from "../src/shutdown.ts";
 import { processWorkerTick } from "../src/worker.ts";
-import type { GitRunner } from "../src/workspace.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import {
   makeComment,
@@ -21,6 +20,7 @@ import {
   makeRepo,
   makeWorkerConfig,
 } from "./fixtures.ts";
+import { frozenGit } from "./harness/git.ts";
 
 const role = process.argv[2];
 const statusPath = process.argv[3];
@@ -65,16 +65,6 @@ function shutdownReviewApi(): ReviewApi & ProbeApi {
     listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
   });
   return Object.assign(fake, { comments, statuses });
-}
-
-function frozenGit(): GitRunner {
-  return async (args) => {
-    if (args[0] === "rev-parse") return "headsha";
-    if (args[0] === "status") return "?? JUMI_REVIEW.md";
-    if (args[0] === "ls-files") return "";
-    if (args[0] === "checkout") return "";
-    throw new Error(`unexpected git ${args.join(" ")}`);
-  };
 }
 
 const store = new MemoryReviewJobStore();
