@@ -11,16 +11,7 @@ import {
   restoreCheckpoint,
   sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
-import {
-  buildCiMarkdown,
-  CI_LOG_FILE,
-  type CiInspection,
-  flakeComment,
-  flakeSkipReason,
-  inspectCi,
-  recordCiHandled,
-  resolveRequiredCiContexts,
-} from "./ci.ts";
+import { buildCiMarkdown, CI_LOG_FILE, flakeComment, flakeSkipReason, recordCiHandled } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -43,7 +34,6 @@ import {
   MAX_CONFLICT_ROUNDS,
   type MergeDefaultResult,
   mergeDefaultIntoWorktree,
-  readConflictLatch,
   shouldIncrementRound,
   shouldResetConflictRound,
   writeConflictLatch,
@@ -66,14 +56,7 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff, saveWorktreeHandoff } from "./handoff.ts";
-import {
-  hasIgnoreConflictsLabel,
-  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
-  ignoreConflictsReason,
-  isLeftToAuthor,
-  leaveConflictsAuthorReason,
-  loadIgnoreConflictsAuthors,
-} from "./ignore_conflicts.ts";
+import { IGNORE_CONFLICTS_SETTINGS_UNREADABLE } from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -93,11 +76,23 @@ import {
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
+import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
-import { applyRepoChain } from "./repo_settings.ts";
+import {
+  applyRepoChain,
+  conventionsFromLoad,
+  effectiveConflictRounds,
+  effectiveFollowupIgnoreLogins,
+  effectiveFollowupRounds,
+  effectiveTrustedSenderLogins,
+  failOpenLoadFromSnapshot,
+  isSuggestionFollowupEnabled,
+  loadRepoSettings,
+  type SettingsSnapshot,
+} from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
@@ -111,13 +106,8 @@ import {
   evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
-  fingerprintFindingIdentityFromParts,
-  fingerprintFollowUpText,
-  fingerprintPrDiffFromFiles,
-  fingerprintSameFinding,
   isQuotaStuck,
   markQuotaStuckLatch,
-  readStuckLatch,
   sameFindingDisplayFromParts,
   sameFindingLatchReasonFromParts,
   stuckComment,
@@ -781,7 +771,7 @@ function reviewFindingFromReview(review: PullReview): HandledReviewFinding | und
   return { id: review.id, sha };
 }
 
-function briefInlines(items: FollowUpItems): InlineComment[] {
+export function briefInlines(items: FollowUpItems): InlineComment[] {
   const seen = new Set<number>();
   const out: InlineComment[] = [];
   for (const comment of items.inlines) {
@@ -792,7 +782,7 @@ function briefInlines(items: FollowUpItems): InlineComment[] {
   return out;
 }
 
-function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
+export function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
   return items.jumiInlines.filter(isUnresolvedInline);
 }
 
@@ -834,7 +824,7 @@ function isMaintainerOnlyPullReview(
  * is maintainer-only. Then the worker must not start a round only to
  * answer it; the board keeps the PR visible as waiting on a maintainer.
  */
-function onlyMaintainerQuestionsPending(
+export function onlyMaintainerQuestionsPending(
   items: FollowUpItems,
   state: Pick<FollowUpState, "handledCommentIds" | "handledReviewIds" | "handledReviewFindings">,
   botUsername: string
@@ -887,7 +877,7 @@ function earlierJumiReviews(items: FollowUpItems, lastReview?: Comment): Comment
   return out;
 }
 
-function hasUnhandledFollowUpItems(
+export function hasUnhandledFollowUpItems(
   items: {
     comments: Comment[];
     inlines: InlineComment[];
@@ -1184,7 +1174,7 @@ export function buildFeedbackMarkdown(opts: {
   return { markdown, commentIds: [...commentIds], reviewIds: [...reviewIds] };
 }
 
-function triggerBodyFromItems(
+export function triggerBodyFromItems(
   trigger: IssueJob["trigger"] | undefined,
   items: { comments: Comment[]; inlines: InlineComment[]; reviews: PullReview[] }
 ): string {
@@ -1203,7 +1193,7 @@ function triggerBodyFromItems(
   return "";
 }
 
-function reviewFindingMatchOptsForJob(
+export function reviewFindingMatchOptsForJob(
   job: IssueJob,
   headSha: string,
   prAuthor?: string | undefined | null,
@@ -1224,54 +1214,48 @@ export async function implementFollowUp(
   opts: ImplementOptions & { sleep?: (ms: number) => Promise<void> }
 ): Promise<FollowUpResult> {
   const log = opts.logger ?? logDefault;
-  // Single default-branch file read for both the round caps/suggestion
-  // switch and the effective blocking list. Fail-open to deployment caps
-  // and the deployer list.
-  let policy = {
-    followupOnSuggestions: true,
-    maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-  };
-  let effectiveBlockingUpFront = opts.blockingQuestionAuthors;
-  let effectiveFollowupIgnoreUpFront = opts.followupIgnoreLogins;
-  let effectiveTrustedUpFront = opts.trustedSenderLogins;
-  let effectiveIgnoreLabelUpFront = opts.ignoreConflictsLabel;
-  let ciGateWaitUpFront: import("./repo_settings.ts").CiGateWait = "required";
-  try {
-    const defaultBranch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch : "";
-    if (defaultBranch) {
-      const repoPolicy = await resolveRepoPolicy(
-        { api: opts.api, owner: opts.job.owner, repo: opts.job.repo, ref: defaultBranch },
-        {
-          trustedSenderLogins: opts.trustedSenderLogins,
-          followupIgnoreLogins: opts.followupIgnoreLogins,
-          ignoreConflictsLabel: opts.ignoreConflictsLabel,
-          blockingQuestionAuthors: opts.blockingQuestionAuthors,
-          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-        },
-        { onUnreadable: "throw" }
-      );
-      if (repoPolicy.status === "invalid") {
-        log(`follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${defaultBranch}: ${repoPolicy.error}`);
-      } else {
-        policy = {
-          followupOnSuggestions: repoPolicy.followupOnSuggestions,
-          maxFollowupRounds: repoPolicy.maxFollowupRounds,
-          maxConflictRounds: repoPolicy.maxConflictRounds,
-        };
+  // Single default-branch file read for the whole wake. Every consumer below
+  // derives from `settingsSnapshot` via the existing pure `effective*`
+  // helpers; fail-open to deployment caps and the deployer lists.
+  let settingsSnapshot: SettingsSnapshot;
+  {
+    const ref = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch.trim() : "";
+    const fileApi = opts.api as unknown as {
+      getRepoFile?: (
+        owner: string,
+        repo: string,
+        path: string,
+        ref: string
+      ) => Promise<{ found: boolean; content?: string }>;
+    };
+    if (!ref || typeof fileApi.getRepoFile !== "function") {
+      settingsSnapshot = { state: "no-branch" };
+    } else {
+      try {
+        const load = await loadRepoSettings(opts.api, opts.job.owner, opts.job.repo, ref);
+        settingsSnapshot = { state: "loaded", load };
+      } catch (error) {
+        settingsSnapshot = { state: "threw", error };
       }
-      ciGateWaitUpFront = repoPolicy.ciGateWait;
-      effectiveBlockingUpFront = repoPolicy.blockingQuestionAuthors;
-      effectiveFollowupIgnoreUpFront = repoPolicy.followupIgnoreLogins;
-      effectiveTrustedUpFront = repoPolicy.trustedSenderLogins;
-      effectiveIgnoreLabelUpFront = repoPolicy.ignoreConflictsLabel;
     }
-  } catch (err) {
-    log(
-      `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${errorMessage(err)}`
-    );
+    if (settingsSnapshot.state === "loaded" && settingsSnapshot.load.state === "invalid") {
+      log(
+        `follow-up settings invalid for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${settingsSnapshot.load.error}`
+      );
+    } else if (settingsSnapshot.state === "threw") {
+      log(
+        `follow-up settings unreadable for ${opts.job.owner}/${opts.job.repo}@${opts.job.defaultBranch}: ${errorMessage(settingsSnapshot.error)}`
+      );
+    }
   }
+  const failOpenUpFront = failOpenLoadFromSnapshot(settingsSnapshot);
+  const policy = {
+    followupOnSuggestions: isSuggestionFollowupEnabled(failOpenUpFront),
+    maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, failOpenUpFront),
+    maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, failOpenUpFront),
+  };
+  const effectiveFollowupIgnoreUpFront = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, failOpenUpFront);
+  const effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpenUpFront);
   const maxFollowupRounds = policy.maxFollowupRounds;
   const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
@@ -1314,11 +1298,7 @@ export async function implementFollowUp(
     return assigned;
   }
 
-  const { loadRepoConventions: loadFollowupConventions, defaultRepoConventions: defaultFollowupConventions } =
-    await import("./repo_settings.ts");
-  const followupConventions = await loadFollowupConventions(opts.api, owner, repo, opts.job.defaultBranch, log).catch(
-    () => defaultFollowupConventions()
-  );
+  const followupConventions = conventionsFromLoad(failOpenLoadFromSnapshot(settingsSnapshot));
   const followupPrefix = followupConventions.branchPrefix ?? "jumi";
   const pr = await resolveWorkerPullRequest(
     opts.api,
@@ -1345,17 +1325,6 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
-  // Effective blocking authors were loaded once above with the policy
-  // (the job's default branch). Fail-open to deployer.
-  const effectiveBlocking = effectiveBlockingUpFront;
-  const findingOpts = reviewFindingMatchOptsForJob(
-    opts.job,
-    pr.head.sha,
-    pr.user?.login,
-    effectiveBlocking,
-    policy.followupOnSuggestions
-  );
-
   const state = await readFollowUpLatch(latches, latchKey);
   // Resolve a held suggestion `pending` to `success` when this round will not
   // push. The review consumed the one-hold flag; any terminal no-push outcome
@@ -1388,73 +1357,49 @@ export async function implementFollowUp(
     await forgetClaim();
     return { status: "skipped", reason: "refusing to follow up on the default branch" };
   }
-  const pendingItems = await collectFollowUpItems(
-    opts.api,
-    owner,
-    repo,
-    pr.number,
-    opts.botUsername,
-    pr.head.sha,
-    effectiveFollowupIgnoreUpFront,
-    findingOpts,
-    effectiveTrustedUpFront
-  );
-  const pendingTriggerBody = triggerBodyFromItems(opts.job.trigger, pendingItems);
-  const pendingLastReview = pickLatestJumiFinding(pendingItems, pr.head.sha);
-  let hasFeedback = hasUnhandledFollowUpItems(pendingItems, state);
-  // Maintainer-only ❓ is answered on the forge, not from the branch: never
-  // start a worker round only for it.
-  if (hasFeedback && onlyMaintainerQuestionsPending(pendingItems, state, opts.botUsername)) {
-    hasFeedback = false;
-  }
-  let requiredContexts: readonly string[] | undefined;
-  if (ciGateWaitUpFront !== "all" && ciGateWaitUpFront !== "none") {
-    requiredContexts = await resolveRequiredCiContexts(opts.api, {
+  // Per-wake decision inputs, gathered once. The single `.jumi.yml` read is
+  // `settingsSnapshot` above; every input below comes from `snapshot.*`.
+  const snapshot = await buildFollowUpSnapshot(
+    {
       owner,
       repo,
       issueNumber,
-      baseBranch: pr.base.ref,
-      log,
-    });
-  }
-  const inspectOpts = {
-    api: opts.api,
-    owner,
-    repo,
-    sha: pr.head.sha,
-    home: opts.home,
-    issueNumber,
-    skipLatches: latches,
-    log,
-    ...(requiredContexts ? { requiredContexts } : {}),
-    ...(ciGateWaitUpFront !== "required" ? { wait: ciGateWaitUpFront } : {}),
-  };
-  let ci: CiInspection = {
-    sha: pr.head.sha,
-    pending: false,
-    failed: [],
-    unhandled: [],
-    empty: true,
-    checks: [],
-    pendingOptional: [],
-  };
-  try {
-    ci = await inspectCi(inspectOpts);
-  } catch (err) {
-    log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
-  }
-  if (ci.pending && opts.job.trigger?.event === "workflow_job") {
-    try {
-      await (opts.sleep ?? sleep)(CI_PENDING_RETRY_MS);
-      ci = await inspectCi(inspectOpts);
-    } catch (err) {
-      log(`CI inspect failed for ${owner}/${repo}#${issueNumber}: ${errorMessage(err)}`);
-    }
-  }
-  const ciWake = !ci.pending && ci.unhandled.length > 0;
+      pr,
+      job: opts.job,
+      botUsername: opts.botUsername,
+      home: opts.home,
+      defaultBranch: opts.job.defaultBranch,
+      deployment: {
+        maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
+        maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+        blockingQuestionAuthors: opts.blockingQuestionAuthors,
+        followupIgnoreLogins: opts.followupIgnoreLogins,
+        trustedSenderLogins: opts.trustedSenderLogins,
+        ignoreConflictsLabel: opts.ignoreConflictsLabel,
+      },
+      settings: settingsSnapshot,
+      skipLatches: latches,
+    },
+    { api: opts.api, log, sleep: opts.sleep ?? sleep, now }
+  );
+  const pendingItems = snapshot.items;
+  const pendingTriggerBody = snapshot.pendingTriggerBody;
+  const pendingLastReview = snapshot.pendingLastReview;
+  let hasFeedback = snapshot.hasFeedback;
+  const ci = snapshot.ci;
+  const ciWake = snapshot.ciWake;
+  const snapshotState = snapshot.latch.followup;
+  const findingOpts = reviewFindingMatchOptsForJob(
+    opts.job,
+    pr.head.sha,
+    pr.user?.login,
+    snapshot.lists.blockingAuthors,
+    snapshot.policy.followupOnSuggestions
+  );
   if (
-    (opts.job.trigger?.commentId !== undefined && state.handledCommentIds.includes(opts.job.trigger.commentId)) ||
-    (opts.job.trigger?.reviewId !== undefined && state.handledReviewIds.includes(opts.job.trigger.reviewId))
+    (opts.job.trigger?.commentId !== undefined &&
+      snapshotState.handledCommentIds.includes(opts.job.trigger.commentId)) ||
+    (opts.job.trigger?.reviewId !== undefined && snapshotState.handledReviewIds.includes(opts.job.trigger.reviewId))
   ) {
     if (!ciWake) {
       await resolveHeld("skipped", "comment already handled");
@@ -1462,33 +1407,14 @@ export async function implementFollowUp(
       return { status: "skipped", reason: "comment already handled" };
     }
   }
-  const previousConflict = await readConflictLatch(latches, latchKey);
-  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
+  const previousConflict = await snapshot.getConflict();
+  const ignoreAuthors = snapshot.lists.ignoreAuthors;
   if (ignoreAuthors === undefined) {
     await resolveHeld("skipped", "settings unreadable");
     await forgetClaim();
     return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   }
-  const leftToAuthor = await isLeftToAuthor(
-    opts.api,
-    owner,
-    repo,
-    pr,
-    {
-      botUsername: opts.botUsername,
-      ignoreConflictsLabel: effectiveIgnoreLabelUpFront,
-      ignoreConflictsAuthors: ignoreAuthors,
-      prAuthor: pr.user?.login,
-      defaultBranch: opts.job.defaultBranch,
-    },
-    log
-  );
-  const leftViaAuthorOnly =
-    leftToAuthor && !hasIgnoreConflictsLabel(pr, effectiveIgnoreLabelUpFront) && ignoreAuthors.length > 0;
-  const leftReason = leftViaAuthorOnly
-    ? leaveConflictsAuthorReason(pr.user?.login)
-    : ignoreConflictsReason(effectiveIgnoreLabelUpFront);
-  const conflictedLeftToAuthor = pr.mergeable === false && leftToAuthor;
+  const { leftToAuthor, leftReason, conflictedLeftToAuthor } = await snapshot.getLeftToAuthor();
   // The conflict cap gates conflict-resolution work only: a mergeable pull
   // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
   // For an unmergeable pull the cap reports first so a conflicted pull with
@@ -1501,7 +1427,7 @@ export async function implementFollowUp(
     await forgetClaim();
     return { status: "skipped", reason };
   }
-  if (hasFeedback && state.round >= maxFollowupRounds) {
+  if (hasFeedback && snapshotState.round >= maxFollowupRounds) {
     if (!ciWake) {
       await sticky("stuck: too many follow-up rounds", pr.number);
       await resolveHeld("skipped", "round cap");
@@ -1549,23 +1475,19 @@ export async function implementFollowUp(
     return { status: "skipped", reason: leftReason };
   }
 
-  const feedbackPreview = buildFeedbackMarkdown({
-    pr,
-    trigger: opts.job.trigger,
-    triggerBody: pendingTriggerBody,
-    comments: pendingItems.comments,
-    inlines: briefInlines(pendingItems),
-    reviews: pendingItems.reviews,
-    lastReview: pendingLastReview,
-    currentInlines: unresolvedJumiInlines(pendingItems),
-  });
-  const findingHash = hasFeedback ? fingerprintFollowUpText(feedbackPreview.markdown) : undefined;
-  const ciHash = hasFeedback ? undefined : fingerprintCiChecks(ci.unhandled);
-  const currentFingerprint = findingHash
-    ? { kind: "action" as const, hash: findingHash }
-    : ciHash
-      ? { kind: "ci" as const, hash: ciHash }
-      : undefined;
+  // `snapshot.currentFingerprint`/`findingIdentityHash` are pre-cap (before the
+  // round-cap `hasFeedback = false` above). Re-derive post-cap exactly like the
+  // old inline code: `findingHash` only when feedback remains, otherwise the CI
+  // hash; no diff read when the post-cap identity is empty.
+  let currentFingerprint = snapshot.currentFingerprint;
+  let sameFindingCurrent: { kind: "finding"; hash: string } | undefined;
+  if (!hasFeedback) {
+    const ciHash = fingerprintCiChecks(ci.unhandled);
+    currentFingerprint = ciHash ? { kind: "ci" as const, hash: ciHash } : undefined;
+  } else {
+    const diffResult = await snapshot.getSameFinding();
+    sameFindingCurrent = diffResult.sameFindingCurrent;
+  }
   // Same-finding stuck: the same blocking finding identity repeats while the
   // PR's own diff has not moved. Base merges change the head SHA but not the
   // three-dot diff, so the diff hash stays stable across them. A real change
@@ -1575,46 +1497,9 @@ export async function implementFollowUp(
   // inlines: an inline-only repeat has an empty top-level body, so gate on
   // `hasFeedback` alone and let the helper return undefined when both inputs
   // are empty.
-  const reviewBodyForIdentity = pendingLastReview?.body ?? undefined;
+  const reviewBodyForIdentity = snapshot.reviewBodyForIdentity;
   const jumiInlinesForIdentity = unresolvedJumiInlines(pendingItems);
-  const findingIdentityHash = hasFeedback
-    ? fingerprintFindingIdentityFromParts(reviewBodyForIdentity, jumiInlinesForIdentity)
-    : undefined;
-  let prDiffHash: string | undefined;
-  if (findingIdentityHash) {
-    try {
-      const getFiles = (
-        opts.api as unknown as {
-          getPRFiles?: (
-            owner: string,
-            repo: string,
-            index: number
-          ) => Promise<
-            ReadonlyArray<{
-              filename: string;
-              patch?: string | null | undefined;
-              status?: string | null | undefined;
-              additions?: number | null | undefined;
-              deletions?: number | null | undefined;
-              changes?: number | null | undefined;
-            }>
-          >;
-        }
-      ).getPRFiles;
-      if (typeof getFiles === "function") {
-        const files = await getFiles.call(opts.api, owner, repo, pr.number);
-        prDiffHash = fingerprintPrDiffFromFiles(files);
-      }
-    } catch (err) {
-      log(`same-finding diff unavailable for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
-      prDiffHash = undefined;
-    }
-  }
-  const sameFindingCurrent =
-    findingIdentityHash && prDiffHash
-      ? { kind: "finding" as const, hash: fingerprintSameFinding(findingIdentityHash, prDiffHash) }
-      : undefined;
-  const stuckState = await readStuckLatch(latches, latchKey);
+  const stuckState = await snapshot.getStuck();
   if (isQuotaStuck(stuckState)) {
     const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
     await sticky(quotaReason, pr.number);
@@ -1670,6 +1555,7 @@ export async function implementFollowUp(
       log,
       diagBase: { job: `${owner}/${repo}#${issueNumber}`, head: pr.head.sha },
       unreadableContext: `${owner}/${repo}`,
+      preloaded: settingsSnapshot,
       publish: async (reason) => {
         try {
           await sticky(reason, pr.number);
