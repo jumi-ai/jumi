@@ -32,7 +32,11 @@ const LEDGER_METHODS = new Set(["markPublished", "setIssueSkipReason", "enqueueI
 export function normalizeString(input: string): string {
   let out = input;
   const tmp = tmpdir();
-  if (tmp && out.includes(tmp)) out = out.split(tmp).join("<tmpdir>");
+  if (tmp) {
+    const escaped = tmp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = escaped + "(?:/[^\\s\"'`,\\]}]*)?";
+    out = out.replace(new RegExp(pattern, "g"), "<tmpdir>");
+  }
   out = out.replace(/\/tmp\/[^\s"'`,\]}]*/g, "<tmpdir>");
   out = out.replace(/\/private\/tmp\/[^\s"'`,\]}]*/g, "<tmpdir>");
   out = out.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, "<iso>");
