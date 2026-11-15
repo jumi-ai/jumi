@@ -153,7 +153,7 @@ import {
   trailerSuggestionCount,
 } from "./verdict.ts";
 import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
-import { workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
+import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_FOLLOWUP_ROUNDS = 3;
@@ -2302,7 +2302,15 @@ export async function implementFollowUp(
           const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
           const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
-          await sticky(buildNoChangesSticky(workerStore.getNoChangesReason()), pr.number);
+          const noChangesReason = workerStore.getNoChangesReason();
+          await sticky(
+            buildNoChangesSticky(
+              noChangesReason
+                ? redactGitSecrets(noChangesReason, workerPublishSecrets(loop.auth.token, jobChain))
+                : undefined
+            ),
+            pr.number
+          );
           await recordAttempt(sha || pr.head.sha);
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "no-changes" };

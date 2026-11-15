@@ -49,9 +49,17 @@ function rpcError(id: unknown, code: number, message: string): Response {
   return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 }
 
-/** Count sentences: non-empty segments split on `.`/`!`/`?`. */
+/** Count sentences: non-empty segments split on `.`/`!`/`?`, ignoring dots inside URLs. */
 export function countReasonSentences(reason: string): number {
-  return reason
+  // Strip `http(s)://...` tokens first so dots inside a link (e.g. an
+  // external-fix URL the issue explicitly wants) never count as boundaries.
+  // Keep trailing sentence punctuation attached to the URL (the greedy `\S+`
+  // would otherwise swallow the `.` that ends the sentence).
+  const withoutUrls = reason.replace(/https?:\/\/\S+/g, (match) => {
+    const trail = match.match(/[.,!?;:]+$/)?.[0] ?? "";
+    return trail ? ` ${trail}` : " ";
+  });
+  return withoutUrls
     .split(/[.!?]+/)
     .map((part) => part.trim())
     .filter(Boolean).length;

@@ -55,6 +55,13 @@ describe("worker MCP server", () => {
     expect(countReasonSentences("a. b. c. d.")).toBe(4);
     expect(validateNoChangesReason("a. b. c. d.").ok).toBe(false);
     expect(validateNoChangesReason("a. b. c.").ok).toBe(true);
+    // Dots inside a URL must not count as sentence boundaries.
+    expect(countReasonSentences("Blocked on https://gitea.example.com/org/repo/pulls/1. See the link.")).toBe(2);
+    expect(
+      validateNoChangesReason(
+        "Review finding already addressed in abc123. Blocked on an external fix, see https://gitea.example.com/org/repo/pulls/1. Keeping the tree as is."
+      ).ok
+    ).toBe(true);
     const long = `${"x".repeat(MAX_WORKER_NO_CHANGES_REASON_CHARS + 1)}.`;
     expect(validateNoChangesReason(long).ok).toBe(false);
     const store = new WorkerResultStore();
@@ -66,6 +73,21 @@ describe("worker MCP server", () => {
       const many = await probeWorkerMcpServer(server.url, "tok", "no_changes", { reason: "a. b. c. d." });
       expect(many.ok).toBe(false);
       expect(store.hasNoChanges()).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  test("link-bearing reason is accepted by the tool", async () => {
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const out = await probeWorkerMcpServer(server.url, "tok", "no_changes", {
+        reason:
+          "Review finding already addressed in abc123. Blocked on an external fix, see https://gitea.example.com/org/repo/pulls/1. Keeping the tree as is.",
+      });
+      expect(out.ok).toBe(true);
+      expect(store.getNoChangesReason()).toContain("https://gitea.example.com");
     } finally {
       server.close();
     }

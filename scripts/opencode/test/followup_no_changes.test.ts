@@ -165,4 +165,36 @@ describe("follow-up no_changes reason", () => {
       expect(last).not.toContain("a > b");
     });
   });
+
+  test("git token in the reason is redacted before reaching the forge", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = followupApi();
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: cleanGitRunner(),
+        openCodeRunner: async (opts) => {
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "no_changes", {
+            reason: "Already addressed in abc123 with bot-token.",
+          });
+          expect(out.ok).toBe(true);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      const last = api.comments.at(-1) ?? "";
+      expect(last).toContain("no follow-up changes:");
+      expect(last).not.toContain("bot-token");
+      expect(last).toContain("***");
+    });
+  });
 });
