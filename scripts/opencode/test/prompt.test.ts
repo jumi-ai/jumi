@@ -452,6 +452,99 @@ describe("buildPROpenedPrompt", () => {
     });
     expect(prompt).not.toContain("<closing_issues");
   });
+
+  test("checks the linked issue Done-when list against the whole PR diff", () => {
+    for (const runnerType of ["opencode", "claude", "agy", "codex"]) {
+      const prompt = buildPROpenedPrompt({
+        repo: makeRepo(),
+        pr: makePR(),
+        prFiles: [],
+        runnerType,
+      });
+      expect(prompt).toContain('"Done when", "Acceptance", or "Tests"');
+      expect(prompt).toContain("whole PR diff");
+      expect(prompt).toContain("not only the delta since the last review");
+      expect(prompt).toContain("on both forges");
+      expect(prompt).toContain("Match by behaviour");
+      expect(prompt).toContain("whatever its name");
+      expect(prompt).toContain("does not exercise it does not count");
+      expect(prompt).toContain("quotes the item");
+      expect(prompt).toContain("confirmed after deploy");
+      expect(prompt).toContain("first real runs log");
+      expect(prompt).toContain("bun run ci");
+      expect(prompt).toContain("<ci_results>");
+      expect(prompt).toContain("Refs #N");
+      expect(prompt).toContain("❓ maintainer:");
+    }
+  });
+
+  test("keeps an Acceptance section past the truncation point in the emitted prompt", () => {
+    const filler = `${"background\n".repeat(1500)}`;
+    const acceptance = "## Acceptance\n- pins the new prompt rule\n";
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      thread: {
+        comments: [],
+        linkedIssues: [
+          {
+            number: 645,
+            state: "open",
+            author: "alice",
+            html_url: "https://example.test/issues/645",
+            title: "Do the thing",
+            body: `${filler}${acceptance}`,
+            comments: [],
+          },
+        ],
+      },
+    });
+    expect(prompt).toContain("## Acceptance");
+    expect(prompt).toContain("pins the new prompt rule");
+  });
+
+  test("a fitted thread keeps Acceptance in the emitted review prompt", async () => {
+    const { fitReviewThread } = await import("../src/review_context.ts");
+    const filler = `${"background\n".repeat(1500)}`;
+    const acceptance = "## Acceptance\n- fitted acceptance item\n";
+    const fitted = fitReviewThread(
+      {
+        comments: [],
+        linkedIssues: [
+          {
+            number: 645,
+            state: "open",
+            author: "alice",
+            html_url: "https://example.test/issues/645",
+            title: "Do the thing",
+            body: `${filler}${acceptance}`,
+            comments: [],
+          },
+        ],
+        pullReviews: [],
+        reviewComments: [],
+      },
+      5_000
+    );
+    expect(fitted.thread.linkedIssues[0]?.body).toContain("## Acceptance");
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+      thread: fitted.thread,
+    });
+    expect(prompt).toContain("## Acceptance");
+    expect(prompt).toContain("fitted acceptance item");
+  });
+
+  test("worker prompts walk the Done-when list before finishing", () => {
+    for (const prompt of [buildImplementPrompt(), buildImplementYieldPrompt(), buildFollowupPrompt()]) {
+      expect(prompt).toContain("Done-when or Acceptance list item by item");
+      expect(prompt).toContain("Refs #N");
+      expect(prompt).toContain("Never claim an item the diff does not contain");
+    }
+  });
 });
 
 describe("formatCiResults", () => {

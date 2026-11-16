@@ -386,6 +386,43 @@ function truncateUtf8(text: string, maxBytes: number): string {
   return new TextDecoder().decode(bytes.slice(0, maxBytes));
 }
 
+/**
+ * Heading that starts the acceptance contract of a linked issue: a markdown
+ * heading naming "Done when", "Acceptance", or "Tests". The reviewer checks
+ * every such item against the whole PR diff, so the fit step keeps this
+ * section when the body is over budget and truncates elsewhere first.
+ */
+const ACCEPTANCE_HEADING_RE = /^#{1,6}\s+.*?(done\s+when|acceptance|tests).*?$/gim;
+
+export function acceptanceSectionStart(body: string): number {
+  ACCEPTANCE_HEADING_RE.lastIndex = 0;
+  const match = ACCEPTANCE_HEADING_RE.exec(body);
+  ACCEPTANCE_HEADING_RE.lastIndex = 0;
+  return match?.index ?? -1;
+}
+
+const ACCEPTANCE_OMISSION_NOTE = "\n\n[truncated to keep Done-when/Acceptance section]\n\n";
+
+/**
+ * Truncate a linked-issue body to `maxBytes` while keeping its Done-when /
+ * Acceptance / Tests section. When the section exists, the tail from its
+ * heading is kept verbatim and the head is shrunk to fit; when the section
+ * alone is over budget, its head is kept. Without such a section this is a
+ * plain head truncation.
+ */
+export function truncateLinkedIssueBody(body: string, maxBytes: number): string {
+  if (byteLength(body) <= maxBytes) return body;
+  const start = acceptanceSectionStart(body);
+  if (start < 0) return truncateUtf8(body, maxBytes);
+  const acceptance = body.slice(start);
+  if (byteLength(acceptance) >= maxBytes) return truncateUtf8(acceptance, maxBytes);
+  const noteBytes = byteLength(ACCEPTANCE_OMISSION_NOTE);
+  const headBudget = maxBytes - byteLength(acceptance) - noteBytes;
+  if (headBudget <= 0) return truncateUtf8(acceptance, maxBytes);
+  const head = truncateUtf8(body.slice(0, start), headBudget);
+  return `${head}${ACCEPTANCE_OMISSION_NOTE}${acceptance}`;
+}
+
 function threadByteLength(thread: ReviewThread): number {
   return byteLength(serializeReviewThread(thread));
 }
@@ -426,7 +463,7 @@ export function fitReviewThread(thread: ReviewThread, maxBytes: number): FitRevi
   if (!underCap()) {
     for (const issue of fitted.linkedIssues) {
       if (byteLength(issue.body) > MAX_LINKED_ISSUE_BODY_BYTES) {
-        issue.body = truncateUtf8(issue.body, MAX_LINKED_ISSUE_BODY_BYTES);
+        issue.body = truncateLinkedIssueBody(issue.body, MAX_LINKED_ISSUE_BODY_BYTES);
         truncated = true;
       }
     }
