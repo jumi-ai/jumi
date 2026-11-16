@@ -22,6 +22,8 @@
 import { randomBytes } from "node:crypto";
 import type { ReviewVerdictStore } from "./review_verdict_store.ts";
 
+export const REVIEW_MCP_SERVER_NAME = "jumi-review";
+
 export const REVIEW_MCP_TOOL_NAMES = [
   "add_finding",
   "update_finding",
@@ -192,7 +194,7 @@ export async function startReviewMcpServer(opts: {
           result: {
             protocolVersion: "2025-06-18",
             capabilities: { tools: {} },
-            serverInfo: { name: "jumi-review", version: "1.0.0" },
+            serverInfo: { name: REVIEW_MCP_SERVER_NAME, version: "1.0.0" },
           },
         });
       }
@@ -248,7 +250,7 @@ export async function probeReviewMcpInit(url: string, token: string): Promise<bo
   });
   if (!res.ok) return false;
   const payload = (await res.json()) as { result?: { serverInfo?: { name?: string } } };
-  return payload.result?.serverInfo?.name === "jumi-review";
+  return payload.result?.serverInfo?.name === REVIEW_MCP_SERVER_NAME;
 }
 
 // ── Runner MCP configs ─────────────────────────────────────────────────────
@@ -278,7 +280,7 @@ export function claudeMcpConfigFor(serverName: string, url: string, token: strin
 
 /** Claude `--mcp-config` file content. `--strict-mcp-config` keeps the repo's `.mcp.json` from shadowing it. */
 export function claudeReviewMcpConfig(url: string, token: string): string {
-  return claudeMcpConfigFor("jumi-review", url, token);
+  return claudeMcpConfigFor(REVIEW_MCP_SERVER_NAME, url, token);
 }
 
 export function claudeMcpArgs(configPath: string): string[] {

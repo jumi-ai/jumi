@@ -44,7 +44,7 @@ import { stageImageSkillsForClaude } from "./image_skills.ts";
 import { looksLikeInfraStderr } from "./infra.ts";
 import { CREDIT_QUOTA_MESSAGE, isCreditBalanceText, QUOTA_MESSAGE, type QuotaClass } from "./quota.ts";
 import { stageBaseSkillsForClaude } from "./review_base.ts";
-import { claudeMcpArgs } from "./review_mcp.ts";
+import { claudeMcpArgs, REVIEW_MCP_SERVER_NAME, REVIEW_MCP_TOOL_NAMES } from "./review_mcp.ts";
 import {
   assertReviewRunnerSandboxable,
   ensureSandboxedShellHome,
@@ -58,6 +58,7 @@ import { claudeSearxngMcpConfig, SEARXNG_CLAUDE_TOOL, searxngForgeHost, searxngU
 import { recordClaudeUsage } from "./token_metrics.ts";
 import { engineExitMessage } from "./util/engine.ts";
 import { errorMessage } from "./util/error.ts";
+import { WORKER_MCP_SERVER_NAME, WORKER_MCP_TOOL_NAMES } from "./worker_mcp.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
 /** `project` is what loads the checkout's `AGENTS.md`, `CLAUDE.md`, skills and settings. */
@@ -93,9 +94,34 @@ export function inspectClaudeCreditExhaustion(text: string | null | undefined): 
   return "hard";
 }
 
+/** Claude-side MCP tool name (`mcp__<server>__<tool>`). */
+export function claudeMcpTool(serverName: string, toolName: string): string {
+  return `mcp__${serverName}__${toolName}`;
+}
+
+/** Claude-side tool names for the worker MCP server, derived from its tool list. */
+export function claudeWorkerMcpTools(): string[] {
+  return WORKER_MCP_TOOL_NAMES.map((tool) => claudeMcpTool(WORKER_MCP_SERVER_NAME, tool));
+}
+
+/** Claude-side tool names for the review MCP server, derived from its tool list. */
+export function claudeReviewMcpTools(): string[] {
+  return REVIEW_MCP_TOOL_NAMES.map((tool) => claudeMcpTool(REVIEW_MCP_SERVER_NAME, tool));
+}
+
 /** Allowed tools for this spawn: the search tool joins only when configured. */
-export function claudeAllowedTools(searxngConfigured: boolean): string {
-  return searxngConfigured ? `${CLAUDE_ALLOWED_TOOLS},${SEARXNG_CLAUDE_TOOL}` : CLAUDE_ALLOWED_TOOLS;
+export function claudeAllowedTools(
+  searxngConfigured: boolean,
+  opts?: { workerMcp?: boolean; reviewMcp?: boolean }
+): string {
+  const parts = [CLAUDE_ALLOWED_TOOLS];
+  if (searxngConfigured) parts.push(SEARXNG_CLAUDE_TOOL);
+  // `--permission-mode dontAsk` denies every MCP tool that is not pre-approved,
+  // so a spawn that registers the worker or review server must also allow its
+  // tools here, or the model cannot call them.
+  if (opts?.workerMcp) parts.push(...claudeWorkerMcpTools());
+  if (opts?.reviewMcp) parts.push(...claudeReviewMcpTools());
+  return parts.join(",");
 }
 
 /**
@@ -390,6 +416,13 @@ export function claudeArgv(
 ): string[] {
   const searxngMcpConfig = claudeSearxngMcpConfigForSpawn(opts);
   const isReview = opts.trace?.kind === "review";
+  // Worker tools are allowed only on worker spawns (implement/follow-up/
+  // conflict with `workerMcp`); review tools only on review spawns with
+  // `reviewMcp`. Either `opts` or the staged config path selects the kind, so
+  // direct `claudeArgv` callers that pass only the path get the same allowlist
+  // as `runClaude`, which writes one config or the other under that path.
+  const hasWorkerMcp = (!!opts.workerMcp && !isReview) || (!!reviewMcpConfigPath && !isReview);
+  const hasReviewMcp = (!!opts.reviewMcp && isReview) || (!!reviewMcpConfigPath && isReview);
   const args = [
     "claude",
     "-p",
@@ -398,7 +431,7 @@ export function claudeArgv(
     "--permission-mode",
     CLAUDE_PERMISSION_MODE,
     "--allowedTools",
-    claudeAllowedTools(searxngMcpConfig !== undefined),
+    claudeAllowedTools(searxngMcpConfig !== undefined, { workerMcp: hasWorkerMcp, reviewMcp: hasReviewMcp }),
     // Deny beats every allow, so WebFetch stays on the allow-list for public
     // docs while the forge host itself is refused by the binary. The host is
     // this spawn's own `GIT_AUTH_HOST`, so a GitHub-factory child denies

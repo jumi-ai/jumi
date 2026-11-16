@@ -11,7 +11,9 @@ import {
   CLAUDE_SETTING_SOURCES,
   claudeAllowedTools,
   claudeArgv,
+  claudeReviewMcpTools,
   claudeSearxngMcpConfigForSpawn,
+  claudeWorkerMcpTools,
   inspectClaudeUsageLimit,
   runClaude,
 } from "../src/claude.ts";
@@ -21,9 +23,11 @@ import { runRegisteredEngine } from "../src/engine_dispatch.ts";
 import { withEngineChain } from "../src/fallback.ts";
 import { claudeDisallowedTools, forgeDenyHost, forgeHostFromUrl } from "../src/forge_webfetch.ts";
 import { QUOTA_MESSAGE } from "../src/quota.ts";
+import { REVIEW_MCP_SERVER_NAME, REVIEW_MCP_TOOL_NAMES } from "../src/review_mcp.ts";
 import { SEARXNG_CLAUDE_TOOL, SEARXNG_SERVER_NAME } from "../src/searxng.ts";
 import { omitClaudeConfigWarning } from "../src/status_description.ts";
 import { renderTokenMetrics, resetTokenMetricsForTests } from "../src/token_metrics.ts";
+import { WORKER_MCP_SERVER_NAME, WORKER_MCP_TOOL_NAMES } from "../src/worker_mcp.ts";
 import { withFakeClaude } from "./harness/bins.ts";
 
 const originalSecret = process.env.GITEA_BOT_TOKEN;
@@ -168,6 +172,43 @@ describe("claudeArgv", () => {
     // No Phoenix configured: the child runs untraced rather than failing.
     delete process.env.PHOENIX_OTLP_ENDPOINT;
     expect(claudeArgv({ model: "opus", workdir: "/work" })).not.toContain("--plugin-dir");
+  });
+
+  test("worker spawn allows every worker MCP tool, plain spawn allows none", () => {
+    const expected = [...WORKER_MCP_TOOL_NAMES].map((tool) => `mcp__${WORKER_MCP_SERVER_NAME}__${tool}`);
+    expect(claudeWorkerMcpTools()).toEqual(expected);
+    const worker = claudeArgv({
+      model: "opus",
+      workdir: "/work",
+      trace: { kind: "implement", owner: "o", repo: "r" },
+      workerMcp: { url: "http://127.0.0.1:1/mcp", token: "t" },
+    });
+    const allowed = worker[worker.indexOf("--allowedTools") + 1] ?? "";
+    for (const tool of expected) expect(allowed.split(",")).toContain(tool);
+
+    const plain = claudeArgv({ model: "opus", workdir: "/work" });
+    const plainAllowed = plain[plain.indexOf("--allowedTools") + 1] ?? "";
+    for (const tool of expected) expect(plainAllowed.split(",")).not.toContain(tool);
+    expect(plainAllowed).toBe(CLAUDE_ALLOWED_TOOLS);
+  });
+
+  test("review spawn allows the review MCP tools", () => {
+    const expected = [...REVIEW_MCP_TOOL_NAMES].map((tool) => `mcp__${REVIEW_MCP_SERVER_NAME}__${tool}`);
+    expect(claudeReviewMcpTools()).toEqual(expected);
+    const review = claudeArgv(
+      {
+        model: "opus",
+        workdir: "/work",
+        trace: { kind: "review", owner: "o", repo: "r" },
+        reviewMcp: { url: "http://127.0.0.1:1/mcp", token: "t" },
+      },
+      undefined,
+      undefined,
+      undefined,
+      "/tmp/review-mcp.json"
+    );
+    const allowed = review[review.indexOf("--allowedTools") + 1] ?? "";
+    for (const tool of expected) expect(allowed.split(",")).toContain(tool);
   });
 });
 
