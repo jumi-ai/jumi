@@ -111,6 +111,7 @@ describe("verdict view equivalence (seeded property)", () => {
   test("record-backed view equals text-backed view on every field", () => {
     const rng = mulberry32(SEED);
     let casesRun = 0;
+    let maintainerPositive = 0;
     for (let i = 0; i < CASES; i++) {
       const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/a.ts", patch: PATCH }] });
       const nFindings = Math.floor(rng() * 9); // 0-8
@@ -171,8 +172,11 @@ describe("verdict view equivalence (seeded property)", () => {
       const recordBare = recordView.blockingQuestionCount(undefined, undefined);
       if (textBare !== recordBare) fail("blockingQuestionCount(undefined)", textBare, recordBare);
 
+      if (recordView.maintainerQuestionCount > 0) maintainerPositive++;
+
       casesRun++;
     }
     expect(casesRun).toBe(CASES);
+    expect(maintainerPositive).toBeGreaterThan(0);
   });
 });

@@ -12,6 +12,7 @@ import { traced } from "./golden/trace.ts";
 
 const enqueueFollowUpFromReview = traced("enqueueFollowUpFromReview", realEnqueueFollowUpFromReview);
 
+import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import type { ReviewApi } from "../src/review.ts";
 import { MemoryReviewJobStore, type ReviewJobRecord, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import type { ReviewRecord } from "../src/review_verdict_store.ts";
@@ -21,7 +22,9 @@ import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makeJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 
-function handoverApi(overrides: Partial<ReviewApi> = {}): ReviewApi & { comments: string[] } {
+function handoverApi(
+  overrides: Parameters<typeof makeReviewApi>[0] = {}
+): ReviewApi & { comments: string[]; capabilities: unknown } {
   const comments: string[] = [];
   const fake = makeReviewApi({
     getPR: async () =>
@@ -808,6 +811,35 @@ describe("enqueueFollowUpFromReview", () => {
     expect(waiting?.message?.toLowerCase()).toContain("waiting on a maintainer");
     expect(waiting?.kick).toBeUndefined();
   });
+
+  for (const [forgeLabel, caps] of [
+    ["gitea", FORGE_CAPABILITIES.gitea],
+    ["github", FORGE_CAPABILITIES.github],
+  ] as const) {
+    test(`maintainer hold handover skips worker round on ${forgeLabel}`, async () => {
+      const markdown =
+        "src/foo.ts:12: ❓ maintainer: please file a follow-up issue for the leftover scope?\n<!-- jumi-check: success -->";
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const leased = await store.lease("engine-1", 60_000);
+      const api = handoverApi({ capabilities: caps });
+      expect(api.capabilities).toBe(caps);
+      const logs: string[] = [];
+      const result = await enqueueFollowUpFromReview({
+        store,
+        api,
+        row: leased!,
+        botUsername: "jumi",
+        published: { status: "posted", commentId: 1 },
+        markdown,
+        logger: (message) => logs.push(message),
+      });
+      expect(result).toBeUndefined();
+      expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+      expect(logs).toEqual([`persist-insert skipped: ${WAITING_ON_MAINTAINER_REASON}`]);
+      expect((await store.sits.get("kirmanak", "demo", 7))?.reason).toBe("waiting-maintainer");
+    });
+  }
 });
 
 describe("suggestion hold fallback", () => {
