@@ -395,6 +395,7 @@ export function toGithubPullCommit(value: unknown): PullCommit {
   if (!value || typeof value !== "object") return {};
   const commit = value as {
     sha?: unknown;
+    created?: unknown;
     commit?: { author?: unknown; committer?: unknown };
     author?: unknown;
     committer?: unknown;
@@ -402,11 +403,30 @@ export function toGithubPullCommit(value: unknown): PullCommit {
   const sha = typeof commit.sha === "string" ? commit.sha : undefined;
   const author = toCommitPerson(commit.author) ?? toCommitPerson(commit.commit?.author);
   const committer = toCommitPerson(commit.committer) ?? toCommitPerson(commit.commit?.committer);
+  const created = githubPullCommitDate(commit);
   return {
     ...(sha ? { sha } : {}),
     ...(author ? { author } : {}),
     ...(committer ? { committer } : {}),
+    ...(created ? { created } : {}),
   };
+}
+
+function githubPullCommitDate(commit: {
+  created?: unknown;
+  commit?: { author?: unknown; committer?: unknown };
+}): string | undefined {
+  const candidates: unknown[] = [commit.created];
+  const nested = commit.commit as { author?: unknown; committer?: unknown } | undefined;
+  for (const person of [nested?.author, nested?.committer]) {
+    if (person && typeof person === "object") {
+      candidates.push((person as { date?: unknown }).date);
+    }
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate && !Number.isNaN(Date.parse(candidate))) return candidate;
+  }
+  return undefined;
 }
 
 export function checkRunState(status?: string, conclusion?: string | null): CheckState {

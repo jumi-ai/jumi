@@ -5486,10 +5486,11 @@ export class PgReviewJobStore implements ReviewJobStore {
         }
         // No follow-up row yet (election before the first job row exists):
         // insert a marker row so the fingerprint is still in `result_json`.
+        // `kind` must be 'follow-up': every shared-failure read filters on it.
         const merged = mergeInto(null);
         await tx.unsafe(
-          `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
-           VALUES ($1, $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
+          `INSERT INTO review_jobs (job_key, kind, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
+           VALUES ($1, 'follow-up', $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
            ON CONFLICT DO NOTHING`,
           [
             `shared-failure:${owner}/${repo}#${prNumber}:${headSha ?? "head"}`,
@@ -5602,8 +5603,8 @@ export class PgReviewJobStore implements ReviewJobStore {
         } else {
           const merged = mergeInto(null, found ?? null);
           await tx.unsafe(
-            `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
-             VALUES ($1, $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
+            `INSERT INTO review_jobs (job_key, kind, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
+             VALUES ($1, 'follow-up', $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
              ON CONFLICT DO NOTHING`,
             [
               `shared-failure:${opts.owner}/${opts.repo}#${opts.prNumber}:${opts.headSha ?? "head"}`,

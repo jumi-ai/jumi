@@ -1210,6 +1210,8 @@ type MergeOnlyCtx = {
   log: (message: string) => void;
   now: () => Date;
   forgetClaim: () => Promise<void>;
+  /** Effective trusted senders for automerge restore (computed up front). */
+  effectiveTrustedUpFront?: readonly string[];
 };
 
 async function runMergeOnlyFollowUp(
@@ -1293,7 +1295,12 @@ async function runMergeOnlyFollowUp(
           prNumber: pr.number,
           automergeRepos: (opts as { automergeRepos?: readonly string[] }).automergeRepos,
           automergeEnabled: (opts as { automergeEnabled?: boolean }).automergeEnabled,
-          trustedSenderLogins: [],
+          // Same effective list the normal follow-up push restores with;
+          // an empty list would drop a scheduled automerge on this path.
+          trustedSenderLogins:
+            ctx.effectiveTrustedUpFront ??
+            (opts as { trustedSenderLogins?: readonly string[] }).trustedSenderLogins ??
+            [],
           issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,
@@ -1316,7 +1323,9 @@ async function runMergeOnlyFollowUp(
 }
 
 async function resolveSharedFailureForWake(opts: {
-  api: Pick<import("./ports.ts").Forge, "listOpenPulls" | "getPR"> & Record<string, unknown>;
+  api: Pick<import("./ports.ts").Forge, "listOpenPulls" | "getPR"> &
+    Partial<Pick<import("./ports.ts").Forge, "listPullCommits">> &
+    Record<string, unknown>;
   ledger?: Pick<
     import("./review_jobs.ts").ReviewJobStore,
     "electSharedFailure" | "listSharedFailures" | "listWaitersForFirst" | "recordSharedFailures"
@@ -1325,18 +1334,31 @@ async function resolveSharedFailureForWake(opts: {
   repo: string;
   prNumber: number;
   headSha: string;
-  ciUnhandled: Array<{ name: string; fingerprint?: string }>;
+  ciUnhandled: Array<{ name: string; fingerprint?: string; logHash?: string; flake?: string }>;
   defaultBranch: string;
   nowMs: number;
   log?: (message: string) => void;
-}): Promise<{ firstPr: number; check: string; defaultBranch: string; checks: { name: string }[] } | undefined> {
+}): Promise<
+  | { firstPr: number; check: string; defaultBranch: string; checks: import("./pr_decision.ts").CiCheckRef[] }
+  | undefined
+> {
   if (!opts.ledger || typeof opts.ledger.electSharedFailure !== "function") return undefined;
+  if (opts.ciUnhandled.length === 0) return undefined;
+  // Without a fingerprint there is no sharing signal: today's behaviour applies.
+  // Require every unhandled check to carry one, otherwise a distinct real
+  // failure would be silenced by waiting on the shared subset.
   const fingerprinted = opts.ciUnhandled.filter(
-    (check): check is { name: string; fingerprint: string } =>
+    (check): check is { name: string; fingerprint: string; logHash?: string; flake?: string } =>
       typeof check.fingerprint === "string" && check.fingerprint.length > 0
   );
-  if (fingerprinted.length === 0) return undefined;
-  let openPulls: Array<{ number: number; updated_at?: string; state?: string; merged?: boolean }> = [];
+  if (fingerprinted.length !== opts.ciUnhandled.length) return undefined;
+  let openPulls: Array<{
+    number: number;
+    updated_at?: string;
+    state?: string;
+    merged?: boolean;
+    head?: { sha?: string };
+  }> = [];
   try {
     const list = (opts.api as { listOpenPulls?: (owner: string, repo: string) => Promise<unknown[]> }).listOpenPulls;
     if (typeof list !== "function") return undefined;
@@ -1353,10 +1375,44 @@ async function resolveSharedFailureForWake(opts: {
   }
   const { SHARED_FAILURE_TAKEOVER_MS } = await import("./shared_failure.ts");
   const isOpen = (prNumber: number): boolean => openByNumber.has(prNumber);
-  const isLivePush = (prNumber: number): boolean => {
-    const entry = openByNumber.get(prNumber);
-    if (!entry) return false;
-    return opts.nowMs - entry.updatedAtMs < SHARED_FAILURE_TAKEOVER_MS;
+  // Push signal, not PR activity: the latest commit date moves only on a push,
+  // while `updated_at` also moves on comments/labels. Falls back to
+  // `updated_at` when commit history is unavailable or dateless.
+  const pushMsCache = new Map<number, number>();
+  const lastPushMs = async (prNumber: number): Promise<number> => {
+    if (pushMsCache.has(prNumber)) return pushMsCache.get(prNumber) as number;
+    const fallback = openByNumber.get(prNumber)?.updatedAtMs ?? opts.nowMs;
+    try {
+      const listCommits = (
+        opts.api as {
+          listPullCommits?: (owner: string, repo: string, n: number) => Promise<Array<{ created?: string }>>;
+        }
+      ).listPullCommits;
+      if (typeof listCommits !== "function") {
+        pushMsCache.set(prNumber, fallback);
+        return fallback;
+      }
+      const commits = await listCommits.call(opts.api, opts.owner, opts.repo, prNumber);
+      let best: number | undefined;
+      if (Array.isArray(commits)) {
+        for (const commit of commits) {
+          const raw = (commit as { created?: unknown })?.created;
+          if (typeof raw !== "string" || !raw) continue;
+          const ms = Date.parse(raw);
+          if (Number.isFinite(ms) && (best === undefined || ms > best)) best = ms;
+        }
+      }
+      const resolved = best ?? fallback;
+      pushMsCache.set(prNumber, resolved);
+      return resolved;
+    } catch {
+      pushMsCache.set(prNumber, fallback);
+      return fallback;
+    }
+  };
+  const isLivePush = async (prNumber: number): Promise<boolean> => {
+    if (!openByNumber.has(prNumber)) return false;
+    return opts.nowMs - (await lastPushMs(prNumber)) < SHARED_FAILURE_TAKEOVER_MS;
   };
   const isMerged = async (prNumber: number): Promise<boolean> => {
     if (openByNumber.has(prNumber)) return false;
@@ -1372,6 +1428,7 @@ async function resolveSharedFailureForWake(opts: {
       return false;
     }
   };
+  const electedFirsts = new Map<number, string>();
   for (const check of fingerprinted) {
     try {
       const elected = await opts.ledger.electSharedFailure({
@@ -1386,20 +1443,34 @@ async function resolveSharedFailureForWake(opts: {
         isLivePush,
         isMerged,
       });
-      if (elected.role === "waiter") {
-        return {
-          firstPr: elected.firstPr,
-          check: check.name,
-          defaultBranch: opts.defaultBranch,
-          checks: opts.ciUnhandled.map((item) => ({ name: item.name })),
-        };
-      }
+      // Only wait when every unhandled check is shared. A `first` on any
+      // check means this PR owns part of the failure and must run.
+      if (elected.role !== "waiter") return undefined;
+      electedFirsts.set(elected.firstPr, check.name);
     } catch (err) {
       opts.log?.(`shared failure election failed for ${check.name}: ${(err as Error)?.message ?? String(err)}`);
       return undefined;
     }
   }
-  return undefined;
+  if (electedFirsts.size !== 1) return undefined;
+  const firstPr = [...electedFirsts.keys()][0] as number;
+  const check = fingerprinted[0]?.name ?? "";
+  return {
+    firstPr,
+    check,
+    defaultBranch: opts.defaultBranch,
+    // Pass through the full checks (name + logHash + fingerprint) so
+    // `recordCiHandled` writes a latch `isCheckHandled` can match. A stripped
+    // `{name}` copy would never match a future wake (logHash `undefined`)
+    // and would re-elect forever; passing every unhandled check is safe here
+    // because we only return when all of them elected waiter.
+    checks: opts.ciUnhandled.map((item) => ({
+      name: item.name,
+      ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
+      ...(item.logHash !== undefined ? { logHash: item.logHash } : {}),
+      ...(item.flake !== undefined ? { flake: item.flake } : {}),
+    })),
+  };
 }
 
 export async function implementFollowUp(
@@ -1515,7 +1586,7 @@ export async function implementFollowUp(
   // engine unless the merge itself conflicts (handled inside the merge).
   if (opts.job.mergeOnly) {
     const mergeOnlyResult = await runMergeOnlyFollowUp(
-      { ...opts, pr, latches, latchKey, log, now, forgetClaim },
+      { ...opts, pr, latches, latchKey, log, now, forgetClaim, effectiveTrustedUpFront },
       claimed
     );
     return mergeOnlyResult;
@@ -1550,7 +1621,7 @@ export async function implementFollowUp(
   const decisionDeps = {
     log,
     sticky: (text: string) => sticky(text, pr.number),
-    recordCiHandled: (checks: { name: string; flake?: string | undefined }[]) =>
+    recordCiHandled: (checks: import("./pr_decision.ts").CiCheckRef[]) =>
       recordCiHandled({
         home: opts.home,
         owner,
@@ -1640,7 +1711,7 @@ export async function implementFollowUp(
   // per (repo, fingerprint). A waiter posts the sticky, records CI handled,
   // and returns `shared-failure` without engine work or round-cap cost.
   let sharedForDecision:
-    | { firstPr: number; check: string; defaultBranch: string; checks: { name: string }[] }
+    | { firstPr: number; check: string; defaultBranch: string; checks: import("./pr_decision.ts").CiCheckRef[] }
     | undefined;
   if (ciWake && !snapshot.hasFeedback && (opts as { ledger?: unknown }).ledger) {
     try {

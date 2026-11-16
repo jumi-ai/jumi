@@ -174,18 +174,45 @@ export function toPullCommit(value: unknown): PullCommit {
   if (!value || typeof value !== "object") return {};
   const commit = value as {
     sha?: unknown;
-    commit?: { author?: unknown; committer?: unknown };
+    created?: unknown;
+    date?: unknown;
+    commit?: { author?: unknown; committer?: unknown; created?: unknown };
     author?: unknown;
     committer?: unknown;
   };
   const sha = typeof commit.sha === "string" ? commit.sha : undefined;
   const author = commitPerson(commit.author) ?? commitPerson(commit.commit?.author);
   const committer = commitPerson(commit.committer) ?? commitPerson(commit.commit?.committer);
+  const created = pullCommitDate(commit);
   return {
     ...(sha ? { sha } : {}),
     ...(author ? { author } : {}),
     ...(committer ? { committer } : {}),
+    ...(created ? { created } : {}),
   };
+}
+
+/** Commit date from either forge shape; Gitea `created`, GitHub nested `commit.author.date`. */
+function pullCommitDate(commit: {
+  created?: unknown;
+  date?: unknown;
+  commit?: { author?: unknown; committer?: unknown; created?: unknown };
+}): string | undefined {
+  const candidates: unknown[] = [
+    commit.created,
+    commit.date,
+    (commit.commit as { created?: unknown } | undefined)?.created,
+  ];
+  const nested = commit.commit as { author?: unknown; committer?: unknown } | undefined;
+  for (const person of [nested?.author, nested?.committer]) {
+    if (person && typeof person === "object") {
+      candidates.push((person as { date?: unknown }).date, (person as { created?: unknown }).created);
+    }
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate && !Number.isNaN(Date.parse(candidate))) return candidate;
+  }
+  return undefined;
 }
 
 export function toCheck(status: GiteaCommitStatus): Check {

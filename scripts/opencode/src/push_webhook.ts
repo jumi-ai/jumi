@@ -201,7 +201,8 @@ export type SharedWaiterMergeLedger = Pick<
   "listSharedFailures" | "listWaitersForFirst"
 >;
 
-type SharedWaiterMergeApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> & Partial<Pick<IssueApi, "getPR">>;
+type SharedWaiterMergeApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
+  Partial<Pick<IssueApi, "getPR" | "listPullCommits" | "getRepoFile">>;
 
 /**
  * Merge-only wakes for shared-failure waiters whose first just merged.
@@ -267,6 +268,43 @@ export async function shouldEnqueueSharedWaiterMerges(
   }
   if (mergedFirsts.size === 0) return [];
   const sender = pushSender(payload);
+  // `ignore-conflicts` waiters get no default-branch merge from any path until
+  // Jumi has committed: mirror the conflict path's `leftToAuthor` guard here.
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(api, owner, repo, payload.repository.default_branch, logger);
+  let ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
+  try {
+    const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+    if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
+      const repoPolicy = await resolveRepoPolicy(
+        { api, owner, repo, ref: payload.repository.default_branch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: policy.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (repoPolicy !== undefined) ignoreLabel = repoPolicy.ignoreConflictsLabel;
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
+  async function waiterLeftToAuthor(pr: Pull): Promise<boolean> {
+    if (ignoreAuthors === undefined) return true;
+    const labeled = hasIgnoreConflictsLabel(pr, ignoreLabel);
+    const viaAuthor = !labeled && isIgnoreConflictsAuthor(pr.user?.login, ignoreAuthors);
+    if (!labeled && !viaAuthor) return false;
+    return isLeftToAuthor(
+      api,
+      owner,
+      repo,
+      pr,
+      {
+        botUsername: policy.botUsername,
+        ignoreConflictsLabel: ignoreLabel,
+        ignoreConflictsAuthors: ignoreAuthors,
+        prAuthor: pr.user?.login,
+        defaultBranch: payload.repository.default_branch,
+      },
+      logger
+    );
+  }
   const out: Array<Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true }> = [];
   for (const first of mergedFirsts) {
     let waiterNumbers: number[];
@@ -289,6 +327,10 @@ export async function shouldEnqueueSharedWaiterMerges(
     // Reuse the conflict path's scope checks without duplicating issue fetches:
     // foreign PRs use the PR itself, Jumi PRs need their closing issue.
     for (const pr of targets) {
+      if (await waiterLeftToAuthor(pr)) {
+        logger?.(`shared waiter #${pr.number} left to author; skipping merge-only wake`);
+        continue;
+      }
       if (isAssignedForeignPR(pr, owner, repo, policy.botUsername, policy)) {
         const waiter = waiterTargets.find((item) => item.prNumber === pr.number);
         if (!waiter) continue;

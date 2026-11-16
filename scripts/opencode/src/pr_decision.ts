@@ -34,6 +34,8 @@ export interface CiCheckRef {
   name: string;
   flake?: string | undefined;
   fingerprint?: string | undefined;
+  /** Preserved so `recordCiHandled` writes a latch `isCheckHandled` can match. */
+  logHash?: string | undefined;
 }
 
 export type SkipParamsMap = {
@@ -432,17 +434,27 @@ export function decide(snapshot: PrDecisionSnapshot): Decision {
     } else if (snapshot.ciWake && snapshot.sharedFailure && snapshot.mergeable !== false) {
       // Shared failure waits instead of fixing again. It never counts toward
       // the round cap (CI wakes bypass it above) and its reason is not
-      // `stuck:`, so it never latches as stuck.
-      return skip(
-        "shared-failure",
-        {
-          firstPr: snapshot.sharedFailure.firstPr,
-          check: snapshot.sharedFailure.check,
-          defaultBranch: snapshot.sharedFailure.defaultBranch,
-          checks: snapshot.sharedFailure.checks,
-        },
-        snapshot
-      );
+      // `stuck:`, so it never latches as stuck. Only skip when every
+      // unhandled check is shared: a single distinct failure must still run.
+      // `resolveSharedFailureForWake` only produces `sharedFailure` in that
+      // case; this length guard is defense-in-depth for direct callers.
+      const sharedNames = new Set(snapshot.sharedFailure.checks.map((check) => check.name));
+      const allShared =
+        snapshot.ciUnhandled.length > 0 &&
+        snapshot.sharedFailure.checks.length >= snapshot.ciUnhandled.length &&
+        snapshot.ciUnhandled.every((check) => sharedNames.has(check.name));
+      if (allShared) {
+        return skip(
+          "shared-failure",
+          {
+            firstPr: snapshot.sharedFailure.firstPr,
+            check: snapshot.sharedFailure.check,
+            defaultBranch: snapshot.sharedFailure.defaultBranch,
+            checks: snapshot.sharedFailure.checks,
+          },
+          snapshot
+        );
+      }
     }
   }
   if (conflictedLeftToAuthor && !hasFeedback && !snapshot.ciWake) {
