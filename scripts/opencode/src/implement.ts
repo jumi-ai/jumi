@@ -68,7 +68,6 @@ import {
   handoffKeyForJob,
   handoffsFor,
   injectStoredHandoff,
-  saveWorktreeHandoff,
   writeHandoffToWorktree,
 } from "./handoff.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
@@ -174,11 +173,15 @@ export async function readValidatedSkip(worktree: string): Promise<string | null
 /**
  * Tool-first PR body: `set_pr_body` wins, `JUMI_PR.md` is the one-release
  * file fallback. Logs which path was used so the fallback can be removed.
+ * When `seed` is provided (the exact bytes Jumi wrote before the run, or
+ * null when Jumi wrote no file), an untouched file counts as no result:
+ * the posted body stays as it is. Only an edited file is a fallback.
  */
 export async function resolveWorkerPrBody(
   workerStore: WorkerResultStore,
   worktree: string,
-  log?: (message: string) => void
+  log?: (message: string) => void,
+  seed?: string | null
 ): Promise<string | null> {
   const tool = workerStore.getPrBody() ?? null;
   if (tool != null) {
@@ -186,6 +189,18 @@ export async function resolveWorkerPrBody(
     return tool;
   }
   const file = await readPullRequestDescription(worktree);
+  if (seed !== undefined) {
+    if (file === seed) {
+      log?.("worker result: pr_body unchanged");
+      return null;
+    }
+    if (file != null && file !== "") {
+      log?.("worker result: pr_body from file fallback (edited seed)");
+      return file;
+    }
+    log?.("worker result: pr_body missing");
+    return null;
+  }
   const picked = preferWorkerTool("pr_body", null, file, undefined);
   if (picked.source === "file fallback") log?.("worker result: pr_body from file fallback");
   else log?.("worker result: pr_body missing");
@@ -269,6 +284,9 @@ export async function resolveWorkerBlocked(
  * Tool-first handoff save: `set_handoff` wins (redacted, capped), otherwise
  * the `JUMI_HANDOFF.md` file round-trip. Secrets are scrubbed before the
  * store write so a token echoed by the model never lands in the ledger.
+ * When `seed` is provided (the exact note Jumi injected before the run, or
+ * null when Jumi injected nothing), an untouched file keeps the stored note
+ * as it is and is not re-saved. Only an edited file is a fallback.
  */
 export async function saveWorkerHandoff(
   workerStore: WorkerResultStore,
@@ -276,7 +294,8 @@ export async function saveWorkerHandoff(
   store: HandoffStore,
   key: HandoffKey,
   secrets: readonly (string | undefined)[],
-  log?: (message: string) => void
+  log?: (message: string) => void,
+  seed?: string | null
 ): Promise<string | null> {
   const tool = workerStore.getHandoff() ?? null;
   if (tool != null) {
@@ -299,6 +318,22 @@ export async function saveWorkerHandoff(
       // Best-effort.
     }
     return capped;
+  }
+  if (seed !== undefined) {
+    const { readHandoffFromWorktree, saveWorktreeHandoff } = await import("./handoff.ts");
+    const file = await readHandoffFromWorktree(worktree);
+    if (file === seed) {
+      log?.("worker result: handoff unchanged");
+      return null;
+    }
+    if (file == null) {
+      log?.("worker result: handoff missing");
+      return null;
+    }
+    const saved = await saveWorktreeHandoff(worktree, store, key, log);
+    if (saved != null) log?.("worker result: handoff from file fallback (edited seed)");
+    else log?.("worker result: handoff missing");
+    return saved;
   }
   const { saveWorktreeHandoff } = await import("./handoff.ts");
   const saved = await saveWorktreeHandoff(worktree, store, key, log);
@@ -808,7 +843,7 @@ export function withPrConventions(basePrompt: string, conventions: RepoConventio
   }
   if (conventions.closingKeyword === "refs") {
     notes.push(
-      `The repository uses non-closing references: in JUMI_PR.md use \`Refs #${issueNumber}\`, not a closing keyword like \`Fixes #${issueNumber}\`, so the issue stays open after merge.`
+      `The repository uses non-closing references: in the body you pass to \`set_pr_body\` use \`Refs #${issueNumber}\`, not a closing keyword like \`Fixes #${issueNumber}\`, so the issue stays open after merge.`
     );
   }
   if (notes.length === 0) return basePrompt;
@@ -1070,8 +1105,9 @@ async function implementExternalIssue(
         const handoffKey = handoffStore
           ? handoffKeyForJob(effectiveJob, provenanceForgeFor(provenanceOpts))
           : undefined;
+        let externalInjectedHandoff: string | null | undefined;
         if (handoffStore && handoffKey) {
-          await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+          externalInjectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
         }
 
         log(`Running OpenCode for ${ref.tracker}:${ref.id} in ${owner}/${repo}`);
@@ -1116,26 +1152,19 @@ async function implementExternalIssue(
         throwIfEngineFailed(result);
 
         throwIfAborted(opts.abortSignal);
-        const prFileContents = await resolveWorkerPrBody(externalWorkerStore, worktree, log);
+        const prFileContents = await resolveWorkerPrBody(externalWorkerStore, worktree, log, null);
         const validatedSkip = await resolveWorkerSkip(externalWorkerStore, worktree, log);
         if (handoffStore && handoffKey) {
           const secrets = workerPublishSecrets(loop.auth.token, claimed.effectiveChain ?? activeChain);
-          const toolHandoff = externalWorkerStore.getHandoff() ?? null;
-          if (toolHandoff != null) {
-            log("worker result: handoff from tool");
-            const { capHandoffNote } = await import("./handoff.ts");
-            const capped = capHandoffNote(redactGitSecrets(toolHandoff, secrets));
-            if (capped.trim()) {
-              try {
-                await handoffStore.put(handoffKey, capped);
-              } catch (err) {
-                log(`handoff store unavailable: ${errorMessage(err)}`);
-              }
-            }
-          } else {
-            await saveWorktreeHandoff(worktree, handoffStore, handoffKey, log);
-            log("worker result: handoff from file fallback");
-          }
+          await saveWorkerHandoff(
+            externalWorkerStore,
+            worktree,
+            handoffStore,
+            handoffKey,
+            secrets,
+            log,
+            externalInjectedHandoff ?? null
+          );
         }
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
         const porcelain = await worktreePorcelain(loop);
@@ -1877,7 +1906,8 @@ export async function implementIssue(
             handoffStore,
             handoffKey,
             workerPublishSecrets(loop.auth.token, jobChain),
-            log
+            log,
+            injectedHandoff ?? null
           );
           await stripSentinels(worktree, [...JUMI_SENTINEL_FILES, SKIP_FILE, BLOCKED_BY_FILE]);
           porcelain = await worktreePorcelain(loop);

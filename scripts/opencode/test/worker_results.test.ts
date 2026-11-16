@@ -10,6 +10,8 @@ import {
   resolveWorkerPrBody,
   resolveWorkerSkip,
   saveWorkerHandoff,
+  seedPullRequestDescription,
+  withPrConventions,
 } from "../src/implement.ts";
 import { probeWorkerMcpServer, WorkerResultStore } from "../src/worker_mcp.ts";
 import type { GitRunner } from "../src/workspace.ts";
@@ -281,5 +283,140 @@ describe("worker result tool-first reading", () => {
       }
       expect(logs.join("\n")).toContain("worker result: blocked_on from tool");
     });
+  });
+});
+
+describe("worker result seed handling (follow-up copies)", () => {
+  test("pr_body seed: tool wins, untouched is unchanged, edited is fallback", async () => {
+    await withWorktree(async (dir) => {
+      const seed = seedPullRequestDescription("Posted body.\n\nFixes #12");
+      await writeFile(join(dir, "JUMI_PR.md"), seed);
+
+      // Tool wins over an untouched seed.
+      const toolLogs: string[] = [];
+      const toolStore = new WorkerResultStore();
+      expect(toolStore.setPrBody({ markdown: "Tool body.\n\nFixes #12" }).ok).toBe(true);
+      const toolPicked = await resolveWorkerPrBody(toolStore, dir, (m) => toolLogs.push(m), seed);
+      expect(toolPicked).toContain("Tool body");
+      expect(toolLogs.join("\n")).toContain("from tool");
+
+      // Untouched copy counts as no result.
+      const unchangedLogs: string[] = [];
+      const unchanged = await resolveWorkerPrBody(new WorkerResultStore(), dir, (m) => unchangedLogs.push(m), seed);
+      expect(unchanged).toBeNull();
+      expect(unchangedLogs.join("\n")).toContain("pr_body unchanged");
+
+      // Edited copy is the remaining fallback.
+      await writeFile(join(dir, "JUMI_PR.md"), `${seed}\nEdited by child.\n`);
+      const editedLogs: string[] = [];
+      const edited = await resolveWorkerPrBody(new WorkerResultStore(), dir, (m) => editedLogs.push(m), seed);
+      expect(edited).toContain("Edited by child");
+      expect(editedLogs.join("\n")).toContain("from file fallback (edited seed)");
+    });
+  });
+
+  test("pr_body seed absent: no file is unchanged, new file is edited fallback", async () => {
+    await withWorktree(async (dir) => {
+      const logs: string[] = [];
+      const missing = await resolveWorkerPrBody(new WorkerResultStore(), dir, (m) => logs.push(m), null);
+      expect(missing).toBeNull();
+      expect(logs.join("\n")).toContain("pr_body unchanged");
+
+      await writeFile(join(dir, "JUMI_PR.md"), "New body.\n");
+      const editedLogs: string[] = [];
+      const edited = await resolveWorkerPrBody(new WorkerResultStore(), dir, (m) => editedLogs.push(m), null);
+      expect(edited).toContain("New body");
+      expect(editedLogs.join("\n")).toContain("from file fallback (edited seed)");
+    });
+  });
+
+  test("handoff seed: tool wins, untouched keeps store, edited is fallback", async () => {
+    await withWorktree(async (dir) => {
+      const seed = "previous notes";
+      await writeFile(join(dir, "JUMI_HANDOFF.md"), seed);
+      const key = handoffKey("gitea", "o", "r", 12);
+
+      // Tool wins.
+      const toolStore = new WorkerResultStore();
+      expect(toolStore.setHandoff({ notes: "tool notes" }).ok).toBe(true);
+      const toolLogs: string[] = [];
+      const toolHandoffs = new MemoryHandoffStore();
+      await toolHandoffs.put(key, seed);
+      const toolSaved = await saveWorkerHandoff(toolStore, dir, toolHandoffs, key, [], (m) => toolLogs.push(m));
+      expect(toolSaved).toContain("tool notes");
+      expect(toolLogs.join("\n")).toContain("from tool");
+
+      // Untouched copy keeps the stored note and is not re-saved.
+      await writeFile(join(dir, "JUMI_HANDOFF.md"), seed);
+      const kept = new MemoryHandoffStore();
+      await kept.put(key, seed);
+      const unchangedLogs: string[] = [];
+      const unchanged = await saveWorkerHandoff(
+        new WorkerResultStore(),
+        dir,
+        kept,
+        key,
+        [],
+        (m) => unchangedLogs.push(m),
+        seed
+      );
+      expect(unchanged).toBeNull();
+      expect(await kept.get(key)).toBe(seed);
+      expect(unchangedLogs.join("\n")).toContain("handoff unchanged");
+
+      // Edited copy publishes the edit.
+      await writeFile(join(dir, "JUMI_HANDOFF.md"), "edited notes");
+      const editedStore = new MemoryHandoffStore();
+      await editedStore.put(key, seed);
+      const editedLogs: string[] = [];
+      const edited = await saveWorkerHandoff(
+        new WorkerResultStore(),
+        dir,
+        editedStore,
+        key,
+        [],
+        (m) => editedLogs.push(m),
+        seed
+      );
+      expect(edited).toContain("edited notes");
+      expect(await editedStore.get(key)).toContain("edited notes");
+      expect(editedLogs.join("\n")).toContain("from file fallback (edited seed)");
+    });
+  });
+
+  test("handoff seed absent: no file is unchanged, new file is edited fallback", async () => {
+    await withWorktree(async (dir) => {
+      const key = handoffKey("gitea", "o", "r", 12);
+      const store = new MemoryHandoffStore();
+      const logs: string[] = [];
+      const missing = await saveWorkerHandoff(new WorkerResultStore(), dir, store, key, [], (m) => logs.push(m), null);
+      expect(missing).toBeNull();
+      expect(await store.get(key)).toBeNull();
+      expect(logs.join("\n")).toContain("handoff unchanged");
+
+      await writeFile(join(dir, "JUMI_HANDOFF.md"), "new notes");
+      const editedLogs: string[] = [];
+      const edited = await saveWorkerHandoff(
+        new WorkerResultStore(),
+        dir,
+        store,
+        key,
+        [],
+        (m) => editedLogs.push(m),
+        null
+      );
+      expect(edited).toContain("new notes");
+      expect(editedLogs.join("\n")).toContain("from file fallback (edited seed)");
+    });
+  });
+
+  test("withPrConventions refs text names set_pr_body, not JUMI_PR.md", async () => {
+    const out = withPrConventions(
+      "base",
+      { branchPrefix: "jumi", prTitle: "{title}", commitMessage: "x", closingKeyword: "refs" },
+      12
+    );
+    expect(out).toContain("set_pr_body");
+    expect(out).not.toContain("JUMI_PR.md");
   });
 });

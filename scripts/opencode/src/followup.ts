@@ -2060,7 +2060,7 @@ export async function implementFollowUp(
         }
         const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
         const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
-        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+        const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
         if (
           previousConflict.lastHeadSha &&
@@ -2143,6 +2143,7 @@ export async function implementFollowUp(
               ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
               handoffStore,
               handoffKey,
+              handoffSeed: injectedHandoff ?? null,
               chain: jobChain,
               ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
               onPid: loop.engineOnPid(opts.onPid),
@@ -2207,7 +2208,8 @@ export async function implementFollowUp(
             handoffStore,
             handoffKey,
             workerPublishSecrets(loop.auth.token, jobChain),
-            log
+            log,
+            injectedHandoff ?? null
           );
           await persistConflictAttempt(mergeResult);
           await sticky(MERGE_DEFAULT_STUCK_TEXT, pr.number);
@@ -2303,9 +2305,13 @@ export async function implementFollowUp(
           await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
         }
         // Let the child edit the description already posted; only a fenced body is jumi-owned.
+        // JUMI_PR.md is a read-only seed: an untouched copy counts as no
+        // result, only an edited copy publishes.
         const postedRegion = jumiPrBodyRegion(pr.body);
+        let prSeed: string | null = null;
         if (postedRegion != null) {
-          await writeFile(join(worktree, PR_DESCRIPTION_FILE), seedPullRequestDescription(postedRegion));
+          prSeed = seedPullRequestDescription(postedRegion);
+          await writeFile(join(worktree, PR_DESCRIPTION_FILE), prSeed);
         } else {
           await rm(join(worktree, PR_DESCRIPTION_FILE), { recursive: true, force: true }).catch(() => undefined);
         }
@@ -2460,14 +2466,15 @@ export async function implementFollowUp(
         }
 
         throwIfAborted(opts.abortSignal);
-        const prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
+        const prFileContents = await resolveWorkerPrBody(workerStore, worktree, log, prSeed);
         await saveWorkerHandoff(
           workerStore,
           worktree,
           handoffStore,
           handoffKey,
           workerPublishSecrets(loop.auth.token, jobChain),
-          log
+          log,
+          injectedHandoff ?? null
         );
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
         const porcelain = await worktreePorcelain(loop);
