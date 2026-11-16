@@ -552,15 +552,7 @@ export async function buildCloserSnapshot(
     owner: opts.owner,
     repo: opts.repo,
     issueNumber: opts.issueNumber,
-  }).catch(() => ({
-    prNumber: 0,
-    round: 0,
-    lastHeadSha: "",
-    handledCommentIds: [],
-    handledReviewIds: [],
-    handledReviewFindings: [],
-    updatedAt: "",
-  }));
+  });
 
   let hasUnhandledFeedback = false;
   let maintainerOnlyPending = false;
@@ -645,7 +637,7 @@ export async function buildCloserSnapshot(
         owner: opts.owner,
         repo: opts.repo,
         issueNumber: opts.issueNumber,
-      }).catch(() => ({ prNumber: 0, round: 0, lastHeadSha: "", lastBaseSha: "", updatedAt: "" }));
+      });
       conflictRound = conflictLatch.round;
       conflictSameHeadBase = Boolean(
         conflictLatch.lastHeadSha &&
