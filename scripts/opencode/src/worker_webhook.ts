@@ -789,16 +789,40 @@ export async function handleWorkerWebhookEvent(
     }
     try {
       const decision = await shouldEnqueuePushConflicts(payload, policy, deps.api, logger);
-      if (decision.type === "skip") return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const keys: string[] = [];
-      for (const partial of decision.jobs) {
-        const job: IssueJob = { ...partial, delivery, receivedAt };
-        const result: EnqueueResult = await deps.queue.enqueue(job);
-        keys.push(result.key);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      if (decision.type === "enqueue") {
+        for (const partial of decision.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = await deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        }
       }
-      return json(202, { queued: true, keys });
+      // Wake shared-failure waiters whose first just merged: merge-only jobs
+      // that bring the branch up to date, push, and stop.
+      try {
+        const { shouldEnqueueSharedWaiterMerges } = await import("./push_webhook.ts");
+        const ledger = deps.review as unknown as import("./review_jobs.ts").ReviewJobStore | undefined;
+        const waiterJobs = await shouldEnqueueSharedWaiterMerges(
+          payload,
+          policy,
+          deps.api,
+          ledger?.listSharedFailures ? ledger : undefined,
+          logger
+        );
+        for (const partial of waiterJobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = await deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery} merge-only`);
+        }
+      } catch (err) {
+        logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
+      }
+      if (keys.length > 0) return json(202, { queued: true, keys });
+      if (decision.type === "skip") return skipped(decision.reason, logger);
+      return skipped("no managed jumi PRs", logger);
     } catch (err) {
       if (isQueueUnavailable(err)) {
         logger(`queue unavailable: ${err.message}`);

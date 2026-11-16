@@ -118,6 +118,8 @@ export interface PullCommit {
   sha?: string;
   author?: PullCommitIdentity;
   committer?: PullCommitIdentity;
+  /** Latest commit date when the forge exposes it (Gitea `created`, GitHub nested `commit.author.date`). */
+  created?: string;
 }
 
 export interface Comment {

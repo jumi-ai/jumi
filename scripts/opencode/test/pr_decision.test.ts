@@ -592,7 +592,7 @@ describe("pr_decision table", () => {
       const kinds = decision.effects.map((effect) => effect.kind);
       if (row.expectWhy === "same-finding") {
         expect(kinds).toEqual(["log", "sticky", "resolveHeld", "forgetClaim"]);
-      } else if (row.expectWhy === "flake") {
+      } else if (row.expectWhy === "flake" || row.expectWhy === "shared-failure") {
         expect(kinds).toEqual(["sticky", "recordCiHandled", "resolveHeld", "forgetClaim"]);
       } else if (
         row.expectWhy === "conflict-cap" ||
@@ -621,6 +621,12 @@ describe("pr_decision table", () => {
       "ci-pending": {},
       "no-unhandled-feedback": {},
       flake: { checks: [{ name: "build", flake: "reason-a" }] },
+      "shared-failure": {
+        firstPr: 7,
+        check: "build",
+        defaultBranch: "main",
+        checks: [{ name: "build" }],
+      },
       "left-to-author": { leftReason: "conflicted, left to author (label `ignore-conflicts`)" },
       quota: { quotaReason: "stuck: usage limit exceeded" },
       stuck: { stuckReason: "repeated-action" },

@@ -233,6 +233,12 @@ export interface IssueJob {
   prNumber?: number;
   headSha?: string;
   trigger?: IssueJobTrigger;
+  /**
+   * Merge-only follow-up for a shared-failure waiter after its first merged.
+   * Only brings the branch up to date with the default branch, pushes, and
+   * stops. Never calls the engine unless the merge conflicts.
+   */
+  mergeOnly?: boolean;
   /** Login that authored the issue text, when the forge payload carried it. */
   issueAuthor?: string;
   /** Raw forge permission of the issue author at pickup time, lowercased. */

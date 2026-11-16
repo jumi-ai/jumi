@@ -195,3 +195,185 @@ export async function shouldEnqueuePushConflicts(
   }
   return { type: "enqueue", jobs };
 }
+
+export type SharedWaiterMergeLedger = Pick<
+  import("./review_jobs.ts").ReviewJobStore,
+  "listSharedFailures" | "listWaitersForFirst"
+>;
+
+type SharedWaiterMergeApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
+  Partial<Pick<IssueApi, "getPR" | "listPullCommits" | "getRepoFile">>;
+
+/**
+ * Merge-only wakes for shared-failure waiters whose first just merged.
+ * The default-branch push already lists open managed PRs; each waiter whose
+ * recorded `waiterFor` first is now merged gets a follow-up that only brings
+ * the branch up to date, pushes, and stops (never the feedback engine unless
+ * the merge conflicts). Fail-open: without a ledger, with no recent shared
+ * rows, or when the first is still open, returns no jobs.
+ */
+export async function shouldEnqueueSharedWaiterMerges(
+  payload: GiteaPushPayload,
+  policy: PushWebhookPolicy,
+  api: SharedWaiterMergeApi,
+  ledger: SharedWaiterMergeLedger | undefined,
+  logger?: (message: string) => void
+): Promise<Array<Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true }>> {
+  if (!ledger) return [];
+  const defaultRef = `refs/heads/${payload.repository.default_branch}`;
+  if (payload.ref !== defaultRef || isZeroSha(payload.after)) return [];
+  let owner: string;
+  let repo: string;
+  try {
+    ({ owner, repo } = assertRepositoryPolicy(payload.repository, policy));
+  } catch (err) {
+    logger?.(`repository not allowed: ${errorMessage(err)}`);
+    return [];
+  }
+  let pulls: Pull[];
+  try {
+    pulls = await api.listOpenPulls(owner, repo);
+  } catch (err) {
+    logger?.(`shared waiter open-pull lookup failed: ${errorMessage(err)}`);
+    return [];
+  }
+  const openByNumber = new Map<number, Pull>();
+  for (const pr of pulls) {
+    if (typeof pr?.number === "number") openByNumber.set(pr.number, pr);
+  }
+  const { SHARED_FAILURE_WINDOW_MS, buildWaiterMergeJobs } = await import("./shared_failure.ts");
+  const nowMs = Date.now();
+  let entries: import("./shared_failure.ts").SharedFailureLedgerEntry[];
+  try {
+    entries = await ledger.listSharedFailures(owner, repo, nowMs - SHARED_FAILURE_WINDOW_MS, nowMs);
+  } catch (err) {
+    logger?.(`shared waiter ledger lookup failed: ${errorMessage(err)}`);
+    return [];
+  }
+  const firsts = new Set<number>();
+  for (const entry of entries) {
+    if (entry.waiterFor != null) firsts.add(entry.waiterFor);
+  }
+  const mergedFirsts = new Set<number>();
+  const getPR = (api as { getPR?: (owner: string, repo: string, n: number) => Promise<Pull> }).getPR;
+  for (const first of firsts) {
+    if (openByNumber.has(first)) continue;
+    if (typeof getPR !== "function") continue;
+    try {
+      const pr = await getPR.call(api, owner, repo, first);
+      if (pr?.merged === true) mergedFirsts.add(first);
+    } catch {
+      // Missing first: not merged, leave for takeover on the next CI wake.
+    }
+  }
+  if (mergedFirsts.size === 0) return [];
+  const sender = pushSender(payload);
+  // `ignore-conflicts` waiters get no default-branch merge from any path until
+  // Jumi has committed: mirror the conflict path's `leftToAuthor` guard here.
+  const ignoreAuthors = await loadIgnoreConflictsAuthors(api, owner, repo, payload.repository.default_branch, logger);
+  let ignoreLabel = normalizeIgnoreConflictsLabel(policy.ignoreConflictsLabel);
+  try {
+    const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+    if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function") {
+      const repoPolicy = await resolveRepoPolicy(
+        { api, owner, repo, ref: payload.repository.default_branch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: policy.ignoreConflictsLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (repoPolicy !== undefined) ignoreLabel = repoPolicy.ignoreConflictsLabel;
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
+  async function waiterLeftToAuthor(pr: Pull): Promise<boolean> {
+    if (ignoreAuthors === undefined) return true;
+    const labeled = hasIgnoreConflictsLabel(pr, ignoreLabel);
+    const viaAuthor = !labeled && isIgnoreConflictsAuthor(pr.user?.login, ignoreAuthors);
+    if (!labeled && !viaAuthor) return false;
+    return isLeftToAuthor(
+      api,
+      owner,
+      repo,
+      pr,
+      {
+        botUsername: policy.botUsername,
+        ignoreConflictsLabel: ignoreLabel,
+        ignoreConflictsAuthors: ignoreAuthors,
+        prAuthor: pr.user?.login,
+        defaultBranch: payload.repository.default_branch,
+      },
+      logger
+    );
+  }
+  const out: Array<Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true }> = [];
+  for (const first of mergedFirsts) {
+    let waiterNumbers: number[];
+    try {
+      waiterNumbers = await ledger.listWaitersForFirst(owner, repo, first, (prNumber) => openByNumber.has(prNumber));
+    } catch (err) {
+      logger?.(`shared waiter list failed for #${first}: ${errorMessage(err)}`);
+      continue;
+    }
+    const targets = waiterNumbers.map((n) => openByNumber.get(n)).filter((pr): pr is Pull => Boolean(pr));
+    const waiterTargets = targets.map((pr) => ({
+      prNumber: pr.number,
+      headSha: pr.head.sha,
+      title: pr.title,
+      body: pr.body ?? "",
+      htmlUrl: pr.html_url,
+      issueUpdatedAt: pr.updated_at,
+    }));
+    // Only managed PRs wake: foreign assigned PRs and in-scope Jumi closers.
+    // Reuse the conflict path's scope checks without duplicating issue fetches:
+    // foreign PRs use the PR itself, Jumi PRs need their closing issue.
+    for (const pr of targets) {
+      if (await waiterLeftToAuthor(pr)) {
+        logger?.(`shared waiter #${pr.number} left to author; skipping merge-only wake`);
+        continue;
+      }
+      if (isAssignedForeignPR(pr, owner, repo, policy.botUsername, policy)) {
+        const waiter = waiterTargets.find((item) => item.prNumber === pr.number);
+        if (!waiter) continue;
+        out.push(
+          ...buildWaiterMergeJobs({
+            owner,
+            repo,
+            defaultBranch: payload.repository.default_branch,
+            cloneUrl: payload.repository.clone_url,
+            waiters: [waiter],
+            sender,
+          })
+        );
+        continue;
+      }
+      if (!isInScopeJumiPR(pr, owner, repo, policy.botUsername)) continue;
+      const issueNumber = extractWorkingIssueNumber(pr);
+      if (issueNumber === undefined) continue;
+      try {
+        const issue = await api.getIssue(owner, repo, issueNumber);
+        if (issue.state !== "open" || !isIssuePickedUp(issue, policy)) continue;
+        out.push({
+          owner,
+          repo,
+          issueNumber,
+          action: "push",
+          title: issue.title,
+          body: issue.body ?? "",
+          htmlUrl: issue.html_url,
+          issueUpdatedAt: issue.updated_at,
+          defaultBranch: payload.repository.default_branch,
+          cloneUrl: payload.repository.clone_url,
+          mode: "follow-up",
+          prNumber: pr.number,
+          headSha: pr.head.sha,
+          trigger: { event: "push", sender },
+          mergeOnly: true,
+        });
+      } catch (err) {
+        if (err instanceof Error && /→ 404\b/.test(err.message)) continue;
+        throw err;
+      }
+    }
+  }
+  return out;
+}

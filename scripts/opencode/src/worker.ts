@@ -916,6 +916,7 @@ export async function processWorkerTick(
       extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
       home: effectiveConfig.home,
       skipLatches: store.skipLatches,
+      ledger: store,
       handoffs: store.handoffs,
       workdir: effectiveConfig.workdir,
       maxOutputBytes: effectiveConfig.maxOutputBytes,

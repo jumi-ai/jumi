@@ -18,6 +18,7 @@ export type SkipWhy =
   | "ci-pending"
   | "no-unhandled-feedback"
   | "flake"
+  | "shared-failure"
   | "left-to-author"
   | "quota"
   | "stuck"
@@ -36,6 +37,9 @@ export interface StuckFingerprintInput {
 export interface CiCheckRef {
   name: string;
   flake?: string | undefined;
+  fingerprint?: string | undefined;
+  /** Preserved so `recordCiHandled` writes a latch `isCheckHandled` can match. */
+  logHash?: string | undefined;
 }
 
 export type SkipParamsMap = {
@@ -46,6 +50,7 @@ export type SkipParamsMap = {
   "ci-pending": Record<string, never>;
   "no-unhandled-feedback": Record<string, never>;
   flake: { checks: CiCheckRef[] };
+  "shared-failure": { firstPr: number; check: string; defaultBranch: string; checks: CiCheckRef[] };
   "left-to-author": { leftReason: string };
   quota: { quotaReason: string };
   stuck: { stuckReason: StuckReason };
@@ -126,6 +131,8 @@ export interface PrDecisionSnapshot {
   ciPending: boolean;
   ciUnhandled: CiCheckRef[];
   ciHash?: string | undefined;
+  /** Pre-elected shared failure: another open PR already owns this fingerprint. */
+  sharedFailure?: { firstPr: number; check: string; defaultBranch: string; checks: CiCheckRef[] } | undefined;
   preCapFingerprint?: CurrentFingerprint | undefined;
   findingIdentityHash?: string | undefined;
   diffHash?: Resolved<string | undefined> | undefined;
@@ -182,6 +189,14 @@ export function flakeSkipReasonFor(checks: CiCheckRef[]): string {
 export function flakeCommentFor(checks: CiCheckRef[]): string {
   const names = checks.map((check) => check.name).join(", ");
   return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
+}
+
+export function sharedFailureReasonFor(firstPr: number, check: string): string {
+  return `waiting on #${firstPr} (check ${check})`;
+}
+
+export function sharedFailureStickyFor(firstPr: number, check: string, defaultBranch: string): string {
+  return `Same failure as #${firstPr} (check ${check}); waiting for that fix to reach \`${defaultBranch}\`.`;
 }
 
 export function sameFindingLatchReasonFor(display: string | undefined): string {
@@ -299,6 +314,12 @@ export const SKIP_WHY_TABLE: Record<SkipWhy, SkipRow> = {
     hold: { kind: "skipped", reason: "flake" },
     latchesIssue: false,
   }),
+  "shared-failure": row<"shared-failure">({
+    reason: (params) => sharedFailureReasonFor(params.firstPr, params.check),
+    sticky: (params) => sharedFailureStickyFor(params.firstPr, params.check, params.defaultBranch),
+    hold: { kind: "skipped", reason: "shared failure" },
+    latchesIssue: false,
+  }),
   "left-to-author": row<"left-to-author">({
     reason: (params) => params.leftReason,
     sticky: () => undefined,
@@ -361,6 +382,9 @@ function buildSkipEffects(
   }
   if (why === "flake") {
     effects.push({ kind: "recordCiHandled", checks: (params as SkipParamsMap["flake"]).checks });
+  }
+  if (why === "shared-failure") {
+    effects.push({ kind: "recordCiHandled", checks: (params as SkipParamsMap["shared-failure"]).checks });
   }
   if (entry.hold.kind === "completed") {
     effects.push({ kind: "resolveHeld", holdKind: "completed" });
@@ -426,6 +450,31 @@ export function decide(snapshot: PrDecisionSnapshot, caller: DecideCaller = "fol
       snapshot.ciUnhandled.every((check) => check.flake)
     ) {
       return skip("flake", { checks: snapshot.ciUnhandled }, snapshot, caller);
+    } else if (snapshot.ciWake && snapshot.sharedFailure && snapshot.mergeable !== false) {
+      // Shared failure waits instead of fixing again. It never counts toward
+      // the round cap (CI wakes bypass it above) and its reason is not
+      // `stuck:`, so it never latches as stuck. Only skip when every
+      // unhandled check is shared: a single distinct failure must still run.
+      // `resolveSharedFailureForWake` only produces `sharedFailure` in that
+      // case; this length guard is defense-in-depth for direct callers.
+      const sharedNames = new Set(snapshot.sharedFailure.checks.map((check) => check.name));
+      const allShared =
+        snapshot.ciUnhandled.length > 0 &&
+        snapshot.sharedFailure.checks.length >= snapshot.ciUnhandled.length &&
+        snapshot.ciUnhandled.every((check) => sharedNames.has(check.name));
+      if (allShared) {
+        return skip(
+          "shared-failure",
+          {
+            firstPr: snapshot.sharedFailure.firstPr,
+            check: snapshot.sharedFailure.check,
+            defaultBranch: snapshot.sharedFailure.defaultBranch,
+            checks: snapshot.sharedFailure.checks,
+          },
+          snapshot,
+          caller
+        );
+      }
     }
   }
   if (conflictedLeftToAuthor && !hasFeedback && !snapshot.ciWake) {
