@@ -25,11 +25,16 @@ interface ParsedLabelEvent {
   baseBranch?: string;
   htmlUrl?: string;
   cloneUrl?: string;
+  /** Gitea `label_updated`/`label_cleared`: no single label, re-read PR labels. */
+  giteaResync?: boolean;
 }
 
 /**
- * Best-effort parse of a Gitea or GitHub label webhook (`labeled` /
- * `unlabeled`). Supports `issue` (with or without `pull_request`) and
+ * Best-effort parse of a Gitea or GitHub label webhook. GitHub sends
+ * `labeled` / `unlabeled` with a single `label.name`. Gitea sends
+ * `pull_request_label` / `issue_label` with `label_updated` /
+ * `label_cleared` and the full `pull_request.labels` list (no single
+ * `label`). Supports `issue` (with or without `pull_request`) and
  * `pull_request` payloads. Returns undefined when the body is not a label
  * event.
  */
@@ -43,19 +48,61 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
   if (typeof parsed !== "object" || parsed === null) return undefined;
   const record = parsed as Record<string, unknown>;
   const action = typeof record["action"] === "string" ? (record["action"] as string) : "";
-  if (action !== "labeled" && action !== "unlabeled") return undefined;
+  const isGithubAction = action === "labeled" || action === "unlabeled";
+  const isGiteaAction = action === "label_updated" || action === "label_cleared";
+  if (!isGithubAction && !isGiteaAction) return undefined;
   const repository = record["repository"] as
     | { full_name?: string; default_branch?: string; html_url?: string; clone_url?: string }
     | undefined;
   const fullName = typeof repository?.full_name === "string" ? repository.full_name : "";
   const [owner, repo] = fullName.split("/");
   if (!owner || !repo) return undefined;
-  const label = record["label"] as { name?: string } | string | undefined;
-  const labelName = typeof label === "string" ? label : (label?.name ?? "");
-  if (!labelName.trim()) return undefined;
   const sender = record["sender"] as { login?: string } | undefined;
   const htmlUrl = typeof repository?.html_url === "string" ? repository.html_url : undefined;
   const cloneUrl = typeof repository?.clone_url === "string" ? repository.clone_url : undefined;
+  const baseBranch = typeof repository?.default_branch === "string" ? repository.default_branch : undefined;
+  const extras = {
+    ...(htmlUrl ? { htmlUrl } : {}),
+    ...(cloneUrl ? { cloneUrl } : {}),
+  };
+  // Gitea `pull_request_label` / `issue_label`: full label list in the
+  // payload, no single `label`. Re-read the PR's current labels downstream.
+  if (isGiteaAction) {
+    const pr = record["pull_request"] as { number?: number } | undefined;
+    if (typeof pr?.number === "number") {
+      return {
+        owner,
+        repo,
+        number: pr.number,
+        action,
+        labelName: "",
+        senderLogin: sender?.login,
+        baseBranch,
+        ...extras,
+        giteaResync: true,
+      };
+    }
+    const issue = record["issue"] as { number?: number; pull_request?: unknown; is_pull?: boolean } | undefined;
+    if (typeof issue?.number === "number") {
+      const isPr = issue.pull_request != null || issue.is_pull === true;
+      if (!isPr) return undefined;
+      return {
+        owner,
+        repo,
+        number: issue.number,
+        action,
+        labelName: "",
+        senderLogin: sender?.login,
+        baseBranch,
+        ...extras,
+        giteaResync: true,
+      };
+    }
+    return undefined;
+  }
+  const label = record["label"] as { name?: string } | string | undefined;
+  const labelName = typeof label === "string" ? label : (label?.name ?? "");
+  if (!labelName.trim()) return undefined;
   // PR number: prefer pull_request.number, else issue.number when it is a PR.
   const pr = record["pull_request"] as { number?: number } | undefined;
   if (typeof pr?.number === "number") {
@@ -66,9 +113,8 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
       action,
       labelName,
       senderLogin: sender?.login,
-      baseBranch: typeof repository?.default_branch === "string" ? repository.default_branch : undefined,
-      ...(htmlUrl ? { htmlUrl } : {}),
-      ...(cloneUrl ? { cloneUrl } : {}),
+      baseBranch,
+      ...extras,
     };
   }
   const issue = record["issue"] as { number?: number; pull_request?: unknown; is_pull?: boolean } | undefined;
@@ -82,9 +128,8 @@ export function parseAutomergeLabelEvent(rawBody: Uint8Array): ParsedLabelEvent 
       action,
       labelName,
       senderLogin: sender?.login,
-      baseBranch: typeof repository?.default_branch === "string" ? repository.default_branch : undefined,
-      ...(htmlUrl ? { htmlUrl } : {}),
-      ...(cloneUrl ? { cloneUrl } : {}),
+      baseBranch,
+      ...extras,
     };
   }
   return undefined;
@@ -187,9 +232,17 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   } catch {
     // Fall back to defaults for the match.
   }
-  const needle = parsed.labelName.trim().toLowerCase();
-  if (needle !== automergeLabel.toLowerCase() && needle !== noAutomergeLabel.toLowerCase()) {
-    return { handled: false };
+  // Gitea carries no single label: the full list lives on the PR. Re-read
+  // the PR's current labels via handleAutomergeLabelChange and run the same
+  // schedule/cancel decision (automerge present → schedule with the timeline
+  // labeller check, no-automerge present or automerge removed → cancel).
+  if (!parsed.giteaResync) {
+    const needle = parsed.labelName.trim().toLowerCase();
+    if (needle !== automergeLabel.toLowerCase() && needle !== noAutomergeLabel.toLowerCase()) {
+      return { handled: false };
+    }
+  } else {
+    log(`automerge label ${parsed.action} for ${parsed.owner}/${parsed.repo}#${parsed.number}: re-reading PR labels`);
   }
   const { extractWorkingIssueNumber } = await import("./gitea_issues.ts");
   const issueNumber = extractWorkingIssueNumber({
