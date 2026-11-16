@@ -58,6 +58,7 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 - A provider failure leaves the CI failure it was fixing unhandled, so the retry still runs (#258).
 - Provenance records only runners that wrote pushed code, so independent review keeps an eligible reviewer for a pull's whole life, including under `random-start` (#277).
 - Argv and child env match what the pinned binary accepts and keeps, including resume flags and env filtering (#155).
+- A config file the parent writes for a runner (Codex `config.toml`, OpenCode `opencode.json`, Claude MCP JSON) is built with that format's serializer or quoting helper, and a test parses the written file with a real parser for that format. `JSON.stringify` of an object is not TOML (#562, #603).
 - A hop-yes quota abort stays out of the pageable `143` exit class (#66).
 
 ## *_webhook.ts, api.ts, github_api.ts, ci.ts, permissions.ts, forge.ts, pickup.ts
