@@ -233,10 +233,33 @@
       "getRepo": 1
     }
   },
+  "handover.test.ts::38": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::39": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
   "handover.test.ts::4": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
       "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::40": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
       "getPR": 1,
       "getRepo": 1
     }

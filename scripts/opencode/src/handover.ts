@@ -318,7 +318,25 @@ export async function enqueueFollowUpFromReview(
 
   if (earlySkip === "success trailer") {
     const trailerSkip = persistInsertSkipReason(opts.markdown, pr.user?.login, effectiveBlocking, record);
-    if (trailerSkip) return logSkip(trailerSkip);
+    if (trailerSkip) {
+      // A consumed hold must never outlive the handover: the review posted
+      // `pending` and consumed the one-hold flag, and no follow-up job is
+      // left to clear it. Resolve the held head to `success` with a note,
+      // the same way every other skip branch after the hold does.
+      await resolveHeldSuggestion(
+        opts.store,
+        opts.api,
+        opts.row.owner,
+        opts.row.repo,
+        extractWorkingIssueNumber(pr) ?? pr.number,
+        opts.row.headSha,
+        opts.markdown,
+        trailerSkip,
+        pr.html_url,
+        record
+      );
+      return logSkip(trailerSkip);
+    }
   }
 
   const closer = extractWorkingIssueNumber(pr);

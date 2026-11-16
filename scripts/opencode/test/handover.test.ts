@@ -1026,3 +1026,90 @@ describe("record-backed rows behave identically", () => {
     expect(withRecord.result).toEqual(without.result);
   });
 });
+
+describe("suggestion hold spelled-out count", () => {
+  test("spelled-out model reason with one published suggestion queues a review-suggestions follow-up", async () => {
+    const markdown = [
+      "src/foo.ts:12: 💡 simpler: dedupe the helper",
+      "<!-- jumi-check: success; One suggestion to dedupe -->",
+    ].join("\n");
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const api = handoverApi();
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(store.rows.find((row) => row.kind === "follow-up")?.payload?.trigger).toEqual({
+      event: "review-suggestions",
+      sender: "jumi",
+    });
+    expect(logs.some((line) => line.includes("persist-insert skipped"))).toBe(false);
+  });
+
+  test("record counts beat a spelled-out model reason with no body findings", async () => {
+    const markdown = "note\n<!-- jumi-check: success; One suggestion to dedupe -->";
+    const record: ReviewRecord = {
+      version: 1,
+      state: "success",
+      reason: "One suggestion to dedupe",
+      findings: [],
+      counts: { bug: 0, risk: 0, question: 0, suggestion: 1 },
+    };
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const row: ReviewJobRecord = { ...leased!, resultJson: record };
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api: handoverApi(),
+      row,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+  });
+
+  test("success-trailer skip resolves a consumed hold to success", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = handoverApi({
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "ok\n<!-- jumi-check: success -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(logs).toEqual(["persist-insert skipped: success trailer"]);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]).toMatchObject({ state: "success" });
+    expect(statuses[0]?.description).toContain("success trailer");
+  });
+});
