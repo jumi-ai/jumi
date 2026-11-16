@@ -13,9 +13,7 @@ export type AutomergeWebhookPolicy = WebhookPolicy & {
   forgeKind?: string;
 };
 
-type AutomergeWebhookApi = Parameters<typeof handleAutomergeLabelChange>[0]["api"] & {
-  getRepo(owner: string, repo: string): Promise<{ default_branch?: string }>;
-};
+type AutomergeWebhookApi = Partial<Parameters<typeof handleAutomergeLabelChange>[0]["api"]>;
 
 interface ParsedLabelEvent {
   owner: string;
@@ -200,7 +198,7 @@ export async function tryHandleAutomergeLabelEvent(opts: {
     head: pr.head as { ref?: string },
   });
   const result = await handleAutomergeLabelChange({
-    api: api as never,
+    api,
     forgeKind: (policy.forgeKind as "gitea" | "github") ?? "gitea",
     owner: parsed.owner,
     repo: parsed.repo,
