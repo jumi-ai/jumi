@@ -70,6 +70,7 @@ import {
   compileReviewExcludePatterns,
   effectiveReviewBudget,
   effectiveSuggestionCap,
+  isMaintainerQuestionsHoldEnabled,
   isReviewDraftsEnabled,
   isSuggestionFollowupEnabled,
   isSuggestionHoldEnabled,
@@ -140,6 +141,7 @@ import {
   buildFindingsList,
   capSuggestionFindings,
   countBugFindings,
+  countMaintainerQuestionFindings,
   countQuestionFindings,
   countRiskFindings,
   countSuggestionFindings,
@@ -153,6 +155,7 @@ import {
   keepReviewFindingLines,
   lastNonEmptyLine,
   MAX_SUGGESTION_FINDINGS,
+  maintainerHoldPendingDescription,
   openQuestionDescription,
   parseCheckLine,
   parseReviewFindings,
@@ -1828,6 +1831,27 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   }
   // An explicit `suggestions_hold_merge: false` opt-out and a missing latch
   // store keep today's success silently: the follow-up still runs as today.
+  // Maintainer hold: an open `❓ maintainer:` on a success review posts
+  // `pending` instead of `success` so the required check gates every merge
+  // (Jumi-owned, label-forced, `automerge: true`, or hand-scheduled) until a
+  // maintainer answers. Failures and opt-in blocking questions take
+  // precedence (they already failed above); the worker still never starts for
+  // a maintainer-only review (see the handover skip). Unlike the suggestion
+  // hold this is not one-shot: every review with an open maintainer question
+  // holds. An explicit `maintainer_questions_hold_merge: false` opts out.
+  const holdMaintainerCount =
+    !parsed.verdict.incomplete && effectiveVerdict.state === "success" && blockingQuestions === 0
+      ? countMaintainerQuestionFindings(comment, { singleFilePath })
+      : 0;
+  if (holdMaintainerCount > 0 && isMaintainerQuestionsHoldEnabled(settingsForHold)) {
+    state = "pending";
+    description = maintainerHoldPendingDescription(holdMaintainerCount);
+    logDiagnostic(log, "review_maintainer_hold", {
+      review: reviewLabel,
+      head: opts.expectedHeadSha,
+      questions: holdMaintainerCount,
+    });
+  }
   await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;

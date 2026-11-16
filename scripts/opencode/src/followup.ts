@@ -11,7 +11,7 @@ import {
   restoreCheckpoint,
   sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
-import { buildCiMarkdown, CI_LOG_FILE, recordCiHandled } from "./ci.ts";
+import { buildCiMarkdown, CI_LOG_FILE, JUMI_REVIEW_CONTEXT, recordCiHandled } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -94,6 +94,7 @@ import {
   effectiveFollowupRounds,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
+  isMaintainerQuestionsHoldEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type SettingsSnapshot,
@@ -2653,6 +2654,34 @@ export async function implementFollowUp(
   if (typeof followUpResult === "object" && followUpResult !== null && "status" in followUpResult) {
     if (followUpResult.status === "no-changes") {
       await resolveHeld("completed");
+      // Maintainer hold release: a trusted reply enqueued this round and the
+      // worker made no push, so the answer settles the head without a code
+      // change. The last review on this head still carries open `❓
+      // maintainer:` questions (the review never re-runs on its own), so flip
+      // the held `pending` back to `success` here. Pushed rounds do nothing:
+      // the next review posts the status itself. Skipped/cancelled rounds keep
+      // the hold so the merge still waits on the maintainer.
+      try {
+        const trigger = opts.job.trigger;
+        const triggeredByReply = trigger != null && (trigger.commentId !== undefined || trigger.reviewId !== undefined);
+        if (triggeredByReply && pendingLastReview?.body) {
+          const openMaintainers = countMaintainerQuestionFindings(pendingLastReview.body);
+          if (openMaintainers > 0 && isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot))) {
+            const create = (opts.api as HoldStatusPort).createCommitStatus;
+            if (typeof create === "function") {
+              await create.call(opts.api, owner, repo, pr.head.sha, {
+                state: "success",
+                context: JUMI_REVIEW_CONTEXT,
+                description: "No blocking issues",
+                target_url: pr.html_url,
+              });
+              log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${openMaintainers} answered`);
+            }
+          }
+        }
+      } catch {
+        // Best-effort: never fail the follow-up on a status post.
+      }
     } else if (followUpResult.status === "skipped") {
       await resolveHeld("skipped", holdReasonForSkippedResult((followUpResult as { reason?: unknown }).reason));
     } else if (followUpResult.status === "cancelled") {
