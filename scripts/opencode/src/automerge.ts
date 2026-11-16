@@ -858,7 +858,12 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     }
     forcedByLabel = true;
   }
-  if (!forcedByLabel && (settings.state !== "valid" || settings.automerge !== true)) return { scheduled: false };
+  if (!forcedByLabel && (settings.state !== "valid" || settings.automerge !== true)) {
+    log(
+      `automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: no automerge label on PR and file does not opt in`
+    );
+    return { scheduled: false };
+  }
   // Restricted repository modes never schedule: review-only and off keep the
   // pull open for a person without a note (off posts nothing at all).
   if (repoMode(settings) !== "full") {
@@ -1074,6 +1079,16 @@ export async function copyIssueAutomergeLabelsToPr(opts: {
   let copiedNoAutomerge = false;
   if (wantAutomerge) copiedAutomerge = await copyOne(opts.automergeLabel);
   if (wantNoAutomerge) copiedNoAutomerge = await copyOne(opts.noAutomergeLabel);
+  if (wantAutomerge && !copiedAutomerge) {
+    log(
+      `automerge label copy incomplete for ${opts.owner}/${opts.repo}#${opts.prNumber}: issue #${opts.issueNumber} has \`${opts.automergeLabel}\` but the PR was not labeled`
+    );
+  }
+  if (wantNoAutomerge && !copiedNoAutomerge) {
+    log(
+      `automerge label copy incomplete for ${opts.owner}/${opts.repo}#${opts.prNumber}: issue #${opts.issueNumber} has \`${opts.noAutomergeLabel}\` but the PR was not labeled`
+    );
+  }
   return {
     copiedAutomerge,
     copiedNoAutomerge,

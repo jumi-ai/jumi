@@ -72,6 +72,7 @@ export function toTask(issue: GiteaIssue): Task {
     created_at: issue.created_at,
     pull_request: issue.pull_request,
     is_pull: issue.is_pull,
+    labels: issue.labels,
   };
 }
 

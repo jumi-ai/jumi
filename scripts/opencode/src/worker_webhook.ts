@@ -438,11 +438,13 @@ export async function handleWorkerWebhookEvent(
   const logger = deps.logger ?? ((message: string) => console.log(message));
   if (event === "ping" || eventType === "ping") return json(200, { ok: true });
   // Per-PR auto-merge override labels on a Jumi PR schedule or cancel without
-  // enqueueing worker work. The bot's own copy event is ignored. Falls through
-  // when the event is not an automerge label on a Jumi PR.
+  // enqueueing worker work. GitHub sends labeled/unlabeled; Gitea sends
+  // pull_request_label/issue_label with label_updated/label_cleared. The bot's
+  // own copy event is ignored. Falls through when the event is not an
+  // automerge label on a Jumi PR.
   {
     const action = peekWebhookAction(rawBody);
-    if (action === "labeled" || action === "unlabeled") {
+    if (action === "labeled" || action === "unlabeled" || action === "label_updated" || action === "label_cleared") {
       try {
         const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
         const handled = await tryHandleAutomergeLabelEvent({
