@@ -2,6 +2,7 @@ import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipR
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
 import { disabledKickWhy, isKickableReviewRow, kickReasonOf, STUCK_KICK_ALIASES } from "./kick.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
@@ -491,9 +492,7 @@ export function stuckIdempotencyMismatch(
  * remains the forge-state override.
  */
 export function isConflictStuckReason(reason: string | null | undefined): boolean {
-  if (!reason) return false;
-  const normalized = reason.trim().toLowerCase();
-  return normalized.startsWith("stuck: cannot resolve conflicts") || normalized.startsWith("stuck: conflict");
+  return parseSkipWhy(reason).kickKind === "conflict";
 }
 
 /**
@@ -504,7 +503,7 @@ export function isConflictStuckReason(reason: string | null | undefined): boolea
  */
 export function stuckKickJobKind(input: { mergeable?: boolean | null }, skipReason: string | null): JobKind {
   if (input.mergeable === false) return "conflict";
-  if (isConflictStuckReason(skipReason)) return "conflict";
+  if (parseSkipWhy(skipReason).kickKind === "conflict") return "conflict";
   return "follow-up";
 }
 
@@ -2141,7 +2140,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       }
       const latchKey = issueSkipLatchKey(input.owner, input.repo, input.issueNumber);
       const latch = this.issueSkipLatches.get(latchKey);
-      if (!latch?.skipReason?.startsWith("stuck:")) {
+      if (latch?.skipReason == null || !parseSkipWhy(latch.skipReason).latches) {
         const entry = record(null, null, "not-kickable");
         return {
           status: "rejected",
@@ -4691,7 +4690,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           )
         );
         const skipReason = latchRows[0] ? strOrNull(latchRows[0].skip_reason) : null;
-        if (!skipReason?.startsWith("stuck:")) {
+        if (!parseSkipWhy(skipReason).latches) {
           const logged = await this.insertImplementKickLog(tx, input, "not-kickable", null, null);
           return {
             status: "rejected",

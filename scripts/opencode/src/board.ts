@@ -21,10 +21,10 @@ import {
   parseStuckKickBody,
   rawKickIdOf,
 } from "./kick.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
   implementIdempotencyMismatch,
-  isConflictStuckReason,
   isQueueUnavailable,
   isUniqueViolation,
   reopenIdempotencyMismatch,
@@ -271,7 +271,7 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
 
 /** Effect text for a stuck-latch kick: conflict resolution for a conflict-capped latch, follow-up otherwise. */
 export function stuckKickEffect(stuckReason?: string | null): string {
-  return isConflictStuckReason(stuckReason) ? STUCK_CONFLICT_EFFECT : STUCK_FOLLOWUP_EFFECT;
+  return parseSkipWhy(stuckReason).kickKind === "conflict" ? STUCK_CONFLICT_EFFECT : STUCK_FOLLOWUP_EFFECT;
 }
 
 /** Kick id the page must send for each kickable sit. Owner-only payloads never confirm these. */

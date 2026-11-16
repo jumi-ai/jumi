@@ -1,5 +1,6 @@
 import { AUTH_DEATH_REASON, looksLikeProviderAuthDeath } from "./auth.ts";
 import { isCiWaitSkipReason } from "./ci.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 import { reviewVerdictView } from "./verdict.ts";
 
@@ -115,8 +116,8 @@ const WIP_REASONS = new Set(["draft or WIP pull request", "PR title disables rev
 function isBlockedDependencyReason(reason: string): boolean {
   const text = reason.trim();
   if (text.startsWith("blocked on ")) return true;
-  if (text === "stuck: dependency cycle") return true;
-  if (text === "stuck: blocked-by rejected") return true;
+  const parsed = parseSkipWhy(reason);
+  if (parsed.why === "dependency-cycle" || parsed.why === "blocked-by-rejected") return true;
   return false;
 }
 

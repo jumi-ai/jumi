@@ -90,6 +90,7 @@ import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { MERGE_DEFAULT_STUCK_TEXT } from "./skip_why_texts.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
@@ -1407,7 +1408,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
         if (mergeResult.status === "stuck") {
           await saveConflictHandoff(handoffStore, handoffKey, worktree);
-          await sticky("stuck: cannot resolve conflicts", pr.number);
+          await sticky(MERGE_DEFAULT_STUCK_TEXT, pr.number);
           await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "stuck" };

@@ -1,3 +1,4 @@
+import { sitForOwnedReason } from "./pr_decision.ts";
 import { createBunSqlClient, type SqlClient, wrapSqlError } from "./sql_client.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -77,6 +78,12 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   const text = reason.trim();
   if (!text) return undefined;
 
+  // Texts owned by the decision table (skip reasons plus the round-cap hold
+  // alias) map through the parsed row. The router-computed list below stays
+  // exactly as is for everything the router itself computed.
+  const owned = sitForOwnedReason(reason);
+  if (owned.owned) return owned.sit;
+
   // Never sit on these: no kick, no record.
   if (text === "ping") return undefined;
   if (text.startsWith("unsupported action ")) return undefined;
@@ -112,11 +119,8 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text.startsWith("Incomplete review:")) return undefined;
   if (text === "head moved") return undefined;
   if (text === "unassigned") return undefined;
-  if (text === "round cap") return undefined;
   if (text === "incomplete") return undefined;
   if (text === "success trailer") return undefined;
-  if (text === "comment already handled") return undefined;
-  if (text === "no unhandled feedback") return undefined;
   if (text === "failed to load issue") return undefined;
   if (text.startsWith("failed to load ")) return undefined;
   if (text.startsWith("failed to re-check")) return undefined;
@@ -125,7 +129,6 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text.startsWith("failed to load dependencies")) return undefined;
 
   // CI not completed: the router saw a sibling check that has not finished.
-  if (text === "CI still pending") return "ci-not-completed";
   if (text.startsWith("workflow_job ")) return "ci-not-completed";
   if (text === "workflow_job not completed") return "ci-not-completed";
   if (text.startsWith("status ")) return "ci-not-completed";
@@ -150,7 +153,6 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   // clears it with a stuck kick (follow-up, or conflict resolution on a
   // conflict-capped latch or unmergeable pull).
   if (text === "closing issue already assigned") return "repo-mutex";
-  if (text.startsWith("stuck:")) return "implement-latch";
   if (text === "claim is live") return "repo-mutex";
 
   // No changes: implement finished with nothing to ship.
@@ -166,9 +168,6 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   if (text === "not assigned to bot") return "not-labeled";
   if (text === "labeled other label") return "not-labeled";
   if (text === "not a jumi pull request") return "not-labeled";
-
-  // Left to the author via the ignore-conflicts label.
-  if (text.toLowerCase().startsWith("conflicted, left to author")) return "conflict-ignored";
 
   // Maintainer-only review question: the worker cannot act, a human answers on the forge.
   if (text === "waiting on maintainer") return "waiting-maintainer";

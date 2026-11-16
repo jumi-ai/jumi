@@ -23,6 +23,7 @@ import { type HandoffStore, handoffsFor } from "./handoff.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import { ReviewQueue } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { deriveRepoPolicy } from "./repo_policy.ts";
@@ -46,8 +47,8 @@ import { orderedRunners, runnerNameForStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
+import { MERGE_DEFAULT_STUCK_TEXT } from "./skip_why_texts.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
-import { isSkipLatchReason, isTooManyFollowupRoundsReason } from "./stuck.ts";
 import {
   type HoldStatusPort,
   postSuggestionHoldSuccess,
@@ -440,8 +441,8 @@ function failedRunnerNameForWorkerRetry(config: WorkerConfig, err: unknown): str
 }
 
 function skipLatchReasonFromResult(result: { status: string; reason?: string }): string | undefined {
-  if (result.status === "skipped" && isSkipLatchReason(result.reason)) return result.reason;
-  if (result.status === "stuck") return result.reason ?? "stuck: cannot resolve conflicts";
+  if (result.status === "skipped" && parseSkipWhy(result.reason).latches) return result.reason;
+  if (result.status === "stuck") return result.reason ?? MERGE_DEFAULT_STUCK_TEXT;
   return undefined;
 }
 
@@ -834,10 +835,8 @@ export async function processWorkerTick(
     // A follow-up round-cap latch must not refuse a later conflict wake: the
     // conflict job still dispatches to `implementConflict`, which enforces
     // its own round cap. Every other `stuck:` latch still skips every kind.
-    if (
-      isSkipLatchReason(latch.skipReason) &&
-      !(job.mode === "conflict" && isTooManyFollowupRoundsReason(latch.skipReason))
-    ) {
+    const latched = parseSkipWhy(latch.skipReason);
+    if (latched.latches && !(job.mode === "conflict" && latched.why === "round-cap")) {
       const published = await store.markPublished(row.id, leasedBy, {
         state: "skipped",
         reason: latch.skipReason ?? undefined,

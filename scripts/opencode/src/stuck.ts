@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
-import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./skip_why_texts.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 
@@ -12,7 +13,7 @@ export const SAME_ERROR_LIMIT = 3;
 export const SAME_FINDING_LIMIT = 3;
 export const STUCK_HISTORY_LIMIT = 32;
 
-export const SAME_FINDING_STUCK = "stuck: same finding repeated";
+export const SAME_FINDING_STUCK = SAME_FINDING_STUCK_TEXT;
 
 export type StuckKind = "action" | "ci" | "error" | "finding";
 export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
@@ -44,7 +45,7 @@ export function stuckComment(reason: StuckReason): string {
 }
 
 export function isSkipLatchReason(reason: string | null | undefined): boolean {
-  return Boolean(reason?.startsWith("stuck:"));
+  return parseSkipWhy(reason).latches;
 }
 
 /**
@@ -57,7 +58,7 @@ export function isSkipLatchReason(reason: string | null | undefined): boolean {
  */
 export { TOO_MANY_FOLLOWUP_ROUNDS_REASON };
 export function isTooManyFollowupRoundsReason(reason: string | null | undefined): boolean {
-  return typeof reason === "string" && reason.trim() === TOO_MANY_FOLLOWUP_ROUNDS_REASON;
+  return parseSkipWhy(reason).why === "round-cap";
 }
 
 export function stuckMarker(owner: string, repo: string, index: number): string {
