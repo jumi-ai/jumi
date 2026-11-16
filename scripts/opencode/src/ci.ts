@@ -572,26 +572,45 @@ function stripGiteaLogTimestamp(line: string): string {
 }
 
 const FAIL_OR_ERROR_LINE =
-  /^(?:\(fail\)|##\[error\]|Error:|fatal:|dpkg:|Error response from daemon:|ERROR:|helm:|Failed to connect\b|Could not resolve host\b|(?:tofu|terraform)\b|reading manifest\b)/;
+  /^(?:\(fail\)|##\[error\]|::error(?:\s|::)|Error:|fatal:|dpkg:|Error response from daemon:|ERROR:|FAIL:|FAILED\b|helm:|Failed to connect\b|Could not resolve host\b|(?:tofu|terraform)\b|reading manifest\b)/;
+
+function stripErrorCommand(line: string): string | undefined {
+  if (!line.startsWith("::error")) return line;
+  const rest = line.slice("::error".length);
+  const sep = rest.indexOf("::");
+  if (sep === -1) return undefined;
+  const message = rest.slice(sep + 2).trimStart();
+  if (!message) return undefined;
+  return message;
+}
 
 function failOrErrorLines(capped: string): string[] {
-  return capped
-    .split(/\r?\n/)
-    .map(stripGiteaLogTimestamp)
-    .filter((line) => !line.startsWith("(pass)") && FAIL_OR_ERROR_LINE.test(line));
+  const out: string[] = [];
+  for (const raw of capped.split(/\r?\n/)) {
+    const line = stripGiteaLogTimestamp(raw);
+    if (line.startsWith("(pass)")) continue;
+    if (!FAIL_OR_ERROR_LINE.test(line)) continue;
+    const stripped = stripErrorCommand(line);
+    if (stripped === undefined) continue;
+    out.push(stripped);
+  }
+  return out;
 }
 
 function isGenericCiFooter(line: string): boolean {
   return /process completed with exit code/i.test(line);
 }
 
+export function failureLines(capped: string): string[] {
+  return failOrErrorLines(capped).filter((line) => !isGenericCiFooter(line));
+}
+
 export function classifyInfraFlake(capped: string): string | undefined {
-  const lines = failOrErrorLines(capped);
-  if (lines.length === 0) return undefined;
-  // A failing test is a real failure even if its title contains infra words.
-  if (lines.some((line) => line.startsWith("(fail)"))) return undefined;
-  const substantive = lines.filter((line) => !isGenericCiFooter(line));
+  const substantive = failureLines(capped);
   if (substantive.length === 0) return undefined;
+  // A failing test is a real failure even if its title contains infra words.
+  if (substantive.some((line) => line.startsWith("(fail)") || line.startsWith("FAIL:") || line.startsWith("FAILED")))
+    return undefined;
   let first: string | undefined;
   for (const line of substantive) {
     const reason = infraFlakeReason(line);
