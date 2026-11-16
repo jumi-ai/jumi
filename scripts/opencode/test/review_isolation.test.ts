@@ -69,11 +69,19 @@ describe("review isolation", () => {
     expect(review).toContain("--dangerously-bypass-hook-trust");
     const workerResume = codexArgv({ model: "gpt-5.5", workdir: "/work", continueSession: true }, "thread-9");
     expect(workerResume).toContain("--dangerously-bypass-hook-trust");
+    // 0.169.0: non-interactive exec drops the checkout's project config
+    // without explicit trust; workers pass `--trust` (before `resume` on the
+    // resume path), reviews must not so the head's project files never load.
+    expect(worker).toContain("--trust");
+    expect(workerResume).toContain("--trust");
+    expect(workerResume.indexOf("--trust")).toBeLessThan(workerResume.indexOf("resume"));
     const reviewResume = codexArgv(
       { model: "gpt-5.5", workdir: "/work", continueSession: true, trace: { kind: "review", owner: "o", repo: "r" } },
       "thread-9"
     );
     expect(reviewResume).toContain("--dangerously-bypass-hook-trust");
+    expect(review).not.toContain("--trust");
+    expect(reviewResume).not.toContain("--trust");
   });
 
   test("opencode reviews disable project config, workers do not", async () => {

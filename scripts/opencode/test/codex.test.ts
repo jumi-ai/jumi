@@ -73,6 +73,10 @@ describe("codexArgv", () => {
     expect(args).not.toContain("--disable");
     // The repository's own setup loads: these are what kept it out.
     expect(args).toContain("--dangerously-bypass-hook-trust");
+    // 0.169.0: the checkout's `.codex` only loads with explicit project
+    // trust; workers pass it, reviews must not (the review home marks the
+    // workdir untrusted so the head's project files never load).
+    expect(args).toContain("--trust");
     expect(args).not.toContain("features.hooks=false");
     expect(args).not.toContain("--ignore-rules");
     expect(args).not.toContain("--ignore-user-config");
@@ -124,6 +128,19 @@ describe("codexArgv", () => {
     expect(resumed).not.toContain("--all");
   });
 
+  test("review spawns never pass project trust", () => {
+    for (const args of [
+      codexArgv({ model: "gpt-6-sol", workdir: "/w", trace: { kind: "review", owner: "o", repo: "r" } }),
+      codexArgv(
+        { model: "gpt-6-sol", workdir: "/w", continueSession: true, trace: { kind: "review", owner: "o", repo: "r" } },
+        "thread-9"
+      ),
+    ]) {
+      expect(args).not.toContain("--trust");
+      expect(args).toContain("--dangerously-bypass-hook-trust");
+    }
+  });
+
   test("resume uses a minimal flag list exec resume accepts", () => {
     const resumed = codexArgv({ model: "gpt-6-sol", workdir: "/w", continueSession: true }, "thread-9");
     const resumeIdx = resumed.indexOf("resume");
@@ -135,6 +152,15 @@ describe("codexArgv", () => {
     expect(resumed.slice(resumeIdx + 2)).not.toContain("--json");
     expect(resumed.indexOf("--skip-git-repo-check")).toBeLessThan(resumeIdx);
     expect(resumed.indexOf("--dangerously-bypass-hook-trust")).toBeLessThan(resumeIdx);
+    // `--trust` is global on `exec`, so it travels before `resume` with the
+    // other globals; reviews omit it so the head's project files never load.
+    expect(resumed).toContain("--trust");
+    expect(resumed.indexOf("--trust")).toBeLessThan(resumeIdx);
+    const reviewResume = codexArgv(
+      { model: "gpt-6-sol", workdir: "/w", continueSession: true, trace: { kind: "review", owner: "o", repo: "r" } },
+      "thread-9"
+    );
+    expect(reviewResume).not.toContain("--trust");
     expect(resumed).not.toContain("--ignore-rules");
     expect(resumed).not.toContain("--ignore-user-config");
     // `-c` is global so it travels after the thread id; every turn-1
