@@ -170,4 +170,35 @@ describe("ReviewVerdictStore validation", () => {
     expect(parsed.verdict.incomplete).toBe(false);
     expect(parsed.checkLine).toBe(lines[0]);
   });
+
+  test("maintainer and simpler markers publish exactly once each", async () => {
+    const store = makeStore();
+    expect(
+      store.addFinding({
+        path: "src/a.ts",
+        line: 2,
+        severity: "question",
+        title: "❓ maintainer: please close the other issue?",
+      }).ok
+    ).toBe(true);
+    expect(
+      store.addFinding({ path: "src/a.ts", line: 3, severity: "suggestion", title: "💡 simpler: extract a helper" }).ok
+    ).toBe(true);
+    expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    const markdown = store.toMarkdown();
+    const { countMaintainerQuestionFindings, isMaintainerQuestionFirstLine } = await import("../src/verdict.ts");
+    expect(markdown).toContain("❓ maintainer: please close the other issue?");
+    expect(markdown).toContain("💡 simpler: extract a helper");
+    expect(markdown).not.toContain("❓ q: ❓ maintainer:");
+    expect(markdown).not.toContain("💡 simpler: 💡 simpler:");
+    const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+    expect(occurrences(markdown, "❓ maintainer:")).toBe(1);
+    expect(occurrences(markdown, "💡 simpler:")).toBe(1);
+    const maintainerLine = markdown.split("\n").find((line) => line.includes("❓ maintainer:")) ?? "";
+    expect(isMaintainerQuestionFirstLine(maintainerLine)).toBe(true);
+    expect(countMaintainerQuestionFindings(markdown)).toBe(1);
+    const record = store.toRecord();
+    expect(record.counts.question).toBe(1);
+    expect(record.counts.maintainerQuestion).toBe(1);
+  });
 });

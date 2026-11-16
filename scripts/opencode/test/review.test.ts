@@ -13,6 +13,7 @@ import {
 } from "../src/ci.ts";
 import { reviewStuckStatePath } from "../src/claim.ts";
 import { isJumiReviewFinding, lastCheckTrailer } from "../src/followup.ts";
+import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import { GithubAPI } from "../src/github_api.ts";
 import type { InlineComment } from "../src/ports.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
@@ -4536,5 +4537,144 @@ describe("check trailer reason sanitization", () => {
     });
     expect(result.status).toBe("posted");
     expect(lastCheckTrailer(bodies.join("\n"))?.state).toBe("success");
+  });
+});
+
+describe("maintainer hold", () => {
+  const holdOpts = {
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 7,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+  };
+  const maintainerMarkdown =
+    "src/foo.ts:12: ❓ maintainer: please file the follow-up issue?\n<!-- jumi-check: success -->";
+
+  function maintainerApi(
+    statuses: Array<{ state: string; description?: string; context?: string }>,
+    settingsContent: string | undefined,
+    extraPr: Record<string, unknown> = {},
+    caps = FORGE_CAPABILITIES.gitea
+  ) {
+    return makeReviewApi({
+      capabilities: caps,
+      getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }), ...extraPr }),
+      getPRFiles: async () => [makeFile()],
+      getRepoFile: async () =>
+        settingsContent === undefined ? { found: false } : { found: true, content: settingsContent },
+      createPullReview: async () => ({ id: 1 }),
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+  }
+
+  for (const [forgeLabel, caps] of [
+    ["gitea", FORGE_CAPABILITIES.gitea],
+    ["github", FORGE_CAPABILITIES.github],
+  ] as const) {
+    test(`success with one ❓ maintainer: holds merge as pending on ${forgeLabel}`, async () => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await publishReviewResult({
+        ...holdOpts,
+        resultMarkdown: maintainerMarkdown,
+        api: maintainerApi(statuses, undefined, {}, caps),
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(statuses.at(-1)).toMatchObject({
+        state: "pending",
+        context: "jumi/opencode-review",
+        description: "waiting on maintainer: 1 question",
+      });
+    });
+
+    test(`maintainer_questions_hold_merge: false posts success on ${forgeLabel}`, async () => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await publishReviewResult({
+        ...holdOpts,
+        resultMarkdown: maintainerMarkdown,
+        api: maintainerApi(statuses, "maintainer_questions_hold_merge: false\n", {}, caps),
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(statuses.at(-1)).toMatchObject({ state: "success" });
+      expect(statuses.at(-1)?.description).not.toContain("waiting on maintainer");
+    });
+
+    test(`label-forced automerge with no .jumi.yml still holds on ${forgeLabel}`, async () => {
+      const statuses: Array<{ state: string; description?: string }> = [];
+      const result = await publishReviewResult({
+        ...holdOpts,
+        resultMarkdown: maintainerMarkdown,
+        api: maintainerApi(statuses, undefined, { labels: ["automerge"] }, caps),
+      });
+      expect(result).toEqual({ status: "posted" });
+      expect(statuses.at(-1)).toMatchObject({
+        state: "pending",
+        description: "waiting on maintainer: 1 question",
+      });
+    });
+  }
+
+  test("ordinary ❓ q: stays success for a non-blocking author", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: maintainerApi(statuses, undefined),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+  });
+
+  test("ordinary ❓ q: fails for an author in blocking_question_authors", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...holdOpts,
+      blockingQuestionAuthors: ["alice"],
+      resultMarkdown: "src/foo.ts:12: ❓ q: is the timeout intentional?\n<!-- jumi-check: success -->",
+      api: maintainerApi(statuses, undefined),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)).toMatchObject({ state: "failure", description: "1 open question" });
+  });
+
+  test("💡 suggestion hold plus ❓ maintainer: stays pending with the maintainer note", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const latches = new MemorySkipLatchStore();
+    const result = await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ maintainer: please file the follow-up issue?",
+        "src/foo.ts:13: 💡 simpler: extract a helper",
+        "<!-- jumi-check: success; 1 suggestion -->",
+      ].join("\n"),
+      api: maintainerApi(statuses, "automerge: true\n"),
+      skipLatches: latches,
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)).toMatchObject({
+      state: "pending",
+      description: "waiting on maintainer: 1 question",
+    });
+  });
+
+  test("🔴 plus ❓ maintainer: fails (failure outranks the hold)", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const result = await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: 🔴 bug: null deref. Guard it.",
+        "src/foo.ts:13: ❓ maintainer: please file the follow-up issue?",
+        "<!-- jumi-check: failure; 1 blocking -->",
+      ].join("\n"),
+      api: maintainerApi(statuses, undefined),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)?.state).toBe("failure");
+    expect(statuses.at(-1)?.description).not.toContain("waiting on maintainer");
   });
 });

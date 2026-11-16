@@ -1,4 +1,4 @@
-import { FORGE_CAPABILITIES } from "../../src/forge_capabilities.ts";
+import { FORGE_CAPABILITIES, type ForgeCapabilities } from "../../src/forge_capabilities.ts";
 import type {
   ActionJob,
   AttachmentMeta,
@@ -327,7 +327,9 @@ export function makeForgeApi(overrides: Partial<Forge> = {}): ForgeFake<Forge> {
 }
 
 /** Complete neutral ReviewApi fake with a built-in call recorder. */
-export function makeReviewApi(overrides: Partial<ReviewApi> = {}): ForgeFake<ReviewApi> {
+export function makeReviewApi(
+  overrides: Partial<ReviewApi> & { capabilities?: ForgeCapabilities } = {}
+): ForgeFake<ReviewApi> & { capabilities: ForgeCapabilities } {
   const calls: ForgeCall[] = [];
   const record = (method: string, args: unknown[]) => {
     calls.push({ method, args });
@@ -426,13 +428,18 @@ export function makeReviewApi(overrides: Partial<ReviewApi> = {}): ForgeFake<Rev
       return neutralIssue();
     },
   };
-  const api = { ...defaults } as ReviewApi;
-  applyOverrides(api, calls, overrides);
+  const { capabilities, ...rest } = overrides as { capabilities?: ForgeCapabilities } & Partial<ReviewApi>;
+  const api = { ...defaults, capabilities: capabilities ?? FORGE_CAPABILITIES.gitea } as ReviewApi & {
+    capabilities: ForgeCapabilities;
+  };
+  applyOverrides(api, calls, rest);
   return Object.assign(api, makeProbe(calls));
 }
 
 /** Complete neutral IssueApi fake with a built-in call recorder. */
-export function makeIssueApi(overrides: Partial<IssueApi> = {}): ForgeFake<IssueApi> {
+export function makeIssueApi(
+  overrides: Partial<IssueApi> & { capabilities?: ForgeCapabilities } = {}
+): ForgeFake<IssueApi> & { capabilities: ForgeCapabilities } {
   const calls: ForgeCall[] = [];
   const record = (method: string, args: unknown[]) => {
     calls.push({ method, args });
@@ -541,7 +548,12 @@ export function makeIssueApi(overrides: Partial<IssueApi> = {}): ForgeFake<Issue
       return out;
     },
   };
-  const api = { ...defaults } as IssueApi;
-  applyOverrides(api, calls, overrides);
+  const { capabilities: issueCaps, ...issueRest } = overrides as {
+    capabilities?: ForgeCapabilities;
+  } & Partial<IssueApi>;
+  const api = { ...defaults, capabilities: issueCaps ?? FORGE_CAPABILITIES.gitea } as IssueApi & {
+    capabilities: ForgeCapabilities;
+  };
+  applyOverrides(api, calls, issueRest);
   return Object.assign(api, makeProbe(calls));
 }
