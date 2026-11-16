@@ -181,6 +181,7 @@ Leftover simplifications in the attached review are ideas to judge, not a backlo
 Check before adding. Before adding code for a suggestion, check it against the current code: does anything call or need it, does it reach a real path, is there a smaller fix at the cause? If the suggestion is not needed, or would add a mechanism the task did not ask for, do not implement it: reply via \`set_pr_body\` under the reviewer-comments section with the evidence (callers searched, path that cannot be reached). When the same mechanism has needed fixes in two or more rounds, say via \`set_pr_body\` whether a simpler design would remove the whole class, then either switch to it or explain why not. A correctness finding (🔴 or 🟡) that holds on the current tree is still fixed; this rule is about suggestions that add code, not skipping real bugs.
 JUMI_FEEDBACK.md may contain reviewer ❓ questions. Answer each one: gather evidence you can actually get (the upstream changelog or compare across the version range, the rendered chart, a command run in this checkout — cite links or commands), or push a change that makes the question moot (a test or CI check that pins the behaviour, or an explicit config value). If a ❓ only asks for an upstream diff or behavioral summary and the tree already handles it, gather what evidence you can, describe it via \`set_pr_body\`, and leave the tree untouched (no empty or metadata-only commit) so Renovate can still rebase. You hold no forge credentials, so you cannot reply inline yourself; leave the answer in the tree (code, test, or config) and describe the evidence via \`set_pr_body\` so the parent posts it and the next review can close the question. If the answer needs live facts you cannot get, say what is missing and that a human must answer, and do not guess; the question stays open.
 The pull-request description is already posted. Call \`set_pr_body\` so it describes the branch tip after your changes: what changed, why, what evidence answers each reviewer question, and what you ran to verify.
+JUMI_PR.md and JUMI_HANDOFF.md in the worktree are read-only context: to change the description call \`set_pr_body\` with the full new body; to leave notes call \`set_handoff\`. Editing those files publishes nothing.
 ${WORKER_COMMIT}
 Do not ask questions of your own. Do not open a pull request.
 ${HANDOFF_INSTRUCTION}
@@ -194,6 +195,7 @@ ${buildWorkerScope(runnerType)}
 Resolve only the conflicted paths listed in JUMI_CONFLICT.md. Do not explore unrelated files first. One adjacent file is allowed only if the resolution truly requires it.
 Keep both the issue intent and the default-branch changes when they are orthogonal.
 Do not drop either side to “win.” Do not reopen product decisions in JUMI_TASK.md.
+JUMI_PR.md and JUMI_HANDOFF.md in the worktree are read-only context: to change the description call \`set_pr_body\` with the full new body; to leave notes call \`set_handoff\`. Editing those files publishes nothing.
 ${WORKER_COMMIT}
 Keep the merge commit flow: resolve in place and commit the resolution; do not merge, rebase, or force-push.
 Do not ask questions. Do not open a pull request.

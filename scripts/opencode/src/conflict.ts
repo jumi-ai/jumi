@@ -198,6 +198,8 @@ export interface MergeDefaultIntoWorktreeOpts {
   workerMcp?: { url: string; token: string };
   /** In-memory worker result store backing `workerMcp` (tool-first handoff). */
   workerStore?: import("./worker_mcp.ts").WorkerResultStore;
+  /** Exact note Jumi injected before the run (null when none); untouched files stay unsaved. */
+  handoffSeed?: string | null;
   /** Runner chain for secret scrubbing (Claude keys) before the handoff store write. */
   chain?: readonly import("./runners.ts").NamedRunner[];
 }
@@ -886,6 +888,17 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
             log(`handoff store unavailable: ${errorMessage(err)}`);
           }
         }
+      } else if (opts.handoffSeed !== undefined) {
+        const { readHandoffFromWorktree } = await import("./handoff.ts");
+        const file = await readHandoffFromWorktree(worktree);
+        if (file === opts.handoffSeed) {
+          log("worker result: handoff unchanged");
+        } else if (file == null) {
+          log("worker result: handoff missing");
+        } else {
+          await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
+          log("worker result: handoff from file fallback (edited seed)");
+        }
       } else {
         await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
         log("worker result: handoff from file fallback");
@@ -1136,7 +1149,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const conflictWorkerStore = new ConflictWorkerStore();
   const conflictWorkerServer = await startConflictWorkerMcp({ store: conflictWorkerStore });
   const conflictWorkerMcpRef = { url: conflictWorkerServer.url, token: conflictWorkerServer.token };
-  const saveConflictHandoff = async (store: HandoffStore, key: HandoffKey, worktree: string) => {
+  const saveConflictHandoff = async (store: HandoffStore, key: HandoffKey, worktree: string, seed?: string | null) => {
     const tool = conflictWorkerStore.getHandoff() ?? null;
     if (tool != null) {
       log("worker result: handoff from tool");
@@ -1152,6 +1165,22 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         }
       }
       return capped.trim() ? capped : null;
+    }
+    if (seed !== undefined) {
+      const { readHandoffFromWorktree } = await import("./handoff.ts");
+      const file = await readHandoffFromWorktree(worktree);
+      if (file === seed) {
+        log("worker result: handoff unchanged");
+        return null;
+      }
+      if (file == null) {
+        log("worker result: handoff missing");
+        return null;
+      }
+      const saved = await saveWorktreeHandoff(worktree, store, key, log);
+      if (saved != null) log("worker result: handoff from file fallback (edited seed)");
+      else log("worker result: handoff missing");
+      return saved;
     }
     const saved = await saveWorktreeHandoff(worktree, store, key, log);
     if (saved != null) log("worker result: handoff from file fallback");
@@ -1213,7 +1242,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         }
         const handoffStore = handoffsFor({ home: opts.home, handoffs: opts.handoffs });
         const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
-        await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
+        const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
         if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -1306,6 +1335,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             jobId: opts.jobId ?? opts.job.delivery,
             handoffStore,
             handoffKey,
+            handoffSeed: injectedHandoff ?? null,
             workerMcp: conflictWorkerMcpRef,
             workerStore: conflictWorkerStore,
             chain: jobChain,
@@ -1351,7 +1381,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         }
 
         if (mergeResult.status === "stuck") {
-          await saveConflictHandoff(handoffStore, handoffKey, worktree);
+          await saveConflictHandoff(handoffStore, handoffKey, worktree, injectedHandoff ?? null);
           await sticky(MERGE_DEFAULT_STUCK_TEXT, pr.number);
           await recordAttempt(mergeResult.headSha, mergeResult.baseSha, shouldIncrementRound(mergeResult));
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
@@ -1444,7 +1474,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
                 throw new Error(quotaReason);
               }
               throwIfEngineFailed(continued);
-              await saveConflictHandoff(handoffStore, handoffKey, worktree);
+              await saveConflictHandoff(handoffStore, handoffKey, worktree, injectedHandoff ?? null);
               await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
             },
           });
@@ -1480,7 +1510,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             renderCommitMessage(conventions.commitMessage, gate.snapshot.title, issueNumber)
           );
         }
-        await saveConflictHandoff(handoffStore, handoffKey, worktree);
+        await saveConflictHandoff(handoffStore, handoffKey, worktree, injectedHandoff ?? null);
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
 
         if (await tipTracksEngineScratch(loop.runConfiguredGit, { cwd: loop.worktree, env: loop.env })) {

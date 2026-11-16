@@ -62,7 +62,8 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("changing labels or assignment");
     expect(prompt).toContain("ship part 1 now or keep going");
     expect(prompt).toContain("PR description itself stay ordinary");
-    expect(prompt).toContain("JUMI_PR.md");
+    expect(prompt).toContain("set_pr_body");
+    expect(prompt).not.toContain("JUMI_PR.md");
     expect(prompt).toContain("❓ maintainer:");
   });
 
