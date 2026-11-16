@@ -1339,8 +1339,7 @@ async function resolveSharedFailureForWake(opts: {
   nowMs: number;
   log?: (message: string) => void;
 }): Promise<
-  | { firstPr: number; check: string; defaultBranch: string; checks: import("./pr_decision.ts").CiCheckRef[] }
-  | undefined
+  { firstPr: number; check: string; defaultBranch: string; checks: import("./pr_decision.ts").CiCheckRef[] } | undefined
 > {
   if (!opts.ledger || typeof opts.ledger.electSharedFailure !== "function") return undefined;
   if (opts.ciUnhandled.length === 0) return undefined;

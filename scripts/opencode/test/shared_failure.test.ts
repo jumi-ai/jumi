@@ -262,7 +262,7 @@ describe("takeover and still-red", () => {
       pickSharedFirst(entries, {
         excludePr: 2,
         isOpen: () => true,
-        isLivePush: (n) => (n === 1 ? false : true),
+        isLivePush: (n) => n !== 1,
       })
     ).toBeUndefined();
     // Oldest waiter becomes first.
