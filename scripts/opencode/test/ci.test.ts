@@ -19,6 +19,7 @@ import {
   encodeCiAbsentWait,
   encodeCiLookupMarker,
   encodeCiPendingWait,
+  failureLines,
   flakeSkipReason,
   formatCheckDuration,
   hashText,
@@ -254,6 +255,76 @@ describe("infraFlakeReason", () => {
         },
       ])
     ).toBe("CI infra flake: Helm remote-schema timeout/429");
+  });
+
+  test("unittest FAIL header blocks a flake classification", () => {
+    const log = [
+      "FAIL: test_add (calc.CalcTest)",
+      "helm: values.schema.json remote schema 429 Too Many Requests",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+  });
+
+  test("pytest FAILED line blocks a flake classification", () => {
+    const log = [
+      "FAILED chart/tests/test_plan.py::test_talos - AssertionError: dry-run failed",
+      "helm: values.schema.json remote schema 429 Too Many Requests",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toBeUndefined();
+  });
+
+  test("error-command infra text classifies as a flake", () => {
+    const log = [
+      "::error::helm values.schema.json remote schema 429 Too Many Requests",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(classifyInfraFlake(log)).toContain("Helm");
+  });
+});
+
+describe("failureLines", () => {
+  test("returns chart-check error messages without the echoed source or footer", () => {
+    const log = [
+      "::group::Run chart checks",
+      'echo "::error::SSH setup did not succeed"',
+      "::error::Failed chart checks: chart-local suites",
+      "::error::sampo (unittest) timed out after 1500s (rc=124)",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(failureLines(log)).toEqual([
+      "Failed chart checks: chart-local suites",
+      "sampo (unittest) timed out after 1500s (rc=124)",
+    ]);
+    expect(failureLines(capFailedJobLog(log))).toEqual([
+      "Failed chart checks: chart-local suites",
+      "sampo (unittest) timed out after 1500s (rc=124)",
+    ]);
+  });
+
+  test("returns talos error messages without the echoed source or footer", () => {
+    const log = [
+      "::group::Run talos plan",
+      'echo "::error::plan preview"',
+      "::error::unknown chart suite completion '9'",
+      "::error::Talos dry-run failed (exit code 1)",
+      "::error::job talos-plan result=failure (required because paths matched)",
+      "##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(failureLines(log)).toEqual([
+      "unknown chart suite completion '9'",
+      "Talos dry-run failed (exit code 1)",
+      "job talos-plan result=failure (required because paths matched)",
+    ]);
+  });
+
+  test("strips file/line properties and timestamp prefixes", () => {
+    const log = [
+      "2026-11-15T10:00:00.0000000Z ::error file=deploy.yaml,line=12::Talos dry-run failed (exit code 1)",
+      "2026-11-15T10:00:01.0000000Z ##[error]Process completed with exit code 1.",
+    ].join("\n");
+    expect(failureLines(log)).toEqual(["Talos dry-run failed (exit code 1)"]);
   });
 });
 
