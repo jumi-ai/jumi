@@ -47,14 +47,7 @@ import {
 } from "./engine_scratch.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
-import {
-  type HandoffKey,
-  type HandoffStore,
-  handoffKeyForJob,
-  handoffsFor,
-  injectStoredHandoff,
-  saveWorktreeHandoff,
-} from "./handoff.ts";
+import { type HandoffKey, type HandoffStore, handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import { hasIgnoreConflictsLabel, isIgnoreConflictsAuthor } from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
@@ -66,6 +59,7 @@ import {
   noteProvenanceRunners,
   type OpenCodeRunner,
   provenanceForgeFor,
+  saveWorkerHandoff,
   workerPublishSecrets,
 } from "./implement.ts";
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
@@ -88,6 +82,7 @@ import { appendStuckLatchFingerprint, fingerprintError, markQuotaStuckLatch } fr
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { pathExists } from "./util/fs.ts";
+import { WorkerResultStore } from "./worker_mcp.ts";
 import { type GitRunner, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -871,38 +866,15 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
     mergeNarrowed = engineResult.contributors;
     throwIfEngineFailed(engineResult);
     if (opts.handoffStore && opts.handoffKey) {
-      const toolHandoff = opts.workerStore?.getHandoff() ?? null;
-      if (toolHandoff != null) {
-        log("worker result: handoff from tool");
-        const { capHandoffNote } = await import("./handoff.ts");
-        const { redactGitSecrets } = await import("./workspace.ts");
-        const { workerPublishSecrets } = await import("./implement.ts");
-        const capped = capHandoffNote(
-          redactGitSecrets(toolHandoff, workerPublishSecrets(opts.loop.auth.token, opts.chain))
-        );
-        if (capped.trim()) {
-          try {
-            await opts.handoffStore.put(opts.handoffKey, capped);
-          } catch (err) {
-            const { errorMessage } = await import("./util/error.ts");
-            log(`handoff store unavailable: ${errorMessage(err)}`);
-          }
-        }
-      } else if (opts.handoffSeed !== undefined) {
-        const { readHandoffFromWorktree } = await import("./handoff.ts");
-        const file = await readHandoffFromWorktree(worktree);
-        if (file === opts.handoffSeed) {
-          log("worker result: handoff unchanged");
-        } else if (file == null) {
-          log("worker result: handoff missing");
-        } else {
-          await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
-          log("worker result: handoff from file fallback (edited seed)");
-        }
-      } else {
-        await saveWorktreeHandoff(worktree, opts.handoffStore, opts.handoffKey, log);
-        log("worker result: handoff from file fallback");
-      }
+      await saveWorkerHandoff(
+        opts.workerStore ?? new WorkerResultStore(),
+        worktree,
+        opts.handoffStore,
+        opts.handoffKey,
+        workerPublishSecrets(opts.loop.auth.token, opts.chain),
+        log,
+        opts.handoffSeed
+      );
     }
     await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
     await git([...STAGE_ALL_ARGS], { cwd: worktree, env }).catch(() => undefined);
@@ -1150,42 +1122,15 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const conflictWorkerServer = await startConflictWorkerMcp({ store: conflictWorkerStore });
   const conflictWorkerMcpRef = { url: conflictWorkerServer.url, token: conflictWorkerServer.token };
   const saveConflictHandoff = async (store: HandoffStore, key: HandoffKey, worktree: string, seed?: string | null) => {
-    const tool = conflictWorkerStore.getHandoff() ?? null;
-    if (tool != null) {
-      log("worker result: handoff from tool");
-      const { capHandoffNote } = await import("./handoff.ts");
-      const { redactGitSecrets } = await import("./workspace.ts");
-      const { workerPublishSecrets } = await import("./implement.ts");
-      const capped = capHandoffNote(redactGitSecrets(tool, workerPublishSecrets(loop.auth.token, jobChain)));
-      if (capped.trim()) {
-        try {
-          await store.put(key, capped);
-        } catch (err) {
-          log(`handoff store unavailable: ${errorMessage(err)}`);
-        }
-      }
-      return capped.trim() ? capped : null;
-    }
-    if (seed !== undefined) {
-      const { readHandoffFromWorktree } = await import("./handoff.ts");
-      const file = await readHandoffFromWorktree(worktree);
-      if (file === seed) {
-        log("worker result: handoff unchanged");
-        return null;
-      }
-      if (file == null) {
-        log("worker result: handoff missing");
-        return null;
-      }
-      const saved = await saveWorktreeHandoff(worktree, store, key, log);
-      if (saved != null) log("worker result: handoff from file fallback (edited seed)");
-      else log("worker result: handoff missing");
-      return saved;
-    }
-    const saved = await saveWorktreeHandoff(worktree, store, key, log);
-    if (saved != null) log("worker result: handoff from file fallback");
-    else log("worker result: handoff missing");
-    return saved;
+    return saveWorkerHandoff(
+      conflictWorkerStore,
+      worktree,
+      store,
+      key,
+      workerPublishSecrets(loop.auth.token, jobChain),
+      log,
+      seed
+    );
   };
 
   let conflictResult: ConflictResult;
