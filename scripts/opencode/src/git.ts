@@ -138,10 +138,14 @@ const PR_DESCRIPTION_RULE = `Call \`set_pr_body\` with the pull-request descript
 
 const HANDOFF_INSTRUCTION = `Before finishing, call \`set_handoff\` with notes for the next round: the key files and why they matter, commands that built and tested successfully, environment workarounds, and what is left or risky. If the previous round's notes were injected, verify every claim against the code, then replace them. Keep the notes short (a few KiB at most). Never include forge tokens or secrets.`;
 
+/** Walk the linked issue's acceptance contract before finishing (implement and follow-up). */
+const WORKER_DONE_WHEN_RULE = `Before finishing, go through the linked issue's Done-when or Acceptance list item by item. Do each item, or list it as left in the PR body under \`Refs #N\`. Never claim an item the diff does not contain.`;
+
 const IMPLEMENT_FINISH = `Edit, write, and commit as needed.
 ${WORKER_COMMIT}
 Do not ask questions.
 ${PR_DESCRIPTION_RULE}
+${WORKER_DONE_WHEN_RULE}
 If there is nothing to change, call \`skip\` with the reason.
 When the task is complete, call \`set_pr_body\` with a short pull-request description: what changed, why, and what you ran to verify. Do not paste JUMI_TASK.md. Do not open the pull request.
 ${HANDOFF_INSTRUCTION}
@@ -176,6 +180,7 @@ ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
 A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).
 ${PR_DESCRIPTION_RULE}
+${WORKER_DONE_WHEN_RULE}
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
 Check before adding. Before adding code for a suggestion, check it against the current code: does anything call or need it, does it reach a real path, is there a smaller fix at the cause? If the suggestion is not needed, or would add a mechanism the task did not ask for, do not implement it: reply via \`set_pr_body\` under the reviewer-comments section with the evidence (callers searched, path that cannot be reached). When the same mechanism has needed fixes in two or more rounds, say via \`set_pr_body\` whether a simpler design would remove the whole class, then either switch to it or explain why not. A correctness finding (🔴 or 🟡) that holds on the current tree is still fixed; this rule is about suggestions that add code, not skipping real bugs.

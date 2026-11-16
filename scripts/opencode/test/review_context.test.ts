@@ -124,6 +124,33 @@ describe("fitReviewThread", () => {
     expect(byteLength(prefix)).toBe(32_768);
     expect(byteLength(serializeReviewThread(result.thread))).toBeLessThanOrEqual(maxBytes);
   });
+
+  test("keeps the Done-when/Acceptance section when the linked issue body is truncated", () => {
+    const filler = `${"prose line\n".repeat(1500)}`;
+    const acceptance = "## Acceptance\n- behaviour test one\n- docs update\n";
+    const thread: ReviewThread = {
+      comments: [],
+      linkedIssues: [
+        {
+          number: 645,
+          state: "open",
+          author: "alice",
+          html_url: "https://example.test/issues/645",
+          title: "Do the thing",
+          body: `${filler}${acceptance}`,
+          comments: [],
+        },
+      ],
+    };
+    const fullBytes = byteLength(serializeReviewThread(thread));
+    expect(fullBytes).toBeGreaterThan(8_192);
+    const maxBytes = fullBytes - 1_000;
+    const fitted = fitReviewThread(thread, maxBytes);
+    expect(fitted.truncated).toBe(true);
+    expect(fitted.thread.linkedIssues[0]?.body).toContain("## Acceptance");
+    expect(fitted.thread.linkedIssues[0]?.body).toContain("behaviour test one");
+    expect(byteLength(serializeReviewThread(fitted.thread))).toBeLessThanOrEqual(maxBytes);
+  });
 });
 
 describe("resolvePermissions", () => {
