@@ -261,6 +261,12 @@ export interface ReviewJobStore {
   /** Terminal review rows for the operator board requeue kick. No forge calls. Throws when the ledger is down. */
   listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]>;
   /**
+   * Rows where the number is the `prNumber` or the `issueNumber` (issue and
+   * pull share one number space), any kind, any state, newest first.
+   * Backs the read-only board MCP `issue_history` tool. Capped at 50 rows.
+   */
+  listRowsForNumber(owner: string, repo: string, number: number, limit?: number): Promise<ReviewJobRecord[]>;
+  /**
    * Same-commit requeue for a terminal review row. Bypasses the enqueue
    * terminal no-op: the terminal row is kept and a new queued row with the
    * same job key is inserted. An in-flight row for that key is a conflict.
@@ -1728,6 +1734,19 @@ export class MemoryReviewJobStore implements ReviewJobStore {
               row.state === "skipped" ||
               row.state === "succeeded" ||
               row.state === "cancelled")
+        )
+        .sort((a, b) => b.id - a.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
+    });
+  }
+
+  listRowsForNumber(owner: string, repo: string, number: number, limit = 50): Promise<ReviewJobRecord[]> {
+    return this.locked(() => {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 50;
+      return this.rows
+        .filter(
+          (row) => row.owner === owner && row.repo === repo && (row.prNumber === number || row.issueNumber === number)
         )
         .sort((a, b) => b.id - a.id)
         .slice(0, cap)
@@ -3940,6 +3959,17 @@ export class PgReviewJobStore implements ReviewJobStore {
       await this.sql.unsafe(
         `SELECT * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY id DESC LIMIT $1`,
         [cap]
+      )
+    );
+    return rows.map(mapRow);
+  }
+
+  async listRowsForNumber(owner: string, repo: string, number: number, limit = 50): Promise<ReviewJobRecord[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 50;
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs WHERE owner = $1 AND repo = $2 AND (pr_number = $3 OR issue_number = $3) ORDER BY id DESC LIMIT $4`,
+        [owner, repo, number, cap]
       )
     );
     return rows.map(mapRow);

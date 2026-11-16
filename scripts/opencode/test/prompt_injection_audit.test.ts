@@ -123,6 +123,7 @@ describe("audit gap 2: child env per runner", () => {
     GITHUB_APP_PRIVATE_KEY: "private-key",
     GITHUB_WEBHOOK_SECRET: "github-secret",
     BOARD_PEER_TOKEN: "board-token",
+    BOARD_MCP_TOKEN: "mcp-token",
   };
 
   function baseOpts(extraEnv: Record<string, string>): EngineRunOptions {

@@ -77,6 +77,7 @@ export interface ServiceConfig {
   phoenixOtlpEndpoint?: string;
   boardPeerUrl?: string;
   boardPeerToken?: string;
+  boardMcpToken?: string;
 }
 
 type Env = Record<string, string | undefined>;
@@ -88,6 +89,7 @@ export const SECRET_ENV_KEYS = [
   "GITHUB_APP_PRIVATE_KEY",
   "GITHUB_WEBHOOK_SECRET",
   "BOARD_PEER_TOKEN",
+  "BOARD_MCP_TOKEN",
 ] as const;
 export const SECRETS_FILE_ENV = "JUMI_SECRETS_FILE";
 export const SECRETS_DIR_ENV = "JUMI_SECRETS_DIR";
@@ -311,5 +313,6 @@ export function loadConfig(env: Env = process.env): ServiceConfig {
     phoenixOtlpEndpoint: optionalEnv(resolved, "PHOENIX_OTLP_ENDPOINT"),
     boardPeerUrl: optionalEnv(resolved, "BOARD_PEER_URL"),
     boardPeerToken: optionalEnv(resolved, "BOARD_PEER_TOKEN"),
+    boardMcpToken: optionalEnv(resolved, "BOARD_MCP_TOKEN"),
   };
 }
