@@ -1400,7 +1400,7 @@ async function main(): Promise<void> {
     giteaUrl: config.giteaUrl,
     giteaToken: config.giteaToken,
   });
-  const api = makeReplayReadOnly(fullApi as unknown as ReviewApi);
+  const api = makeReplayReadOnly(fullApi);
   const workdirRoot = join(config.workdir, "jumi-replay");
   await mkdir(workdirRoot, { recursive: true });
   const records = await runReplay({

@@ -114,7 +114,7 @@ import {
   stuckComment,
 } from "./stuck.ts";
 import {
-  type HoldStatusApi,
+  type HoldStatusPort,
   postSuggestionHoldSuccess,
   suggestionHoldCompletedDescription,
   suggestionHoldSkippedDescription,
@@ -239,7 +239,7 @@ export async function writeFollowUpLatch(
  * consumed hold. Never throws.
  */
 async function resolveHeldFromLatch(
-  api: HoldStatusApi,
+  api: HoldStatusPort,
   latches: SkipLatchStore,
   latchKey: SkipLatchKey,
   fallback: { owner: string; repo: string; headSha: string },
@@ -1289,7 +1289,7 @@ export async function implementFollowUp(
     // early result above intentionally does NOT resolve: the claim holder is
     // still running and will settle the hold itself.
     await resolveHeldFromLatch(
-      opts.api as unknown as HoldStatusApi,
+      opts.api,
       latches,
       latchKey,
       { owner, repo, headSha: opts.job.headSha ?? "" },
@@ -1312,7 +1312,7 @@ export async function implementFollowUp(
   );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
     await resolveHeldFromLatch(
-      opts.api as unknown as HoldStatusApi,
+      opts.api,
       latches,
       latchKey,
       { owner, repo, headSha: opts.job.headSha ?? "" },
@@ -1345,7 +1345,7 @@ export async function implementFollowUp(
         kind === "completed"
           ? suggestionHoldCompletedDescription(count)
           : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
-      await postSuggestionHoldSuccess(opts.api as unknown as HoldStatusApi, owner, repo, sha, description, pr.html_url);
+      await postSuggestionHoldSuccess(opts.api, owner, repo, sha, description, pr.html_url);
     } catch {
       // Best-effort.
     }

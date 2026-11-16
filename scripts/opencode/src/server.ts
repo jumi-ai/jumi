@@ -6,7 +6,6 @@ import {
   CI_LOOKUP_FAILED_REASON,
   CI_PENDING_REASON,
   type CiCheckSummary,
-  type CiGateResolverApi,
   decideCiLookupRetry,
   resolveCiGate,
   reviewSkipReasonForCi,
@@ -214,7 +213,7 @@ export async function runReviewJob(
   let ciGateWait: import("./repo_settings.ts").CiGateWait = "required";
   let ciGateRequiredContexts: readonly string[] | undefined;
   try {
-    const gate = await resolveCiGate(api as unknown as CiGateResolverApi, {
+    const gate = await resolveCiGate(api, {
       owner: job.owner,
       repo: job.repo,
       prNumber: job.prNumber,
@@ -531,7 +530,7 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
               if (takeoverOwner && takeoverRepo) {
                 const decision = await shouldEnqueueTakeoverForOpenedPull({
-                  api: deps.worker.api as never,
+                  api: deps.worker.api,
                   forgeKind: config.forge,
                   owner: takeoverOwner,
                   repo: takeoverRepo,
@@ -1241,59 +1240,58 @@ export function workerMailboxApi(
   api: ReviewApi &
     Partial<
       Pick<
+        IssueApi,
+        | "listOpenPulls"
+        | "listIssueBlocks"
+        | "listRepoIssues"
+        | "listPullCommits"
+        | "deleteGitRef"
+        | "getRepoFile"
+        | "addIssueAssignees"
+        | "addIssueLabel"
+      >
+    > &
+    Partial<
+      Pick<
         Forge,
         "deleteGitRef" | "getBranch" | "scheduleAutoMerge" | "cancelAutoMerge" | "listIssueTimeline" | "getPRFiles"
       >
-    >
-): HandleWorkerWebhookDeps["api"] {
-  const extra = api as ReviewApi &
-    Partial<
-      Pick<IssueApi, "listOpenPulls" | "listIssueBlocks" | "listRepoIssues" | "listPullCommits" | "deleteGitRef">
     > & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
-    };
-  const full = api as unknown as Partial<IssueApi>;
-  const forge = api as unknown as Partial<
-    Pick<Forge, "getBranch" | "scheduleAutoMerge" | "cancelAutoMerge" | "listIssueTimeline" | "getPRFiles">
-  >;
+    }
+): HandleWorkerWebhookDeps["api"] {
   return {
     getIssue: (owner, repo, index) => api.getIssue(owner, repo, index),
     getRepo: (owner, repo) => api.getRepo(owner, repo),
     getPR: (owner, repo, index) => api.getPR(owner, repo, index),
     getCollaboratorPermission: (owner, repo, username) => api.getCollaboratorPermission(owner, repo, username),
     getAppPermissions: api.getAppPermissions ? (slug) => api.getAppPermissions!(slug) : undefined,
-    listOpenPulls: (owner, repo) => (extra.listOpenPulls ? extra.listOpenPulls(owner, repo) : Promise.resolve([])),
-    listIssueBlocks: extra.listIssueBlocks
-      ? (owner, repo, index) => extra.listIssueBlocks!(owner, repo, index)
+    listOpenPulls: (owner, repo) => (api.listOpenPulls ? api.listOpenPulls(owner, repo) : Promise.resolve([])),
+    listIssueBlocks: api.listIssueBlocks ? (owner, repo, index) => api.listIssueBlocks!(owner, repo, index) : undefined,
+    listRepoIssues: api.listRepoIssues ? (owner, repo, opts) => api.listRepoIssues!(owner, repo, opts) : undefined,
+    listPullCommits: api.listPullCommits ? (owner, repo, index) => api.listPullCommits!(owner, repo, index) : undefined,
+    deleteGitRef: api.deleteGitRef ? (owner, repo, ref) => api.deleteGitRef!(owner, repo, ref) : undefined,
+    getRepoFile: api.getRepoFile ? (owner, repo, path, ref) => api.getRepoFile!(owner, repo, path, ref) : undefined,
+    addIssueAssignees: api.addIssueAssignees
+      ? (owner, repo, index, assignees) => api.addIssueAssignees!(owner, repo, index, assignees)
       : undefined,
-    listRepoIssues: extra.listRepoIssues ? (owner, repo, opts) => extra.listRepoIssues!(owner, repo, opts) : undefined,
-    listPullCommits: extra.listPullCommits
-      ? (owner, repo, index) => extra.listPullCommits!(owner, repo, index)
+    addIssueLabel: api.addIssueLabel
+      ? (owner, repo, index, label) => api.addIssueLabel!(owner, repo, index, label)
       : undefined,
-    deleteGitRef: extra.deleteGitRef ? (owner, repo, ref) => extra.deleteGitRef!(owner, repo, ref) : undefined,
-    getRepoFile: full.getRepoFile ? (owner, repo, path, ref) => full.getRepoFile!(owner, repo, path, ref) : undefined,
-    addIssueAssignees: full.addIssueAssignees
-      ? (owner, repo, index, assignees) => full.addIssueAssignees!(owner, repo, index, assignees)
+    getBranch: api.getBranch ? (owner, repo, branch) => api.getBranch!(owner, repo, branch) : undefined,
+    scheduleAutoMerge: api.scheduleAutoMerge
+      ? (owner, repo, index, opts) => api.scheduleAutoMerge!(owner, repo, index, opts)
       : undefined,
-    addIssueLabel: full.addIssueLabel
-      ? (owner, repo, index, label) => full.addIssueLabel!(owner, repo, index, label)
-      : undefined,
-    getBranch: forge.getBranch ? (owner, repo, branch) => forge.getBranch!(owner, repo, branch) : undefined,
-    scheduleAutoMerge: forge.scheduleAutoMerge
-      ? (owner, repo, index, opts) => forge.scheduleAutoMerge!(owner, repo, index, opts)
-      : undefined,
-    cancelAutoMerge: forge.cancelAutoMerge
-      ? (owner, repo, index) => forge.cancelAutoMerge!(owner, repo, index)
-      : undefined,
-    getPRFiles: forge.getPRFiles ? (owner, repo, index) => forge.getPRFiles!(owner, repo, index) : undefined,
-    listIssueTimeline: forge.listIssueTimeline
-      ? (owner, repo, index) => forge.listIssueTimeline!(owner, repo, index)
+    cancelAutoMerge: api.cancelAutoMerge ? (owner, repo, index) => api.cancelAutoMerge!(owner, repo, index) : undefined,
+    getPRFiles: api.getPRFiles ? (owner, repo, index) => api.getPRFiles!(owner, repo, index) : undefined,
+    listIssueTimeline: api.listIssueTimeline
+      ? (owner, repo, index) => api.listIssueTimeline!(owner, repo, index)
       : undefined,
     findStickyIssueComment: (owner, repo, index, bot, marker) =>
       api.findStickyIssueComment(owner, repo, index, bot, marker),
     createIssueComment: (owner, repo, index, body) => api.createIssueComment(owner, repo, index, body),
     updateIssueComment: (owner, repo, id, body) => api.updateIssueComment(owner, repo, id, body),
-    rememberInstallation: extra.rememberInstallation?.bind(extra),
+    rememberInstallation: api.rememberInstallation?.bind(api),
   };
 }
 

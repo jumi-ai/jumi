@@ -62,11 +62,11 @@ export type TakeoverFileApi = {
 };
 
 export type TakeoverTrustApi = {
-  getCollaboratorPermission(
+  getCollaboratorPermission?: (
     owner: string,
     repo: string,
     username: string
-  ): Promise<import("./ports.ts").CollaboratorPermission>;
+  ) => Promise<import("./ports.ts").CollaboratorPermission>;
 };
 
 export type TakeoverMarkerApi = {

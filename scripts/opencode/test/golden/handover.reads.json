@@ -187,6 +187,52 @@
       "getRepo": 1
     }
   },
+  "handover.test.ts::32": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::33": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::34": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::35": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::36": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::37": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
   "handover.test.ts::4": {
     "name": "enqueueFollowUpFromReview",
     "reads": {

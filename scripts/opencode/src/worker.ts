@@ -49,7 +49,7 @@ import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
 import { isSkipLatchReason, isTooManyFollowupRoundsReason } from "./stuck.ts";
 import {
-  type HoldStatusApi,
+  type HoldStatusPort,
   postSuggestionHoldSuccess,
   readSuggestionHold,
   suggestionHoldCompletedDescription,
@@ -337,7 +337,7 @@ export async function handleIssueCancel(
     const hold = await readSuggestionHold(latches, { owner, repo, issueNumber });
     if (hold.consumed && hold.count && hold.headSha) {
       await postSuggestionHoldSuccess(
-        api as unknown as HoldStatusApi,
+        api,
         owner,
         repo,
         hold.headSha,
@@ -451,7 +451,7 @@ export async function reclaimExpiredWorkerJobs(
   logger: (message: string) => void = log,
   opts?: {
     api?: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> &
-      Partial<HoldStatusApi> & {
+      HoldStatusPort & {
         getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
       };
     botUsername?: string;
@@ -485,9 +485,7 @@ export async function reclaimExpiredWorkerJobs(
         } else {
           if (row.kind === "follow-up" && row.issueNumber != null && opts?.api && "createCommitStatus" in opts.api) {
             await resolveWorkerHeld(
-              opts.api as unknown as HoldStatusApi & {
-                getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-              },
+              opts.api,
               store,
               row.owner,
               row.repo,
@@ -528,7 +526,7 @@ export async function reclaimExpiredWorkerJobs(
  * reach it. Never throws.
  */
 async function resolveWorkerHeld(
-  api: HoldStatusApi & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
+  api: HoldStatusPort & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
   store: ReviewJobStore,
   owner: string,
   repo: string,
@@ -634,9 +632,7 @@ export async function processWorkerTick(
     await store.markPublished(row.id, leasedBy, { state: "skipped", reason });
     if (row.kind === "follow-up" && row.issueNumber != null) {
       await resolveWorkerHeld(
-        api as unknown as HoldStatusApi & {
-          getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-        },
+        api,
         store,
         row.owner,
         row.repo,
@@ -978,9 +974,7 @@ export async function processWorkerTick(
     if (await settleObservedCancel(job.owner, job.repo, job.issueNumber, issueJobKey(job))) {
       if (job.mode === "follow-up") {
         await resolveWorkerHeld(
-          api as unknown as HoldStatusApi & {
-            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-          },
+          api,
           store,
           job.owner,
           job.repo,
@@ -997,9 +991,7 @@ export async function processWorkerTick(
     if (current?.state !== "leased" || current.leasedBy !== leasedBy) {
       if (job.mode === "follow-up") {
         await resolveWorkerHeld(
-          api as unknown as HoldStatusApi & {
-            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-          },
+          api,
           store,
           job.owner,
           job.repo,
@@ -1016,9 +1008,7 @@ export async function processWorkerTick(
     if (result.status === "cancelled" && extras.abortSignal?.aborted) {
       if (job.mode === "follow-up") {
         await resolveWorkerHeld(
-          api as unknown as HoldStatusApi & {
-            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-          },
+          api,
           store,
           job.owner,
           job.repo,
@@ -1055,9 +1045,7 @@ export async function processWorkerTick(
     if (published.cancelled) {
       if (job.mode === "follow-up") {
         await resolveWorkerHeld(
-          api as unknown as HoldStatusApi & {
-            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-          },
+          api,
           store,
           job.owner,
           job.repo,
@@ -1120,9 +1108,7 @@ export async function processWorkerTick(
     if (await settleObservedCancel(row.owner, row.repo, row.issueNumber ?? 0, row.jobKey).catch(() => false)) {
       if (row.kind === "follow-up" && row.issueNumber != null) {
         await resolveWorkerHeld(
-          api as unknown as HoldStatusApi & {
-            getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-          },
+          api,
           store,
           row.owner,
           row.repo,
@@ -1218,9 +1204,7 @@ export async function processWorkerTick(
           } else {
             if (row.kind === "follow-up" && row.issueNumber != null) {
               await resolveWorkerHeld(
-                api as unknown as HoldStatusApi & {
-                  getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }>;
-                },
+                api,
                 store,
                 row.owner,
                 row.repo,

@@ -171,7 +171,14 @@ export interface MergeDefaultIntoWorktreeOpts {
   job: IssueJob;
   pr: Pull;
   /** Parent forge client for attachment staging (parent credentials only). */
-  api?: import("./attachments.ts").AttachmentApi;
+  api?: import("./attachments.ts").AttachmentApi & {
+    getRepoFile?: (
+      owner: string,
+      repo: string,
+      path: string,
+      ref: string
+    ) => Promise<{ found: boolean; content?: string }>;
+  };
   model: string;
   variant?: string;
   home: string;
@@ -737,16 +744,7 @@ export async function mergeDefaultIntoWorktree(opts: MergeDefaultIntoWorktreeOpt
   throwIfAborted(opts.abortSignal);
   let conflicted = false;
   const regenEntries = await resolveConflictRegenerateEntries({
-    api: opts.api as unknown as
-      | {
-          getRepoFile?: (
-            owner: string,
-            repo: string,
-            path: string,
-            ref: string
-          ) => Promise<{ found: boolean; content?: string }>;
-        }
-      | undefined,
+    api: opts.api,
     owner: opts.job.owner,
     repo: opts.job.repo,
     defaultBranch,

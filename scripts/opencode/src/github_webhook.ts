@@ -618,7 +618,7 @@ export async function handleGithubWebhookEvent(
             const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
             if (takeoverOwner && takeoverRepo) {
               const decision = await shouldEnqueueTakeoverForOpenedPull({
-                api: (deps.worker.api ?? {}) as never,
+                api: deps.worker.api ?? {},
                 forgeKind: "github",
                 owner: takeoverOwner,
                 repo: takeoverRepo,
@@ -676,7 +676,7 @@ export async function handleGithubWebhookEvent(
         const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
         if (!takeoverOwner || !takeoverRepo) return skipped("invalid webhook payload", logger);
         const decision = await shouldEnqueueTakeoverForOpenedPull({
-          api: (deps.worker.api ?? {}) as never,
+          api: deps.worker.api ?? {},
           forgeKind: "github",
           owner: takeoverOwner,
           repo: takeoverRepo,
@@ -720,7 +720,7 @@ export async function handleGithubWebhookEvent(
             automergeRepos: (policy as { automergeRepos?: readonly string[] }).automergeRepos,
             automergeEnabled: (policy as { automergeEnabled?: boolean }).automergeEnabled,
           },
-          api: deps.worker.api as never,
+          api: deps.worker.api,
           log: logger,
         });
         if (automergeHandled.handled) return json(202, { queued: false, reason: automergeHandled.reason });

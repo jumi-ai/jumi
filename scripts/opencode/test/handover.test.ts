@@ -13,7 +13,9 @@ import { traced } from "./golden/trace.ts";
 const enqueueFollowUpFromReview = traced("enqueueFollowUpFromReview", realEnqueueFollowUpFromReview);
 
 import type { ReviewApi } from "../src/review.ts";
-import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { MemoryReviewJobStore, type ReviewJobRecord, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import type { ReviewRecord } from "../src/review_verdict_store.ts";
+import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
 import { stuckMarker } from "../src/stuck.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
@@ -940,5 +942,87 @@ describe("suggestion hold fallback", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({ sha: "headsha", state: "success" });
     expect(posted[0]?.description).toContain("head moved");
+  });
+});
+
+describe("record-backed rows behave identically", () => {
+  const PATCH = ["@@ -1,3 +1,5 @@", " context", "-old", "+new line two", "+new line three", " context", " tail"].join(
+    "\n"
+  );
+
+  function verdictStore(kind: "failure" | "success" | "questions"): { markdown: string; record: ReviewRecord } {
+    const store = new ReviewVerdictStore({ changedFiles: [{ filename: "src/a.ts", patch: PATCH }] });
+    if (kind === "failure") {
+      expect(
+        store.addFinding({ path: "src/a.ts", line: 2, severity: "bug", title: "null deref", body: "Guard it." }).ok
+      ).toBe(true);
+      expect(store.setVerdict({ state: "failure", reason: "1 blocking" }).ok).toBe(true);
+    } else if (kind === "success") {
+      expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    } else {
+      expect(store.addFinding({ severity: "question", title: "why?", body: "explain" }).ok).toBe(true);
+      expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    }
+    return { markdown: store.toMarkdown(), record: store.toRecord() };
+  }
+
+  async function runHandover(opts: {
+    markdown: string;
+    record?: ReviewRecord;
+    api?: ReviewApi;
+    blockingQuestionAuthors?: string[];
+  }): Promise<{ result: unknown; logs: string[] }> {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    const row: ReviewJobRecord = opts.record ? { ...leased!, resultJson: opts.record } : leased!;
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api: opts.api ?? handoverApi(),
+      row,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: opts.markdown,
+      ...(opts.blockingQuestionAuthors === undefined ? {} : { blockingQuestionAuthors: opts.blockingQuestionAuthors }),
+      logger: (message) => logs.push(message),
+    });
+    return { result, logs };
+  }
+
+  test("failure verdict enqueues with and without a record", async () => {
+    const { markdown, record } = verdictStore("failure");
+    const without = await runHandover({ markdown });
+    const withRecord = await runHandover({ markdown, record });
+    expect(withRecord.result).toEqual(without.result);
+    expect(withRecord.result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(withRecord.logs).toEqual(without.logs);
+  });
+
+  test("plain success skips with and without a record", async () => {
+    const { markdown, record } = verdictStore("success");
+    const without = await runHandover({ markdown });
+    const withRecord = await runHandover({ markdown, record });
+    expect(withRecord.result).toBeUndefined();
+    expect(without.result).toBeUndefined();
+    expect(withRecord.logs).toEqual(["persist-insert skipped: success trailer"]);
+    expect(withRecord.logs).toEqual(without.logs);
+  });
+
+  test("questions-only success for a listed author enqueues with and without a record", async () => {
+    const { markdown, record } = verdictStore("questions");
+    const api = () =>
+      handoverApi({
+        getPR: async () =>
+          makePR({
+            body: "Fixes #12",
+            user: makeUser({ login: "renovate-bot" }),
+            head: { ...makePR().head, ref: "renovate/x", sha: "headsha" },
+          }),
+      });
+    const without = await runHandover({ markdown, api: api(), blockingQuestionAuthors: ["renovate-bot"] });
+    const withRecord = await runHandover({ markdown, record, api: api(), blockingQuestionAuthors: ["renovate-bot"] });
+    expect(withRecord.result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(withRecord.result).toEqual(without.result);
   });
 });
