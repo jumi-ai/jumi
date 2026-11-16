@@ -11,7 +11,7 @@ import {
   restoreCheckpoint,
   sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
-import { buildCiMarkdown, CI_LOG_FILE, JUMI_REVIEW_CONTEXT, recordCiHandled } from "./ci.ts";
+import { buildCiMarkdown, CI_LOG_FILE, recordCiHandled } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -127,13 +127,18 @@ import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
 import {
   blockingOpenQuestionCount,
+  countBugFindings,
   countMaintainerQuestionFindings,
   countQuestionFindings,
+  countRiskFindings,
+  countSuggestionFindings,
+  describeSuggestionsReason,
   isBlockingQuestionAuthor,
   isMaintainerOnlyTrailerText,
   isMaintainerQuestionInline,
   isQuestionInline,
   parseCheckLine,
+  parseReviewOutput,
   trailerSuggestionCount,
 } from "./verdict.ts";
 import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
@@ -2658,25 +2663,39 @@ export async function implementFollowUp(
       // worker made no push, so the answer settles the head without a code
       // change. The last review on this head still carries open `❓
       // maintainer:` questions (the review never re-runs on its own), so flip
-      // the held `pending` back to `success` here. Pushed rounds do nothing:
-      // the next review posts the status itself. Skipped/cancelled rounds keep
-      // the hold so the merge still waits on the maintainer.
+      // the held `pending` back to `success` here. Only a complete `success`
+      // review with zero actionable blocking findings and zero blocking
+      // questions releases: a failure (open 🔴/🟡 or blocking ❓) that also
+      // carries a `❓ maintainer:` line must stay failed so blocking findings
+      // still gate the merge. Pushed rounds do nothing: the next review posts
+      // the status itself. Skipped/cancelled rounds keep the hold so the merge
+      // still waits on the maintainer.
       try {
         const trigger = opts.job.trigger;
         const triggeredByReply = trigger != null && (trigger.commentId !== undefined || trigger.reviewId !== undefined);
         if (triggeredByReply && pendingLastReview?.body) {
-          const openMaintainers = countMaintainerQuestionFindings(pendingLastReview.body);
-          if (openMaintainers > 0 && isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot))) {
-            const create = (opts.api as HoldStatusPort).createCommitStatus;
-            if (typeof create === "function") {
-              await create.call(opts.api, owner, repo, pr.head.sha, {
-                state: "success",
-                context: JUMI_REVIEW_CONTEXT,
-                description: "No blocking issues",
-                target_url: pr.html_url,
-              });
-              log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${openMaintainers} answered`);
-            }
+          const parsed = parseReviewOutput(pendingLastReview.body);
+          const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
+          const openBugs = countBugFindings(parsed.comment);
+          const openRisks = countRiskFindings(parsed.comment);
+          const openBlockingQuestions = blockingOpenQuestionCount(
+            pendingLastReview.body,
+            pr.user?.login,
+            snapshot.lists.blockingAuthors
+          );
+          const openMaintainers = countMaintainerQuestionFindings(parsed.comment);
+          if (
+            completeSuccess &&
+            openBugs === 0 &&
+            openRisks === 0 &&
+            openBlockingQuestions === 0 &&
+            openMaintainers > 0 &&
+            isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot))
+          ) {
+            const openSuggestions = countSuggestionFindings(parsed.comment);
+            const description = openSuggestions > 0 ? describeSuggestionsReason(openSuggestions) : "No blocking issues";
+            await postSuggestionHoldSuccess(opts.api, owner, repo, pr.head.sha, description, pr.html_url);
+            log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${openMaintainers} answered`);
           }
         }
       } catch {
