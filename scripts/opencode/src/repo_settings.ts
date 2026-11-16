@@ -1074,6 +1074,42 @@ export type RepoSettingsLoad =
   | ({ state: "valid" } & RepoSettings)
   | { state: "invalid"; error: string };
 
+/**
+ * Single default-branch `.jumi.yml` read held as a tri-state so every
+ * follow-up consumer derives from the same load without re-reading.
+ * `loaded` wraps the `RepoSettingsLoad` (valid/invalid/missing), `threw` is
+ * a read that failed for another reason, `no-branch` is an empty ref or a
+ * file-API-less caller (no read attempted).
+ */
+export type SettingsSnapshot =
+  | { state: "loaded"; load: RepoSettingsLoad }
+  | { state: "threw"; error: unknown }
+  | { state: "no-branch" };
+
+/** Load the default-branch file once into a `SettingsSnapshot`. Never throws. */
+export async function loadSettingsSnapshot(
+  api: RepoSettingsFileApi | undefined,
+  owner: string,
+  repo: string,
+  defaultBranch: string | undefined | null
+): Promise<SettingsSnapshot> {
+  const ref = (defaultBranch ?? "").trim();
+  if (!ref) return { state: "no-branch" };
+  if (!api || typeof api.getRepoFile !== "function") return { state: "no-branch" };
+  try {
+    const load = await loadRepoSettings(api, owner, repo, ref);
+    return { state: "loaded", load };
+  } catch (error) {
+    return { state: "threw", error };
+  }
+}
+
+/** Fail-open load for `effective*` derivation: threw/no-branch behave as missing. */
+export function failOpenLoadFromSnapshot(snapshot: SettingsSnapshot): RepoSettingsLoad {
+  if (snapshot.state === "loaded") return snapshot.load;
+  return { state: "missing" };
+}
+
 /** Ledger kind to repository timeout key: `follow-up` reads `followup`. */
 export function timeoutKeyForKind(kind: string): RepoTimeoutKey | undefined {
   if (kind === "follow-up") return "followup";
@@ -1822,9 +1858,15 @@ export async function loadRepoConventions(
   owner: string,
   repo: string,
   defaultBranch: string,
-  log?: (message: string) => void
+  log?: (message: string) => void,
+  preloaded?: SettingsSnapshot
 ): Promise<RepoConventions> {
   const fallback = defaultRepoConventions();
+  if (preloaded) {
+    const load = failOpenLoadFromSnapshot(preloaded);
+    if (load.state !== "valid") return fallback;
+    return conventionsFromLoad(load);
+  }
   if (!defaultBranch.trim()) return fallback;
   try {
     const settings = await loadRepoSettings(api, owner, repo, defaultBranch);
@@ -1917,8 +1959,28 @@ export async function resolveRepoChain<T extends { name: string }>(opts: {
   defaultBranch: string;
   chain: readonly T[] | undefined;
   log?: (message: string) => void;
+  /** Pre-loaded single settings read: when present no forge read happens. */
+  preloaded?: SettingsSnapshot;
 }): Promise<RepoChainResolution<T>> {
   const base = opts.chain ? [...opts.chain] : [];
+  if (opts.preloaded) {
+    const snapshot = opts.preloaded;
+    if (snapshot.state === "threw") throw snapshot.error;
+    if (snapshot.state === "no-branch") return { state: "unrestricted", chain: base };
+    const settings = snapshot.load;
+    if (settings.state === "missing") return { state: "unrestricted", chain: base };
+    if (settings.state === "invalid") return { state: "invalid", reason: invalidRepoSettingsReason(settings.error) };
+    if (settings.allowedRunners === undefined) return { state: "unrestricted", chain: base };
+    const narrowed = narrowChainForRepo(base, settings.allowedRunners, opts.log);
+    if (narrowed.chain.length === 0) {
+      return {
+        state: "empty",
+        reason: noAllowedRunnerReason(opts.owner, opts.repo, settings.allowedRunners),
+        unknownNames: narrowed.unknownNames,
+      };
+    }
+    return { state: "narrowed", chain: narrowed.chain, unknownNames: narrowed.unknownNames };
+  }
   if (!opts.defaultBranch.trim()) return { state: "unrestricted", chain: base };
   const settings = await loadRepoSettings(opts.api, opts.owner, opts.repo, opts.defaultBranch);
   if (settings.state === "missing") return { state: "unrestricted", chain: base };
@@ -1959,6 +2021,8 @@ export async function applyRepoChain<T extends { name: string }>(opts: {
   /** Log context for the fail-open unreadable line. Defaults to `owner/repo`. */
   unreadableContext?: string;
   publish: (reason: string) => Promise<void>;
+  /** Pre-loaded single settings read: when present no forge read happens. */
+  preloaded?: SettingsSnapshot;
 }): Promise<RepoChainApply<T>> {
   const base = opts.chain ? [...opts.chain] : undefined;
   if (!opts.chain || opts.chain.length === 0) return { failedClosed: false, chain: base, narrowed: false };
@@ -1971,6 +2035,7 @@ export async function applyRepoChain<T extends { name: string }>(opts: {
       defaultBranch: opts.defaultBranch,
       chain: opts.chain,
       log: opts.log,
+      ...(opts.preloaded ? { preloaded: opts.preloaded } : {}),
     });
   } catch (err) {
     const context = opts.unreadableContext ?? `${opts.owner}/${opts.repo}`;

@@ -2,6 +2,7 @@ import { hasLabel } from "./assignee.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isListedLogin } from "./permissions.ts";
 import type { PullCommit } from "./ports.ts";
+import type { SettingsSnapshot } from "./repo_settings.ts";
 import { errorMessage } from "./util/error.ts";
 
 export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
@@ -177,6 +178,20 @@ export async function isLeftToAuthor(
 }
 
 /**
+ * Derive the `ignore_conflicts_authors` list from an already-loaded settings
+ * snapshot. A thrown read derives to `undefined` (fail closed with
+ * `IGNORE_CONFLICTS_SETTINGS_UNREADABLE`); any non-`valid` load derives to
+ * `[]` (an invalid file never leaves conflicts to anyone). Kept next to
+ * `loadIgnoreConflictsAuthors` so the two cannot drift.
+ */
+export function ignoreConflictsAuthorsFromSnapshot(snapshot: SettingsSnapshot): string[] | undefined {
+  if (snapshot.state === "threw") return undefined;
+  if (snapshot.state === "no-branch") return [];
+  if (snapshot.load.state !== "valid") return [];
+  return [...(snapshot.load.ignoreConflictsAuthors ?? [])];
+}
+
+/**
  * Best-effort load of the `ignore_conflicts_authors` list from the
  * default-branch settings file. Missing, invalid, or file-API-less resolves to
  * an empty list (no leave): an invalid file never leaves conflicts to anyone.
@@ -197,8 +212,10 @@ export async function loadIgnoreConflictsAuthors(
   owner: string,
   repo: string,
   defaultBranch: string | undefined | null,
-  logger?: (message: string) => void
+  logger?: (message: string) => void,
+  preloaded?: SettingsSnapshot
 ): Promise<string[] | undefined> {
+  if (preloaded) return ignoreConflictsAuthorsFromSnapshot(preloaded);
   try {
     if (!api || typeof api.getRepoFile !== "function") return [];
     if (typeof defaultBranch !== "string" || !defaultBranch.trim()) return [];
