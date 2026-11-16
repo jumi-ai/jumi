@@ -3,6 +3,7 @@ import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
 import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
+import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
 import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
@@ -16,7 +17,7 @@ import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { reviewVerdictView } from "./verdict.ts";
 
-export const TOO_MANY_FOLLOWUP_ROUNDS = "stuck: too many follow-up rounds";
+export const TOO_MANY_FOLLOWUP_ROUNDS: string = TOO_MANY_FOLLOWUP_ROUNDS_REASON;
 
 /** Skip reason (and sit text) when the only open item needs a maintainer. */
 export const WAITING_ON_MAINTAINER_REASON = "waiting on maintainer";

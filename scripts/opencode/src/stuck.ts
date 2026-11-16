@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { deleteClaim, reviewStuckStatePath, stuckStatePath } from "./claim.ts";
+import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
@@ -54,8 +55,7 @@ export function isSkipLatchReason(reason: string | null | undefined): boolean {
  * publishing skipped from this latch. Every other `stuck:` latch still
  * refuses every kind.
  */
-export const TOO_MANY_FOLLOWUP_ROUNDS_REASON = "stuck: too many follow-up rounds";
-
+export { TOO_MANY_FOLLOWUP_ROUNDS_REASON };
 export function isTooManyFollowupRoundsReason(reason: string | null | undefined): boolean {
   return typeof reason === "string" && reason.trim() === TOO_MANY_FOLLOWUP_ROUNDS_REASON;
 }

@@ -11,7 +11,7 @@ import {
   restoreCheckpoint,
   sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
-import { buildCiMarkdown, CI_LOG_FILE, flakeComment, flakeSkipReason, recordCiHandled } from "./ci.ts";
+import { buildCiMarkdown, CI_LOG_FILE, recordCiHandled } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -29,8 +29,6 @@ import {
 } from "./claimed_worktree.ts";
 import {
   CONFLICT_TIMEOUT_MS,
-  conflictCapReason,
-  conflictCapSticky,
   MAX_CONFLICT_ROUNDS,
   type MergeDefaultResult,
   mergeDefaultIntoWorktree,
@@ -56,7 +54,6 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
-import { IGNORE_CONFLICTS_SETTINGS_UNREADABLE } from "./ignore_conflicts.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -77,6 +74,7 @@ import {
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
+import { applyEffects, decide, type LeftToAuthorInfo, type PrDecisionSnapshot, type Resolved } from "./pr_decision.ts";
 import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
@@ -85,12 +83,9 @@ import { resolveRepoPolicy } from "./repo_policy.ts";
 import {
   applyRepoChain,
   conventionsFromLoad,
-  effectiveConflictRounds,
   effectiveFollowupIgnoreLogins,
-  effectiveFollowupRounds,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
-  isSuggestionFollowupEnabled,
   loadRepoSettings,
   type SettingsSnapshot,
 } from "./repo_settings.ts";
@@ -104,14 +99,11 @@ import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
   appendStuckLatchFingerprint,
-  evaluateStuck,
   fingerprintCiChecks,
   fingerprintError,
   isQuotaStuck,
   markQuotaStuckLatch,
   sameFindingDisplayFromParts,
-  sameFindingLatchReasonFromParts,
-  stuckComment,
 } from "./stuck.ts";
 import {
   type HoldStatusPort,
@@ -1250,15 +1242,8 @@ export async function implementFollowUp(
     }
   }
   const failOpenUpFront = failOpenLoadFromSnapshot(settingsSnapshot);
-  const policy = {
-    followupOnSuggestions: isSuggestionFollowupEnabled(failOpenUpFront),
-    maxFollowupRounds: effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, failOpenUpFront),
-    maxConflictRounds: effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, failOpenUpFront),
-  };
   const effectiveFollowupIgnoreUpFront = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, failOpenUpFront);
   const effectiveTrustedUpFront = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpenUpFront);
-  const maxFollowupRounds = policy.maxFollowupRounds;
-  const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? FOLLOWUP_TIMEOUT_MS;
   const conflictTimeoutMs = opts.conflictTimeoutMs ?? CONFLICT_TIMEOUT_MS;
   const claimed = await beginClaimedWorktree({
@@ -1353,10 +1338,52 @@ export async function implementFollowUp(
 
   const branch = pr.head.ref;
   claim.branch = branch;
+  const decisionDeps = {
+    log,
+    sticky: (text: string) => sticky(text, pr.number),
+    recordCiHandled: (checks: { name: string; flake?: string | undefined }[]) =>
+      recordCiHandled({
+        home: opts.home,
+        owner,
+        repo,
+        issueNumber,
+        prNumber: pr.number,
+        sha: pr.head.sha,
+        checks: checks as never,
+        now,
+        skipLatches: latches,
+      }),
+    resolveHeld,
+    forgetClaim,
+  };
   if (!branch || branch === opts.job.defaultBranch) {
-    await resolveHeld("skipped", "default branch");
-    await forgetClaim();
-    return { status: "skipped", reason: "refusing to follow up on the default branch" };
+    const early = decide({
+      branchIsDefault: true,
+      triggerCommentId: undefined,
+      triggerReviewId: undefined,
+      handledCommentIds: [],
+      handledReviewIds: [],
+      ciWake: false,
+      ignoreAuthors: [],
+      mergeable: undefined,
+      conflictRound: 0,
+      maxConflictRounds: 0,
+      hasFeedback: false,
+      stateRound: 0,
+      maxFollowupRounds: 0,
+      ciPending: false,
+      ciUnhandled: [],
+      stuckFingerprints: [],
+      quotaStuck: false,
+      quotaReason: "",
+      owner,
+      repo,
+      prNumber: pr.number,
+    });
+    if (early.kind === "skip") {
+      await applyEffects(early.effects, decisionDeps);
+      return { status: "skipped", reason: early.reason };
+    }
   }
   // Per-wake decision inputs, gathered once. The single `.jumi.yml` read is
   // `settingsSnapshot` above; every input below comes from `snapshot.*`.
@@ -1386,10 +1413,8 @@ export async function implementFollowUp(
   const pendingItems = snapshot.items;
   const pendingTriggerBody = snapshot.pendingTriggerBody;
   const pendingLastReview = snapshot.pendingLastReview;
-  let hasFeedback = snapshot.hasFeedback;
   const ci = snapshot.ci;
   const ciWake = snapshot.ciWake;
-  const snapshotState = snapshot.latch.followup;
   const findingOpts = reviewFindingMatchOptsForJob(
     opts.job,
     pr.head.sha,
@@ -1397,142 +1422,69 @@ export async function implementFollowUp(
     snapshot.lists.blockingAuthors,
     snapshot.policy.followupOnSuggestions
   );
-  if (
-    (opts.job.trigger?.commentId !== undefined &&
-      snapshotState.handledCommentIds.includes(opts.job.trigger.commentId)) ||
-    (opts.job.trigger?.reviewId !== undefined && snapshotState.handledReviewIds.includes(opts.job.trigger.reviewId))
-  ) {
-    if (!ciWake) {
-      await resolveHeld("skipped", "comment already handled");
-      await forgetClaim();
-      return { status: "skipped", reason: "comment already handled" };
+  const ciHashForDecision = fingerprintCiChecks(ci.unhandled);
+  const displayForDecision = sameFindingDisplayFromParts(
+    snapshot.reviewBodyForIdentity,
+    unresolvedJumiInlines(pendingItems)
+  );
+  let leftToAuthorResolved: Resolved<LeftToAuthorInfo> | undefined;
+  let diffHashResolved: Resolved<string | undefined> | undefined;
+  let preDecision: ReturnType<typeof decide>;
+  for (;;) {
+    const input: PrDecisionSnapshot = {
+      branchIsDefault: false,
+      triggerCommentId: opts.job.trigger?.commentId,
+      triggerReviewId: opts.job.trigger?.reviewId,
+      handledCommentIds: snapshot.latch.followup.handledCommentIds,
+      handledReviewIds: snapshot.latch.followup.handledReviewIds,
+      ciWake,
+      ignoreAuthors: snapshot.lists.ignoreAuthors,
+      mergeable: snapshot.pr.mergeable,
+      conflictRound: snapshot.latch.conflict.round,
+      maxConflictRounds: snapshot.policy.maxConflictRounds,
+      ...(leftToAuthorResolved ? { leftToAuthor: leftToAuthorResolved } : {}),
+      hasFeedback: snapshot.hasFeedback,
+      stateRound: snapshot.latch.followup.round,
+      maxFollowupRounds: snapshot.policy.maxFollowupRounds,
+      ciPending: ci.pending,
+      ciUnhandled: ci.unhandled,
+      ...(ciHashForDecision ? { ciHash: ciHashForDecision } : {}),
+      ...(snapshot.currentFingerprint ? { preCapFingerprint: snapshot.currentFingerprint } : {}),
+      ...(snapshot.findingIdentityHash ? { findingIdentityHash: snapshot.findingIdentityHash } : {}),
+      ...(diffHashResolved ? { diffHash: diffHashResolved } : {}),
+      stuckFingerprints: snapshot.latch.stuck.fingerprints,
+      quotaStuck: isQuotaStuck(snapshot.latch.stuck),
+      quotaReason: quotaStuckReasonForText(snapshot.latch.stuck.quota?.reason),
+      ...(displayForDecision ? { sameFindingDisplay: displayForDecision } : {}),
+      owner,
+      repo,
+      prNumber: pr.number,
+    };
+    preDecision = decide(input);
+    if (preDecision.kind !== "need") break;
+    if (preDecision.field === "leftToAuthor") {
+      const resolved = await snapshot.getLeftToAuthor();
+      leftToAuthorResolved = {
+        value: {
+          leftToAuthor: resolved.leftToAuthor,
+          leftReason: resolved.leftReason,
+          conflictedLeftToAuthor: resolved.conflictedLeftToAuthor,
+        },
+      };
+    } else {
+      diffHashResolved = { value: await snapshot.getPrDiffHash() };
     }
   }
-  const previousConflict = await snapshot.getConflict();
-  const ignoreAuthors = snapshot.lists.ignoreAuthors;
-  if (ignoreAuthors === undefined) {
-    await resolveHeld("skipped", "settings unreadable");
-    await forgetClaim();
-    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
+  const preRunDecision = preDecision;
+  if (preRunDecision.kind === "skip") {
+    await applyEffects(preRunDecision.effects, decisionDeps);
+    return { status: "skipped", reason: preRunDecision.reason };
   }
-  const { leftToAuthor, leftReason, conflictedLeftToAuthor } = await snapshot.getLeftToAuthor();
-  // The conflict cap gates conflict-resolution work only: a mergeable pull
-  // runs normally bounded by MAX_FOLLOWUP_ROUNDS whatever the counter says.
-  // For an unmergeable pull the cap reports first so a conflicted pull with
-  // new feedback or red CI keeps skipping merge-of-default with the conflict
-  // reason instead of the follow-up budget.
-  if (pr.mergeable === false && !conflictedLeftToAuthor && previousConflict.round >= maxConflictRounds) {
-    const reason = conflictCapReason(previousConflict.round, maxConflictRounds);
-    await sticky(conflictCapSticky(previousConflict.round, maxConflictRounds), pr.number);
-    await resolveHeld("skipped", "conflict cap");
-    await forgetClaim();
-    return { status: "skipped", reason };
-  }
-  if (hasFeedback && snapshotState.round >= maxFollowupRounds) {
-    if (!ciWake) {
-      await sticky("stuck: too many follow-up rounds", pr.number);
-      await resolveHeld("skipped", "round cap");
-      await forgetClaim();
-      return { status: "skipped", reason: "stuck: too many follow-up rounds" };
-    }
-    hasFeedback = false;
-  }
-  if (!hasFeedback) {
-    if (ci.pending) {
-      await resolveHeld("skipped", "CI still pending");
-      await forgetClaim();
-      return { status: "skipped", reason: "CI still pending" };
-    }
-    if (!ciWake) {
-      // A conflicted pull still needs merge-of-default work below: a
-      // follow-up must not silently skip it with `no unhandled feedback`.
-      // Conflict resolution runs first.
-      if (pr.mergeable !== false) {
-        await resolveHeld("completed");
-        await forgetClaim();
-        return { status: "skipped", reason: "no unhandled feedback" };
-      }
-    } else if (pr.mergeable !== false && ci.unhandled.every((check) => check.flake)) {
-      await sticky(flakeComment(ci.unhandled), pr.number);
-      await recordCiHandled({
-        home: opts.home,
-        owner,
-        repo,
-        issueNumber,
-        prNumber: pr.number,
-        sha: pr.head.sha,
-        checks: ci.unhandled,
-        now,
-        skipLatches: latches,
-      });
-      await resolveHeld("skipped", "flake");
-      await forgetClaim();
-      return { status: "skipped", reason: flakeSkipReason(ci.unhandled) };
-    }
-  }
-  if (conflictedLeftToAuthor && !hasFeedback && !ciWake) {
-    await resolveHeld("skipped", "left to author");
-    await forgetClaim();
-    return { status: "skipped", reason: leftReason };
-  }
-
-  // `snapshot.currentFingerprint`/`findingIdentityHash` are pre-cap (before the
-  // round-cap `hasFeedback = false` above). Re-derive post-cap exactly like the
-  // old inline code: `findingHash` only when feedback remains, otherwise the CI
-  // hash; no diff read when the post-cap identity is empty.
-  let currentFingerprint = snapshot.currentFingerprint;
-  let sameFindingCurrent: { kind: "finding"; hash: string } | undefined;
-  if (!hasFeedback) {
-    const ciHash = fingerprintCiChecks(ci.unhandled);
-    currentFingerprint = ciHash ? { kind: "ci" as const, hash: ciHash } : undefined;
-  } else {
-    const diffResult = await snapshot.getSameFinding();
-    sameFindingCurrent = diffResult.sameFindingCurrent;
-  }
-  // Same-finding stuck: the same blocking finding identity repeats while the
-  // PR's own diff has not moved. Base merges change the head SHA but not the
-  // three-dot diff, so the diff hash stays stable across them. A real change
-  // to the PR diff (or a different finding) changes the combined hash and
-  // resets the consecutive count. Fail-open when the diff is unreadable.
-  // The identity covers both the latest review body and unresolved Jumi
-  // inlines: an inline-only repeat has an empty top-level body, so gate on
-  // `hasFeedback` alone and let the helper return undefined when both inputs
-  // are empty.
-  const reviewBodyForIdentity = snapshot.reviewBodyForIdentity;
-  const jumiInlinesForIdentity = unresolvedJumiInlines(pendingItems);
-  const stuckState = await snapshot.getStuck();
-  if (isQuotaStuck(stuckState)) {
-    const quotaReason = quotaStuckReasonForText(stuckState.quota?.reason);
-    await sticky(quotaReason, pr.number);
-    await resolveHeld("skipped", "quota");
-    await forgetClaim();
-    return { status: "skipped", reason: quotaReason };
-  }
-  const stuckReason = evaluateStuck(stuckState.fingerprints, currentFingerprint);
-  if (stuckReason) {
-    await sticky(stuckComment(stuckReason), pr.number);
-    await resolveHeld("skipped", "stuck");
-    await forgetClaim();
-    return { status: "skipped", reason: stuckComment(stuckReason) };
-  }
-  if (sameFindingCurrent) {
-    const sameFindingStuck = evaluateStuck(stuckState.fingerprints, sameFindingCurrent);
-    if (sameFindingStuck === "same-finding") {
-      const latchReason = sameFindingLatchReasonFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
-      const display = sameFindingDisplayFromParts(reviewBodyForIdentity, jumiInlinesForIdentity);
-      log(`same finding repeated${display ? ` (${display})` : ""} on unchanged diff for ${owner}/${repo}#${pr.number}`);
-      await sticky(latchReason, pr.number);
-      await resolveHeld("skipped", "same finding");
-      await forgetClaim();
-      return { status: "skipped", reason: latchReason };
-    }
-    if (sameFindingStuck) {
-      await sticky(stuckComment(sameFindingStuck), pr.number);
-      await resolveHeld("skipped", "stuck");
-      await forgetClaim();
-      return { status: "skipped", reason: stuckComment(sameFindingStuck) };
-    }
-  }
+  const hasFeedback = preRunDecision.hasFeedback;
+  const currentFingerprint = preRunDecision.currentFingerprint;
+  const sameFindingCurrent = preRunDecision.sameFindingCurrent;
+  const previousConflict = snapshot.latch.conflict;
+  const leftToAuthor = leftToAuthorResolved?.value.leftToAuthor ?? false;
 
   const loop = openClaimedLoop(claimed, opts);
 
