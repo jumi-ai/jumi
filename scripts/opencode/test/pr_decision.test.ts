@@ -570,14 +570,14 @@ describe("pr_decision table", () => {
       if (row.expectWhy === "run") {
         expect(decision.kind).toBe("run");
         if (decision.kind === "run") {
-          expect(decision.hasFeedback).toBe(row.expectHasFeedback);
+          expect(decision.hasFeedback).toBe(row.expectHasFeedback as boolean);
         }
         return;
       }
       expect(decision.kind).toBe("skip");
       if (decision.kind !== "skip") return;
       expect(decision.why).toBe(row.expectWhy);
-      expect(decision.reason).toBe(row.expectReason);
+      expect(decision.reason).toBe(row.expectReason as string);
       const entry = SKIP_WHY_TABLE[row.expectWhy as SkipWhy];
       expect(decision.reason).toBe((entry.reason as (params: unknown) => string)(decision.params as never));
       const kinds = decision.effects.map((effect) => effect.kind);
