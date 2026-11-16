@@ -1067,8 +1067,22 @@ export async function needsCiFollowUp(opts: {
       ...(requiredContexts ? { requiredContexts } : {}),
       ...(wait ? { wait } : {}),
     });
-    if (inspection.pending) return false;
-    return inspection.unhandled.length > 0;
+    const { classify } = await import("./pr_decision.ts");
+    return classify({
+      followupRound: 0,
+      maxFollowupRounds: 0,
+      hasUnhandledFeedback: false,
+      maintainerOnlyPending: true,
+      ciPending: inspection.pending,
+      ciUnhandledCount: inspection.unhandled.length,
+      prEligible: false,
+      mergeable: true,
+      hasJumiCommit: undefined,
+      labeledOrAuthorListed: false,
+      conflictRound: 0,
+      maxConflictRounds: 0,
+      conflictSameHeadBase: true,
+    }).ci;
   } catch {
     return false;
   }

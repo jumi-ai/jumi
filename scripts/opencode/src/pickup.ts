@@ -1,6 +1,5 @@
-import { needsCiFollowUp } from "./ci.ts";
-import { type ConflictResult, implementConflict, needsConflict } from "./conflict.ts";
-import { type FollowUpResult, implementFollowUp, needsFollowUp } from "./followup.ts";
+import { type ConflictResult, implementConflict } from "./conflict.ts";
+import { type FollowUpResult, implementFollowUp } from "./followup.ts";
 import { extractWorkingIssueNumber, isInScopeJumiPR } from "./gitea_issues.ts";
 import {
   hasIgnoreConflictsLabel,
@@ -11,6 +10,8 @@ import {
 } from "./ignore_conflicts.ts";
 import type { ImplementOptions } from "./implement.ts";
 import type { Forge, IssueApi, Pull } from "./ports.ts";
+import { classify } from "./pr_decision.ts";
+import { buildCloserSnapshot } from "./pr_snapshot.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
@@ -50,113 +51,28 @@ export async function classifyCloserWork(opts: {
   /** Default-branch name for the per-repository `.jumi.yml` policy. */
   defaultBranch?: string;
 }): Promise<CloserWorkMode | undefined> {
-  let ignoreAuthors = opts.ignoreConflictsAuthors;
-  if (ignoreAuthors === undefined) {
-    const branch =
-      opts.defaultBranch ??
-      (await opts.api
-        .getRepo(opts.owner, opts.repo)
-        .then((r) => r.default_branch)
-        .catch(() => undefined));
-    ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.owner, opts.repo, branch);
-    if (ignoreAuthors === undefined) return undefined;
-  }
-  // Effective ignore-conflicts label from the default-branch file (override,
-  // otherwise the deployment value). Fail-open to the deployment value.
-  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
-  try {
-    const branch =
-      opts.defaultBranch ??
-      (await opts.api
-        .getRepo(opts.owner, opts.repo)
-        .then((r) => r.default_branch)
-        .catch(() => undefined));
-    if (
-      typeof branch === "string" &&
-      branch.trim() &&
-      typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function"
-    ) {
-      const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
-      const policy = await resolveRepoPolicy(
-        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: branch.trim() },
-        fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
-        { onUnreadable: "fallback" }
-      ).catch(() => undefined);
-      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
-    }
-  } catch {
-    // Fail-open to the deployment value.
-  }
-  const followUp = await needsFollowUp({
-    api: opts.api,
-    owner: opts.owner,
-    repo: opts.repo,
-    pr: opts.pr,
-    issueNumber: opts.issueNumber,
-    botUsername: opts.botUsername,
-    home: opts.home,
-    maxFollowupRounds: opts.maxFollowupRounds,
-    maxConflictRounds: opts.maxConflictRounds,
-    followupIgnoreLogins: opts.followupIgnoreLogins,
-    trustedSenderLogins: opts.trustedSenderLogins,
-    blockingQuestionAuthors: opts.blockingQuestionAuthors,
-    skipLatches: opts.skipLatches,
-    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
-  });
-  const ci = await needsCiFollowUp({
-    api: opts.api,
-    owner: opts.owner,
-    repo: opts.repo,
-    sha: opts.pr.head.sha,
-    home: opts.home,
-    issueNumber: opts.issueNumber,
-    skipLatches: opts.skipLatches,
-    baseBranch: opts.pr.base.ref,
-    ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
-  });
-  const authorListed = isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
-  let hasJumiCommit: boolean | undefined;
-  if (!followUp && !ci && (hasIgnoreConflictsLabel(opts.pr, effectiveIgnoreLabel) || authorListed)) {
-    hasJumiCommit = await hasJumiCommitOnPull(opts.api, opts.owner, opts.repo, opts.pr.number, {
+  const built = await buildCloserSnapshot(
+    {
+      owner: opts.owner,
+      repo: opts.repo,
+      pr: opts.pr,
+      issueNumber: opts.issueNumber,
       botUsername: opts.botUsername,
-    });
-  }
-  const conflict = await needsConflict({
-    pr: opts.pr,
-    owner: opts.owner,
-    repo: opts.repo,
-    issueNumber: opts.issueNumber,
-    botUsername: opts.botUsername,
-    home: opts.home,
-    maxConflictRounds: opts.maxConflictRounds,
-    maxFollowupRounds: opts.maxFollowupRounds,
-    skipLatches: opts.skipLatches,
-    ignoreConflictsLabel: effectiveIgnoreLabel,
-    ignoreConflictsAuthors: ignoreAuthors,
-    ...(hasJumiCommit !== undefined ? { hasJumiCommit } : {}),
-    ...(opts.defaultBranch
-      ? {
-          defaultBranch: opts.defaultBranch,
-          ...(typeof (opts.api as { getRepoFile?: unknown }).getRepoFile === "function"
-            ? {
-                getRepoFile: (
-                  opts.api as {
-                    getRepoFile: (
-                      owner: string,
-                      repo: string,
-                      path: string,
-                      ref: string
-                    ) => Promise<{ found: boolean; content?: string }>;
-                  }
-                ).getRepoFile.bind(opts.api),
-              }
-            : {}),
-        }
-      : {}),
-  });
-  if (conflict && !(followUp || ci)) return "conflict";
-  if (followUp || ci || conflict) return "follow-up";
-  return undefined;
+      home: opts.home,
+      ...(opts.maxFollowupRounds !== undefined ? { maxFollowupRounds: opts.maxFollowupRounds } : {}),
+      ...(opts.maxConflictRounds !== undefined ? { maxConflictRounds: opts.maxConflictRounds } : {}),
+      ...(opts.followupIgnoreLogins !== undefined ? { followupIgnoreLogins: opts.followupIgnoreLogins } : {}),
+      ...(opts.trustedSenderLogins !== undefined ? { trustedSenderLogins: opts.trustedSenderLogins } : {}),
+      ...(opts.blockingQuestionAuthors !== undefined ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+      ...(opts.skipLatches !== undefined ? { skipLatches: opts.skipLatches } : {}),
+      ...(opts.ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel: opts.ignoreConflictsLabel } : {}),
+      ...(opts.ignoreConflictsAuthors !== undefined ? { ignoreConflictsAuthors: opts.ignoreConflictsAuthors } : {}),
+      ...(opts.defaultBranch ? { defaultBranch: opts.defaultBranch } : {}),
+    },
+    { api: opts.api }
+  );
+  if (built.ignoreAuthorsUnreadable) return undefined;
+  return classify(built.snapshot).mode;
 }
 
 export async function runCloserWork(
@@ -164,28 +80,29 @@ export async function runCloserWork(
   pr: Pull
 ): Promise<FollowUpResult | ConflictResult | { status: "skipped"; reason: string }> {
   const branch = opts.job.defaultBranch;
-  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, opts.job.owner, opts.job.repo, branch);
-  if (ignoreAuthors === undefined) {
+  const built = await buildCloserSnapshot(
+    {
+      owner: opts.job.owner,
+      repo: opts.job.repo,
+      pr,
+      issueNumber: opts.job.issueNumber,
+      botUsername: opts.botUsername,
+      home: opts.home,
+      ...(opts.maxFollowupRounds !== undefined ? { maxFollowupRounds: opts.maxFollowupRounds } : {}),
+      ...(opts.maxConflictRounds !== undefined ? { maxConflictRounds: opts.maxConflictRounds } : {}),
+      ...(opts.followupIgnoreLogins !== undefined ? { followupIgnoreLogins: opts.followupIgnoreLogins } : {}),
+      ...(opts.trustedSenderLogins !== undefined ? { trustedSenderLogins: opts.trustedSenderLogins } : {}),
+      ...(opts.blockingQuestionAuthors !== undefined ? { blockingQuestionAuthors: opts.blockingQuestionAuthors } : {}),
+      ...(opts.skipLatches !== undefined ? { skipLatches: opts.skipLatches } : {}),
+      ...(opts.ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel: opts.ignoreConflictsLabel } : {}),
+      ...(branch ? { defaultBranch: branch } : {}),
+    },
+    { api: opts.api }
+  );
+  if (built.ignoreAuthorsUnreadable) {
     return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
   }
-  const mode = await classifyCloserWork({
-    api: opts.api,
-    owner: opts.job.owner,
-    repo: opts.job.repo,
-    pr,
-    issueNumber: opts.job.issueNumber,
-    botUsername: opts.botUsername,
-    home: opts.home,
-    maxFollowupRounds: opts.maxFollowupRounds,
-    maxConflictRounds: opts.maxConflictRounds,
-    followupIgnoreLogins: opts.followupIgnoreLogins,
-    trustedSenderLogins: opts.trustedSenderLogins,
-    blockingQuestionAuthors: opts.blockingQuestionAuthors,
-    skipLatches: opts.skipLatches,
-    ignoreConflictsLabel: opts.ignoreConflictsLabel,
-    ignoreConflictsAuthors: ignoreAuthors,
-    defaultBranch: branch,
-  });
+  const mode = classify(built.snapshot).mode;
   if (!mode) return { status: "skipped", reason: `open PR already closes #${opts.job.issueNumber}` };
   const job: IssueJob = {
     ...opts.job,
