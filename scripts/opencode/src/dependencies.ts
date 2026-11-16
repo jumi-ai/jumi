@@ -1,9 +1,11 @@
 import { isAssignedToBot, isPullRequestIssue } from "./assignee.ts";
 import { pullRequestWorkingOnIssue } from "./gitea_issues.ts";
 import type { LinkedIssue, Pull } from "./ports.ts";
+import { BLOCKED_BY_REJECTED_STUCK, DEPENDENCY_CYCLE_REASON } from "./skip_why_texts.ts";
+
+export { BLOCKED_BY_REJECTED_STUCK, DEPENDENCY_CYCLE_REASON };
 
 export const DEPENDENCY_GRAPH_CAP = 32;
-export const DEPENDENCY_CYCLE_REASON = "stuck: dependency cycle";
 
 export type BlockerCheck =
   | { status: "ready" }
@@ -118,7 +120,6 @@ export async function checkIssueBlockers(
 
 export const QUEUE_FILE = "JUMI_QUEUE.md";
 export const BLOCKED_BY_FILE = "JUMI_BLOCKED.md";
-export const BLOCKED_BY_REJECTED_STUCK = "stuck: blocked-by rejected";
 export const QUEUE_CANDIDATE_CAP = 32;
 export const QUEUE_CITATION_CAP = 16;
 

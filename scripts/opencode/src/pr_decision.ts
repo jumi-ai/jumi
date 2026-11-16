@@ -1,12 +1,26 @@
 import { createHash } from "node:crypto";
+import type { RouterSitReason } from "./router_sits.ts";
+import {
+  BLOCKED_BY_REJECTED_STUCK,
+  CONFLICT_CAP_PREFIX,
+  CONFLICT_LEGACY_PREFIX,
+  CREDIT_STUCK_TEXT,
+  DEPENDENCY_CYCLE_REASON,
+  FLAKE_PREFIX,
+  IGNORE_CONFLICTS_PREFIX,
+  MERGE_DEFAULT_STUCK_TEXT,
+  QUOTA_STUCK_TEXT,
+  ROUND_CAP_HOLD_TEXT,
+  SAME_FINDING_STUCK_TEXT,
+  STUCK_OTHER_TEXT,
+  TOO_MANY_FOLLOWUP_ROUNDS_REASON,
+} from "./skip_why_texts.ts";
+
+export { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON };
 
 export type DecideCaller = "follow-up" | "conflict";
 
-export const TOO_MANY_FOLLOWUP_ROUNDS_REASON = "stuck: too many follow-up rounds";
-
 export const CONFLICT_DEFAULT_BRANCH_REASON = "refusing to merge on the default branch";
-
-export const SAME_FINDING_STUCK_TEXT = "stuck: same finding repeated";
 
 export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
 
@@ -23,7 +37,11 @@ export type SkipWhy =
   | "quota"
   | "stuck"
   | "same-finding"
-  | "default-branch";
+  | "default-branch"
+  | "merge-default-stuck"
+  | "dependency-cycle"
+  | "blocked-by-rejected"
+  | "stuck-other";
 
 export type Resolved<T> = { value: T };
 
@@ -56,6 +74,10 @@ export type SkipParamsMap = {
   stuck: { stuckReason: StuckReason };
   "same-finding": { display?: string | undefined };
   "default-branch": Record<string, never>;
+  "merge-default-stuck": Record<string, never>;
+  "dependency-cycle": Record<string, never>;
+  "blocked-by-rejected": Record<string, never>;
+  "stuck-other": Record<string, never>;
 };
 
 export type HoldRelease = { kind: "completed" } | { kind: "skipped"; reason: string };
@@ -183,7 +205,7 @@ function uniqueFlakeReasons(checks: CiCheckRef[]): string[] {
 }
 
 export function flakeSkipReasonFor(checks: CiCheckRef[]): string {
-  return `CI infra flake: ${uniqueFlakeReasons(checks).join("; ")}`;
+  return `${FLAKE_PREFIX} ${uniqueFlakeReasons(checks).join("; ")}`;
 }
 
 export function flakeCommentFor(checks: CiCheckRef[]): string {
@@ -350,7 +372,162 @@ export const SKIP_WHY_TABLE: Record<SkipWhy, SkipRow> = {
     hold: { kind: "skipped", reason: "default branch" },
     latchesIssue: false,
   }),
+  // Parse-only rows for skip reasons produced outside `decide()`. They are
+  // never returned by `decide()`; they exist so `parseSkipWhy` recognizes
+  // every stored text through this one table instead of ad-hoc matching.
+  "merge-default-stuck": row<"merge-default-stuck">({
+    reason: () => MERGE_DEFAULT_STUCK_TEXT,
+    sticky: () => MERGE_DEFAULT_STUCK_TEXT,
+    hold: { kind: "skipped", reason: "conflict cap" },
+    latchesIssue: true,
+  }),
+  "dependency-cycle": row<"dependency-cycle">({
+    reason: () => DEPENDENCY_CYCLE_REASON,
+    sticky: () => DEPENDENCY_CYCLE_REASON,
+    hold: { kind: "skipped", reason: "stuck" },
+    latchesIssue: true,
+  }),
+  "blocked-by-rejected": row<"blocked-by-rejected">({
+    reason: () => BLOCKED_BY_REJECTED_STUCK,
+    sticky: () => BLOCKED_BY_REJECTED_STUCK,
+    hold: { kind: "skipped", reason: "stuck" },
+    latchesIssue: true,
+  }),
+  "stuck-other": row<"stuck-other">({
+    reason: () => STUCK_OTHER_TEXT,
+    sticky: () => STUCK_OTHER_TEXT,
+    hold: { kind: "skipped", reason: "stuck" },
+    latchesIssue: true,
+  }),
 };
+
+/**
+ * A stored skip reason read back through the decision table.
+ *
+ * - `why` is the table row that produced the text (`stuck-other` for any
+ *   other `stuck:` text, so rows written by older images keep latching).
+ * - `latches` preserves `isSkipLatchReason` (untrimmed, case-sensitive).
+ * - `kickKind` preserves `isConflictStuckReason` (trimmed, lower-cased).
+ * - `sit` preserves the decision-owned slice of `normalizeSitReason`.
+ */
+export interface ParsedSkipWhy {
+  why: SkipWhy | undefined;
+  latches: boolean;
+  kickKind: "conflict" | "follow-up";
+  sit: RouterSitReason | undefined;
+}
+
+/**
+ * Canonical reason text for one table row. `parseSkipWhy` derives its `why`
+ * matching from these same rows, so a text change here flows through.
+ */
+export function reasonText<Why extends SkipWhy>(why: Why, params: SkipParamsMap[Why]): string {
+  return (SKIP_WHY_TABLE[why].reason as (params: SkipParamsMap[Why]) => string)(params);
+}
+
+/**
+ * Hold reason for a skipped follow-up result. Intentionally keeps the old
+ * substring semantics (`includes("too many follow-up")`): any round-cap
+ * wording, counted or not, resolves the held `pending` as `round cap`,
+ * while every other reason passes through unchanged.
+ */
+export function holdReasonForSkippedResult(reason: unknown): string {
+  if (typeof reason === "string" && reason.includes("too many follow-up")) return ROUND_CAP_HOLD_TEXT;
+  if (typeof reason === "string") return reason;
+  return "follow-up skipped";
+}
+
+const COUNTED_CONFLICT_CAP_RE = /^stuck: cannot resolve conflicts \(\d+\/\d+ conflict rounds\)$/;
+
+export function parseSkipWhy(reason: string | null | undefined): ParsedSkipWhy {
+  // Preserves `isSkipLatchReason`: untrimmed, case-sensitive `stuck:` prefix.
+  const latches = typeof reason === "string" && reason.startsWith("stuck:");
+  const trimmed = typeof reason === "string" ? reason.trim() : "";
+  const lowered = trimmed.toLowerCase();
+  // Preserves `isConflictStuckReason`: trimmed, lower-cased conflict prefixes,
+  // which also cover older `stuck: conflict ...` variants and the counted cap.
+  const kickKind: ParsedSkipWhy["kickKind"] =
+    lowered.startsWith(CONFLICT_CAP_PREFIX) || lowered.startsWith(CONFLICT_LEGACY_PREFIX) ? "conflict" : "follow-up";
+  // Preserves the decision-owned slice of `normalizeSitReason`.
+  let sit: RouterSitReason | undefined;
+  if (trimmed === reasonText("ci-pending", {})) sit = "ci-not-completed";
+  else if (lowered.startsWith(IGNORE_CONFLICTS_PREFIX)) sit = "conflict-ignored";
+  else if (
+    trimmed === reasonText("no-unhandled-feedback", {}) ||
+    trimmed === ROUND_CAP_HOLD_TEXT ||
+    trimmed === reasonText("comment-already-handled", {})
+  )
+    sit = undefined;
+  else if (trimmed.startsWith("stuck:")) sit = "implement-latch";
+  else sit = undefined;
+
+  let why: SkipWhy | undefined;
+  if (typeof reason !== "string" || trimmed === "") {
+    why = undefined;
+  } else if (trimmed === TOO_MANY_FOLLOWUP_ROUNDS_REASON) {
+    // Preserves `isTooManyFollowupRoundsReason`: trimmed exact equality.
+    why = "round-cap";
+  } else if (COUNTED_CONFLICT_CAP_RE.test(trimmed)) {
+    why = "conflict-cap";
+  } else if (trimmed === MERGE_DEFAULT_STUCK_TEXT) {
+    why = "merge-default-stuck";
+  } else if (trimmed === DEPENDENCY_CYCLE_REASON) {
+    why = "dependency-cycle";
+  } else if (trimmed === BLOCKED_BY_REJECTED_STUCK) {
+    why = "blocked-by-rejected";
+  } else if (trimmed === QUOTA_STUCK_TEXT || trimmed === CREDIT_STUCK_TEXT) {
+    why = "quota";
+  } else if (trimmed === SAME_FINDING_STUCK_TEXT || trimmed.startsWith(`${SAME_FINDING_STUCK_TEXT} (`)) {
+    // The bare text is produced both by `stuck` with `same-finding` and by
+    // `same-finding` without a display; it maps to `same-finding` here.
+    why = "same-finding";
+  } else if (
+    trimmed === stuckCommentFor("repeated-action") ||
+    trimmed === stuckCommentFor("repeated-error") ||
+    trimmed === stuckCommentFor("ping-pong")
+  ) {
+    why = "stuck";
+  } else if (lowered.startsWith(IGNORE_CONFLICTS_PREFIX)) {
+    // Preserves `isIgnoreConflictsSkipReason`: trimmed, case-insensitive leave prefix.
+    why = "left-to-author";
+  } else if (trimmed.startsWith(FLAKE_PREFIX)) {
+    why = "flake";
+  } else if (trimmed === reasonText("comment-already-handled", {})) {
+    why = "comment-already-handled";
+  } else if (trimmed === reasonText("settings-unreadable", {})) {
+    why = "settings-unreadable";
+  } else if (trimmed === reasonText("ci-pending", {})) {
+    why = "ci-pending";
+  } else if (trimmed === reasonText("no-unhandled-feedback", {})) {
+    why = "no-unhandled-feedback";
+  } else if (trimmed === reasonText("default-branch", {})) {
+    why = "default-branch";
+  } else if (latches) {
+    why = "stuck-other";
+  } else {
+    why = undefined;
+  }
+  return { why, latches, kickKind, sit };
+}
+
+/**
+ * Whether the router owns no sit mapping for this text and the decision
+ * table does. `normalizeSitReason` returns `sit` for owned texts (including
+ * the round-cap hold alias, which is never a skip reason) and falls through
+ * to the router-computed list otherwise. A trimmed `stuck:` sit without a
+ * `why` (leading-whitespace unknown `stuck:` text, where `latches` stays
+ * false) is still owned, so the parsed sit is not discarded.
+ */
+export function sitForOwnedReason(reason: string | null | undefined): {
+  owned: boolean;
+  sit: RouterSitReason | undefined;
+} {
+  const parsed = parseSkipWhy(reason);
+  if (parsed.why !== undefined || parsed.sit !== undefined) return { owned: true, sit: parsed.sit };
+  const text = typeof reason === "string" ? reason.trim() : "";
+  if (text === ROUND_CAP_HOLD_TEXT) return { owned: true, sit: undefined };
+  return { owned: false, sit: undefined };
+}
 
 function buildSkipEffects(
   why: SkipWhy,

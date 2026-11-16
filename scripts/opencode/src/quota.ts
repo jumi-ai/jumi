@@ -6,8 +6,9 @@
 
 import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
+import { CREDIT_STUCK_TEXT, QUOTA_STUCK_TEXT } from "./skip_why_texts.ts";
 
-export const QUOTA_STUCK_TEXT = "stuck: usage limit exceeded";
+export { CREDIT_STUCK_TEXT, QUOTA_STUCK_TEXT };
 
 export const QUOTA_MESSAGE = "opencode stuck: usage limit exceeded";
 
@@ -42,12 +43,6 @@ export const CREDIT_BALANCE_RE = /Credit balance is too low/i;
  * running out apart from a plan limit. Still counted as quota (see
  * `classifyOpenCodeExit`), never as a task or infra failure. */
 export const CREDIT_QUOTA_MESSAGE = "opencode stuck: credit balance is too low";
-
-/** Stuck-file reason for credit exhaustion. Parallel to
- * `QUOTA_STUCK_TEXT`, distinct so the parked job names the credit, and
- * handled by the same stuck path (no quota-wait backoff: the billing cycle
- * can be weeks away). */
-export const CREDIT_STUCK_TEXT = "stuck: credit balance is too low";
 
 export const QUOTA_ERROR_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded|Credit balance is too low/i;

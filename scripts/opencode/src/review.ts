@@ -107,6 +107,7 @@ import {
   resolveRunnerSelection,
 } from "./runners.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
+import { INCOMPLETE_REVIEW_STUCK } from "./skip_why_texts.ts";
 import {
   GITEA_STATUS_DESCRIPTION_MAX_BYTES,
   omitOpenCodeStderr,
@@ -787,7 +788,7 @@ const CHECK_CONTEXT = "jumi/opencode-review";
 const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
 export const MAX_INCOMPLETE_RETRIES = 2;
-export const INCOMPLETE_REVIEW_STUCK = "stuck: incomplete review";
+export { INCOMPLETE_REVIEW_STUCK };
 export const INCOMPLETE_NO_FINDINGS_REASON = "Incomplete review: no findings";
 
 function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {

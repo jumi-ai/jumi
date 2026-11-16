@@ -74,7 +74,14 @@ import {
 import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } from "./issue_recheck.ts";
 import { trustedPushLogins, withIssueAuthorPermission } from "./permissions.ts";
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
-import { applyEffects, decide, type LeftToAuthorInfo, type PrDecisionSnapshot, type Resolved } from "./pr_decision.ts";
+import {
+  applyEffects,
+  decide,
+  holdReasonForSkippedResult,
+  type LeftToAuthorInfo,
+  type PrDecisionSnapshot,
+  type Resolved,
+} from "./pr_decision.ts";
 import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
@@ -97,6 +104,7 @@ import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
+import { MERGE_DEFAULT_STUCK_TEXT } from "./skip_why_texts.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
 import {
@@ -2202,9 +2210,9 @@ export async function implementFollowUp(
             log
           );
           await persistConflictAttempt(mergeResult);
-          await sticky("stuck: cannot resolve conflicts", pr.number);
+          await sticky(MERGE_DEFAULT_STUCK_TEXT, pr.number);
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
-          return { status: "skipped", reason: "stuck: cannot resolve conflicts" };
+          return { status: "skipped", reason: MERGE_DEFAULT_STUCK_TEXT };
         }
 
         throwIfAborted(opts.abortSignal);
@@ -2639,14 +2647,7 @@ export async function implementFollowUp(
     if (followUpResult.status === "no-changes") {
       await resolveHeld("completed");
     } else if (followUpResult.status === "skipped") {
-      const reason =
-        typeof (followUpResult as { reason?: unknown }).reason === "string" &&
-        (followUpResult as { reason: string }).reason.includes("too many follow-up")
-          ? "round cap"
-          : typeof (followUpResult as { reason?: unknown }).reason === "string"
-            ? (followUpResult as { reason: string }).reason
-            : "follow-up skipped";
-      await resolveHeld("skipped", reason);
+      await resolveHeld("skipped", holdReasonForSkippedResult((followUpResult as { reason?: unknown }).reason));
     } else if (followUpResult.status === "cancelled") {
       await resolveHeld("skipped", "job cancelled");
     }

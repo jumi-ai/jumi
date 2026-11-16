@@ -2,6 +2,7 @@ import { hasLabel } from "./assignee.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isListedLogin } from "./permissions.ts";
 import type { PullCommit } from "./ports.ts";
+import { parseSkipWhy } from "./pr_decision.ts";
 import type { SettingsSnapshot } from "./repo_settings.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -40,8 +41,7 @@ export function leaveConflictsAuthorReason(authorLogin: string | undefined | nul
 }
 
 export function isIgnoreConflictsSkipReason(reason: string | null | undefined): boolean {
-  if (!reason) return false;
-  return reason.trim().toLowerCase().startsWith("conflicted, left to author");
+  return parseSkipWhy(reason).why === "left-to-author";
 }
 
 function equalsLower(left: string | undefined, right: string): boolean {

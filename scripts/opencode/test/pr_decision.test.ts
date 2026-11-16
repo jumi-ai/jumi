@@ -632,6 +632,10 @@ describe("pr_decision table", () => {
       stuck: { stuckReason: "repeated-action" },
       "same-finding": { display: "src/a.ts:10 🔴 boom" },
       "default-branch": {},
+      "merge-default-stuck": {},
+      "dependency-cycle": {},
+      "blocked-by-rejected": {},
+      "stuck-other": {},
     };
     for (const [why, params] of Object.entries(samples)) {
       const entry = SKIP_WHY_TABLE[why as SkipWhy];
