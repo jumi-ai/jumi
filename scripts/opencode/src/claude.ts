@@ -79,7 +79,7 @@ export const CLAUDE_ENABLE_TOOL_SEARCH = "false";
 
 const CLAUDE_STDERR_MAX_BYTES = 64_000;
 const SCRUB_ENV_PREFIXES = ["GITEA_", "GITHUB_APP_"] as const;
-const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET", "BOARD_PEER_TOKEN"]);
+const SCRUB_ENV_KEYS = new Set(["GITHUB_WEBHOOK_SECRET", "BOARD_PEER_TOKEN", "BOARD_MCP_TOKEN"]);
 const CLAUDE_USAGE_LIMIT_RE =
   /You've hit your (?:session |usage |weekly |opus |sonnet |5[- ]hour )?limit|Claude AI usage limit reached/i;
 

@@ -1440,6 +1440,14 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             forgeUrl: config.giteaUrl,
             peerUrl: config.boardPeerUrl,
             peerToken: config.boardPeerToken,
+            mcpToken: config.boardMcpToken,
+            mcpSecrets: [
+              config.giteaToken,
+              config.webhookSecret,
+              config.githubWebhookSecret,
+              config.boardPeerToken,
+              config.boardMcpToken,
+            ],
             forgeApi: boardForge,
           }),
         });

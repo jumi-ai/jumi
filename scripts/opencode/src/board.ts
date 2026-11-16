@@ -6,6 +6,7 @@ import {
   handleDeviceLoginStart,
   handleDeviceLoginStatus,
 } from "./board_device_login.ts";
+import { BOARD_MCP_PATH, handleBoardMcp } from "./board_mcp.ts";
 import {
   disabledKickWhy,
   isFailingVerdictRow,
@@ -882,6 +883,17 @@ export interface BoardHandlerDeps {
   peerUrl?: string;
   /** Bearer for the peer hop. Unset means that forge is unavailable. Never invent one. */
   peerToken?: string;
+  /**
+   * Bearer for the read-only MCP endpoint (`POST /mcp`). Unset or empty
+   * disables it: `/mcp` answers 404. Never the peer token; never an edge
+   * identity header.
+   */
+  mcpToken?: string;
+  /**
+   * Router secrets redacted from every MCP string (bot token, webhook
+   * secrets, peer/MCP tokens). The bearer itself is never logged or returned.
+   */
+  mcpSecrets?: Array<string | undefined>;
   fetchFn?: BoardFetchFn;
   peerTimeoutMs?: number;
   /**
@@ -1683,6 +1695,22 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = normalizePathname(url.pathname);
+    // Read-only MCP for operator agents. Bearer only, same on both forges:
+    // unset or empty token disables the endpoint (404, nothing else changes);
+    // missing or wrong bearer is 401. Never reads edge identity headers, and
+    // the peer token never authenticates here. Other methods are 405.
+    if (pathname === BOARD_MCP_PATH) {
+      if (request.method !== "POST") return json(405, { error: "method not allowed" });
+      const mcpToken = (deps.mcpToken ?? "").trim();
+      if (mcpToken === "") return json(404, { error: "not found" });
+      if (!hasBearerAuth(request, mcpToken)) return json(401, { error: "missing bearer" });
+      return handleBoardMcp(request, {
+        store: deps.store,
+        forge: localForge,
+        secrets: deps.mcpSecrets ?? [],
+        logger,
+      });
+    }
     // Same-commit requeue kick plus sit-clear kick, both forge-gated.
     // Homelab requires the edge identity (and logs the username attached after
     // that check); the peer trusts only the bearer and never reads forwarded
