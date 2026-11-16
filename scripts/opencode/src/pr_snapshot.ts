@@ -12,14 +12,18 @@ import {
   triggerBodyFromItems,
   unresolvedJumiInlines,
 } from "./followup.ts";
+import { isEligibleWorkerPR } from "./gitea_issues.ts";
 import {
   hasIgnoreConflictsLabel,
+  hasJumiCommitOnPull,
   ignoreConflictsAuthorsFromSnapshot,
   ignoreConflictsReason,
+  isIgnoreConflictsAuthor,
   isLeftToAuthor,
   leaveConflictsAuthorReason,
 } from "./ignore_conflicts.ts";
 import type { Comment, Pull } from "./ports.ts";
+import type { CloserSnapshot, PrDecisionSnapshot } from "./pr_decision.ts";
 import {
   type CiGateWait,
   effectiveBlockingQuestionAuthors,
@@ -442,4 +446,346 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
     getSameFinding,
     getStuck,
   };
+}
+
+export interface CloserSnapshotOpts {
+  owner: string;
+  repo: string;
+  pr: Pull;
+  issueNumber: number;
+  botUsername: string;
+  home: string;
+  maxFollowupRounds?: number;
+  maxConflictRounds?: number;
+  followupIgnoreLogins?: readonly string[];
+  trustedSenderLogins?: readonly string[];
+  blockingQuestionAuthors?: readonly string[];
+  skipLatches?: SkipLatchStore;
+  ignoreConflictsLabel?: string;
+  ignoreConflictsAuthors?: readonly string[];
+  defaultBranch?: string;
+  settings?: SettingsSnapshot;
+}
+
+export interface CloserSnapshotDeps {
+  // biome-ignore lint/suspicious/noExplicitAny: forge fakes vary per test.
+  api: any;
+  log?: (message: string) => void;
+}
+
+export interface CloserSnapshotBuild {
+  snapshot: CloserSnapshot;
+  ignoreAuthorsUnreadable: boolean;
+  settings: SettingsSnapshot;
+}
+
+/**
+ * Single-load closer snapshot for `classifyCloserWork`. One `.jumi.yml`
+ * read (via `opts.settings` when provided, otherwise one
+ * `loadSettingsSnapshot`); every lane derives from that load. Lane order is
+ * follow-up → CI → conflict so an earlier lane's throw still aborts before
+ * later forge reads. The CI lane fail-closes to "no work" and the conflict
+ * latch is read only after the eligibility and `mergeable` gates, matching
+ * the three wrappers' conditional fetches.
+ */
+export async function buildCloserSnapshot(
+  opts: CloserSnapshotOpts,
+  deps: CloserSnapshotDeps
+): Promise<CloserSnapshotBuild> {
+  const api = deps.api;
+  const log = deps.log;
+  const deploymentMaxFollowup = opts.maxFollowupRounds ?? 3;
+  const deploymentMaxConflict = opts.maxConflictRounds ?? 3;
+
+  let settings = opts.settings;
+  if (!settings) {
+    let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
+    if (!settingsBranch && typeof api?.getRepo === "function") {
+      try {
+        const repoInfo = await api.getRepo(opts.owner, opts.repo);
+        settingsBranch = repoInfo?.default_branch?.trim() ? repoInfo.default_branch.trim() : "";
+      } catch {
+        settingsBranch = "";
+      }
+    }
+    if (!settingsBranch) {
+      settings = { state: "no-branch" };
+    } else {
+      const { loadSettingsSnapshot } = await import("./repo_settings.ts");
+      settings = await loadSettingsSnapshot(api, opts.owner, opts.repo, settingsBranch);
+    }
+  }
+  const failOpen = failOpenLoadFromSnapshot(settings);
+  const maxFollowupRounds = effectiveFollowupRounds(deploymentMaxFollowup, failOpen);
+  const maxConflictRounds = effectiveConflictRounds(deploymentMaxConflict, failOpen);
+  const blockingAuthors = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, failOpen);
+  const followupIgnore = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, failOpen);
+  const trusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpen);
+  const ignoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, failOpen);
+  const followupOnSuggestions = isSuggestionFollowupEnabled(failOpen);
+  const ciGateWait = effectiveCiGateWait(failOpen);
+  const ignoreAuthors = opts.ignoreConflictsAuthors ?? ignoreConflictsAuthorsFromSnapshot(settings);
+  const ignoreAuthorsUnreadable = ignoreAuthors === undefined;
+  if (ignoreAuthorsUnreadable) {
+    const snapshot: CloserSnapshot = {
+      followupRound: 0,
+      maxFollowupRounds,
+      hasUnhandledFeedback: false,
+      maintainerOnlyPending: true,
+      ciPending: true,
+      ciUnhandledCount: 0,
+      prEligible: false,
+      mergeable: undefined,
+      hasJumiCommit: undefined,
+      labeledOrAuthorListed: false,
+      conflictRound: 0,
+      maxConflictRounds,
+      conflictSameHeadBase: true,
+    };
+    return { snapshot, ignoreAuthorsUnreadable, settings };
+  }
+
+  const { readFollowUpLatch } = await import("./followup.ts");
+  const { skipLatchesFor } = await import("./skip_latches.ts");
+  const latchStore = skipLatchesFor(opts);
+  const followupLatch = await readFollowUpLatch(latchStore, {
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+  });
+
+  let hasUnhandledFeedback = false;
+  let maintainerOnlyPending = false;
+  if (followupLatch.round < maxFollowupRounds) {
+    const { collectFollowUpItems, hasUnhandledFollowUpItems, onlyMaintainerQuestionsPending } = await import(
+      "./followup.ts"
+    );
+    const items = await collectFollowUpItems(
+      api,
+      opts.owner,
+      opts.repo,
+      opts.pr.number,
+      opts.botUsername,
+      opts.pr.head.sha,
+      followupIgnore,
+      {
+        prAuthor: opts.pr.user?.login,
+        ...(blockingAuthors ? { blockingQuestionAuthors: blockingAuthors } : {}),
+        ...(followupOnSuggestions ? {} : { followupOnSuggestions: false as const }),
+      },
+      trusted
+    );
+    hasUnhandledFeedback = hasUnhandledFollowUpItems(items, followupLatch);
+    if (hasUnhandledFeedback) {
+      maintainerOnlyPending = onlyMaintainerQuestionsPending(items, followupLatch, opts.botUsername);
+    }
+  }
+  const followUp = followupLatch.round < maxFollowupRounds && hasUnhandledFeedback && !maintainerOnlyPending;
+
+  let ciPending = false;
+  let ciUnhandledCount = 0;
+  try {
+    let requiredContexts: readonly string[] | undefined;
+    if (ciGateWait !== "all" && ciGateWait !== "none") {
+      requiredContexts = await resolveRequiredCiContextsImpl(api, {
+        owner: opts.owner,
+        repo: opts.repo,
+        issueNumber: opts.issueNumber,
+        baseBranch: opts.pr.base.ref,
+        log,
+      });
+    }
+    const inspection = await inspectCi({
+      api,
+      owner: opts.owner,
+      repo: opts.repo,
+      sha: opts.pr.head.sha,
+      home: opts.home,
+      issueNumber: opts.issueNumber,
+      skipLatches: opts.skipLatches,
+      log,
+      ...(requiredContexts ? { requiredContexts } : {}),
+      ...(ciGateWait !== "required" ? { wait: ciGateWait } : {}),
+    });
+    ciPending = inspection.pending;
+    ciUnhandledCount = inspection.unhandled.length;
+  } catch {
+    ciPending = false;
+    ciUnhandledCount = 0;
+  }
+  const ci = !ciPending && ciUnhandledCount > 0;
+
+  const prEligible = isEligibleWorkerPR(opts.pr, opts.owner, opts.repo);
+  const mergeable = opts.pr.mergeable;
+  const labeledOrAuthorListed =
+    hasIgnoreConflictsLabel(opts.pr, ignoreLabel) || isIgnoreConflictsAuthor(opts.pr.user?.login, ignoreAuthors);
+  let hasJumiCommit: boolean | undefined;
+  let conflictRound = 0;
+  let conflictSameHeadBase = false;
+  if (prEligible && mergeable === false) {
+    let gated = false;
+    if (!followUp && !ci && labeledOrAuthorListed) {
+      hasJumiCommit = await hasJumiCommitOnPull(api, opts.owner, opts.repo, opts.pr.number, {
+        botUsername: opts.botUsername,
+      });
+      if (hasJumiCommit === false) {
+        gated = true;
+      }
+    }
+    if (!gated) {
+      const conflictLatch = await readConflictLatch(latchStore, {
+        owner: opts.owner,
+        repo: opts.repo,
+        issueNumber: opts.issueNumber,
+      });
+      conflictRound = conflictLatch.round;
+      conflictSameHeadBase = Boolean(
+        conflictLatch.lastHeadSha &&
+          conflictLatch.lastBaseSha &&
+          conflictLatch.lastHeadSha === opts.pr.head.sha &&
+          conflictLatch.lastBaseSha === opts.pr.base.sha
+      );
+    }
+  }
+
+  const snapshot: CloserSnapshot = {
+    followupRound: followupLatch.round,
+    maxFollowupRounds,
+    hasUnhandledFeedback,
+    maintainerOnlyPending,
+    ciPending,
+    ciUnhandledCount,
+    prEligible,
+    mergeable,
+    hasJumiCommit,
+    labeledOrAuthorListed,
+    conflictRound,
+    maxConflictRounds,
+    conflictSameHeadBase,
+  };
+  return { snapshot, ignoreAuthorsUnreadable, settings };
+}
+
+export interface ConflictDecisionOpts {
+  owner: string;
+  repo: string;
+  pr: Pull;
+  job: IssueJob;
+  botUsername: string;
+  home: string;
+  defaultBranch?: string;
+  maxConflictRounds?: number;
+  maxFollowupRounds?: number;
+  ignoreConflictsLabel?: string;
+  skipLatches?: SkipLatchStore;
+  settings?: SettingsSnapshot;
+}
+
+export interface ConflictDecisionDeps {
+  // biome-ignore lint/suspicious/noExplicitAny: forge fakes vary per test.
+  api: any;
+  log?: (message: string) => void;
+}
+
+export interface ConflictDecisionBuild {
+  base: PrDecisionSnapshot;
+  getLeftToAuthor: () => Promise<{
+    leftToAuthor: boolean;
+    leftViaAuthorOnly: boolean;
+    leftReason: string;
+    conflictedLeftToAuthor: boolean;
+  }>;
+  conflictLatch: ConflictState;
+  settings: SettingsSnapshot;
+  maxConflictRounds: number;
+}
+
+/**
+ * Single-load decision snapshot for `implementConflict`. One `.jumi.yml`
+ * read (via `opts.settings` when provided, otherwise one
+ * `loadSettingsSnapshot`); the left-to-author forge read stays behind the
+ * `getLeftToAuthor` thunk so `decide(..., "conflict")` drives it through the
+ * `need` protocol.
+ */
+export async function buildConflictDecisionSnapshot(
+  opts: ConflictDecisionOpts,
+  deps: ConflictDecisionDeps
+): Promise<ConflictDecisionBuild> {
+  const api = deps.api;
+  const log = deps.log;
+  let settings = opts.settings;
+  if (!settings) {
+    const ref = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
+    if (!ref) {
+      settings = { state: "no-branch" };
+    } else {
+      const { loadSettingsSnapshot } = await import("./repo_settings.ts");
+      settings = await loadSettingsSnapshot(api, opts.owner, opts.repo, ref);
+      if (settings.state === "loaded" && settings.load.state === "invalid") {
+        log?.(`conflict settings invalid for ${opts.owner}/${opts.repo}@${ref}: ${settings.load.error}`);
+      }
+      if (settings.state === "threw") {
+        const { errorMessage } = await import("./util/error.ts");
+        log?.(`conflict settings unreadable for ${opts.owner}/${opts.repo}@${ref}: ${errorMessage(settings.error)}`);
+      }
+    }
+  }
+  const failOpen = failOpenLoadFromSnapshot(settings);
+  const maxConflictRounds = effectiveConflictRounds(opts.maxConflictRounds ?? 3, failOpen);
+  const ignoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, failOpen);
+  const ignoreAuthors = ignoreConflictsAuthorsFromSnapshot(settings);
+  const { skipLatchesFor } = await import("./skip_latches.ts");
+  const store = skipLatchesFor({ home: opts.home, skipLatches: opts.skipLatches });
+  const latchKey = { owner: opts.owner, repo: opts.repo, issueNumber: opts.job.issueNumber };
+  const conflictLatch = await readConflictLatch(store, latchKey);
+  const stuckLatch = await readStuckLatch(store, latchKey);
+  const { quotaStuckReasonForText } = await import("./quota.ts");
+  const quotaStuck = isQuotaStuck(stuckLatch);
+  const base: PrDecisionSnapshot = {
+    branchIsDefault: !opts.pr.head.ref || opts.pr.head.ref === opts.job.defaultBranch,
+    handledCommentIds: [],
+    handledReviewIds: [],
+    ciWake: false,
+    ignoreAuthors: ignoreAuthors ?? undefined,
+    mergeable: opts.pr.mergeable,
+    conflictRound: conflictLatch.round,
+    maxConflictRounds,
+    leftToAuthor: undefined,
+    hasFeedback: false,
+    stateRound: 0,
+    maxFollowupRounds: 0,
+    ciPending: false,
+    ciUnhandled: [],
+    stuckFingerprints: stuckLatch.fingerprints,
+    quotaStuck,
+    quotaReason: quotaStuck ? quotaStuckReasonForText(stuckLatch.quota?.reason) : "",
+    owner: opts.owner,
+    repo: opts.repo,
+    prNumber: opts.pr.number,
+  };
+  const getLeftToAuthor = memoize(async () => {
+    const leftToAuthor = await isLeftToAuthor(
+      api,
+      opts.owner,
+      opts.repo,
+      opts.pr,
+      {
+        botUsername: opts.botUsername,
+        ignoreConflictsLabel: ignoreLabel,
+        ignoreConflictsAuthors: ignoreAuthors ?? undefined,
+        prAuthor: opts.pr.user?.login,
+        defaultBranch: opts.defaultBranch,
+      },
+      log
+    );
+    const prForLabel = { labels: opts.pr.labels };
+    const leftViaAuthorOnly =
+      leftToAuthor && !hasIgnoreConflictsLabel(prForLabel, ignoreLabel) && (ignoreAuthors?.length ?? 0) > 0;
+    const leftReason = leftViaAuthorOnly
+      ? leaveConflictsAuthorReason(opts.pr.user?.login)
+      : ignoreConflictsReason(ignoreLabel);
+    const conflictedLeftToAuthor = opts.pr.mergeable === false && leftToAuthor;
+    return { leftToAuthor, leftViaAuthorOnly, leftReason, conflictedLeftToAuthor };
+  });
+  return { base, getLeftToAuthor, conflictLatch, settings, maxConflictRounds };
 }

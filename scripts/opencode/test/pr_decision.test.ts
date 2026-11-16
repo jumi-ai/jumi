@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { decide, type PrDecisionSnapshot, type Resolved, SKIP_WHY_TABLE, type SkipWhy } from "../src/pr_decision.ts";
+import {
+  type CloserSnapshot,
+  CONFLICT_DEFAULT_BRANCH_REASON,
+  classify,
+  decide,
+  type PrDecisionSnapshot,
+  type Resolved,
+  SKIP_WHY_TABLE,
+  type SkipWhy,
+} from "../src/pr_decision.ts";
 import { isSkipLatchReason } from "../src/stuck.ts";
 
 function hash(text: string): string {
@@ -665,5 +674,328 @@ describe("pr_decision table", () => {
       preCapFingerprint: { kind: "action", hash: ACTION_A },
     };
     expect(decide(snapshot)).toMatchObject({ kind: "need", field: "diffHash" });
+  });
+});
+
+describe("pr_decision conflict caller", () => {
+  function conflictBase(): PrDecisionSnapshot {
+    return {
+      ...base(),
+      ignoreAuthors: [],
+      leftToAuthor: left({ leftToAuthor: false, leftReason: "", conflictedLeftToAuthor: false }),
+      mergeable: false,
+      conflictRound: 0,
+      maxConflictRounds: 3,
+      hasFeedback: false,
+      ciPending: false,
+      ciUnhandled: [],
+      stuckFingerprints: [],
+      quotaStuck: false,
+      quotaReason: "",
+    };
+  }
+
+  test("left-to-author skips with reason and forgetClaim only", () => {
+    const decision = decide(
+      {
+        ...conflictBase(),
+        leftToAuthor: left({
+          leftToAuthor: true,
+          leftReason: "conflicted, left to author (label `ignore-conflicts`)",
+          conflictedLeftToAuthor: true,
+        }),
+      },
+      "conflict"
+    );
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("left-to-author");
+    expect(decision.reason).toBe("conflicted, left to author (label `ignore-conflicts`)");
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["forgetClaim"]);
+  });
+
+  test("conflict-cap skips stuck with sticky then forgetClaim", () => {
+    const decision = decide({ ...conflictBase(), conflictRound: 3, maxConflictRounds: 3 }, "conflict");
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("conflict-cap");
+    expect(decision.reason).toBe("stuck: cannot resolve conflicts (3/3 conflict rounds)");
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["sticky", "forgetClaim"]);
+  });
+
+  test("quota skips stuck with sticky then forgetClaim", () => {
+    const decision = decide(
+      { ...conflictBase(), quotaStuck: true, quotaReason: "stuck: usage limit exceeded" },
+      "conflict"
+    );
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("quota");
+    expect(decision.reason).toBe("stuck: usage limit exceeded");
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["sticky", "forgetClaim"]);
+  });
+
+  test("repeated-action history skips stuck without a current fingerprint", () => {
+    const decision = decide(
+      {
+        ...conflictBase(),
+        stuckFingerprints: [
+          { kind: "action", hash: ACTION_A },
+          { kind: "action", hash: ACTION_A },
+          { kind: "action", hash: ACTION_A },
+          { kind: "action", hash: ACTION_A },
+        ],
+      },
+      "conflict"
+    );
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("stuck");
+    expect(decision.reason).toBe("stuck: repeated action");
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["sticky", "forgetClaim"]);
+  });
+
+  test("left-to-author wins before conflict-cap", () => {
+    const decision = decide(
+      {
+        ...conflictBase(),
+        conflictRound: 3,
+        maxConflictRounds: 3,
+        leftToAuthor: left({
+          leftToAuthor: true,
+          leftReason: "conflicted, left to author (author `alice`)",
+          conflictedLeftToAuthor: true,
+        }),
+      },
+      "conflict"
+    );
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("left-to-author");
+  });
+
+  test("no resolveHeld in any conflict row", () => {
+    const rows: PrDecisionSnapshot[] = [
+      { ...conflictBase(), branchIsDefault: true },
+      { ...conflictBase(), ignoreAuthors: undefined, leftToAuthor: undefined },
+      {
+        ...conflictBase(),
+        leftToAuthor: left({ leftToAuthor: true, leftReason: "x", conflictedLeftToAuthor: true }),
+      },
+      { ...conflictBase(), conflictRound: 3, maxConflictRounds: 3 },
+      { ...conflictBase(), quotaStuck: true, quotaReason: "stuck: usage limit exceeded" },
+      {
+        ...conflictBase(),
+        stuckFingerprints: [
+          { kind: "error", hash: ERROR_E },
+          { kind: "error", hash: ERROR_E },
+          { kind: "error", hash: ERROR_E },
+        ],
+      },
+    ];
+    for (const snapshot of rows) {
+      const decision = decide(snapshot, "conflict");
+      expect(decision.kind).toBe("skip");
+      if (decision.kind !== "skip") continue;
+      expect(decision.effects.map((effect) => effect.kind)).not.toContain("resolveHeld");
+    }
+  });
+
+  test("conflict never returns same-finding", () => {
+    const decision = decide(
+      {
+        ...conflictBase(),
+        stuckFingerprints: [
+          { kind: "finding", hash: SAME_H },
+          { kind: "finding", hash: SAME_H },
+        ],
+        findingIdentityHash: FIND_F,
+        diffHash: { value: DIFF_D },
+        preCapFingerprint: { kind: "action", hash: ACTION_A },
+      },
+      "conflict"
+    );
+    expect(decision.kind).toBe("run");
+    if (decision.kind === "run") expect(decision.hasFeedback).toBe(false);
+  });
+
+  test("conflict default-branch text refuses the merge", () => {
+    const decision = decide({ ...conflictBase(), branchIsDefault: true }, "conflict");
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("default-branch");
+    expect(decision.reason).toBe(CONFLICT_DEFAULT_BRANCH_REASON);
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["forgetClaim"]);
+  });
+
+  test("conflict settings-unreadable skips with forgetClaim only", () => {
+    const decision = decide({ ...conflictBase(), ignoreAuthors: undefined, leftToAuthor: undefined }, "conflict");
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.why).toBe("settings-unreadable");
+    expect(decision.effects.map((effect) => effect.kind)).toEqual(["forgetClaim"]);
+  });
+
+  test("conflict needs leftToAuthor when unresolved", () => {
+    expect(decide({ ...conflictBase(), leftToAuthor: undefined }, "conflict")).toMatchObject({
+      kind: "need",
+      field: "leftToAuthor",
+    });
+  });
+});
+
+describe("classify closer snapshot", () => {
+  function closerBase(): CloserSnapshot {
+    return {
+      followupRound: 0,
+      maxFollowupRounds: 3,
+      hasUnhandledFeedback: false,
+      maintainerOnlyPending: false,
+      ciPending: true,
+      ciUnhandledCount: 0,
+      prEligible: false,
+      mergeable: undefined,
+      hasJumiCommit: undefined,
+      labeledOrAuthorListed: false,
+      conflictRound: 0,
+      maxConflictRounds: 3,
+      conflictSameHeadBase: true,
+    };
+  }
+
+  test("follow-up true when round allows with unhandled non-maintainer items", () => {
+    expect(classify({ ...closerBase(), hasUnhandledFeedback: true }).followUp).toBe(true);
+  });
+
+  test("follow-up false at round cap", () => {
+    expect(
+      classify({ ...closerBase(), followupRound: 3, maxFollowupRounds: 3, hasUnhandledFeedback: true }).followUp
+    ).toBe(false);
+  });
+
+  test("follow-up false with no unhandled items", () => {
+    expect(classify({ ...closerBase(), hasUnhandledFeedback: false }).followUp).toBe(false);
+  });
+
+  test("follow-up false when only maintainer questions pending", () => {
+    expect(classify({ ...closerBase(), hasUnhandledFeedback: true, maintainerOnlyPending: true }).followUp).toBe(false);
+  });
+
+  test("ci true when not pending with unhandled checks", () => {
+    expect(classify({ ...closerBase(), ciPending: false, ciUnhandledCount: 2 }).ci).toBe(true);
+  });
+
+  test("ci false when pending", () => {
+    expect(classify({ ...closerBase(), ciPending: true, ciUnhandledCount: 2 }).ci).toBe(false);
+  });
+
+  test("ci false with no unhandled checks", () => {
+    expect(classify({ ...closerBase(), ciPending: false, ciUnhandledCount: 0 }).ci).toBe(false);
+  });
+
+  test("conflict true for eligible mergeable-false PR below cap on new head", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: false,
+        conflictRound: 1,
+        maxConflictRounds: 3,
+        conflictSameHeadBase: false,
+      }).conflict
+    ).toBe(true);
+  });
+
+  test("conflict false when ineligible", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: false,
+        mergeable: false,
+        conflictRound: 0,
+        conflictSameHeadBase: false,
+      }).conflict
+    ).toBe(false);
+  });
+
+  test("conflict false when mergeable is not false", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: true,
+        conflictRound: 0,
+        conflictSameHeadBase: false,
+      }).conflict
+    ).toBe(false);
+  });
+
+  test("conflict false when untouched by jumi with label or author", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: false,
+        hasJumiCommit: false,
+        labeledOrAuthorListed: true,
+        conflictRound: 0,
+        conflictSameHeadBase: false,
+      }).conflict
+    ).toBe(false);
+  });
+
+  test("conflict false at round cap", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: false,
+        conflictRound: 3,
+        maxConflictRounds: 3,
+        conflictSameHeadBase: false,
+      }).conflict
+    ).toBe(false);
+  });
+
+  test("conflict false on already-attempted head and base", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: false,
+        conflictRound: 0,
+        conflictSameHeadBase: true,
+      }).conflict
+    ).toBe(false);
+  });
+
+  test("follow-up true and conflict true resolves to follow-up", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        hasUnhandledFeedback: true,
+        ciPending: true,
+        prEligible: true,
+        mergeable: false,
+        conflictRound: 0,
+        conflictSameHeadBase: false,
+      }).mode
+    ).toBe("follow-up");
+  });
+
+  test("conflict only resolves to conflict", () => {
+    expect(
+      classify({
+        ...closerBase(),
+        prEligible: true,
+        mergeable: false,
+        conflictRound: 0,
+        conflictSameHeadBase: false,
+      }).mode
+    ).toBe("conflict");
+  });
+
+  test("nothing to do resolves to undefined", () => {
+    expect(classify(closerBase()).mode).toBeUndefined();
   });
 });

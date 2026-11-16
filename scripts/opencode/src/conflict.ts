@@ -45,7 +45,6 @@ import {
   tipTracksAttachments,
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
-import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import {
@@ -56,15 +55,7 @@ import {
   injectStoredHandoff,
   saveWorktreeHandoff,
 } from "./handoff.ts";
-import {
-  hasIgnoreConflictsLabel,
-  IGNORE_CONFLICTS_SETTINGS_UNREADABLE,
-  ignoreConflictsReason,
-  isIgnoreConflictsAuthor,
-  isLeftToAuthor,
-  leaveConflictsAuthorReason,
-  loadIgnoreConflictsAuthors,
-} from "./ignore_conflicts.ts";
+import { hasIgnoreConflictsLabel, isIgnoreConflictsAuthor } from "./ignore_conflicts.ts";
 import {
   buildTaskMarkdown,
   confirmProvenancePublication,
@@ -84,7 +75,7 @@ import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
-import { applyRepoChain, type ConflictRegenerateEntry, loadRepoFollowupPolicy } from "./repo_settings.ts";
+import { applyRepoChain, type ConflictRegenerateEntry } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
@@ -92,15 +83,7 @@ import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from ".
 import { type SkipLatchKey, type SkipLatchStore, skipLatchesFor, skipLatchStoreFromPath } from "./skip_latches.ts";
 import { stickyFailureDetail } from "./sticky_failure.ts";
 import { buildActiveWorkerEngine } from "./sticky_worker.ts";
-import {
-  appendStuckLatchFingerprint,
-  evaluateStuck,
-  fingerprintError,
-  isQuotaStuck,
-  markQuotaStuckLatch,
-  readStuckLatch,
-  stuckComment,
-} from "./stuck.ts";
+import { appendStuckLatchFingerprint, fingerprintError, markQuotaStuckLatch } from "./stuck.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { pathExists } from "./util/fs.ts";
@@ -286,56 +269,53 @@ export async function needsConflict(opts: {
   /** Forge file read for the settings file. Absent keeps today's behavior. */
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
 }): Promise<boolean> {
-  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
+  const { effectiveConflictRounds, effectiveIgnoreConflictsLabel, loadRepoSettings } = await import(
+    "./repo_settings.ts"
+  );
+  let load: import("./repo_settings.ts").RepoSettingsLoad = { state: "missing" };
   if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
-    const policy = await resolveRepoPolicy(
-      {
-        api: { getRepoFile: opts.getRepoFile },
-        owner: opts.owner,
-        repo: opts.repo,
-        ref: opts.defaultBranch,
-      },
-      fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
-      { onUnreadable: "fallback" }
-    ).catch(() => undefined);
-    if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
+    try {
+      load = await loadRepoSettings({ getRepoFile: opts.getRepoFile }, opts.owner, opts.repo, opts.defaultBranch);
+    } catch {
+      load = { state: "missing" };
+    }
   }
-  if (!isEligibleWorkerPR(opts.pr, opts.owner, opts.repo)) return false;
+  const effectiveIgnoreLabel = effectiveIgnoreConflictsLabel(opts.ignoreConflictsLabel, load);
+  const effectiveMax = effectiveConflictRounds(opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS, load);
+  const prEligible = isEligibleWorkerPR(opts.pr, opts.owner, opts.repo);
+  if (!prEligible) return false;
   if (opts.pr.mergeable !== false) return false;
-  if (opts.hasJumiCommit === false) {
-    if (hasIgnoreConflictsLabel(opts.pr, effectiveIgnoreLabel)) return false;
-    if (isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors)) return false;
-  }
+  const labeledOrAuthorListed =
+    hasIgnoreConflictsLabel(opts.pr, effectiveIgnoreLabel) ||
+    isIgnoreConflictsAuthor(opts.pr.user?.login, opts.ignoreConflictsAuthors);
+  if (opts.hasJumiCommit === false && labeledOrAuthorListed) return false;
   const state = await readConflictLatch(skipLatchesFor(opts), {
     owner: opts.owner,
     repo: opts.repo,
     issueNumber: opts.issueNumber,
   });
-  let effectiveMax = opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS;
-  if (opts.defaultBranch && typeof opts.getRepoFile === "function") {
-    const policy = await loadRepoFollowupPolicy(
-      { getRepoFile: opts.getRepoFile },
-      opts.owner,
-      opts.repo,
-      opts.defaultBranch,
-      {
-        maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-        maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-      },
-      undefined
-    );
-    effectiveMax = policy.maxConflictRounds;
-  }
-  if (state.round >= effectiveMax) return false;
-  if (
+  const sameHeadBase = Boolean(
     state.lastHeadSha &&
-    state.lastBaseSha &&
-    state.lastHeadSha === opts.pr.head.sha &&
-    state.lastBaseSha === opts.pr.base.sha
-  ) {
-    return false;
-  }
-  return true;
+      state.lastBaseSha &&
+      state.lastHeadSha === opts.pr.head.sha &&
+      state.lastBaseSha === opts.pr.base.sha
+  );
+  const { classify } = await import("./pr_decision.ts");
+  return classify({
+    followupRound: 0,
+    maxFollowupRounds: 0,
+    hasUnhandledFeedback: false,
+    maintainerOnlyPending: true,
+    ciPending: true,
+    ciUnhandledCount: 0,
+    prEligible,
+    mergeable: opts.pr.mergeable,
+    hasJumiCommit: opts.hasJumiCommit,
+    labeledOrAuthorListed,
+    conflictRound: state.round,
+    maxConflictRounds: effectiveMax,
+    conflictSameHeadBase: sameHeadBase,
+  }).conflict;
 }
 
 function splitLines(text: string): string[] {
@@ -952,48 +932,9 @@ export function shouldResetConflictRound(result: MergeDefaultResult): boolean {
   return result.status === "merged";
 }
 
-export function conflictCapReason(round: number, max: number): string {
-  return `stuck: cannot resolve conflicts (${round}/${max} conflict rounds)`;
-}
-
-export function conflictCapSticky(round: number, max: number): string {
-  return `${conflictCapReason(round, max)} — run a stuck kick to retry`;
-}
-
 export async function implementConflict(opts: ImplementOptions): Promise<ConflictResult> {
   const log = opts.logger ?? logDefault;
-  const policy = await loadRepoFollowupPolicy(
-    opts.api,
-    opts.job.owner,
-    opts.job.repo,
-    opts.job.defaultBranch,
-    {
-      // Follow-up cap unused here; passed through for a single policy load.
-      maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-      maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-    },
-    log
-  );
-  const maxConflictRounds = policy.maxConflictRounds;
   const timeoutMs = opts.timeoutMs ?? CONFLICT_TIMEOUT_MS;
-  // Effective ignore-conflicts label from the same default-branch file.
-  // Missing, invalid, or unreadable falls back to the deployment value.
-  // `opts` already carries the worker's effective value; re-resolving here is
-  // idempotent and keeps direct callers repo-aware.
-  let effectiveIgnoreLabel = opts.ignoreConflictsLabel;
-  try {
-    const branch = opts.job.defaultBranch?.trim() ? opts.job.defaultBranch.trim() : "";
-    if (branch) {
-      const policy = await resolveRepoPolicy(
-        { api: opts.api, owner: opts.job.owner, repo: opts.job.repo, ref: branch },
-        fallbackPolicyDeployment({ ignoreConflictsLabel: opts.ignoreConflictsLabel }),
-        { onUnreadable: "fallback" }
-      ).catch(() => undefined);
-      if (policy !== undefined) effectiveIgnoreLabel = policy.ignoreConflictsLabel;
-    }
-  } catch {
-    // Fail-open to the deployment value.
-  }
   const claimed = await beginClaimedWorktree({
     ...opts,
     fallbackEngine: registeredEngine,
@@ -1041,58 +982,61 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
 
   const branch = pr.head.ref;
   claim.branch = branch;
-  if (!branch || branch === opts.job.defaultBranch) {
-    await forgetClaim();
-    return { status: "skipped", reason: "refusing to merge on the default branch" };
-  }
-
-  const ignoreAuthors = await loadIgnoreConflictsAuthors(opts.api, owner, repo, opts.job.defaultBranch, log);
-  if (ignoreAuthors === undefined) {
-    await forgetClaim();
-    return { status: "skipped", reason: IGNORE_CONFLICTS_SETTINGS_UNREADABLE };
-  }
-  const leftLabeled = hasIgnoreConflictsLabel(pr, effectiveIgnoreLabel);
-  if (
-    await isLeftToAuthor(
-      opts.api,
+  const { buildConflictDecisionSnapshot } = await import("./pr_snapshot.ts");
+  const { applyEffects, decide } = await import("./pr_decision.ts");
+  const built = await buildConflictDecisionSnapshot(
+    {
       owner,
       repo,
       pr,
-      {
-        botUsername: opts.botUsername,
-        ignoreConflictsLabel: effectiveIgnoreLabel,
-        ignoreConflictsAuthors: ignoreAuthors,
-        prAuthor: pr.user?.login,
-        defaultBranch: opts.job.defaultBranch,
-      },
-      log
-    )
-  ) {
-    await forgetClaim();
-    const reason = !leftLabeled
-      ? leaveConflictsAuthorReason(pr.user?.login)
-      : ignoreConflictsReason(effectiveIgnoreLabel);
-    return { status: "skipped", reason };
+      job: opts.job,
+      botUsername: opts.botUsername,
+      home: opts.home,
+      ...(opts.job.defaultBranch ? { defaultBranch: opts.job.defaultBranch } : {}),
+      ...(opts.maxConflictRounds !== undefined ? { maxConflictRounds: opts.maxConflictRounds } : {}),
+      ...(opts.maxFollowupRounds !== undefined ? { maxFollowupRounds: opts.maxFollowupRounds } : {}),
+      ...(opts.ignoreConflictsLabel !== undefined ? { ignoreConflictsLabel: opts.ignoreConflictsLabel } : {}),
+      skipLatches: latches,
+    },
+    { api: opts.api, log }
+  );
+  let leftResolved:
+    | { value: { leftToAuthor: boolean; leftReason: string; conflictedLeftToAuthor: boolean } }
+    | undefined;
+  for (;;) {
+    const input = leftResolved ? { ...built.base, leftToAuthor: leftResolved } : built.base;
+    const decision = decide(input, "conflict");
+    if (decision.kind === "need") {
+      const resolved = await built.getLeftToAuthor();
+      leftResolved = {
+        value: {
+          leftToAuthor: resolved.leftToAuthor,
+          leftReason: resolved.leftReason,
+          conflictedLeftToAuthor: resolved.conflictedLeftToAuthor,
+        },
+      };
+      continue;
+    }
+    if (decision.kind === "skip") {
+      await applyEffects(decision.effects, {
+        log,
+        sticky: (text: string) => sticky(text, pr.number),
+        recordCiHandled: async () => {
+          throw new Error("conflict decision must not record CI handled");
+        },
+        resolveHeld: async () => {
+          throw new Error("conflict decision must not resolve held");
+        },
+        forgetClaim,
+      });
+      if (decision.why === "conflict-cap" || decision.why === "quota" || decision.why === "stuck") {
+        return { status: "stuck" };
+      }
+      return { status: "skipped", reason: decision.reason };
+    }
+    break;
   }
-
-  const state = await readConflictLatch(latches, latchKey);
-  if (state.round >= maxConflictRounds) {
-    await sticky(conflictCapSticky(state.round, maxConflictRounds), pr.number);
-    await forgetClaim();
-    return { status: "stuck" };
-  }
-  const stuckState = await readStuckLatch(latches, latchKey);
-  if (isQuotaStuck(stuckState)) {
-    await sticky(quotaStuckReasonForText(stuckState.quota?.reason), pr.number);
-    await forgetClaim();
-    return { status: "stuck" };
-  }
-  const stuckReason = evaluateStuck(stuckState.fingerprints);
-  if (stuckReason) {
-    await sticky(stuckComment(stuckReason), pr.number);
-    await forgetClaim();
-    return { status: "stuck" };
-  }
+  const state = built.conflictLatch;
 
   const loop = openClaimedLoop(claimed, opts);
 
