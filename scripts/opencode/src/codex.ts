@@ -113,7 +113,6 @@ function codexConfigArgs(
   searxng?: { baseUrl: string; forgeHost: string },
   isReview = false
 ): string[] {
-  void isReview;
   return [
     "--json",
     "--color",
@@ -125,6 +124,13 @@ function codexConfigArgs(
     "--sandbox",
     CODEX_SANDBOX,
     "--skip-git-repo-check",
+    // 0.169.0 keeps project config, hooks, and MCP servers disabled in
+    // untrusted directories even under `--sandbox workspace-write`: `--trust`
+    // explicitly saves project trust so the checkout's `.codex` the probe and
+    // production rely on keeps loading. Reviews stay excluded: the review
+    // home marks the workdir untrusted precisely so the head's project files
+    // never load.
+    ...(isReview ? [] : ["--trust"]),
     // Reviews and workers both bypass hook trust: the review hook is a fresh
     // per-spawn file in a review-only CODEX_HOME, so its hash is never
     // pre-trusted and non-interactive `codex exec` would silently skip it
@@ -141,9 +147,10 @@ function codexConfigArgs(
  * Flags for `codex exec resume <id>`. `--color` is declared on the `exec`
  * command without `global = true`, so it must appear before the `resume`
  * subcommand — after it the real binary rejects it as an unexpected
- * argument. `--json`, `--skip-git-repo-check`, and `-c` are `global = true`
+ * argument. `--json`, `--skip-git-repo-check`, `--trust`, and `-c` are
+ * `global = true`
  * and therefore valid on either side (both workers and reviews pass
- * `--dangerously-bypass-hook-trust` there; the review home marks the workdir
+ * `--dangerously-bypass-hook-trust` there; only non-reviews pass `--trust`: the review home marks the workdir
  * untrusted so the head's project hooks never load, and the bypass only
  * trusts our fresh per-spawn user-layer hook that would otherwise be skipped
  * silently); the globals stay before
@@ -158,12 +165,16 @@ function codexConfigArgs(
  * experimental context management, undoing what turn 1 pinned.
  */
 function codexResumePreArgs(model: string, isReview = false): string[] {
-  void isReview;
   return [
     "--json",
     "--color",
     "never",
     "--skip-git-repo-check",
+    // Same trust rule as the fresh spawn: `--trust` is `global = true` on
+    // `exec`, so it is valid before `resume` (and listed by both
+    // `exec --help` and `exec resume --help`). Reviews stay excluded so the
+    // head's project files never load.
+    ...(isReview ? [] : ["--trust"]),
     // Same fail-closed rule as the fresh spawn: the review hook hash is fresh
     // every spawn, so without the bypass `exec resume` silently skips it.
     "--dangerously-bypass-hook-trust",
