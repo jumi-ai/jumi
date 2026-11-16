@@ -160,6 +160,8 @@ describe("verdict view equivalence (seeded property)", () => {
         fail("description", textView.description, recordView.description);
       if (textView.suggestionCount !== recordView.suggestionCount)
         fail("suggestionCount", textView.suggestionCount, recordView.suggestionCount);
+      if (textView.maintainerQuestionCount !== recordView.maintainerQuestionCount)
+        fail("maintainerQuestionCount", textView.maintainerQuestionCount, recordView.maintainerQuestionCount);
       if (textView.isMaintainerOnly !== recordView.isMaintainerOnly)
         fail("isMaintainerOnly", textView.isMaintainerOnly, recordView.isMaintainerOnly);
       const textBlocking = textView.blockingQuestionCount(prAuthor, blockingAuthors);

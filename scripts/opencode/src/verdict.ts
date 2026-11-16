@@ -797,7 +797,8 @@ export function isBlockingQuestionAuthor(
  * keep going). Findings about the PR description itself are never
  * maintainer-only: the worker writes it with `set_pr_body`.
  */
-const MAINTAINER_MARKER_RE = /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*❓\s*maintainer\s*:/iu;
+const MAINTAINER_MARKER_RE =
+  /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:/iu;
 
 /** Whether a finding first line carries the prescribed `❓ maintainer:` marker. */
 export function isMaintainerQuestionFirstLine(original: string): boolean {
@@ -813,6 +814,22 @@ export function countMaintainerQuestionFindings(text: string, opts?: { singleFil
     if (isMaintainerQuestionFirstLine(block.first)) count++;
   }
   return count;
+}
+
+/** One body line naming how many maintainer questions hold the merge. Never parses as a finding. */
+export function maintainerHoldPendingDescription(count: number): string {
+  return `waiting on maintainer: ${count} question${count === 1 ? "" : "s"}`;
+}
+
+/** Open maintainer `❓` count for a published body (text path for the hold). */
+export function openMaintainerQuestionCount(
+  markdown: string | null | undefined,
+  opts?: { singleFilePath?: string }
+): number {
+  if (!markdown) return 0;
+  const parsed = parseReviewOutput(markdown);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
+  return countMaintainerQuestionFindings(parsed.comment, opts);
 }
 
 /**
@@ -911,12 +928,55 @@ export interface ReviewVerdictView {
   description: string;
   /** Parent-computed published suggestion count, never regex over the model's reason. */
   suggestionCount: number;
+  /** Open `❓ maintainer:` count: text findings or the record's stored count. */
+  maintainerQuestionCount: number;
   isMaintainerOnly: boolean;
   blockingQuestionCount(
     prAuthorLogin: string | undefined | null,
     blockingAuthors: readonly string[] | undefined | null,
     opts?: { singleFilePath?: string }
   ): number;
+}
+
+function recordMaintainerQuestionCount(record: ReviewRecord): number {
+  const stored = (record.counts as { maintainerQuestion?: unknown }).maintainerQuestion;
+  if (typeof stored === "number" && Number.isSafeInteger(stored) && stored >= 0) {
+    return Math.min(stored, record.counts.question);
+  }
+  // Old rows predate the stored count: derive it from the findings so the
+  // record path still agrees with the text parser on stored markdown. The
+  // check mirrors `toMarkdown()` canonicalization: leading generic markers
+  // are stripped first, so a `❓ maintainer:` behind `q:`/`question:` still
+  // counts, while a buried mention or an HTML comment prefix does not.
+  // Embedded check trailers are stripped first, mirroring `parseReviewOutput`.
+  let count = 0;
+  for (const finding of record.findings ?? []) {
+    if (finding.severity !== "question") continue;
+    const raw = [finding.title ?? "", finding.body ?? ""].filter(Boolean).join(" ").trim();
+    if (!raw) continue;
+    let cur = raw
+      .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/gi, " ")
+      .replace(/<!--\s*jumi-review:[^>]*-->/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^(?:\*\*|__)?\s*/, "");
+    let isMaint = false;
+    for (;;) {
+      if (/^❓\s*maintainer\s*:/iu.test(cur)) {
+        isMaint = true;
+        break;
+      }
+      const generic = /^(?:❓\s*(?:q\s*:|question\s*:)|(?:q|question)\s*:|❓)\s*/iu.exec(cur);
+      if (generic && generic[0].length > 0) {
+        cur = cur.slice(generic[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+        if (!cur) break;
+        continue;
+      }
+      break;
+    }
+    if (isMaint) count++;
+  }
+  return Math.min(count, record.counts.question);
 }
 
 function isUsableReviewRecord(record: ReviewRecord | null | undefined): record is ReviewRecord {
@@ -926,16 +986,33 @@ function isUsableReviewRecord(record: ReviewRecord | null | undefined): record i
   if (record.reason !== undefined && typeof record.reason !== "string") return false;
   const counts = record.counts;
   if (!counts || typeof counts !== "object") return false;
-  return (
-    Number.isSafeInteger(counts.bug) &&
-    (counts.bug as number) >= 0 &&
-    Number.isSafeInteger(counts.risk) &&
-    (counts.risk as number) >= 0 &&
-    Number.isSafeInteger(counts.question) &&
-    (counts.question as number) >= 0 &&
-    Number.isSafeInteger(counts.suggestion) &&
-    (counts.suggestion as number) >= 0
-  );
+  if (
+    !(
+      Number.isSafeInteger(counts.bug) &&
+      (counts.bug as number) >= 0 &&
+      Number.isSafeInteger(counts.risk) &&
+      (counts.risk as number) >= 0 &&
+      Number.isSafeInteger(counts.question) &&
+      (counts.question as number) >= 0 &&
+      Number.isSafeInteger(counts.suggestion) &&
+      (counts.suggestion as number) >= 0
+    )
+  ) {
+    return false;
+  }
+  const stored = (counts as { maintainerQuestion?: unknown }).maintainerQuestion;
+  if (stored !== undefined) {
+    if (typeof stored !== "number" || !Number.isSafeInteger(stored) || stored < 0) return false;
+    if ((stored as number) > (counts.question as number)) return false;
+  }
+  if (!Array.isArray((record as { findings?: unknown }).findings)) {
+    // Old rows predate the findings array: still usable, the stored counts
+    // decide. The maintainer count then comes from the stored count alone.
+    const countsOnly = (record as { counts?: unknown }).counts;
+    if (!countsOnly || typeof countsOnly !== "object") return false;
+    return true;
+  }
+  return true;
 }
 
 /**
@@ -978,6 +1055,7 @@ export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictV
       state: parsed.verdict.state,
       description,
       suggestionCount: Math.max(countSuggestionFindings(parsed.comment), trailerSuggestionCount(description)),
+      maintainerQuestionCount: countMaintainerQuestionFindings(parsed.comment),
       isMaintainerOnly: isMaintainerOnlyTrailerText(input.markdown),
       blockingQuestionCount: (prAuthorLogin, blockingAuthors, opts) =>
         blockingOpenQuestionCount(input.markdown, prAuthorLogin, blockingAuthors, opts),
@@ -985,15 +1063,19 @@ export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictV
   }
   const base = descriptionFromRecord(record);
   const suggestionCount = Math.max(record.counts.suggestion, trailerSuggestionCount(base.description));
+  const maintainerQuestionCount = recordMaintainerQuestionCount(record);
+  const isMaintainerOnly =
+    base.state === "success" &&
+    suggestionCount === 0 &&
+    record.counts.question > 0 &&
+    maintainerQuestionCount === record.counts.question;
   return {
     incomplete: false,
     state: base.state,
     description: base.description,
     suggestionCount,
-    // The store has no maintainer severity and `toMarkdown()` never emits the
-    // `❓ maintainer:` marker, so the text parser always finds zero maintainer
-    // questions on stored markdown: always false here, matching the text path.
-    isMaintainerOnly: false,
+    maintainerQuestionCount,
+    isMaintainerOnly,
     blockingQuestionCount: (prAuthorLogin, blockingAuthors, opts) => {
       // Single-file scoping can only be answered from text; no row consumer
       // passes it, but stay on the parser when one does.

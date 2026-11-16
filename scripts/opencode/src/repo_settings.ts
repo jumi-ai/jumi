@@ -305,6 +305,16 @@ export const REPO_SETTINGS_REGISTRY = [
     },
   }),
   optionalSetting({
+    key: "maintainer_questions_hold_merge",
+    field: "maintainerQuestionsHoldMerge",
+    doc: "Hold the merge while open ❓ maintainer: questions remain; false posts success instead of pending.",
+    placement: "late",
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"maintainer_questions_hold_merge" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
+  optionalSetting({
     key: "max_followup_rounds",
     field: "maxFollowupRounds",
     doc: "Cap follow-up rounds per pull request; 0 means no follow-up rounds.",
@@ -1523,6 +1533,19 @@ export function isSuggestionHoldEnabled(load: RepoSettingsLoad, automergeEnabled
   if (load.automerge !== true) return false;
   if (load.suggestionsHoldMerge === false) return false;
   return true;
+}
+
+/**
+ * Whether open `❓ maintainer:` questions hold the merge via a `pending`
+ * `jumi/opencode-review` status. Default on: missing, invalid, unreadable,
+ * and `automerge: false` files all hold — the status gates every PR, not just
+ * auto-merge ones. An explicit `maintainer_questions_hold_merge: false`
+ * opts out and keeps today's `success`.
+ */
+export function isMaintainerQuestionsHoldEnabled(load: RepoSettingsLoad | undefined): boolean {
+  if (!load) return true;
+  if (load.state !== "valid") return true;
+  return load.maintainerQuestionsHoldMerge !== false;
 }
 
 export interface RepoFollowupPolicy {

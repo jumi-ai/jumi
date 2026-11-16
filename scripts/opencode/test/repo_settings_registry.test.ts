@@ -25,6 +25,7 @@ review_exclude:
   - "**/generated/**"
 followup_on_suggestions: false
 suggestions_hold_merge: true
+maintainer_questions_hold_merge: true
 max_followup_rounds: 2
 max_conflict_rounds: 1
 takeover_authors:
@@ -115,6 +116,7 @@ const expectedFullKeys = [
   "automergeMethod",
   "setup",
   "suggestionsHoldMerge",
+  "maintainerQuestionsHoldMerge",
 ];
 
 // One invalid value per key, with the pre-refactor error string.
@@ -129,6 +131,11 @@ const invalidPerKey: Array<[string, string, string]> = [
   ["review_exclude", 'review_exclude:\n  - ""\n', '"review_exclude" must not contain blank entries'],
   ["followup_on_suggestions", 'followup_on_suggestions: "yes"\n', '"followup_on_suggestions" must be a boolean'],
   ["suggestions_hold_merge", "suggestions_hold_merge: 1\n", '"suggestions_hold_merge" must be a boolean'],
+  [
+    "maintainer_questions_hold_merge",
+    "maintainer_questions_hold_merge: 1\n",
+    '"maintainer_questions_hold_merge" must be a boolean',
+  ],
   ["max_followup_rounds", "max_followup_rounds: -1\n", '"max_followup_rounds" must be a non-negative integer'],
   ["max_conflict_rounds", "max_conflict_rounds: 1.5\n", '"max_conflict_rounds" must be a non-negative integer'],
   ["takeover_authors", 'takeover_authors:\n  - ""\n', '"takeover_authors" must not contain blank entries'],
@@ -168,7 +175,7 @@ const invalidPerKey: Array<[string, string, string]> = [
 
 describe("repo_settings registry", () => {
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(29);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(30);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);

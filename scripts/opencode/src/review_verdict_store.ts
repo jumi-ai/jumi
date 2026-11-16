@@ -50,12 +50,21 @@ export interface ReviewRecordFinding {
   body: string;
 }
 
+export interface ReviewRecordCounts {
+  bug: number;
+  risk: number;
+  question: number;
+  suggestion: number;
+  /** Subset of `question` already addressed to the maintainer (`❓ maintainer:`). */
+  maintainerQuestion?: number;
+}
+
 export interface ReviewRecord {
   version: 1;
   state: "success" | "failure" | "incomplete";
   reason?: string;
   findings: ReviewRecordFinding[];
-  counts: { bug: number; risk: number; question: number; suggestion: number };
+  counts: ReviewRecordCounts;
 }
 
 export type ReviewMcpError = { ok: false; error: string };
@@ -122,6 +131,117 @@ export function severityMarker(severity: ReviewMcpSeverity): string {
     case "question":
       return "❓ q";
   }
+}
+
+/** Check trailers embedded in hostile titles/bodies: the text parser strips them before counting. */
+function stripEmbeddedChecks(text: string): string {
+  return text
+    .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/gi, " ")
+    .replace(/<!--\s*jumi-review:[^>]*-->/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Canonical finding body for `toMarkdown()`: a single severity marker, never
+ * a doubled `❓ q: ❓ maintainer:` / `💡 simpler: 💡 simpler:` prefix. The
+ * model already writes its own marker (`❓ maintainer:`, `💡 simpler:`); the
+ * store normalizes any leading markers to one canonical marker so the text
+ * parser matches and an unlocated line never parses as a located finding
+ * (the canonical `word:` keeps a colon inside any would-be path, which the
+ * path validator rejects).
+ */
+function canonicalFindingBodyText(text: string, severity: ReviewMcpSeverity): string {
+  // For questions, strip embedded check/review trailers first, mirroring the
+  // text parser's maintainer count (which runs on stripped comment text):
+  // otherwise the canonical prefix and the record count disagree on hostile
+  // inputs that hide a marker behind a check literal. Other severities keep
+  // the raw text so a check-only body still counts, matching the raw-line
+  // risk/suggestion counters.
+  let cur = severity === "question" ? stripEmbeddedChecks(text) : text.replace(/\s+/g, " ").trim();
+  cur = cur.replace(/^(?:\*\*|__)?\s*/, "");
+  // Strip leading markers but keep the last one as body when stripping would
+  // leave nothing: a finding whose whole text is markers (`🟡 🟡`) still
+  // publishes with a body so the parser counts it, matching the typed input.
+  const stripOne = (re: RegExp): boolean => {
+    const m = re.exec(cur);
+    if (!m || m[0].length === 0) return false;
+    const rest = cur.slice(m[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+    if (!rest) return false;
+    cur = rest;
+    return true;
+  };
+  let isMaintainer = false;
+  if (severity === "question") {
+    // Strip all leading question/maintainer markers, remembering whether a
+    // maintainer marker led the text (tolerating a doubled prefix). A bare
+    // `❓ maintainer:` marker with no body still counts, so an empty
+    // remainder after a maintainer prefix keeps the maintainer flag.
+    for (;;) {
+      const maint = /^(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:\s*/iu.exec(cur);
+      if (maint) {
+        const rest = cur.slice(maint[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+        isMaintainer = true;
+        cur = rest;
+        if (!cur) break;
+        continue;
+      }
+      if (stripOne(/^(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:|❓)\s*/iu)) {
+        // A doubled `❓ q: ❓ maintainer:` still leads with a maintainer
+        // marker after the generic strip: loop to catch it.
+        continue;
+      }
+      break;
+    }
+    const base = isMaintainer ? "❓ maintainer" : "❓ q";
+    return cur ? `${base}: ${cur}` : `${base}:`;
+  }
+  if (severity === "suggestion") {
+    while (stripOne(/^(?:💡\s*(?:simpler\s*:|suggestions?\s*:)?|(?:simpler|suggestions?)\s*:|💡)\s*/iu)) {}
+    return cur ? `💡 simpler: ${cur}` : `💡 simpler:`;
+  }
+  if (severity === "bug") {
+    while (stripOne(/^(?:🔴\s*(?:bug\s*:)?|bug\s*:|🔴)\s*/iu)) {}
+    return cur ? `🔴 bug: ${cur}` : `🔴 bug:`;
+  }
+  while (stripOne(/^(?:🟡\s*(?:risk\s*:)?|risk\s*:|🟡)\s*/iu)) {}
+  return cur ? `🟡 risk: ${cur}` : `🟡 risk:`;
+}
+
+/** Combined title/body text for one stored finding, single-spaced. */
+function findingDisplayText(finding: Pick<ReviewMcpFindingRecord, "title" | "body">): string {
+  return [finding.title, finding.body].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Whether a stored finding is a maintainer-only `❓`: a question whose
+ * combined text leads with the prescribed `❓ maintainer:` marker
+ * (tolerating a doubled `❓ q: ❓ maintainer:` prefix from before the
+ * canonicalization, so old rows still count). A `❓ maintainer:` buried in
+ * the middle of the text does not count, matching the text parser.
+ */
+export function isMaintainerStoreFinding(
+  finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">
+): boolean {
+  if (finding.severity !== "question") return false;
+  const raw = stripEmbeddedChecks(findingDisplayText(finding));
+  if (!raw) return false;
+  // Agreement with the text parser runs on the canonical markdown, not the
+  // raw input: leading generic markers (`q:`, `question:`, `❓ q:`) are
+  // stripped by `toMarkdown()`, so a `❓ maintainer:` buried behind them
+  // still publishes as `❓ maintainer:` and must count here too.
+  return canonicalFindingBodyText(raw, "question").startsWith("❓ maintainer:");
+}
+
+/** Count the maintainer-only `❓` findings among stored findings. */
+export function countMaintainerStoreFindings(
+  findings: ReadonlyArray<Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">>
+): number {
+  let count = 0;
+  for (const finding of findings) {
+    if (isMaintainerStoreFinding(finding)) count++;
+  }
+  return count;
 }
 
 /**
@@ -333,12 +453,18 @@ export class ReviewVerdictStore {
   toMarkdown(): string {
     const lines: string[] = [];
     for (const finding of this.findings.values()) {
-      const text = [finding.title, finding.body].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
-      const marker = severityMarker(finding.severity);
+      const text = findingDisplayText(finding);
+      // Canonical single marker: the model already writes its own marker
+      // (`❓ maintainer:`, `💡 simpler:`); normalizing strips any doubled
+      // prefix so the published body carries one marker the text parser
+      // matches, and an unlocated line never parses as a located finding.
+      const canonical = text
+        ? canonicalFindingBodyText(text, finding.severity)
+        : `${severityMarker(finding.severity)}:`;
       if (finding.path && finding.line != null) {
-        lines.push(`${finding.path}:${finding.line}: ${marker}: ${text}`);
+        lines.push(`${finding.path}:${finding.line}: ${canonical}`);
       } else {
-        lines.push(`${marker}: ${text}`);
+        lines.push(canonical);
       }
     }
     const verdict = this.verdict;
@@ -356,7 +482,7 @@ export class ReviewVerdictStore {
    * what the store knows.
    */
   toRecord(): ReviewRecord {
-    const counts = { bug: 0, risk: 0, question: 0, suggestion: 0 };
+    const counts: ReviewRecordCounts = { bug: 0, risk: 0, question: 0, suggestion: 0 };
     const findings: ReviewRecordFinding[] = [];
     for (const finding of this.findings.values()) {
       counts[finding.severity] += 1;
@@ -369,6 +495,8 @@ export class ReviewVerdictStore {
         body: finding.body,
       });
     }
+    const maintainerQuestion = countMaintainerStoreFindings([...this.findings.values()]);
+    if (maintainerQuestion > 0) counts.maintainerQuestion = maintainerQuestion;
     if (!this.verdict) {
       return { version: 1, state: "incomplete", findings, counts };
     }
