@@ -249,6 +249,27 @@ describe("skip why matrix", () => {
       kickKind: "follow-up",
       sit: "implement-latch",
     },
+    {
+      input: " stuck: foo ",
+      why: undefined,
+      latches: false,
+      kickKind: "follow-up",
+      sit: "implement-latch",
+    },
+    {
+      input: " stuck: incomplete review ",
+      why: undefined,
+      latches: false,
+      kickKind: "follow-up",
+      sit: "implement-latch",
+    },
+    {
+      input: " stuck: conflict resolution failed ",
+      why: undefined,
+      latches: false,
+      kickKind: "conflict",
+      sit: "implement-latch",
+    },
   ];
   test(`has at least 30 rows (has ${rows.length})`, () => {
     expect(rows.length).toBeGreaterThanOrEqual(30);

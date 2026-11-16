@@ -493,14 +493,16 @@ export function parseSkipWhy(reason: string | null | undefined): ParsedSkipWhy {
  * Whether the router owns no sit mapping for this text and the decision
  * table does. `normalizeSitReason` returns `sit` for owned texts (including
  * the round-cap hold alias, which is never a skip reason) and falls through
- * to the router-computed list otherwise.
+ * to the router-computed list otherwise. A trimmed `stuck:` sit without a
+ * `why` (leading-whitespace unknown `stuck:` text, where `latches` stays
+ * false) is still owned, so the parsed sit is not discarded.
  */
 export function sitForOwnedReason(reason: string | null | undefined): {
   owned: boolean;
   sit: RouterSitReason | undefined;
 } {
   const parsed = parseSkipWhy(reason);
-  if (parsed.why !== undefined) return { owned: true, sit: parsed.sit };
+  if (parsed.why !== undefined || parsed.sit !== undefined) return { owned: true, sit: parsed.sit };
   const text = typeof reason === "string" ? reason.trim() : "";
   if (text === ROUND_CAP_HOLD_TEXT) return { owned: true, sit: undefined };
   return { owned: false, sit: undefined };
