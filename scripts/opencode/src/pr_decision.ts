@@ -18,6 +18,10 @@ import {
 
 export { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON };
 
+export type DecideCaller = "follow-up" | "conflict";
+
+export const CONFLICT_DEFAULT_BRANCH_REASON = "refusing to merge on the default branch";
+
 export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
 
 export type SkipWhy =
@@ -505,12 +509,23 @@ export function sitForOwnedReason(reason: string | null | undefined): {
 function buildSkipEffects(
   why: SkipWhy,
   params: SkipParamsMap[SkipWhy],
-  snapshot: PrDecisionSnapshot
+  snapshot: PrDecisionSnapshot,
+  caller: DecideCaller = "follow-up"
 ): { reason: string; effects: Effect[] } {
   const entry = SKIP_WHY_TABLE[why];
-  const reason = (entry.reason as (params: unknown) => string)(params);
+  const reason =
+    caller === "conflict" && why === "default-branch"
+      ? CONFLICT_DEFAULT_BRANCH_REASON
+      : (entry.reason as (params: unknown) => string)(params);
   const stickyText = (entry.sticky as (params: unknown) => string | undefined)(params);
   const effects: Effect[] = [];
+  if (caller === "conflict") {
+    if (stickyText !== undefined) {
+      effects.push({ kind: "sticky", text: stickyText });
+    }
+    effects.push({ kind: "forgetClaim" });
+    return { reason, effects };
+  }
   if (why === "same-finding") {
     const display = (params as SkipParamsMap["same-finding"]).display;
     const message = `same finding repeated${display ? ` (${display})` : ""} on unchanged diff for ${snapshot.owner}/${snapshot.repo}#${snapshot.prNumber}`;
@@ -534,24 +549,28 @@ function buildSkipEffects(
 function skip<Why extends SkipWhy>(
   why: Why,
   params: SkipParamsMap[Why],
-  snapshot: PrDecisionSnapshot
+  snapshot: PrDecisionSnapshot,
+  caller: DecideCaller = "follow-up"
 ): Extract<Decision, { kind: "skip" }> {
-  const { reason, effects } = buildSkipEffects(why, params, snapshot);
+  const { reason, effects } = buildSkipEffects(why, params, snapshot, caller);
   return { kind: "skip", why, params, effects, reason };
 }
 
-export function decide(snapshot: PrDecisionSnapshot): Decision {
+export function decide(snapshot: PrDecisionSnapshot, caller: DecideCaller = "follow-up"): Decision {
+  if (caller === "conflict") {
+    return decideConflict(snapshot);
+  }
   if (snapshot.branchIsDefault) {
-    return skip("default-branch", {}, snapshot);
+    return skip("default-branch", {}, snapshot, caller);
   }
   const triggerHandled =
     (snapshot.triggerCommentId !== undefined && snapshot.handledCommentIds.includes(snapshot.triggerCommentId)) ||
     (snapshot.triggerReviewId !== undefined && snapshot.handledReviewIds.includes(snapshot.triggerReviewId));
   if (triggerHandled && !snapshot.ciWake) {
-    return skip("comment-already-handled", {}, snapshot);
+    return skip("comment-already-handled", {}, snapshot, caller);
   }
   if (snapshot.ignoreAuthors === undefined) {
-    return skip("settings-unreadable", {}, snapshot);
+    return skip("settings-unreadable", {}, snapshot, caller);
   }
   const leftResolved = snapshot.leftToAuthor;
   if (!leftResolved) {
@@ -559,33 +578,33 @@ export function decide(snapshot: PrDecisionSnapshot): Decision {
   }
   const { conflictedLeftToAuthor, leftReason } = leftResolved.value;
   if (snapshot.mergeable === false && !conflictedLeftToAuthor && snapshot.conflictRound >= snapshot.maxConflictRounds) {
-    return skip("conflict-cap", { round: snapshot.conflictRound, max: snapshot.maxConflictRounds }, snapshot);
+    return skip("conflict-cap", { round: snapshot.conflictRound, max: snapshot.maxConflictRounds }, snapshot, caller);
   }
   let hasFeedback = snapshot.hasFeedback;
   if (hasFeedback && snapshot.stateRound >= snapshot.maxFollowupRounds) {
     if (!snapshot.ciWake) {
-      return skip("round-cap", {}, snapshot);
+      return skip("round-cap", {}, snapshot, caller);
     }
     hasFeedback = false;
   }
   if (!hasFeedback) {
     if (snapshot.ciPending) {
-      return skip("ci-pending", {}, snapshot);
+      return skip("ci-pending", {}, snapshot, caller);
     }
     if (!snapshot.ciWake) {
       if (snapshot.mergeable !== false) {
-        return skip("no-unhandled-feedback", {}, snapshot);
+        return skip("no-unhandled-feedback", {}, snapshot, caller);
       }
     } else if (
       snapshot.mergeable !== false &&
       snapshot.ciUnhandled.length > 0 &&
       snapshot.ciUnhandled.every((check) => check.flake)
     ) {
-      return skip("flake", { checks: snapshot.ciUnhandled }, snapshot);
+      return skip("flake", { checks: snapshot.ciUnhandled }, snapshot, caller);
     }
   }
   if (conflictedLeftToAuthor && !hasFeedback && !snapshot.ciWake) {
-    return skip("left-to-author", { leftReason }, snapshot);
+    return skip("left-to-author", { leftReason }, snapshot, caller);
   }
   let currentFingerprint: CurrentFingerprint | undefined;
   if (!hasFeedback) {
@@ -594,11 +613,11 @@ export function decide(snapshot: PrDecisionSnapshot): Decision {
     currentFingerprint = snapshot.preCapFingerprint;
   }
   if (snapshot.quotaStuck) {
-    return skip("quota", { quotaReason: snapshot.quotaReason }, snapshot);
+    return skip("quota", { quotaReason: snapshot.quotaReason }, snapshot, caller);
   }
   const stuckReason = evaluateStuckLocal(snapshot.stuckFingerprints, currentFingerprint);
   if (stuckReason) {
-    return skip("stuck", { stuckReason }, snapshot);
+    return skip("stuck", { stuckReason }, snapshot, caller);
   }
   if (hasFeedback) {
     if (snapshot.findingIdentityHash) {
@@ -619,10 +638,10 @@ export function decide(snapshot: PrDecisionSnapshot): Decision {
       if (sameFindingCurrent) {
         const sameStuck = evaluateStuckLocal(snapshot.stuckFingerprints, sameFindingCurrent);
         if (sameStuck === "same-finding") {
-          return skip("same-finding", { display: snapshot.sameFindingDisplay }, snapshot);
+          return skip("same-finding", { display: snapshot.sameFindingDisplay }, snapshot, caller);
         }
         if (sameStuck) {
-          return skip("stuck", { stuckReason: sameStuck }, snapshot);
+          return skip("stuck", { stuckReason: sameStuck }, snapshot, caller);
         }
       }
       return { kind: "run", hasFeedback, currentFingerprint, sameFindingCurrent };
@@ -630,4 +649,74 @@ export function decide(snapshot: PrDecisionSnapshot): Decision {
     return { kind: "run", hasFeedback, currentFingerprint, sameFindingCurrent: undefined };
   }
   return { kind: "run", hasFeedback, currentFingerprint, sameFindingCurrent: undefined };
+}
+
+function decideConflict(snapshot: PrDecisionSnapshot): Decision {
+  const caller: DecideCaller = "conflict";
+  if (snapshot.branchIsDefault) {
+    return skip("default-branch", {}, snapshot, caller);
+  }
+  if (snapshot.ignoreAuthors === undefined) {
+    return skip("settings-unreadable", {}, snapshot, caller);
+  }
+  const leftResolved = snapshot.leftToAuthor;
+  if (!leftResolved) {
+    return { kind: "need", field: "leftToAuthor" };
+  }
+  if (leftResolved.value.leftToAuthor) {
+    return skip("left-to-author", { leftReason: leftResolved.value.leftReason }, snapshot, caller);
+  }
+  if (snapshot.conflictRound >= snapshot.maxConflictRounds) {
+    return skip("conflict-cap", { round: snapshot.conflictRound, max: snapshot.maxConflictRounds }, snapshot, caller);
+  }
+  if (snapshot.quotaStuck) {
+    return skip("quota", { quotaReason: snapshot.quotaReason }, snapshot, caller);
+  }
+  const stuckReason = evaluateStuckLocal(snapshot.stuckFingerprints, undefined);
+  if (stuckReason) {
+    return skip("stuck", { stuckReason }, snapshot, caller);
+  }
+  return { kind: "run", hasFeedback: false, currentFingerprint: undefined, sameFindingCurrent: undefined };
+}
+
+export interface CloserSnapshot {
+  followupRound: number;
+  maxFollowupRounds: number;
+  hasUnhandledFeedback: boolean;
+  maintainerOnlyPending: boolean;
+  ciPending: boolean;
+  ciUnhandledCount: number;
+  prEligible: boolean;
+  mergeable: boolean | null | undefined;
+  hasJumiCommit: boolean | undefined;
+  labeledOrAuthorListed: boolean;
+  conflictRound: number;
+  maxConflictRounds: number;
+  conflictSameHeadBase: boolean;
+}
+
+export interface CloserClassification {
+  followUp: boolean;
+  ci: boolean;
+  conflict: boolean;
+  mode: "follow-up" | "conflict" | undefined;
+}
+
+export function classify(snapshot: CloserSnapshot): CloserClassification {
+  const followUp =
+    snapshot.followupRound < snapshot.maxFollowupRounds &&
+    snapshot.hasUnhandledFeedback &&
+    !snapshot.maintainerOnlyPending;
+  const ci = !snapshot.ciPending && snapshot.ciUnhandledCount > 0;
+  const conflict =
+    snapshot.prEligible &&
+    snapshot.mergeable === false &&
+    !(snapshot.hasJumiCommit === false && snapshot.labeledOrAuthorListed) &&
+    snapshot.conflictRound < snapshot.maxConflictRounds &&
+    !snapshot.conflictSameHeadBase;
+  let mode: CloserClassification["mode"];
+  if (conflict && !(followUp || ci)) mode = "conflict";
+  else if (followUp || ci || conflict) mode = "follow-up";
+  else mode = undefined;
+  return { followUp, ci, conflict, mode };
 }

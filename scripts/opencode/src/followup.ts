@@ -86,13 +86,15 @@ import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
-import { resolveRepoPolicy } from "./repo_policy.ts";
 import {
   applyRepoChain,
   conventionsFromLoad,
+  effectiveBlockingQuestionAuthors,
   effectiveFollowupIgnoreLogins,
+  effectiveFollowupRounds,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
+  isSuggestionFollowupEnabled,
   loadRepoSettings,
   type SettingsSnapshot,
 } from "./repo_settings.ts";
@@ -934,44 +936,28 @@ export async function needsFollowUp(opts: {
     repo: opts.repo,
     issueNumber: opts.issueNumber,
   });
-  let effectiveMax = opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS;
-  let followupOnSuggestions = true;
-  // Effective blocking authors: deployer plus the repository's
-  // default-branch file. Fail-open to the deployer list. Prefer the
-  // caller-provided default branch so no extra repo lookup is needed.
-  // The settings file is read once; the resolver derives the cap and the
-  // blocking union from that load.
-  let effectiveBlocking = opts.blockingQuestionAuthors;
-  let effectiveIgnore = opts.followupIgnoreLogins;
-  let effectiveTrusted = opts.trustedSenderLogins;
-  try {
-    let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
-    if (!settingsBranch) {
+  let settingsBranch = opts.defaultBranch?.trim() ? opts.defaultBranch.trim() : "";
+  if (!settingsBranch) {
+    try {
       const repoInfo = await opts.api.getRepo(opts.owner, opts.repo);
       settingsBranch = repoInfo.default_branch?.trim() ? repoInfo.default_branch : "";
+    } catch {
+      settingsBranch = "";
     }
-    if (settingsBranch) {
-      const policy = await resolveRepoPolicy(
-        { api: opts.api, owner: opts.owner, repo: opts.repo, ref: settingsBranch },
-        {
-          trustedSenderLogins: opts.trustedSenderLogins,
-          followupIgnoreLogins: opts.followupIgnoreLogins,
-          ignoreConflictsLabel: undefined,
-          blockingQuestionAuthors: opts.blockingQuestionAuthors,
-          maxFollowupRounds: opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS,
-          maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
-        },
-        { onUnreadable: "fallback" }
-      );
-      effectiveMax = policy.maxFollowupRounds;
-      followupOnSuggestions = policy.followupOnSuggestions;
-      effectiveBlocking = policy.blockingQuestionAuthors;
-      effectiveIgnore = policy.followupIgnoreLogins;
-      effectiveTrusted = policy.trustedSenderLogins;
-    }
-  } catch {
-    // Fail-open: deployment caps and the deployer list still decide.
   }
+  let settings: SettingsSnapshot;
+  if (!settingsBranch) {
+    settings = { state: "no-branch" };
+  } else {
+    const { loadSettingsSnapshot } = await import("./repo_settings.ts");
+    settings = await loadSettingsSnapshot(opts.api, opts.owner, opts.repo, settingsBranch);
+  }
+  const failOpen = failOpenLoadFromSnapshot(settings);
+  const effectiveMax = effectiveFollowupRounds(opts.maxFollowupRounds ?? MAX_FOLLOWUP_ROUNDS, failOpen);
+  const followupOnSuggestions = isSuggestionFollowupEnabled(failOpen);
+  const effectiveBlocking = effectiveBlockingQuestionAuthors(opts.blockingQuestionAuthors, failOpen);
+  const effectiveIgnore = effectiveFollowupIgnoreLogins(opts.followupIgnoreLogins, failOpen);
+  const effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, failOpen);
   if (state.round >= effectiveMax) return false;
   const items = await collectFollowUpItems(
     opts.api,
@@ -988,15 +974,28 @@ export async function needsFollowUp(opts: {
     },
     effectiveTrusted
   );
-  if (!hasUnhandledFollowUpItems(items, state)) return false;
+  const hasUnhandled = hasUnhandledFollowUpItems(items, state);
+  if (!hasUnhandled) return false;
   // Maintainer-only ❓ needs a human (forge action or scope decision), not
   // a worker round: filing/closing another issue, labels/assignment, or
   // "ship part 1 now or keep going" cannot be answered from the branch.
   if (onlyMaintainerQuestionsPending(items, state, opts.botUsername)) return false;
-  if (state.lastHeadSha && state.lastHeadSha === opts.pr.head.sha && !hasUnhandledFollowUpItems(items, state)) {
-    return false;
-  }
-  return true;
+  const { classify } = await import("./pr_decision.ts");
+  return classify({
+    followupRound: state.round,
+    maxFollowupRounds: effectiveMax,
+    hasUnhandledFeedback: hasUnhandled,
+    maintainerOnlyPending: false,
+    ciPending: false,
+    ciUnhandledCount: 0,
+    prEligible: false,
+    mergeable: true,
+    hasJumiCommit: undefined,
+    labeledOrAuthorListed: false,
+    conflictRound: 0,
+    maxConflictRounds: opts.maxConflictRounds ?? MAX_CONFLICT_ROUNDS,
+    conflictSameHeadBase: false,
+  }).followUp;
 }
 
 interface FeedbackItem {
