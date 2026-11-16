@@ -1435,11 +1435,169 @@
       "queued": true
     }
   },
+  "handover.test.ts::38": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "src/foo.ts:12: 💡 simpler: dedupe the helper\n<!-- jumi-check: success; One suggestion to dedupe -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
+  "handover.test.ts::39": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          12
+        ],
+        "op": "clear",
+        "seam": "sits",
+        "seq": 1
+      },
+      {
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "method": "enqueueIssue",
+        "mode": "follow-up",
+        "prNumber": 7,
+        "seam": "ledger",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "note\n<!-- jumi-check: success; One suggestion to dedupe -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview",
+    "result": {
+      "key": "follow-up:kirmanak/demo#7:headsha",
+      "queued": true
+    }
+  },
   "handover.test.ts::4": {
     "claimExists": null,
     "effects": [],
     "input": {
       "markdown": "blocking\n<!-- jumi-check: failure -->",
+      "published": "posted",
+      "row": {
+        "headSha": "headsha",
+        "issueNumber": null,
+        "kind": "review",
+        "owner": "kirmanak",
+        "prNumber": 7,
+        "repo": "demo"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "enqueueFollowUpFromReview"
+  },
+  "handover.test.ts::40": {
+    "claimExists": null,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "1 suggestion (follow-up skipped: success trailer)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/7"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "markdown": "ok\n<!-- jumi-check: success -->",
       "published": "posted",
       "row": {
         "headSha": "headsha",

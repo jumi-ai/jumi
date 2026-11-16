@@ -866,7 +866,9 @@ export function isMaintainerOnlyTrailerText(markdown: string | null | undefined)
   if (!markdown) return false;
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return false;
-  if (trailerSuggestionCount(parsed.verdict.description) !== 0) return false;
+  if (Math.max(countSuggestionFindings(parsed.comment), trailerSuggestionCount(parsed.verdict.description)) !== 0) {
+    return false;
+  }
   const total = countQuestionFindings(parsed.comment);
   if (total === 0) return false;
   return countMaintainerQuestionFindings(parsed.comment) === total;
@@ -907,7 +909,7 @@ export interface ReviewVerdictView {
   incomplete: boolean;
   state: "success" | "failure";
   description: string;
-  /** From the trailer reason (`trailerSuggestionCount`), never `record.counts`. */
+  /** Parent-computed published suggestion count, never regex over the model's reason. */
   suggestionCount: number;
   isMaintainerOnly: boolean;
   blockingQuestionCount(
@@ -956,11 +958,15 @@ function descriptionFromRecord(record: ReviewRecord): { state: "success" | "fail
 }
 
 /**
- * Ledger-row verdict view: with a usable record the answers come from the
- * record (suggestion count via `trailerSuggestionCount` on the record reason,
- * question counts via `record.counts`); without one the existing text
- * functions run unchanged. A corrupt record falls back to the text path.
- * Never changes the text path's result.
+ * Ledger-row verdict view: the suggestion count is the parent-computed
+ * published count — `record.counts.suggestion` when a usable record exists,
+ * otherwise the published 💡 findings in the stored body
+ * (`countSuggestionFindings`) — with the model-written trailer reason
+ * (`trailerSuggestionCount`) kept only as a legacy fallback. The max of the
+ * parent count and the trailer keeps old rows (trailer digit, no body
+ * findings) handing over while a spelled-out model reason ("One suggestion")
+ * with a real 💡 finding also hands over. A corrupt record falls back to the
+ * text path.
  */
 export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictView {
   const record = isUsableReviewRecord(input.record) ? input.record : undefined;
@@ -971,14 +977,14 @@ export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictV
       incomplete: parsed.verdict.incomplete,
       state: parsed.verdict.state,
       description,
-      suggestionCount: trailerSuggestionCount(description),
+      suggestionCount: Math.max(countSuggestionFindings(parsed.comment), trailerSuggestionCount(description)),
       isMaintainerOnly: isMaintainerOnlyTrailerText(input.markdown),
       blockingQuestionCount: (prAuthorLogin, blockingAuthors, opts) =>
         blockingOpenQuestionCount(input.markdown, prAuthorLogin, blockingAuthors, opts),
     };
   }
   const base = descriptionFromRecord(record);
-  const suggestionCount = trailerSuggestionCount(base.description);
+  const suggestionCount = Math.max(record.counts.suggestion, trailerSuggestionCount(base.description));
   return {
     incomplete: false,
     state: base.state,
