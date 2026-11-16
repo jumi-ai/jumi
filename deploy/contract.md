@@ -77,6 +77,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `PHOENIX_PUBLIC_HOST`
 - `BOARD_PEER_URL`
 - `BOARD_PEER_TOKEN`
+- `BOARD_MCP_TOKEN`
 - `JUMI_ALLOW_UNSANDBOXED_REVIEWS`
 
 #### required constraints
