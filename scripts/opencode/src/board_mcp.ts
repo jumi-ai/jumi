@@ -184,32 +184,15 @@ export function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
           createdAt: row.createdAt,
           updatedAt: row.updatedAt,
         }));
-        const latch = await store.readIssueSkipLatch(owner, repo, number).catch(() => null);
-        const sit = await store.sits.get(owner, repo, number).catch(() => undefined);
-        const kickLog = await store.listKickLog(500).catch(
-          (): Array<{
-            id: number;
-            idempotencyKey: string;
-            actor: string;
-            owner: string;
-            repo: string;
-            number: number;
-            commit: string;
-            kick: string;
-            result: string;
-            terminalJobId: number | null;
-            newJobId: number | null;
-            createdAt: number;
-          }> => []
-        );
+        const latch = await store.readIssueSkipLatch(owner, repo, number);
+        const sit = await store.sits.get(owner, repo, number);
+        const kickLog = await store.listKickLog(500);
         const payload = {
           owner: redact(owner, secrets),
           repo: redact(repo, secrets),
           number,
           rows: history,
-          skipLatch: latch
-            ? { generation: latch.generation, skipReason: redactNullable(latch.skipReason, secrets) }
-            : { generation: 0, skipReason: null },
+          skipLatch: { generation: latch.generation, skipReason: redactNullable(latch.skipReason, secrets) },
           sit: sit
             ? {
                 owner: redact(sit.owner, secrets),
@@ -263,7 +246,7 @@ export function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
         }> = [];
         if (typeof store.listRunnerCooldowns === "function") {
           for (const role of ["engine", "worker"] as const) {
-            const rows = await store.listRunnerCooldowns(role).catch(() => []);
+            const rows = await store.listRunnerCooldowns(role);
             for (const row of rows) {
               cooldowns.push({
                 role,
@@ -277,7 +260,7 @@ export function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
           }
           cooldowns.sort((a, b) => `${a.role}\0${a.runner}`.localeCompare(`${b.role}\0${b.runner}`));
         }
-        const quotaResets = (await store.getRunnerQuotaResets().catch(() => []))
+        const quotaResets = (await store.getRunnerQuotaResets())
           .map((row) => ({ runner: redact(row.runner, secrets), resetAtSeconds: row.resetAtSeconds }))
           .sort((a, b) => a.runner.localeCompare(b.runner));
         logger(

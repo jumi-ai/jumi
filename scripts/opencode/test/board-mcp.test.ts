@@ -517,4 +517,46 @@ describe("board read-only MCP (#644)", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^\[board-mcp\] tool=issue_history kirmanak\/demo#7 rows=1 ms=\d+$/);
   });
+
+  test("auxiliary lookup errors surface as tool errors, never empty defaults", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedReviewRow(store, { prNumber: 7, headSha: "abc123", state: "failed", reason: "boom" });
+    store.readIssueSkipLatch = () => Promise.reject(new Error("latch down"));
+    const logs: string[] = [];
+    const handler = makeHandler(store, logs);
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handler });
+    try {
+      const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${server.port}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${MCP_TOKEN}` } },
+      });
+      const client = new Client({ name: "board-mcp-test", version: "1.0.0" });
+      await client.connect(transport);
+      const history = await client.callTool({
+        name: "issue_history",
+        arguments: { owner: "kirmanak", repo: "demo", number: 7 },
+      });
+      expect(history.isError).toBe(true);
+
+      const failingRunners = new MemoryReviewJobStore();
+      failingRunners.getRunnerQuotaResets = () => Promise.reject(new Error("quota down"));
+      const runnersHandler = makeHandler(failingRunners, []);
+      const runnersServer = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: runnersHandler });
+      try {
+        const runnersTransport = new StreamableHTTPClientTransport(
+          new URL(`http://127.0.0.1:${runnersServer.port}/mcp`),
+          { requestInit: { headers: { Authorization: `Bearer ${MCP_TOKEN}` } } }
+        );
+        const runnersClient = new Client({ name: "board-mcp-test", version: "1.0.0" });
+        await runnersClient.connect(runnersTransport);
+        const runners = await runnersClient.callTool({ name: "runners", arguments: {} });
+        expect(runners.isError).toBe(true);
+        await runnersClient.close();
+      } finally {
+        runnersServer.stop(true);
+      }
+      await client.close();
+    } finally {
+      server.stop(true);
+    }
+  });
 });
