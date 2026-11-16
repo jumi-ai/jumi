@@ -435,6 +435,14 @@ export interface ImplementOptions extends PickupPolicy {
   reviewQueue?: {
     enqueue(job: ReviewJob): Promise<{ key: string; queued: boolean }> | { key: string; queued: boolean };
   };
+  /**
+   * Ledger for shared CI failure fingerprints (`review_jobs.result_json`).
+   * Unset skips the wait-instead-of-fixing-again election (today's behaviour).
+   */
+  ledger?: Pick<
+    import("./review_jobs.ts").ReviewJobStore,
+    "electSharedFailure" | "listSharedFailures" | "listWaitersForFirst" | "recordSharedFailures"
+  >;
 }
 
 function logDefault(message: string) {

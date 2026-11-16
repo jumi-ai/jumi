@@ -313,6 +313,46 @@ export interface ReviewJobStore {
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
   /**
+   * Shared CI failure ledger (issue #628). Follow-up fingerprints live in
+   * `review_jobs.result_json` (`{ sharedFailures: [...] }`) so no new table
+   * is needed. `electSharedFailure` wraps the check-and-record in
+   * `pg_advisory_xact_lock` on (repo, fingerprint) for Postgres and an
+   * equivalent mutex for the memory store, electing exactly one first PR
+   * when a burst fails together.
+   */
+  listSharedFailures(
+    owner: string,
+    repo: string,
+    sinceMs: number,
+    nowMs?: number
+  ): Promise<import("./shared_failure.ts").SharedFailureLedgerEntry[]>;
+  recordSharedFailures(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    headSha: string | undefined,
+    entries: Array<{ check: string; fingerprint: string; waiterFor?: number | null }>,
+    nowMs?: number
+  ): Promise<void>;
+  electSharedFailure(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    headSha?: string;
+    check: string;
+    fingerprint: string;
+    nowMs?: number;
+    isOpen: (prNumber: number) => boolean | Promise<boolean>;
+    isLivePush: (prNumber: number) => boolean | Promise<boolean>;
+    isMerged?: (prNumber: number) => boolean | Promise<boolean>;
+  }): Promise<{ role: "first" } | { role: "waiter"; firstPr: number }>;
+  listWaitersForFirst(
+    owner: string,
+    repo: string,
+    firstPr: number,
+    isOpen: (prNumber: number) => boolean | Promise<boolean>
+  ): Promise<number[]>;
+  /**
    * Ledger-backed share of the infra breaker and quota cooldown, per role.
    * One row per role (`engine`|`worker`); each deployment owns its database.
    * Thresholds match `infra.ts`: 3 consecutive failures open a 60s window,
@@ -996,6 +1036,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly handoffs = new MemoryHandoffStore();
   private nextId = 1;
   private chain = Promise.resolve();
+  private readonly sharedLocks = new Map<string, Promise<void>>();
+  private sharedLedger: import("./shared_failure.ts").SharedFailureLedgerEntry[] = [];
   private readonly issueSkipLatches = new Map<string, IssueSkipLatch>();
   private readonly roleGates = new Map<
     RoleGateRole,
@@ -2537,6 +2579,365 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         });
       }
       return out;
+    });
+  }
+
+  private sharedLock<T>(key: string, fn: () => T | Promise<T>): Promise<T> {
+    const prev = this.sharedLocks.get(key) ?? Promise.resolve();
+    let release: () => void = () => undefined;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.sharedLocks.set(
+      key,
+      prev.then(() => next)
+    );
+    return prev.then(async () => {
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (this.sharedLocks.get(key) === next) this.sharedLocks.delete(key);
+      }
+    });
+  }
+
+  private readSharedLedger(
+    owner: string,
+    repo: string,
+    sinceMs: number,
+    nowMs: number
+  ): import("./shared_failure.ts").SharedFailureLedgerEntry[] {
+    const out: import("./shared_failure.ts").SharedFailureLedgerEntry[] = [];
+    for (const row of this.rows) {
+      if (row.owner !== owner || row.repo !== repo) continue;
+      if (rowKind(row) !== "follow-up") continue;
+      const rec = (row.resultJson as unknown as { sharedFailures?: unknown } | null | undefined)?.sharedFailures;
+      if (!Array.isArray(rec)) continue;
+      for (const entry of rec) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as {
+          check?: unknown;
+          fingerprint?: unknown;
+          waiterFor?: unknown;
+          updatedAt?: unknown;
+          headSha?: unknown;
+        };
+        if (typeof e.check !== "string" || typeof e.fingerprint !== "string") continue;
+        const updatedAt = typeof e.updatedAt === "number" ? e.updatedAt : row.updatedAt;
+        if (!Number.isFinite(updatedAt) || updatedAt < sinceMs || updatedAt > nowMs) continue;
+        out.push({
+          prNumber: row.prNumber,
+          check: e.check,
+          fingerprint: e.fingerprint,
+          ...(typeof e.waiterFor === "number" ? { waiterFor: e.waiterFor } : {}),
+          updatedAt,
+          ...(typeof e.headSha === "string" ? { headSha: e.headSha } : {}),
+        });
+      }
+    }
+    // Tests that record without a ledger row use the auxiliary ledger below.
+    for (const entry of this.sharedLedger) {
+      const current = entry as unknown as {
+        owner?: unknown;
+        repo?: unknown;
+      } & import("./shared_failure.ts").SharedFailureLedgerEntry;
+      if (current.owner !== undefined || current.repo !== undefined) continue;
+      void current;
+    }
+    return out;
+  }
+
+  listSharedFailures(
+    owner: string,
+    repo: string,
+    sinceMs: number,
+    nowMs = Date.now()
+  ): Promise<import("./shared_failure.ts").SharedFailureLedgerEntry[]> {
+    return this.locked(() => {
+      const fromRows = this.readSharedLedger(owner, repo, sinceMs, nowMs);
+      const fromAux = this.sharedLedger.filter(
+        (entry) => (entry as unknown as { owner?: string }).owner === undefined || true
+      );
+      void fromAux;
+      // Auxiliary ledger stores owner/repo alongside; filter here.
+      const aux = (
+        this.sharedLedger as Array<
+          import("./shared_failure.ts").SharedFailureLedgerEntry & { owner: string; repo: string }
+        >
+      ).filter(
+        (entry) =>
+          entry.owner === owner && entry.repo === repo && entry.updatedAt >= sinceMs && entry.updatedAt <= nowMs
+      );
+      const merged = [...fromRows, ...aux.map(({ owner: _o, repo: _r, ...rest }) => rest)];
+      return merged;
+    });
+  }
+
+  recordSharedFailures(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    headSha: string | undefined,
+    entries: Array<{ check: string; fingerprint: string; waiterFor?: number | null }>,
+    nowMs = Date.now()
+  ): Promise<void> {
+    return this.locked(() => {
+      const timestamp = nowMs;
+      // Persist in the auxiliary ledger (drives election) and mirror into the
+      // latest follow-up row's result_json so no new table is needed.
+      for (const entry of entries) {
+        const existing = (
+          this.sharedLedger as Array<
+            import("./shared_failure.ts").SharedFailureLedgerEntry & { owner: string; repo: string }
+          >
+        ).find(
+          (item) =>
+            item.owner === owner &&
+            item.repo === repo &&
+            item.prNumber === prNumber &&
+            item.check === entry.check &&
+            item.fingerprint === entry.fingerprint
+        );
+        if (existing) {
+          existing.waiterFor = entry.waiterFor ?? null;
+          existing.updatedAt = timestamp;
+          if (headSha !== undefined) existing.headSha = headSha;
+        } else {
+          (
+            this.sharedLedger as Array<
+              import("./shared_failure.ts").SharedFailureLedgerEntry & { owner: string; repo: string }
+            >
+          ).push({
+            owner,
+            repo,
+            prNumber,
+            check: entry.check,
+            fingerprint: entry.fingerprint,
+            ...(entry.waiterFor != null ? { waiterFor: entry.waiterFor } : {}),
+            updatedAt: timestamp,
+            ...(headSha !== undefined ? { headSha } : {}),
+          });
+        }
+      }
+      const rows = this.rows.filter(
+        (row) => row.owner === owner && row.repo === repo && row.prNumber === prNumber && rowKind(row) === "follow-up"
+      );
+      const target = rows.sort((a, b) => b.id - a.id)[0];
+      if (target) {
+        const prev = (target.resultJson as unknown as { sharedFailures?: unknown[] } | null | undefined)
+          ?.sharedFailures;
+        const merged = Array.isArray(prev) ? [...prev] : [];
+        for (const entry of entries) {
+          const idx = merged.findIndex(
+            (item) =>
+              item &&
+              typeof item === "object" &&
+              (item as { check?: unknown }).check === entry.check &&
+              (item as { fingerprint?: unknown }).fingerprint === entry.fingerprint
+          );
+          const record = {
+            check: entry.check,
+            fingerprint: entry.fingerprint,
+            ...(entry.waiterFor != null ? { waiterFor: entry.waiterFor } : {}),
+            updatedAt: timestamp,
+            ...(headSha !== undefined ? { headSha } : {}),
+          };
+          if (idx >= 0) merged[idx] = record;
+          else merged.push(record);
+        }
+        const base =
+          target.resultJson && typeof target.resultJson === "object"
+            ? (target.resultJson as unknown as Record<string, unknown>)
+            : {
+                version: 1,
+                state: "incomplete",
+                findings: [],
+                counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+              };
+        target.resultJson = { ...base, sharedFailures: merged } as unknown as typeof target.resultJson;
+        target.updatedAt = timestamp;
+      }
+    });
+  }
+
+  electSharedFailure(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    headSha?: string;
+    check: string;
+    fingerprint: string;
+    nowMs?: number;
+    isOpen: (prNumber: number) => boolean | Promise<boolean>;
+    isLivePush: (prNumber: number) => boolean | Promise<boolean>;
+    isMerged?: (prNumber: number) => boolean | Promise<boolean>;
+  }): Promise<{ role: "first" } | { role: "waiter"; firstPr: number }> {
+    const key = `${opts.owner}/${opts.repo}#${opts.fingerprint}:${opts.check}`;
+    return this.sharedLock(key, async () => {
+      const nowMs = opts.nowMs ?? Date.now();
+      const { SHARED_FAILURE_WINDOW_MS } = await import("./shared_failure.ts");
+      const sinceMs = nowMs - SHARED_FAILURE_WINDOW_MS;
+      const fromRows = this.readSharedLedger(opts.owner, opts.repo, sinceMs, nowMs);
+      const aux = (
+        this.sharedLedger as Array<
+          import("./shared_failure.ts").SharedFailureLedgerEntry & { owner: string; repo: string }
+        >
+      ).filter(
+        (entry) =>
+          entry.owner === opts.owner &&
+          entry.repo === opts.repo &&
+          entry.updatedAt >= sinceMs &&
+          entry.updatedAt <= nowMs
+      );
+      const entries = [...fromRows, ...aux.map(({ owner: _o, repo: _r, ...rest }) => rest)];
+      const { pickSharedFirst } = await import("./shared_failure.ts");
+      const openCache = new Map<number, boolean>();
+      const liveCache = new Map<number, boolean>();
+      const mergedCache = new Map<number, boolean>();
+      const isOpen = async (pr: number) => {
+        if (!openCache.has(pr)) openCache.set(pr, Boolean(await opts.isOpen(pr)));
+        return openCache.get(pr) as boolean;
+      };
+      const isLivePush = async (pr: number) => {
+        if (!liveCache.has(pr)) liveCache.set(pr, Boolean(await opts.isLivePush(pr)));
+        return liveCache.get(pr) as boolean;
+      };
+      const isMerged = async (pr: number) => {
+        if (!opts.isMerged) return false;
+        if (!mergedCache.has(pr)) mergedCache.set(pr, Boolean(await opts.isMerged(pr)));
+        return mergedCache.get(pr) as boolean;
+      };
+      // Resolve synchronously when callbacks are sync; otherwise await.
+      const syncEntries = entries.filter(
+        (entry) => entry.check === opts.check && entry.fingerprint === opts.fingerprint
+      );
+      let found: { firstPr: number; check: string } | undefined;
+      // Evaluate in ledger age order (oldest first) so the earliest live
+      // first wins even when callbacks are async.
+      const sorted = [...syncEntries].sort((a, b) => a.updatedAt - b.updatedAt || a.prNumber - b.prNumber);
+      for (const entry of sorted) {
+        if (entry.prNumber === opts.prNumber) continue;
+        const first = entry.waiterFor ?? entry.prNumber;
+        if (first === opts.prNumber) continue;
+        if (await isMerged(first)) continue;
+        if (!(await isOpen(first))) continue;
+        if (!(await isLivePush(first))) continue;
+        found = { firstPr: first, check: entry.check };
+        break;
+      }
+      void pickSharedFirst;
+      const recordDirect = (waiterFor: number | null): void => {
+        type Aux = import("./shared_failure.ts").SharedFailureLedgerEntry & {
+          owner: string;
+          repo: string;
+        };
+        const ledger = this.sharedLedger as unknown as Aux[];
+        const existing = ledger.find(
+          (item) =>
+            item.owner === opts.owner &&
+            item.repo === opts.repo &&
+            item.prNumber === opts.prNumber &&
+            item.check === opts.check &&
+            item.fingerprint === opts.fingerprint
+        );
+        if (existing) {
+          existing.waiterFor = waiterFor;
+          existing.updatedAt = nowMs;
+          if (opts.headSha !== undefined) existing.headSha = opts.headSha;
+        } else {
+          ledger.push({
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: opts.prNumber,
+            check: opts.check,
+            fingerprint: opts.fingerprint,
+            ...(waiterFor != null ? { waiterFor } : {}),
+            updatedAt: nowMs,
+            ...(opts.headSha !== undefined ? { headSha: opts.headSha } : {}),
+          });
+        }
+        const rows = this.rows.filter(
+          (row) =>
+            row.owner === opts.owner &&
+            row.repo === opts.repo &&
+            row.prNumber === opts.prNumber &&
+            rowKind(row) === "follow-up"
+        );
+        const target = rows.sort((a, b) => b.id - a.id)[0];
+        if (target) {
+          const prev = (target.resultJson as unknown as { sharedFailures?: unknown[] } | null | undefined)
+            ?.sharedFailures;
+          const merged = Array.isArray(prev) ? [...prev] : [];
+          const record = {
+            check: opts.check,
+            fingerprint: opts.fingerprint,
+            ...(waiterFor != null ? { waiterFor } : {}),
+            updatedAt: nowMs,
+            ...(opts.headSha !== undefined ? { headSha: opts.headSha } : {}),
+          };
+          const idx = merged.findIndex(
+            (item) =>
+              item !== null &&
+              typeof item === "object" &&
+              (item as { check?: unknown }).check === opts.check &&
+              (item as { fingerprint?: unknown }).fingerprint === opts.fingerprint
+          );
+          if (idx >= 0) merged[idx] = record;
+          else merged.push(record);
+          const base =
+            target.resultJson && typeof target.resultJson === "object"
+              ? (target.resultJson as unknown as Record<string, unknown>)
+              : {
+                  version: 1,
+                  state: "incomplete",
+                  findings: [],
+                  counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+                };
+          target.resultJson = { ...base, sharedFailures: merged } as unknown as typeof target.resultJson;
+          target.updatedAt = nowMs;
+        }
+      };
+      if (found) {
+        recordDirect(found.firstPr);
+        return { role: "waiter", firstPr: found.firstPr };
+      }
+      recordDirect(null);
+      return { role: "first" };
+    });
+  }
+
+  listWaitersForFirst(
+    owner: string,
+    repo: string,
+    firstPr: number,
+    isOpen: (prNumber: number) => boolean | Promise<boolean>
+  ): Promise<number[]> {
+    return this.locked(async () => {
+      const { waitersForFirst } = await import("./shared_failure.ts");
+      const nowMs = Date.now();
+      const fromRows = this.readSharedLedger(owner, repo, 0, nowMs);
+      const aux = (
+        this.sharedLedger as Array<
+          import("./shared_failure.ts").SharedFailureLedgerEntry & { owner: string; repo: string }
+        >
+      ).filter((entry) => entry.owner === owner && entry.repo === repo);
+      const entries = [...fromRows, ...aux.map(({ owner: _o, repo: _r, ...rest }) => rest)];
+      const openCache = new Map<number, boolean>();
+      const checkOpen = async (pr: number) => {
+        if (!openCache.has(pr)) openCache.set(pr, Boolean(await isOpen(pr)));
+        return openCache.get(pr) as boolean;
+      };
+      const out = new Set<number>();
+      for (const pr of waitersForFirst(entries, firstPr, (pr) => openCache.get(pr) ?? true)) {
+        void pr;
+      }
+      for (const entry of entries) {
+        if (entry.waiterFor !== firstPr) continue;
+        if (!(await checkOpen(entry.prNumber))) continue;
+        out.add(entry.prNumber);
+      }
+      return [...out].sort((a, b) => a - b);
     });
   }
 }
@@ -4967,6 +5368,296 @@ export class PgReviewJobStore implements ReviewJobStore {
     const row = rows[0];
     if (!row) throw new Error("failed to record kick");
     return this.mapKickRow(row);
+  }
+
+  private parseSharedRows(
+    rows: Array<{ pr_number: unknown; result_json: unknown; head_sha: unknown; updated_at: unknown }>
+  ): import("./shared_failure.ts").SharedFailureLedgerEntry[] {
+    const out: import("./shared_failure.ts").SharedFailureLedgerEntry[] = [];
+    for (const row of rows) {
+      const rec = (row.result_json as { sharedFailures?: unknown } | null | undefined)?.sharedFailures;
+      if (!Array.isArray(rec)) continue;
+      for (const entry of rec) {
+        if (!entry || typeof entry !== "object") continue;
+        const e = entry as {
+          check?: unknown;
+          fingerprint?: unknown;
+          waiterFor?: unknown;
+          updatedAt?: unknown;
+          headSha?: unknown;
+        };
+        if (typeof e.check !== "string" || typeof e.fingerprint !== "string") continue;
+        const updatedAt = typeof e.updatedAt === "number" ? e.updatedAt : epoch(row.updated_at);
+        if (updatedAt == null) continue;
+        out.push({
+          prNumber: num(row.pr_number),
+          check: e.check,
+          fingerprint: e.fingerprint,
+          ...(typeof e.waiterFor === "number" ? { waiterFor: e.waiterFor } : {}),
+          updatedAt,
+          ...(typeof e.headSha === "string" ? { headSha: e.headSha } : { headSha: str(row.head_sha) }),
+        });
+      }
+    }
+    return out;
+  }
+
+  async listSharedFailures(
+    owner: string,
+    repo: string,
+    sinceMs: number,
+    nowMs = Date.now()
+  ): Promise<import("./shared_failure.ts").SharedFailureLedgerEntry[]> {
+    try {
+      const rows = asRows<{ pr_number: unknown; result_json: unknown; head_sha: unknown; updated_at: unknown }>(
+        await this.sql.unsafe(
+          `SELECT pr_number, result_json, head_sha, updated_at FROM review_jobs
+           WHERE owner = $1 AND repo = $2 AND kind = 'follow-up' AND result_json IS NOT NULL
+             AND result_json ? 'sharedFailures'
+             AND updated_at >= $3::timestamptz AND updated_at <= $4::timestamptz`,
+          [owner, repo, new Date(sinceMs).toISOString(), new Date(nowMs).toISOString()]
+        )
+      );
+      return this.parseSharedRows(rows);
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async recordSharedFailures(
+    owner: string,
+    repo: string,
+    prNumber: number,
+    headSha: string | undefined,
+    entries: Array<{ check: string; fingerprint: string; waiterFor?: number | null }>,
+    nowMs = Date.now()
+  ): Promise<void> {
+    try {
+      await this.sql.begin(async (tx) => {
+        const rows = asRows<{ id: unknown; result_json: unknown }>(
+          await tx.unsafe(
+            `SELECT id, result_json FROM review_jobs
+             WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = 'follow-up'
+             ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+            [owner, repo, prNumber]
+          )
+        );
+        const timestamp = nowMs;
+        const mergeInto = (prev: unknown): Record<string, unknown> => {
+          const base =
+            prev && typeof prev === "object"
+              ? { ...(prev as Record<string, unknown>) }
+              : {
+                  version: 1,
+                  state: "incomplete",
+                  findings: [],
+                  counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+                };
+          const list = Array.isArray((base as { sharedFailures?: unknown }).sharedFailures)
+            ? [...(base as { sharedFailures: unknown[] }).sharedFailures]
+            : [];
+          for (const entry of entries) {
+            const record = {
+              check: entry.check,
+              fingerprint: entry.fingerprint,
+              ...(entry.waiterFor != null ? { waiterFor: entry.waiterFor } : {}),
+              updatedAt: timestamp,
+              ...(headSha !== undefined ? { headSha } : {}),
+            };
+            const idx = list.findIndex(
+              (item) =>
+                item !== null &&
+                typeof item === "object" &&
+                (item as { check?: unknown }).check === entry.check &&
+                (item as { fingerprint?: unknown }).fingerprint === entry.fingerprint
+            );
+            if (idx >= 0) list[idx] = record;
+            else list.push(record);
+          }
+          return { ...base, sharedFailures: list };
+        };
+        if (rows[0]) {
+          const merged = mergeInto(rows[0].result_json);
+          await tx.unsafe(`UPDATE review_jobs SET result_json = $2::jsonb, updated_at = NOW() WHERE id = $1`, [
+            num(rows[0].id),
+            JSON.stringify(merged),
+          ]);
+          return;
+        }
+        // No follow-up row yet (election before the first job row exists):
+        // insert a marker row so the fingerprint is still in `result_json`.
+        const merged = mergeInto(null);
+        await tx.unsafe(
+          `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
+           VALUES ($1, $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
+           ON CONFLICT DO NOTHING`,
+          [
+            `shared-failure:${owner}/${repo}#${prNumber}:${headSha ?? "head"}`,
+            owner,
+            repo,
+            prNumber,
+            headSha ?? "",
+            `shared-failure-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
+            JSON.stringify(merged),
+          ]
+        );
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async electSharedFailure(opts: {
+    owner: string;
+    repo: string;
+    prNumber: number;
+    headSha?: string;
+    check: string;
+    fingerprint: string;
+    nowMs?: number;
+    isOpen: (prNumber: number) => boolean | Promise<boolean>;
+    isLivePush: (prNumber: number) => boolean | Promise<boolean>;
+    isMerged?: (prNumber: number) => boolean | Promise<boolean>;
+  }): Promise<{ role: "first" } | { role: "waiter"; firstPr: number }> {
+    const nowMs = opts.nowMs ?? Date.now();
+    const { SHARED_FAILURE_WINDOW_MS, sharedFailureLockKey } = await import("./shared_failure.ts");
+    const lockKey = sharedFailureLockKey(opts.owner, opts.repo, `${opts.fingerprint}:${opts.check}`);
+    try {
+      return await this.sql.begin(async (tx) => {
+        await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [lockKey]);
+        const sinceMs = nowMs - SHARED_FAILURE_WINDOW_MS;
+        const rows = asRows<{ pr_number: unknown; result_json: unknown; head_sha: unknown; updated_at: unknown }>(
+          await tx.unsafe(
+            `SELECT pr_number, result_json, head_sha, updated_at FROM review_jobs
+             WHERE owner = $1 AND repo = $2 AND kind = 'follow-up' AND result_json IS NOT NULL
+               AND result_json ? 'sharedFailures'
+               AND updated_at >= $3::timestamptz
+             ORDER BY updated_at ASC, pr_number ASC
+             FOR UPDATE`,
+            [opts.owner, opts.repo, new Date(sinceMs).toISOString()]
+          )
+        );
+        const entries = this.parseSharedRows(rows).filter(
+          (entry) => entry.check === opts.check && entry.fingerprint === opts.fingerprint
+        );
+        const sorted = [...entries].sort((a, b) => a.updatedAt - b.updatedAt || a.prNumber - b.prNumber);
+        let found: number | undefined;
+        for (const entry of sorted) {
+          if (entry.prNumber === opts.prNumber) continue;
+          const first = entry.waiterFor ?? entry.prNumber;
+          if (first === opts.prNumber) continue;
+          if (opts.isMerged && (await opts.isMerged(first))) continue;
+          if (!(await opts.isOpen(first))) continue;
+          if (!(await opts.isLivePush(first))) continue;
+          found = first;
+          break;
+        }
+        const timestamp = nowMs;
+        const record = (waiterFor: number | null) => ({
+          check: opts.check,
+          fingerprint: opts.fingerprint,
+          ...(waiterFor != null ? { waiterFor } : {}),
+          updatedAt: timestamp,
+          ...(opts.headSha !== undefined ? { headSha: opts.headSha } : {}),
+        });
+        const existing = asRows<{ id: unknown; result_json: unknown }>(
+          await tx.unsafe(
+            `SELECT id, result_json FROM review_jobs
+             WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = 'follow-up'
+             ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+            [opts.owner, opts.repo, opts.prNumber]
+          )
+        );
+        const mergeInto = (prev: unknown, waiterFor: number | null): Record<string, unknown> => {
+          const base =
+            prev && typeof prev === "object"
+              ? { ...(prev as Record<string, unknown>) }
+              : {
+                  version: 1,
+                  state: "incomplete",
+                  findings: [],
+                  counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+                };
+          const list = Array.isArray((base as { sharedFailures?: unknown }).sharedFailures)
+            ? [...(base as { sharedFailures: unknown[] }).sharedFailures]
+            : [];
+          const next = record(waiterFor);
+          const idx = list.findIndex(
+            (item) =>
+              item !== null &&
+              typeof item === "object" &&
+              (item as { check?: unknown }).check === opts.check &&
+              (item as { fingerprint?: unknown }).fingerprint === opts.fingerprint
+          );
+          if (idx >= 0) list[idx] = next;
+          else list.push(next);
+          return { ...base, sharedFailures: list };
+        };
+        if (existing[0]) {
+          const merged = mergeInto(existing[0].result_json, found ?? null);
+          await tx.unsafe(`UPDATE review_jobs SET result_json = $2::jsonb, updated_at = NOW() WHERE id = $1`, [
+            num(existing[0].id),
+            JSON.stringify(merged),
+          ]);
+        } else {
+          const merged = mergeInto(null, found ?? null);
+          await tx.unsafe(
+            `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, result_json)
+             VALUES ($1, $2, $3, $4, $5, $6, 'skipped', 0, $7::jsonb)
+             ON CONFLICT DO NOTHING`,
+            [
+              `shared-failure:${opts.owner}/${opts.repo}#${opts.prNumber}:${opts.headSha ?? "head"}`,
+              opts.owner,
+              opts.repo,
+              opts.prNumber,
+              opts.headSha ?? "",
+              `shared-failure-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
+              JSON.stringify(merged),
+            ]
+          );
+        }
+        if (found !== undefined) return { role: "waiter", firstPr: found };
+        return { role: "first" };
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async listWaitersForFirst(
+    owner: string,
+    repo: string,
+    firstPr: number,
+    isOpen: (prNumber: number) => boolean | Promise<boolean>
+  ): Promise<number[]> {
+    try {
+      const rows = asRows<{ pr_number: unknown; result_json: unknown; head_sha: unknown; updated_at: unknown }>(
+        await this.sql.unsafe(
+          `SELECT pr_number, result_json, head_sha, updated_at FROM review_jobs
+           WHERE owner = $1 AND repo = $2 AND kind = 'follow-up' AND result_json IS NOT NULL
+             AND result_json ? 'sharedFailures'`,
+          [owner, repo]
+        )
+      );
+      const entries = this.parseSharedRows(rows);
+      const { waitersForFirst } = await import("./shared_failure.ts");
+      const openCache = new Map<number, boolean>();
+      const checkOpen = async (pr: number) => {
+        if (!openCache.has(pr)) openCache.set(pr, Boolean(await isOpen(pr)));
+        return openCache.get(pr) as boolean;
+      };
+      const candidates = waitersForFirst(entries, firstPr, (pr) => openCache.get(pr) ?? true);
+      void candidates;
+      const out = new Set<number>();
+      for (const entry of entries) {
+        if (entry.waiterFor !== firstPr) continue;
+        if (!(await checkOpen(entry.prNumber))) continue;
+        out.add(entry.prNumber);
+      }
+      return [...out].sort((a, b) => a - b);
+    } catch (err) {
+      wrapSqlError(err);
+    }
   }
 }
 

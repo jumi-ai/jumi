@@ -34,6 +34,8 @@ export interface FailedCheck {
   capped: string;
   logHash: string;
   flake?: string;
+  /** `sha256(checkName + normalised failureLines)`, absent when no failure lines. */
+  fingerprint?: string;
 }
 
 export interface CiCheckSummary {
@@ -605,6 +607,47 @@ export function failureLines(capped: string): string[] {
   return failOrErrorLines(capped).filter((line) => !isGenericCiFooter(line));
 }
 
+/**
+ * Normalise one failure line for cross-PR fingerprinting. Strips timestamps,
+ * durations, and runner temp paths (Gitea `.../act/<hash>/hostexecutor/...`,
+ * GitHub `/home/runner/work/<repo>/<repo>/...`). Keeps line numbers (`:12`)
+ * which are stable on a given default branch.
+ */
+export function normalizeFailureLine(line: string): string {
+  let value = line.trim();
+  // Generic leading timestamps (Gitea already stripped above, keep others).
+  value = value.replace(/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s+/, "");
+  value = value.replace(/^\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+/, "");
+  // Gitea act hostexecutor temp path (`.../act/<hash>/hostexecutor/...`,
+  // including `gitea-act` variants).
+  value = value.replace(/[^\s]*act[^/\s]*\/[^/\s]+\/hostexecutor[^\s]*/g, "<ACT_PATH>");
+  // GitHub runner work prefix: keep the repo-relative suffix.
+  value = value.replace(/\/home\/runner\/work\/[^/\s]+\/[^/\s]+/g, "<RUNNER_WORK>");
+  // Embedded ISO timestamps.
+  value = value.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?/g, "<TS>");
+  value = value.replace(/\b\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2}\b/g, "<TS>");
+  // Durations (`12.3s`, `1500ms`, `5m30s`, `took 2 minutes`). Line numbers
+  // (`file:12`, `:12:`) carry no unit and are kept.
+  value = value.replace(/\b\d+(?:\.\d+)?\s*(?:ms|s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?|h(?:ours?)?)\b/gi, "<DUR>");
+  // Remaining bare clock times.
+  value = value.replace(/\b\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/g, "<TS>");
+  return value.replace(/\s+/g, " ").trim();
+}
+
+export function normalizeFailureLines(lines: readonly string[]): string[] {
+  return lines.map((line) => normalizeFailureLine(line)).filter((line) => line.length > 0);
+}
+
+/**
+ * Cross-PR failure fingerprint: `sha256(checkName + normalised failureLines)`.
+ * With no failure lines there is no fingerprint and today's behaviour applies.
+ */
+export function failureFingerprint(checkName: string, capped: string): string | undefined {
+  const lines = normalizeFailureLines(failureLines(capped));
+  if (lines.length === 0) return undefined;
+  return hashText(`${checkName}\n${lines.join("\n")}`);
+}
+
 export function classifyInfraFlake(capped: string): string | undefined {
   const substantive = failureLines(capped);
   if (substantive.length === 0) return undefined;
@@ -929,6 +972,7 @@ export async function inspectCi(opts: {
     const { text, jobId } = await logsForCheck(opts.api, opts.owner, opts.repo, opts.sha, status, jobs);
     const capped = capFailedJobLog(text);
     const logHash = hashText(capped);
+    const fingerprint = failureFingerprint(name, capped);
     failed.push({
       name,
       state,
@@ -938,6 +982,7 @@ export async function inspectCi(opts: {
       capped,
       logHash,
       flake: classifyInfraFlake(capped),
+      ...(fingerprint ? { fingerprint } : {}),
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));

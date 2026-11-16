@@ -894,22 +894,47 @@ export async function handleGithubWebhookEvent(
         return skipped("malformed push payload", logger);
       }
       const decision = await shouldEnqueuePushConflicts(payload, policy, deps.worker.api, logger);
-      if (decision.type === "skip") return skipped(decision.reason, logger);
+      if (decision.type === "skip" && !deps.review) return skipped(decision.reason, logger);
       const receivedAt = new Date().toISOString();
       const jobs: IssueJob[] = [];
-      for (const partial of decision.jobs) {
-        const job: IssueJob = { ...partial, delivery, receivedAt };
-        const prNumber = job.prNumber;
-        const getPR = deps.getPR ?? deps.worker.api.getPR;
-        if (prNumber != null && getPR) {
-          try {
-            const pr = await getPR(job.owner, job.repo, prNumber);
-            if (pr.head?.sha) job.headSha = pr.head.sha;
-          } catch (err) {
-            logger(`mergeable lookup failed: ${errorMessage(err)}`);
+      if (decision.type === "enqueue") {
+        for (const partial of decision.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const prNumber = job.prNumber;
+          const getPR = deps.getPR ?? deps.worker.api.getPR;
+          if (prNumber != null && getPR) {
+            try {
+              const pr = await getPR(job.owner, job.repo, prNumber);
+              if (pr.head?.sha) job.headSha = pr.head.sha;
+            } catch (err) {
+              logger(`mergeable lookup failed: ${errorMessage(err)}`);
+            }
           }
+          jobs.push(job);
         }
-        jobs.push(job);
+      }
+      // Wake shared-failure waiters whose first just merged: merge-only jobs.
+      try {
+        const { shouldEnqueueSharedWaiterMerges } = await import("./push_webhook.ts");
+        const ledger = deps.review as unknown as import("./review_jobs.ts").ReviewJobStore | undefined;
+        const waiterJobs = await shouldEnqueueSharedWaiterMerges(
+          payload,
+          policy,
+          deps.worker.api,
+          ledger?.listSharedFailures ? ledger : undefined,
+          logger
+        );
+        for (const partial of waiterJobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          jobs.push(job);
+          logger(`shared waiter merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${delivery}`);
+        }
+      } catch (err) {
+        logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
+      }
+      if (jobs.length === 0) {
+        if (decision.type === "skip") return skipped(decision.reason, logger);
+        return skipped("no managed jumi PRs", logger);
       }
       // Push is out of scope for sits: enqueue without remembering or clearing.
       return enqueueJobs(jobs, deps.worker.queue, delivery, logger);

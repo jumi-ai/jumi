@@ -173,6 +173,9 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   // Maintainer-only review question: the worker cannot act, a human answers on the forge.
   if (text === "waiting on maintainer") return "waiting-maintainer";
   if (text === "waiting-maintainer") return "waiting-maintainer";
+  // Shared CI failure: this PR waits for another open PR's fix to land.
+  // Boards as waiting (never stuck) so waiters read as `waiting on #N`.
+  if (text.startsWith("waiting on #")) return "waiting-maintainer";
 
   return undefined;
 }
