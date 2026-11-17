@@ -721,6 +721,19 @@ export function describeSuggestionsReason(count: number): string {
   return `${count} suggestion${count === 1 ? "" : "s"}`;
 }
 
+/** Canonical success reason fragment from the open maintainer questions that actually publish. */
+export function describeMaintainerQuestionReason(count: number): string {
+  return `${count} maintainer question${count === 1 ? "" : "s"}`;
+}
+
+/** Canonical success reason from published suggestions and open maintainer questions. */
+export function describeSuccessReason(suggestions: number, maintainerQuestions: number): string {
+  const parts: string[] = [];
+  if (suggestions > 0) parts.push(describeSuggestionsReason(suggestions));
+  if (maintainerQuestions > 0) parts.push(describeMaintainerQuestionReason(maintainerQuestions));
+  return parts.join(", ");
+}
+
 /** One body line naming how many 💡 findings the cap dropped. Never parses as a finding. */
 export function formatSuggestionCapNote(dropped: number, cap: number = MAX_SUGGESTION_FINDINGS): string {
   return `Jumi dropped ${dropped} 💡 suggestion${dropped === 1 ? "" : "s"} (cap ${cap}).`;
@@ -945,36 +958,33 @@ function recordMaintainerQuestionCount(record: ReviewRecord): number {
   }
   // Old rows predate the stored count: derive it from the findings so the
   // record path still agrees with the text parser on stored markdown. The
-  // check mirrors `toMarkdown()` canonicalization: leading generic markers
-  // are stripped first, so a `❓ maintainer:` behind `q:`/`question:` still
+  // check mirrors `toMarkdown()` canonicalization: each part (title, body)
+  // is canonicalized separately, so a `❓ maintainer:` leading either part
   // counts, while a buried mention or an HTML comment prefix does not.
   // Embedded check trailers are stripped first, mirroring `parseReviewOutput`.
-  let count = 0;
-  for (const finding of record.findings ?? []) {
-    if (finding.severity !== "question") continue;
-    const raw = [finding.title ?? "", finding.body ?? ""].filter(Boolean).join(" ").trim();
-    if (!raw) continue;
-    let cur = raw
+  const partIsMaintainer = (part: string): boolean => {
+    let cur = part
       .replace(/<!--\s*jumi-check:\s*(?:success|failure)(?:\s*;\s*(?:(?!-->).)*?)?\s*-->/gi, " ")
       .replace(/<!--\s*jumi-review:[^>]*-->/g, " ")
       .replace(/\s+/g, " ")
       .trim()
       .replace(/^(?:\*\*|__)?\s*/, "");
-    let isMaint = false;
     for (;;) {
-      if (/^❓\s*maintainer\s*:/iu.test(cur)) {
-        isMaint = true;
-        break;
-      }
+      const maint = /^(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:\s*/iu.exec(cur);
+      if (maint) return true;
       const generic = /^(?:❓\s*(?:q\s*:|question\s*:)|(?:q|question)\s*:|❓)\s*/iu.exec(cur);
       if (generic && generic[0].length > 0) {
         cur = cur.slice(generic[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-        if (!cur) break;
+        if (!cur) return false;
         continue;
       }
-      break;
+      return false;
     }
-    if (isMaint) count++;
+  };
+  let count = 0;
+  for (const finding of record.findings ?? []) {
+    if (finding.severity !== "question") continue;
+    if (partIsMaintainer(finding.title ?? "") || partIsMaintainer(finding.body ?? "")) count++;
   }
   return Math.min(count, record.counts.question);
 }

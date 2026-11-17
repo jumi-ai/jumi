@@ -201,4 +201,55 @@ describe("ReviewVerdictStore validation", () => {
     expect(record.counts.question).toBe(1);
     expect(record.counts.maintainerQuestion).toBe(1);
   });
+
+  test("a marker repeated in the body still publishes once", async () => {
+    const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
+    const { countBugFindings, countMaintainerQuestionFindings, isMaintainerQuestionFirstLine } = await import(
+      "../src/verdict.ts"
+    );
+
+    const store = makeStore();
+    expect(
+      store.addFinding({
+        severity: "question",
+        title: "❓ maintainer: merge without the numbers?",
+        body: "❓ maintainer: Issue acceptance asks for the numbers",
+      }).ok
+    ).toBe(true);
+    expect(store.setVerdict({ state: "success" }).ok).toBe(true);
+    const markdown = store.toMarkdown();
+    expect(occurrences(markdown, "❓ maintainer:")).toBe(1);
+    expect(markdown).not.toContain("❓ q:");
+    const maintainerLine = markdown.split("\n").find((line) => line.includes("❓ maintainer:")) ?? "";
+    expect(isMaintainerQuestionFirstLine(maintainerLine)).toBe(true);
+    expect(countMaintainerQuestionFindings(markdown)).toBe(1);
+    const record = store.toRecord();
+    expect(record.counts.question).toBe(1);
+    expect(record.counts.maintainerQuestion).toBe(1);
+
+    const simpler = makeStore();
+    expect(
+      simpler.addFinding({
+        severity: "suggestion",
+        title: "💡 simpler: extract a helper",
+        body: "💡 simpler: the helper removes duplication",
+      }).ok
+    ).toBe(true);
+    expect(simpler.setVerdict({ state: "success" }).ok).toBe(true);
+    const simplerMarkdown = simpler.toMarkdown();
+    expect(occurrences(simplerMarkdown, "💡 simpler:")).toBe(1);
+
+    const bug = makeStore();
+    expect(
+      bug.addFinding({
+        severity: "bug",
+        title: "🔴 bug: null deref",
+        body: "🔴 bug: guard it before use",
+      }).ok
+    ).toBe(true);
+    expect(bug.setVerdict({ state: "failure", reason: "could not finish: dirty tree" }).ok).toBe(true);
+    const bugMarkdown = bug.toMarkdown();
+    expect(occurrences(bugMarkdown, "🔴 bug:")).toBe(1);
+    expect(countBugFindings(bugMarkdown)).toBe(1);
+  });
 });

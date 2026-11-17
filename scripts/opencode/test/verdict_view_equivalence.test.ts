@@ -117,8 +117,21 @@ describe("verdict view equivalence (seeded property)", () => {
       const nFindings = Math.floor(rng() * 9); // 0-8
       for (let j = 0; j < nFindings; j++) {
         const severity = (["bug", "risk", "question", "suggestion"] as const)[Math.floor(rng() * 4)];
-        const title = randomString(rng);
-        const body = randomString(rng);
+        let title = randomString(rng);
+        let body = randomString(rng);
+        // Cover the title marker repeated in the body: with some probability
+        // both parts lead with the same severity marker so the store must
+        // canonicalize to one marker and the record/text maintainer counts
+        // must still agree.
+        if (rng() < 0.3) {
+          let prefix: string;
+          if (severity === "question") prefix = rng() < 0.5 ? "❓ maintainer: " : "❓ q: ";
+          else if (severity === "suggestion") prefix = "💡 simpler: ";
+          else if (severity === "bug") prefix = "🔴 bug: ";
+          else prefix = "🟡 risk: ";
+          title = `${prefix}${title}`;
+          body = `${prefix}${body}`;
+        }
         if (rng() < 0.7) {
           const line = HUNK_LINES[Math.floor(rng() * HUNK_LINES.length)];
           store.addFinding({ path: "src/a.ts", line, severity, title, body });

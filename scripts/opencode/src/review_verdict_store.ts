@@ -143,94 +143,119 @@ function stripEmbeddedChecks(text: string): string {
 }
 
 /**
- * Canonical finding body for `toMarkdown()`: a single severity marker, never
- * a doubled `❓ q: ❓ maintainer:` / `💡 simpler: 💡 simpler:` prefix. The
- * model already writes its own marker (`❓ maintainer:`, `💡 simpler:`); the
- * store normalizes any leading markers to one canonical marker so the text
- * parser matches and an unlocated line never parses as a located finding
- * (the canonical `word:` keeps a colon inside any would-be path, which the
- * path validator rejects).
+ * Canonical finding line for `toMarkdown()`: a single severity marker, never
+ * a doubled `❓ q: ❓ maintainer:` / `💡 simpler: 💡 simpler:` prefix and never
+ * a marker repeated from the body (`❓ maintainer: … ❓ maintainer: …`). The
+ * model already writes its own marker (`❓ maintainer:`, `💡 simpler:`) and
+ * may repeat it in the body; the store canonicalizes the title and the body
+ * separately (stripping that severity's leading markers from each), joins the
+ * remainders, and puts one canonical marker in front so the text parser
+ * matches and an unlocated line never parses as a located finding (the
+ * canonical `word:` keeps a colon inside any would-be path, which the path
+ * validator rejects).
  */
-function canonicalFindingBodyText(text: string, severity: ReviewMcpSeverity): string {
+function stripQuestionPart(part: string): { content: string; isMaintainer: boolean } {
   // For questions, strip embedded check/review trailers first, mirroring the
   // text parser's maintainer count (which runs on stripped comment text):
   // otherwise the canonical prefix and the record count disagree on hostile
-  // inputs that hide a marker behind a check literal. Other severities keep
-  // the raw text so a check-only body still counts, matching the raw-line
-  // risk/suggestion counters.
-  let cur = severity === "question" ? stripEmbeddedChecks(text) : text.replace(/\s+/g, " ").trim();
+  // inputs that hide a marker behind a check literal.
+  let cur = stripEmbeddedChecks(part);
   cur = cur.replace(/^(?:\*\*|__)?\s*/, "");
-  // Strip leading markers but keep the last one as body when stripping would
-  // leave nothing: a finding whose whole text is markers (`🟡 🟡`) still
-  // publishes with a body so the parser counts it, matching the typed input.
-  const stripOne = (re: RegExp): boolean => {
-    const m = re.exec(cur);
-    if (!m || m[0].length === 0) return false;
-    const rest = cur.slice(m[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-    if (!rest) return false;
-    cur = rest;
-    return true;
-  };
   let isMaintainer = false;
-  if (severity === "question") {
-    // Strip all leading question/maintainer markers, remembering whether a
-    // maintainer marker led the text (tolerating a doubled prefix). A bare
-    // `❓ maintainer:` marker with no body still counts, so an empty
-    // remainder after a maintainer prefix keeps the maintainer flag.
-    for (;;) {
-      const maint = /^(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:\s*/iu.exec(cur);
-      if (maint) {
-        const rest = cur.slice(maint[0].length).replace(/^(?:\*\*|__)?\s*/, "");
-        isMaintainer = true;
-        cur = rest;
-        if (!cur) break;
-        continue;
-      }
-      if (stripOne(/^(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:|❓)\s*/iu)) {
-        // A doubled `❓ q: ❓ maintainer:` still leads with a maintainer
-        // marker after the generic strip: loop to catch it.
-        continue;
-      }
-      break;
+  for (;;) {
+    const maint = /^(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:\s*/iu.exec(cur);
+    if (maint) {
+      const rest = cur.slice(maint[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+      isMaintainer = true;
+      cur = rest;
+      if (!cur) break;
+      continue;
     }
-    const base = isMaintainer ? "❓ maintainer" : "❓ q";
-    return cur ? `${base}: ${cur}` : `${base}:`;
+    const generic = /^(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:|❓)\s*/iu.exec(cur);
+    if (generic && generic[0].length > 0) {
+      cur = cur.slice(generic[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+      // A doubled `❓ q: ❓ maintainer:` still leads with a maintainer
+      // marker after the generic strip: loop to catch it. Stripping to
+      // empty is allowed per part so a bare marker still canonicalizes to
+      // a single marker once the parts are rejoined.
+      if (!cur) break;
+      continue;
+    }
+    break;
   }
-  if (severity === "suggestion") {
-    while (stripOne(/^(?:💡\s*(?:simpler\s*:|suggestions?\s*:)?|(?:simpler|suggestions?)\s*:|💡)\s*/iu)) {}
-    return cur ? `💡 simpler: ${cur}` : `💡 simpler:`;
-  }
-  if (severity === "bug") {
-    while (stripOne(/^(?:🔴\s*(?:bug\s*:)?|bug\s*:|🔴)\s*/iu)) {}
-    return cur ? `🔴 bug: ${cur}` : `🔴 bug:`;
-  }
-  while (stripOne(/^(?:🟡\s*(?:risk\s*:)?|risk\s*:|🟡)\s*/iu)) {}
-  return cur ? `🟡 risk: ${cur}` : `🟡 risk:`;
+  return { content: cur, isMaintainer };
 }
 
-/** Combined title/body text for one stored finding, single-spaced. */
-function findingDisplayText(finding: Pick<ReviewMcpFindingRecord, "title" | "body">): string {
-  return [finding.title, finding.body].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+function stripSeverityPart(part: string, severity: ReviewMcpSeverity): string {
+  // Other severities keep the raw text so a check-only body still counts,
+  // matching the raw-line risk/suggestion counters; embedded checks are not
+  // stripped here.
+  let cur = part.replace(/\s+/g, " ").trim();
+  cur = cur.replace(/^(?:\*\*|__)?\s*/, "");
+  const re =
+    severity === "suggestion"
+      ? /^(?:💡\s*(?:simpler\s*:|suggestions?\s*:)?|(?:simpler|suggestions?)\s*:|💡)\s*/iu
+      : severity === "bug"
+        ? /^(?:🔴\s*(?:bug\s*:)?|bug\s*:|🔴)\s*/iu
+        : /^(?:🟡\s*(?:risk\s*:)?|risk\s*:|🟡)\s*/iu;
+  for (;;) {
+    const m = re.exec(cur);
+    if (!m || m[0].length === 0) break;
+    cur = cur.slice(m[0].length).replace(/^(?:\*\*|__)?\s*/, "");
+    if (!cur) break;
+  }
+  return cur;
+}
+
+/** Canonicalize title and body separately, then join with one marker in front. */
+function canonicalFindingLine(
+  title: string | undefined,
+  body: string | undefined,
+  severity: ReviewMcpSeverity
+): string {
+  if (severity === "question") {
+    const t = stripQuestionPart(title ?? "");
+    const b = stripQuestionPart(body ?? "");
+    const isMaintainer = t.isMaintainer || b.isMaintainer;
+    const combined = [t.content, b.content].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    const base = isMaintainer ? "❓ maintainer" : "❓ q";
+    return combined ? `${base}: ${combined}` : `${base}:`;
+  }
+  const t = stripSeverityPart(title ?? "", severity);
+  const b = stripSeverityPart(body ?? "", severity);
+  let combined = [t, b].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+  if (!combined) {
+    // A finding whose whole text is markers (`🟡` + `🟡`) still publishes
+    // with a body so the parser counts it, matching the typed input. The
+    // body is the bare emoji so the line keeps one canonical `word:` prefix.
+    const raw = [title ?? "", body ?? ""].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    if (raw) {
+      if (severity === "bug") combined = "🔴";
+      else if (severity === "risk") combined = "🟡";
+      else if (severity === "suggestion") combined = "💡";
+    }
+  }
+  if (severity === "suggestion") return combined ? `💡 simpler: ${combined}` : `💡 simpler:`;
+  if (severity === "bug") return combined ? `🔴 bug: ${combined}` : `🔴 bug:`;
+  return combined ? `🟡 risk: ${combined}` : `🟡 risk:`;
 }
 
 /**
  * Whether a stored finding is a maintainer-only `❓`: a question whose
- * combined text leads with the prescribed `❓ maintainer:` marker
- * (tolerating a doubled `❓ q: ❓ maintainer:` prefix from before the
- * canonicalization, so old rows still count). A `❓ maintainer:` buried in
- * the middle of the text does not count, matching the text parser.
+ * title or whose body leads with the prescribed `❓ maintainer:` marker
+ * (tolerating a doubled `❓ q: ❓ maintainer:` prefix, so old rows still
+ * count). A `❓ maintainer:` buried in the middle of both parts does not
+ * count, matching the text parser which only reads the published first line.
  */
 export function isMaintainerStoreFinding(
   finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">
 ): boolean {
   if (finding.severity !== "question") return false;
-  const raw = stripEmbeddedChecks(findingDisplayText(finding));
-  if (!raw) return false;
   // Agreement with the text parser runs on the canonical markdown, not the
-  // raw input: leading generic markers (`q:`, `question:`, `❓ q:`) are
-  // stripped by `toMarkdown()`, so a `❓ maintainer:` buried behind them
-  // still publishes as `❓ maintainer:` and must count here too.
-  return canonicalFindingBodyText(raw, "question").startsWith("❓ maintainer:");
+  // raw input: each part is canonicalized separately by `toMarkdown()`, so a
+  // `❓ maintainer:` leading either part publishes as `❓ maintainer:` and
+  // must count here too.
+  return canonicalFindingLine(finding.title, finding.body, "question").startsWith("❓ maintainer:");
 }
 
 /** Count the maintainer-only `❓` findings among stored findings. */
@@ -453,14 +478,12 @@ export class ReviewVerdictStore {
   toMarkdown(): string {
     const lines: string[] = [];
     for (const finding of this.findings.values()) {
-      const text = findingDisplayText(finding);
       // Canonical single marker: the model already writes its own marker
-      // (`❓ maintainer:`, `💡 simpler:`); normalizing strips any doubled
-      // prefix so the published body carries one marker the text parser
+      // (`❓ maintainer:`, `💡 simpler:`) and may repeat it in the body;
+      // canonicalizing title and body separately strips each part's leading
+      // markers so the published body carries one marker the text parser
       // matches, and an unlocated line never parses as a located finding.
-      const canonical = text
-        ? canonicalFindingBodyText(text, finding.severity)
-        : `${severityMarker(finding.severity)}:`;
+      const canonical = canonicalFindingLine(finding.title, finding.body, finding.severity);
       if (finding.path && finding.line != null) {
         lines.push(`${finding.path}:${finding.line}: ${canonical}`);
       } else {
