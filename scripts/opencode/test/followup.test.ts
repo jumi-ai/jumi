@@ -3269,6 +3269,314 @@ describe("implementFollowUp", () => {
     });
   });
 
+  test("flake reruns the failed job once with a visible note", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: Array<{ jobId: number; runId?: number }> = [];
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number, runId?: number) => {
+          rerunCalls.push({ jobId, ...(runId !== undefined ? { runId } : {}) });
+        },
+      });
+      let openCode = 0;
+      const result = await realImplementFollowUp({
+        api: api as never,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
+      });
+      expect(openCode).toBe(0);
+      expect(rerunCalls).toHaveLength(1);
+      expect(rerunCalls[0]?.jobId).toBe(9);
+      expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("Automatic rerun 1/1"))).toBe(true);
+    });
+  });
+
+  test("second flake on the same head and check makes no rerun call", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: number[] = [];
+      let calls = 0;
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => {
+          calls++;
+          return calls === 1
+            ? "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n"
+            : "##[error]Failed to connect to 140.82.112.5 port 443: Connection timed out\n";
+        },
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number) => {
+          rerunCalls.push(jobId);
+        },
+      });
+      const runOnce = async () => {
+        let openCode = 0;
+        const result = await realImplementFollowUp({
+          api: api as never,
+          job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async () => {
+            throw new Error("git should not run");
+          },
+          openCodeRunner: async () => {
+            openCode++;
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        });
+        return { result, openCode };
+      };
+      const first = await runOnce();
+      expect(first.result.status).toBe("skipped");
+      expect(rerunCalls).toHaveLength(1);
+      const second = await runOnce();
+      expect(second.result.status).toBe("skipped");
+      expect(rerunCalls).toHaveLength(1);
+      expect(second.openCode).toBe(0);
+      expect(api.comments.some((body) => body.includes("already failed"))).toBe(true);
+    });
+  });
+
+  test("new head SHA resets the flake rerun budget", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: number[] = [];
+      const shas = ["headsha", "newsha"];
+      let runIndex = 0;
+      const headPr = (sha: string) => {
+        const repo = makeRepo();
+        return makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "jumi" }),
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+          head: {
+            label: "kirmanak:jumi/issue-12-fix-the-thing",
+            ref: "jumi/issue-12-fix-the-thing",
+            sha,
+            repo,
+            repo_id: repo.id,
+          },
+        });
+      };
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listOpenPulls: async () => [headPr(shas[Math.min(runIndex, shas.length - 1)] as string)],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [
+          { id: 9, name: "build", head_sha: "headsha", run_id: 100 },
+          { id: 10, name: "build", head_sha: "newsha", run_id: 101 },
+        ],
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number) => {
+          rerunCalls.push(jobId);
+        },
+      });
+      const runOnce = async () => {
+        const result = await realImplementFollowUp({
+          api: api as never,
+          job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: async () => {
+            throw new Error("git should not run");
+          },
+          openCodeRunner: async () => {
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        });
+        runIndex++;
+        return result;
+      };
+      await runOnce();
+      expect(rerunCalls).toEqual([9]);
+      await runOnce();
+      expect(rerunCalls).toEqual([9, 10]);
+    });
+  });
+
+  test("non-flake failure after the rerun reaches the CI-fix path", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: number[] = [];
+      let calls = 0;
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => {
+          calls++;
+          return calls === 1
+            ? "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n"
+            : "##[error]Failed to find package 'platforms;android-37'\n";
+        },
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number) => {
+          rerunCalls.push(jobId);
+        },
+      });
+      const base = {
+        api: api as never,
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        logger: () => undefined,
+      };
+      let openCode = 0;
+      const first = await realImplementFollowUp({
+        ...base,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(first.status).toBe("skipped");
+      expect(rerunCalls).toHaveLength(1);
+      const second = await realImplementFollowUp({
+        ...base,
+        job: followUpJob(),
+        gitRunner: async (args: string[]) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+      });
+      expect(openCode).toBe(1);
+      expect(second.status).not.toBe("skipped");
+    });
+  });
+
+  test("rerun API error falls back to the human comment", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: number[] = [];
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async () => {
+          rerunCalls.push(9);
+          throw new Error("GitHub API → 403: Actions write permission missing");
+        },
+      });
+      let openCode = 0;
+      const result = await realImplementFollowUp({
+        api: api as never,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
+      });
+      expect(openCode).toBe(0);
+      expect(rerunCalls).toHaveLength(1);
+      expect(api.comments.some((body) => body.includes("A human needs to rerun"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("Automatic rerun failed"))).toBe(true);
+    });
+  });
+
+  test("auto_rerun_flakes false keeps the human note and never reruns", async () => {
+    await withDirs(async (home, workdir) => {
+      let rerunCalls = 0;
+      const api = followupApi({
+        listIssueComments: async () => [],
+        getRepoFile: async () => ({ found: true, content: "auto_rerun_flakes: false\n" }),
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async () => {
+          rerunCalls++;
+        },
+      });
+      let openCode = 0;
+      const result = await realImplementFollowUp({
+        api: api as never,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async () => {
+          throw new Error("git should not run");
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("skipped");
+      expect(openCode).toBe(0);
+      expect(rerunCalls).toBe(0);
+      expect(api.comments.some((body) => body.includes("A human needs to rerun"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(false);
+    });
+  });
+
   test("review follow-up still injects failed CI logs", async () => {
     await withDirs(async (home, workdir) => {
       const api = followupApi({

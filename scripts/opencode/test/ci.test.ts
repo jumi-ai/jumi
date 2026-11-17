@@ -20,19 +20,27 @@ import {
   encodeCiLookupMarker,
   encodeCiPendingWait,
   failureLines,
+  flakeExhaustedComment,
+  flakeRerunCommentFor,
+  flakeRerunFailedComment,
+  flakeRerunsCommentFor,
   flakeSkipReason,
   formatCheckDuration,
   hashText,
   infraFlakeReason,
   inspectCi,
   isCheckHandled,
+  isFlakeRerunSpent,
   jobMatchesCheck,
   latestStatuses,
+  parseCiState,
   needsCiFollowUp as realNeedsCiFollowUp,
   recordCiHandled,
+  recordFlakeReruns,
   resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
+  splitFlakeBudget,
   summarizeCiChecks,
 } from "../src/ci.ts";
 import { traced } from "./golden/trace.ts";
@@ -255,6 +263,60 @@ describe("infraFlakeReason", () => {
         },
       ])
     ).toBe("CI infra flake: Helm remote-schema timeout/429");
+  });
+
+  test("rerun budget is one per head and check, without the log hash", async () => {
+    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
+    const home = await mkdtemp(join(tmpdir(), "jumi-ci-budget-"));
+    try {
+      const store = memorySkipLatchesFor(home);
+      const key = { owner: "o", repo: "r", issueNumber: 1 };
+      const { readCiLatch } = await import("../src/ci.ts");
+      let state = await readCiLatch(store, key);
+      expect(isFlakeRerunSpent(state, "HEAD", "build")).toBe(false);
+      await recordFlakeReruns({
+        home,
+        owner: "o",
+        repo: "r",
+        issueNumber: 1,
+        prNumber: 2,
+        sha: "HEAD",
+        checkNames: ["build"],
+        skipLatches: store,
+      });
+      state = await readCiLatch(store, key);
+      expect(isFlakeRerunSpent(state, "HEAD", "build")).toBe(true);
+      expect(isFlakeRerunSpent(state, "head", "build")).toBe(true);
+      expect(isFlakeRerunSpent(state, "HEAD", "lint")).toBe(false);
+      expect(isFlakeRerunSpent(state, "OTHER", "build")).toBe(false);
+      const split = splitFlakeBudget(state, "HEAD", [
+        { name: "build", state: "failure", description: "", capped: "", logHash: "a" },
+        { name: "lint", state: "failure", description: "", capped: "", logHash: "b" },
+      ]);
+      expect(split.toRerun.map((c) => c.name)).toEqual(["lint"]);
+      expect(split.exhausted.map((c) => c.name)).toEqual(["build"]);
+      expect(parseCiState({ prNumber: 2, handled: [], updatedAt: "" }).flakeReruns).toEqual([]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  test("rerun comments name the check, reason, link, and budget", () => {
+    expect(
+      flakeRerunCommentFor({ name: "helm-lint", flake: "GitHub 140.82 timeout", targetUrl: "https://ci/job/9" })
+    ).toBe("Reran `helm-lint` (GitHub 140.82 timeout) — [rerun](https://ci/job/9). Automatic rerun 1/1.");
+    expect(flakeRerunsCommentFor([{ name: "build" }])).toContain("Automatic rerun 1/1");
+    expect(
+      flakeExhaustedComment([
+        { name: "build", state: "failure", description: "", capped: "", logHash: "x", flake: "r" },
+      ])
+    ).toContain("already failed");
+    expect(
+      flakeRerunFailedComment(
+        [{ name: "build", state: "failure", description: "", capped: "", logHash: "x", flake: "r" }],
+        "403 missing"
+      )
+    ).toContain("Automatic rerun failed: 403 missing");
   });
 
   test("unittest FAIL header blocks a flake classification", () => {

@@ -993,4 +993,11 @@ export class GiteaAPI {
   async getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string> {
     return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
   }
+
+  async rerunActionJob(owner: string, repo: string, jobId: number, runId?: number): Promise<void> {
+    if (runId === undefined || !Number.isFinite(runId)) {
+      throw new Error(`Gitea rerun needs a run id for job ${jobId}`);
+    }
+    await this.post(`/repos/${this.repoPath(owner, repo)}/actions/runs/${runId}/jobs/${jobId}/rerun`, {});
+  }
 }

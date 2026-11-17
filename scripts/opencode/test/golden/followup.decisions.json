@@ -3931,6 +3931,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -3960,6 +3961,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -4107,6 +4109,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -4136,6 +4139,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -6072,6 +6076,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -6101,6 +6106,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -7304,6 +7310,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -7333,6 +7340,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -7452,6 +7460,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "checks",
@@ -7481,6 +7490,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "checks",
@@ -7605,6 +7615,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -7634,6 +7645,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -8743,6 +8755,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -8772,6 +8785,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -9030,6 +9044,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -9059,6 +9074,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -9317,6 +9333,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -9346,6 +9363,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -9522,6 +9540,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -9551,6 +9570,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -9804,6 +9824,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -9833,6 +9854,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -9880,17 +9902,6 @@
     "claimExists": false,
     "effects": [
       {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nCI looks like an infra flake (GitHub 140.82 checkout/cache timeout or unreachable) on build. A human needs to rerun."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 0
-      },
-      {
         "key": {
           "issueNumber": 12,
           "owner": "kirmanak",
@@ -9899,6 +9910,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -9911,6 +9923,17 @@
           }
         },
         "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nCI looks like an infra flake (GitHub 140.82 checkout/cache timeout or unreachable) on build. A human needs to rerun. Automatic rerun failed: rerun not supported by forge client"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
         "seq": 1
       }
     ],
@@ -9928,6 +9951,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
@@ -10034,6 +10058,7 @@
         "op": "put",
         "patch": {
           "ci": {
+            "flakeReruns": [],
             "handled": [
               {
                 "checkName": "build",
@@ -10063,6 +10088,7 @@
     },
     "latchAfter": {
       "ci": {
+        "flakeReruns": [],
         "handled": [
           {
             "checkName": "build",
