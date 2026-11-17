@@ -146,7 +146,7 @@ import {
   countRiskFindings,
   countSuggestionFindings,
   describeBlockingReason,
-  describeSuggestionsReason,
+  describeSuccessReason,
   findingFingerprint,
   hasBlockingFindings,
   hasColonEndingFinding,
@@ -1678,7 +1678,13 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   const publishedRisks = countRiskFindings(comment, { singleFilePath });
   const publishedSuggestions = countSuggestionFindings(comment, { singleFilePath });
   const publishedFailureReason = describeBlockingReason(publishedBugs, publishedRisks);
-  const publishedSuccessReason = publishedSuggestions > 0 ? describeSuggestionsReason(publishedSuggestions) : "";
+  // The success trailer names open maintainer questions next to suggestions
+  // when the maintainer hold applies, built from the published findings like
+  // the suggestion count is. The status description stays the pending hold
+  // note; the failure trailer stays blocking-only.
+  const publishedMaintainers = countMaintainerQuestionFindings(comment, { singleFilePath });
+  const countedMaintainers = isMaintainerQuestionsHoldEnabled(settingsForHold) ? publishedMaintainers : 0;
+  const publishedSuccessReason = describeSuccessReason(publishedSuggestions, countedMaintainers);
   const effectiveVerdict =
     blockingQuestions > 0
       ? { state: "failure" as const, description: openQuestionDescription(blockingQuestions), incomplete: false }
@@ -1700,12 +1706,16 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     });
   }
   // The published trailer carries the same parent-computed counts. A bare
-  // model trailer (no reason of its own) stays bare; any model-written reason
-  // is replaced so stale counts never publish. The reason is sanitized so a
-  // `>` in free text can never break the single-line trailer.
+  // model trailer (no reason of its own) stays bare, except a success review
+  // with open maintainer questions gains its maintainer count so the hold is
+  // visible in the trailer; any model-written reason is replaced so stale
+  // counts never publish. The reason is sanitized so a `>` in free text can
+  // never break the single-line trailer.
   const modelReason = parsed.checkLine ? (parseCheckLine(parsed.checkLine)?.reason ?? "") : "";
+  const needsMaintainerTrailer =
+    countedMaintainers > 0 && !parsed.verdict.incomplete && parsed.verdict.state === "success";
   const publishedCheckLine =
-    modelReason.trim() !== ""
+    modelReason.trim() !== "" || needsMaintainerTrailer
       ? buildCheckTrailer(effectiveVerdict.state, effectiveVerdict.description)
       : parsed.checkLine;
   if (blockingQuestions > 0) {

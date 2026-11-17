@@ -4677,4 +4677,79 @@ describe("maintainer hold", () => {
     expect(statuses.at(-1)?.state).toBe("failure");
     expect(statuses.at(-1)?.description).not.toContain("waiting on maintainer");
   });
+
+  test("success with one ❓ maintainer: publishes a trailer counting the question", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: maintainerMarkdown,
+      api: makeReviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }) }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({ found: false }),
+        createPullReview: async (_owner, _repo, _index, review) => {
+          const body = (review as { body?: unknown }).body;
+          if (typeof body === "string") bodies.push(body);
+          return { id: 1 };
+        },
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(body);
+          return makeComment({ id: 1, body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)).toMatchObject({
+      state: "pending",
+      description: "waiting on maintainer: 1 question",
+    });
+    const trailer = lastCheckTrailer(bodies.join("\n"));
+    expect(trailer?.state).toBe("success");
+    expect(trailer?.reason).toBe("1 maintainer question");
+    expect(trailer?.reason ?? "").not.toContain(">");
+  });
+
+  test("success with one 💡 and one ❓ maintainer: trailer names both", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const bodies: string[] = [];
+    const result = await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: [
+        "src/foo.ts:12: ❓ maintainer: please file the follow-up issue?",
+        "src/foo.ts:13: 💡 simpler: extract a helper",
+        "<!-- jumi-check: success; 1 suggestion -->",
+      ].join("\n"),
+      api: makeReviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }) }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({ found: false }),
+        createPullReview: async (_owner, _repo, _index, review) => {
+          const body = (review as { body?: unknown }).body;
+          if (typeof body === "string") bodies.push(body);
+          return { id: 1 };
+        },
+        createIssueComment: async (_owner, _repo, _index, body) => {
+          bodies.push(body);
+          return makeComment({ id: 1, body });
+        },
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+    });
+    expect(result).toEqual({ status: "posted" });
+    expect(statuses.at(-1)).toMatchObject({
+      state: "pending",
+      description: "waiting on maintainer: 1 question",
+    });
+    const trailer = lastCheckTrailer(bodies.join("\n"));
+    expect(trailer?.state).toBe("success");
+    expect(trailer?.reason).toBe("1 suggestion, 1 maintainer question");
+  });
 });
