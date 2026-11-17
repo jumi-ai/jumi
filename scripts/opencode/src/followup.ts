@@ -17,10 +17,10 @@ import {
   flakeExhaustedComment,
   flakeRerunFailedComment,
   flakeRerunsCommentFor,
-  isFlakeRerunSpent,
   readCiLatch,
   recordCiHandled,
   recordFlakeReruns,
+  splitFlakeBudget,
 } from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
@@ -1819,13 +1819,15 @@ export async function implementFollowUp(
       .filter((check): check is (typeof ci.unhandled)[number] => check !== undefined);
     const targets = fullChecks.length > 0 ? fullChecks : ci.unhandled.filter((check) => check.flake);
     if (targets.length === 0) return undefined;
-    const ciState = await readCiLatch(latches, latchKey).catch(() => undefined);
-    const spent = (name: string): boolean => {
-      if (!ciState) return false;
-      return isFlakeRerunSpent(ciState, sha, name);
-    };
-    const toRerun = targets.filter((check) => !spent(check.name));
-    const exhausted = targets.filter((check) => spent(check.name));
+    let ciState: Awaited<ReturnType<typeof readCiLatch>>;
+    try {
+      ciState = await readCiLatch(latches, latchKey);
+    } catch {
+      // Fail closed: a latch-read error is distinct from an empty budget, so
+      // fall through to the normal flake human-note effects instead of rerunning.
+      return undefined;
+    }
+    const { toRerun, exhausted } = splitFlakeBudget(ciState, sha, targets);
     if (toRerun.length === 0) {
       await decisionDeps.sticky(flakeExhaustedComment(targets));
       await decisionDeps.recordCiHandled(flake.checks);
