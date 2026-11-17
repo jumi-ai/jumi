@@ -306,10 +306,21 @@ function labelNameOf(label: string | { name?: string }): string {
   return typeof label === "string" ? label : (label.name ?? "");
 }
 
+export function hasAutomergeLabel(labels: AutomergeLabelList | null | undefined, name: string): boolean {
+  return hasLabelCaseInsensitive(labels, name);
+}
+
 function hasLabelCaseInsensitive(labels: AutomergeLabelList | null | undefined, name: string): boolean {
   const needle = name.trim().toLowerCase();
   if (!needle) return false;
   return (labels ?? []).some((label) => labelNameOf(label).trim().toLowerCase() === needle);
+}
+
+export function resolveAutomergeLabelNames(settings: RepoSettingsLoad): {
+  automergeLabel: string;
+  noAutomergeLabel: string;
+} {
+  return resolveLabelNames(settings);
 }
 
 function resolveLabelNames(settings: RepoSettingsLoad): { automergeLabel: string; noAutomergeLabel: string } {
@@ -317,6 +328,29 @@ function resolveLabelNames(settings: RepoSettingsLoad): { automergeLabel: string
     return { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
   }
   return { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
+}
+
+/**
+ * Shared "will this PR auto-merge?" opt-in answer used by both the schedule
+ * path and the review suggestion hold. `true` means the repository opted in
+ * through its default-branch file (`automerge: true`) or through an admitted
+ * `automerge` label on the PR; `no-automerge` present (or both labels
+ * together) always means `false`, and an invalid file never opts in. The
+ * caller resolves `labelAdmitted` with `isAutomergeLabelAdmitted` (the same
+ * labeller trust check and custom label names); absent labels keep the file
+ * answer. Deployment switches, modes, and other schedule gates stay with
+ * their callers.
+ */
+export function isAutomergeOptedIn(
+  settings: RepoSettingsLoad,
+  labels: AutomergeLabelList | null | undefined,
+  labelAdmitted: boolean
+): boolean {
+  if (settings.state === "invalid") return false;
+  const names = resolveLabelNames(settings);
+  if (hasLabelCaseInsensitive(labels, names.noAutomergeLabel)) return false;
+  if (hasLabelCaseInsensitive(labels, names.automergeLabel)) return labelAdmitted;
+  return settings.state === "valid" && settings.automerge === true;
 }
 
 function timelineLabelName(entry: IssueTimelineEvent): string {
@@ -858,7 +892,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     }
     forcedByLabel = true;
   }
-  if (!forcedByLabel && (settings.state !== "valid" || settings.automerge !== true)) {
+  if (!isAutomergeOptedIn(settings, prLabels, forcedByLabel)) {
     log(
       `automerge skipped for ${input.owner}/${input.repo}#${input.prNumber}: no automerge label on PR and file does not opt in`
     );

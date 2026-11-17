@@ -423,6 +423,11 @@ export function makeReviewApi(
       const out: CollaboratorPermission = { permission: "write", role_name: "write" };
       return out;
     },
+    listIssueTimeline: async (...args) => {
+      record("listIssueTimeline", args);
+      const out: IssueTimelineEvent[] = [];
+      return out;
+    },
     getIssue: async (...args) => {
       record("getIssue", args);
       return neutralIssue();
