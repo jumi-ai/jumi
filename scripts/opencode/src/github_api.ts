@@ -1507,6 +1507,10 @@ export class GithubAPI {
     return this.requestText(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/logs`);
   }
 
+  async rerunActionJob(owner: string, repo: string, jobId: number): Promise<void> {
+    await this.post(`/repos/${this.repoPath(owner, repo)}/actions/jobs/${jobId}/rerun`, {});
+  }
+
   private async listReviewThreads(owner: string, repo: string, number: number): Promise<ReviewThreadNode[]> {
     const threads: ReviewThreadNode[] = [];
     let cursor: string | undefined;

@@ -338,6 +338,14 @@ export interface Forge extends AttachmentSupport {
   listCheckRuns(owner: string, repo: string, sha: string): Promise<Check[]>;
   listActionJobs(owner: string, repo: string, opts?: { status?: string; headSha?: string }): Promise<ActionJob[]>;
   getActionJobLogs(owner: string, repo: string, jobId: number): Promise<string>;
+  /**
+   * Rerun one failed Actions job (failed jobs only, never the whole run).
+   * Gitea needs the run id (`POST .../actions/runs/{run}/jobs/{job}/rerun`);
+   * GitHub ignores it (`POST .../actions/jobs/{job}/rerun`). Throws when the
+   * forge refuses (permission, 404, run too old) so callers fall back to a
+   * human-rerun note. Optional so existing fakes keep working.
+   */
+  rerunActionJob?(owner: string, repo: string, jobId: number, runId?: number): Promise<void>;
   /** Commits unique to the pull head (not on the base). Empty when the forge has none. */
   listPullCommits?(owner: string, repo: string, index: number): Promise<PullCommit[]>;
   /**
@@ -373,6 +381,7 @@ export type ReviewApi = Pick<
   | "listCheckRuns"
   | "listActionJobs"
   | "getActionJobLogs"
+  | "rerunActionJob"
   | "getCollaboratorPermission"
   | "getAppPermissions"
 > &
@@ -399,6 +408,7 @@ export type IssueApi = Tracker &
     | "listCheckRuns"
     | "listActionJobs"
     | "getActionJobLogs"
+    | "rerunActionJob"
     | "getCollaboratorPermission"
     | "getAppPermissions"
     | "listPullCommits"

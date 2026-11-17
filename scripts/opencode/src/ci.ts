@@ -19,9 +19,16 @@ export interface CiHandledCheck {
   logHash: string;
 }
 
+export interface FlakeRerunRecord {
+  sha: string;
+  checkName: string;
+}
+
 export interface CiFollowUpState {
   prNumber: number;
   handled: CiHandledCheck[];
+  /** One automatic rerun per (head SHA, check name). Never includes logHash. */
+  flakeReruns?: FlakeRerunRecord[];
   updatedAt: string;
 }
 
@@ -31,6 +38,7 @@ export interface FailedCheck {
   description: string;
   targetUrl?: string;
   jobId?: number;
+  runId?: number;
   capped: string;
   logHash: string;
   flake?: string;
@@ -687,6 +695,7 @@ export function parseCiState(parsed: unknown): CiFollowUpState {
   return {
     prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
     handled: parseHandled(state.handled),
+    flakeReruns: parseFlakeReruns((state as { flakeReruns?: unknown }).flakeReruns),
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
   };
 }
@@ -706,7 +715,20 @@ export async function readCiState(path: string): Promise<CiFollowUpState> {
 }
 
 function emptyCiState(): CiFollowUpState {
-  return { prNumber: 0, handled: [], updatedAt: "" };
+  return { prNumber: 0, handled: [], flakeReruns: [], updatedAt: "" };
+}
+
+function parseFlakeReruns(value: unknown): FlakeRerunRecord[] {
+  if (!Array.isArray(value)) return [];
+  const out: FlakeRerunRecord[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry as { sha?: unknown; checkName?: unknown };
+    if (typeof rec.sha === "string" && rec.sha && typeof rec.checkName === "string" && rec.checkName) {
+      out.push({ sha: rec.sha.toLowerCase(), checkName: rec.checkName });
+    }
+  }
+  return out;
 }
 
 function parseHandled(value: unknown): CiHandledCheck[] {
@@ -768,6 +790,62 @@ export async function recordCiHandled(opts: {
   await writeCiLatch(store, key, {
     prNumber: opts.prNumber,
     handled: [...byKey.values()],
+    flakeReruns: state.flakeReruns ?? [],
+    updatedAt: (opts.now?.() ?? new Date()).toISOString(),
+  });
+}
+
+/** Budget: one automatic rerun per (head SHA, check name). Log hashes stay out. */
+export const FLAKE_RERUN_BUDGET_TOTAL = 1;
+
+function flakeRerunKey(sha: string, checkName: string): string {
+  return `${sha.toLowerCase()}:${checkName}`;
+}
+
+export function isFlakeRerunSpent(state: CiFollowUpState, sha: string, checkName: string): boolean {
+  return (state.flakeReruns ?? []).some((entry) => entry.sha === sha.toLowerCase() && entry.checkName === checkName);
+}
+
+export function splitFlakeBudget(
+  state: CiFollowUpState,
+  sha: string,
+  checks: FailedCheck[]
+): { toRerun: FailedCheck[]; exhausted: FailedCheck[] } {
+  const toRerun: FailedCheck[] = [];
+  const exhausted: FailedCheck[] = [];
+  for (const check of checks) {
+    if (isFlakeRerunSpent(state, sha, check.name)) exhausted.push(check);
+    else toRerun.push(check);
+  }
+  return { toRerun, exhausted };
+}
+
+export async function recordFlakeReruns(opts: {
+  home: string;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  prNumber: number;
+  sha: string;
+  checkNames: string[];
+  now?: () => Date;
+  skipLatches?: SkipLatchStore;
+}): Promise<void> {
+  const store = skipLatchesFor(opts);
+  const key = { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber };
+  const state = await readCiLatch(store, key);
+  const seen = new Set((state.flakeReruns ?? []).map((entry) => flakeRerunKey(entry.sha, entry.checkName)));
+  const next = [...(state.flakeReruns ?? [])];
+  for (const checkName of opts.checkNames) {
+    const k = flakeRerunKey(opts.sha, checkName);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    next.push({ sha: opts.sha.toLowerCase(), checkName });
+  }
+  await writeCiLatch(store, key, {
+    prNumber: opts.prNumber,
+    handled: state.handled,
+    flakeReruns: next,
     updatedAt: (opts.now?.() ?? new Date()).toISOString(),
   });
 }
@@ -808,6 +886,24 @@ export function flakeComment(checks: FailedCheck[]): string {
   return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
 }
 
+export function flakeRerunCommentFor(check: { name: string; flake?: string; targetUrl?: string }): string {
+  const reason = check.flake ? ` (${check.flake})` : "";
+  const link = check.targetUrl ? ` — [rerun](${check.targetUrl})` : "";
+  return `Reran \`${check.name}\`${reason}${link}. Automatic rerun ${FLAKE_RERUN_BUDGET_TOTAL}/${FLAKE_RERUN_BUDGET_TOTAL}.`;
+}
+
+export function flakeRerunsCommentFor(checks: Array<{ name: string; flake?: string; targetUrl?: string }>): string {
+  return checks.map((check) => flakeRerunCommentFor(check)).join("\n");
+}
+
+export function flakeExhaustedComment(checks: FailedCheck[]): string {
+  return `${flakeComment(checks)} Automatic rerun ${FLAKE_RERUN_BUDGET_TOTAL}/${FLAKE_RERUN_BUDGET_TOTAL} already failed.`;
+}
+
+export function flakeRerunFailedComment(checks: FailedCheck[], error: string): string {
+  return `${flakeComment(checks)} Automatic rerun failed: ${error}`;
+}
+
 async function logsForCheck(
   api: CiApi,
   owner: string,
@@ -815,20 +911,25 @@ async function logsForCheck(
   sha: string,
   status: Check,
   jobs: ActionJob[]
-): Promise<{ text: string; jobId?: number }> {
+): Promise<{ text: string; jobId?: number; runId?: number }> {
   const name = status.context ?? "";
+  const matched =
+    status.jobId !== undefined
+      ? jobs.find((job) => job.id === status.jobId)
+      : jobs.find((job) => jobMatchesCheck(job, name, sha));
   const jobId =
     status.jobId ?? jobIdFromTargetUrl(status.target_url) ?? jobs.find((job) => jobMatchesCheck(job, name, sha))?.id;
+  const runId = matched?.run_id;
   if (jobId === undefined) {
     const fallback = [status.description, status.target_url].filter(Boolean).join("\n");
     return { text: fallback };
   }
   try {
     const text = await api.getActionJobLogs(owner, repo, jobId);
-    return { text, jobId };
+    return { text, jobId, ...(runId !== undefined ? { runId } : {}) };
   } catch {
     const fallback = [status.description, status.target_url].filter(Boolean).join("\n");
-    return { text: fallback, jobId };
+    return { text: fallback, jobId, ...(runId !== undefined ? { runId } : {}) };
   }
 }
 
@@ -969,7 +1070,7 @@ export async function inspectCi(opts: {
   for (const status of red) {
     const name = status.context ?? "unknown";
     const state = commitStatusState(status) === "error" ? "error" : "failure";
-    const { text, jobId } = await logsForCheck(opts.api, opts.owner, opts.repo, opts.sha, status, jobs);
+    const { text, jobId, runId } = await logsForCheck(opts.api, opts.owner, opts.repo, opts.sha, status, jobs);
     const capped = capFailedJobLog(text);
     const logHash = hashText(capped);
     const fingerprint = failureFingerprint(name, capped);
@@ -979,6 +1080,7 @@ export async function inspectCi(opts: {
       description: status.description ?? "",
       targetUrl: status.target_url,
       jobId,
+      ...(runId !== undefined ? { runId } : {}),
       capped,
       logHash,
       flake: classifyInfraFlake(capped),

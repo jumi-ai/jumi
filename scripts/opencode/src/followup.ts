@@ -11,7 +11,17 @@ import {
   restoreCheckpoint,
   sweepCheckpointsBestEffort,
 } from "./checkpoint.ts";
-import { buildCiMarkdown, CI_LOG_FILE, recordCiHandled } from "./ci.ts";
+import {
+  buildCiMarkdown,
+  CI_LOG_FILE,
+  flakeExhaustedComment,
+  flakeRerunFailedComment,
+  flakeRerunsCommentFor,
+  readCiLatch,
+  recordCiHandled,
+  recordFlakeReruns,
+  splitFlakeBudget,
+} from "./ci.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -94,6 +104,7 @@ import {
   effectiveFollowupRounds,
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
+  isAutoRerunFlakesEnabled,
   isMaintainerQuestionsHoldEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
@@ -1793,7 +1804,102 @@ export async function implementFollowUp(
       diffHashResolved = { value: await snapshot.getPrDiffHash() };
     }
   }
+  const handleFlakeSkipWithRerun = async (flake: {
+    reason: string;
+    checks: import("./pr_decision.ts").CiCheckRef[];
+  }): Promise<{ status: "skipped"; reason: string } | undefined> => {
+    const sha = pr.head.sha;
+    // Opt-out in `.jumi.yml`, on by default. Fail-open: missing/invalid/unreadable reruns.
+    if (!isAutoRerunFlakesEnabled(failOpenLoadFromSnapshot(settingsSnapshot))) {
+      return undefined;
+    }
+    const fullByName = new Map(ci.unhandled.map((check) => [check.name, check]));
+    const fullChecks = flake.checks
+      .map((ref) => fullByName.get(ref.name))
+      .filter((check): check is (typeof ci.unhandled)[number] => check !== undefined);
+    const targets = fullChecks.length > 0 ? fullChecks : ci.unhandled.filter((check) => check.flake);
+    if (targets.length === 0) return undefined;
+    let ciState: Awaited<ReturnType<typeof readCiLatch>>;
+    try {
+      ciState = await readCiLatch(latches, latchKey);
+    } catch {
+      // Fail closed: a latch-read error is distinct from an empty budget, so
+      // fall through to the normal flake human-note effects instead of rerunning.
+      return undefined;
+    }
+    const { toRerun, exhausted } = splitFlakeBudget(ciState, sha, targets);
+    if (toRerun.length === 0) {
+      await decisionDeps.sticky(flakeExhaustedComment(targets));
+      await decisionDeps.recordCiHandled(flake.checks);
+      await decisionDeps.resolveHeld("skipped", "flake");
+      await decisionDeps.forgetClaim();
+      return { status: "skipped", reason: flake.reason };
+    }
+    const rerunFn = (
+      opts.api as unknown as {
+        rerunActionJob?: (owner: string, repo: string, jobId: number, runId?: number) => Promise<void>;
+      }
+    ).rerunActionJob;
+    const successes: typeof toRerun = [];
+    const failures: Array<{ check: (typeof toRerun)[number]; error: string }> = [];
+    for (const check of toRerun) {
+      if (typeof rerunFn !== "function") {
+        const why = "rerun not supported by forge client";
+        failures.push({ check, error: why });
+        log(`flake rerun skipped for ${check.name}: ${why}`);
+        continue;
+      }
+      if (check.jobId === undefined) {
+        const why = `missing job id for \`${check.name}\``;
+        failures.push({ check, error: why });
+        log(`flake rerun skipped for ${check.name}: ${why}`);
+        continue;
+      }
+      try {
+        await rerunFn.call(opts.api, owner, repo, check.jobId, check.runId);
+        successes.push(check);
+        log(`flake rerun started for ${check.name} job ${check.jobId}`);
+      } catch (err) {
+        const message = errorMessage(err);
+        failures.push({ check, error: message });
+        log(`flake rerun failed for ${check.name}: ${message}`);
+      }
+    }
+    if (successes.length > 0) {
+      await recordFlakeReruns({
+        home: opts.home,
+        owner,
+        repo,
+        issueNumber,
+        prNumber: pr.number,
+        sha,
+        checkNames: successes.map((check) => check.name),
+        now,
+        skipLatches: latches,
+      });
+    }
+    // Mark the flake logs handled so the same log never reruns again; the
+    // rerun's fresh logs re-enter the normal flow (green continues, a real
+    // failure runs the CI-fix path). A failed API call spends no budget.
+    await decisionDeps.recordCiHandled(flake.checks);
+    const parts: string[] = [];
+    if (successes.length > 0) parts.push(flakeRerunsCommentFor(successes));
+    if (exhausted.length > 0) parts.push(flakeExhaustedComment(exhausted));
+    for (const failure of failures) parts.push(flakeRerunFailedComment([failure.check], failure.error));
+    await decisionDeps.sticky(parts.join("\n"));
+    await decisionDeps.resolveHeld("skipped", "flake");
+    await decisionDeps.forgetClaim();
+    return { status: "skipped", reason: flake.reason };
+  };
   const preRunDecision = preDecision;
+  if (preRunDecision.kind === "skip" && preRunDecision.why === "flake") {
+    const flakeParams = preRunDecision.params as import("./pr_decision.ts").SkipParamsMap["flake"];
+    const flakeResult = await handleFlakeSkipWithRerun({
+      reason: preRunDecision.reason,
+      checks: flakeParams.checks,
+    });
+    if (flakeResult) return flakeResult;
+  }
   if (preRunDecision.kind === "skip") {
     await applyEffects(preRunDecision.effects, decisionDeps);
     return { status: "skipped", reason: preRunDecision.reason };

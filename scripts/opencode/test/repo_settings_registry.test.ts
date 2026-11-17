@@ -75,6 +75,7 @@ const expectedNoneKeys = [
   "allowedRunners",
   "reviewExclude",
   "followupOnSuggestions",
+  "autoRerunFlakes",
   "takeoverAuthors",
   "ignoreConflictsAuthors",
   "blockingQuestionAuthors",
@@ -94,6 +95,7 @@ const expectedFullKeys = [
   "allowedRunners",
   "reviewExclude",
   "followupOnSuggestions",
+  "autoRerunFlakes",
   "maxFollowupRounds",
   "maxConflictRounds",
   "takeoverAuthors",
@@ -130,6 +132,7 @@ const invalidPerKey: Array<[string, string, string]> = [
   ],
   ["review_exclude", 'review_exclude:\n  - ""\n', '"review_exclude" must not contain blank entries'],
   ["followup_on_suggestions", 'followup_on_suggestions: "yes"\n', '"followup_on_suggestions" must be a boolean'],
+  ["auto_rerun_flakes", 'auto_rerun_flakes: "yes"\n', '"auto_rerun_flakes" must be a boolean'],
   ["suggestions_hold_merge", "suggestions_hold_merge: 1\n", '"suggestions_hold_merge" must be a boolean'],
   [
     "maintainer_questions_hold_merge",
@@ -175,7 +178,7 @@ const invalidPerKey: Array<[string, string, string]> = [
 
 describe("repo_settings registry", () => {
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(30);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(31);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);
