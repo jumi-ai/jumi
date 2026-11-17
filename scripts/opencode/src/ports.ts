@@ -383,6 +383,7 @@ export type ReviewApi = Pick<
   | "getActionJobLogs"
   | "rerunActionJob"
   | "getCollaboratorPermission"
+  | "listIssueTimeline"
   | "getAppPermissions"
 > &
   Pick<Tracker, "getIssue">;

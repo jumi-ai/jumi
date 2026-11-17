@@ -4450,6 +4450,131 @@ describe("suggestion hold", () => {
     expect(statuses.at(-1)?.description).toContain("mode restricted");
   });
 
+  test.each([
+    {
+      forge: "gitea",
+      labels: ["automerge"] as Array<string | { name?: string }>,
+      timelineLabel: "automerge" as string | { name?: string },
+    },
+    {
+      forge: "github",
+      labels: [{ name: "automerge" }] as Array<string | { name?: string }>,
+      timelineLabel: { name: "automerge" } as string | { name?: string },
+    },
+  ])("a missing file with a trusted automerge label holds ($forge labels)", async ({ labels, timelineLabel }) => {
+    const firstStatuses: Array<{ state: string; description?: string }> = [];
+    const latches = new MemorySkipLatchStore();
+    const apiFor = (statuses: Array<{ state: string; description?: string }>, headSha: string) =>
+      reviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: headSha }), labels }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({ found: false }),
+        listIssueTimeline: async () => [{ event: "labeled", label: timelineLabel, actor: { login: "alice" } }],
+        createPullReview: async () => ({ id: 1 }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      });
+    await publishReviewResult({
+      ...holdOpts,
+      expectedHeadSha: "headsha",
+      resultMarkdown: suggestionMarkdown,
+      api: apiFor(firstStatuses, "headsha"),
+      skipLatches: latches,
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(firstStatuses.at(-1)).toMatchObject({
+      state: "pending",
+      description: "1 suggestion waiting for follow-up",
+    });
+
+    const secondStatuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      expectedHeadSha: "newhead",
+      resultMarkdown: suggestionMarkdown,
+      api: apiFor(secondStatuses, "newhead"),
+      skipLatches: latches,
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(secondStatuses.at(-1)).toMatchObject({ state: "success" });
+    expect(secondStatuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("a missing file with an untrusted automerge label keeps today's success", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: reviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }), labels: ["automerge"] }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({ found: false }),
+        listIssueTimeline: async () => [{ event: "labeled", label: "automerge", actor: { login: "mallory" } }],
+        getCollaboratorPermission: async () => ({ permission: "read", role_name: "read" }),
+        createPullReview: async () => ({ id: 1 }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("a missing file with no-automerge alongside automerge keeps today's success", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: reviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }), labels: ["automerge", "no-automerge"] }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({ found: false }),
+        listIssueTimeline: async () => [{ event: "labeled", label: "automerge", actor: { login: "alice" } }],
+        createPullReview: async () => ({ id: 1 }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
+  test("an explicit suggestions_hold_merge: false still opts out with a trusted label", async () => {
+    const statuses: Array<{ state: string; description?: string }> = [];
+    await publishReviewResult({
+      ...holdOpts,
+      resultMarkdown: suggestionMarkdown,
+      api: reviewApi({
+        getPR: async () => makePR({ head: makeBranch({ sha: "headsha" }), labels: ["automerge"] }),
+        getPRFiles: async () => [makeFile()],
+        getRepoFile: async () => ({
+          found: true,
+          content: "automerge: false\nsuggestions_hold_merge: false\n",
+        }),
+        listIssueTimeline: async () => [{ event: "labeled", label: "automerge", actor: { login: "alice" } }],
+        createPullReview: async () => ({ id: 1 }),
+        createCommitStatus: async (_owner, _repo, _sha, status) => {
+          statuses.push(status);
+          return status;
+        },
+      }),
+      skipLatches: new MemorySkipLatchStore(),
+      changedFiles: [{ filename: "src/foo.ts" }],
+    });
+    expect(statuses.at(-1)).toMatchObject({ state: "success" });
+    expect(statuses.at(-1)?.description).not.toContain("waiting for follow-up");
+  });
+
   test("blocking questions take precedence over the hold", async () => {
     const statuses: Array<{ state: string; description?: string }> = [];
     await publishReviewResult({

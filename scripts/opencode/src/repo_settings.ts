@@ -1539,20 +1539,23 @@ export function isAutoRerunFlakesEnabled(load: RepoSettingsLoad): boolean {
 
 /**
  * Whether open 💡 suggestions hold the merge for one follow-up round.
- * Only in auto-merge repositories: the default-branch file must be valid,
- * set `automerge: true`, run in `mode: full`, and not opt out with
- * `suggestions_hold_merge: false` — and the deployment switch must be on.
- * Missing, invalid, or unreadable files never hold; neither does
- * `automerge: false`. An explicit `suggestions_hold_merge: true` with
- * `automerge: false` still never holds.
+ * Only in auto-merge repositories: the deployment switch must be on and the
+ * repository must opt in through its valid default-branch file
+ * (`automerge: true`, `mode: full`, no `suggestions_hold_merge: false`
+ * opt-out) — or through an admitted `automerge` label on the PR
+ * (`labelForced`), which also holds when the file is missing (the rest of
+ * the policy then uses its defaults: follow-up on, full mode, hold on).
+ * `no-automerge` and invalid files never hold; the review caller enforces
+ * the `no-automerge` veto through the shared `isAutomergeOptedIn` helper.
  */
-export function isSuggestionHoldEnabled(load: RepoSettingsLoad, automergeEnabled = true): boolean {
+export function isSuggestionHoldEnabled(load: RepoSettingsLoad, automergeEnabled = true, labelForced = false): boolean {
   if (!automergeEnabled) return false;
+  if (load.state === "missing") return labelForced;
   if (load.state !== "valid") return false;
   if (load.mode !== "full") return false;
-  if (load.automerge !== true) return false;
   if (load.suggestionsHoldMerge === false) return false;
-  return true;
+  if (load.automerge === true) return true;
+  return labelForced;
 }
 
 /**

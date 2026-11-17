@@ -1,6 +1,13 @@
 import { lstat, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  type AutomergeLabelList,
+  hasAutomergeLabel,
+  isAutomergeLabelAdmitted,
+  isAutomergeOptedIn,
+  resolveAutomergeLabelNames,
+} from "./automerge.ts";
+import {
   branchRequiresReviewCheck,
   CI_ABSENT_NOTE,
   CI_LOOKUP_FAILED_REASON,
@@ -70,6 +77,7 @@ import {
   compileReviewExcludePatterns,
   effectiveReviewBudget,
   effectiveSuggestionCap,
+  effectiveTrustedSenderLogins,
   isMaintainerQuestionsHoldEnabled,
   isReviewDraftsEnabled,
   isSuggestionFollowupEnabled,
@@ -247,6 +255,8 @@ export interface ReviewOptions {
   automergeRepos?: readonly string[];
   /** Deployment auto-merge switch. Unset defaults to on. Drives the suggestion hold. */
   automergeEnabled?: boolean;
+  /** Deployment trusted-sender list for the `automerge` label admission check. Unset falls back to write access. */
+  trustedSenderLogins?: readonly string[];
   gitAuthResolver?: GitAuthResolver;
   home?: string;
   /** Postgres ledger for review stuck state. When present (production always
@@ -344,6 +354,8 @@ export interface PublishReviewOptions {
   skipLatches?: SkipLatchStore;
   /** Deployment auto-merge switch. Unset defaults to on. Drives the suggestion hold. */
   automergeEnabled?: boolean;
+  /** Deployment trusted-sender list for the `automerge` label admission check. Unset falls back to write access. */
+  trustedSenderLogins?: readonly string[];
   resultMarkdown?: string | null;
   resultReason?: string | null;
   /** Formatted stamp for the runner that produced `resultMarkdown`. */
@@ -1784,13 +1796,50 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       : 0;
   // One policy helper decides the hold so reviews and tests read the same
   // rule: auto-merge on, deployment switch on, full mode, no opt-out.
+  // The opt-in answer is shared with `automerge.ts`: the repository file or
+  // an admitted `automerge` label on the PR (same labeller trust check and
+  // custom label names), never with `no-automerge`.
   // Follow-up off and restricted mode still post `success`, with a note
   // naming why, so the merge never waits on a follow-up that cannot run.
   const holdDeployOn = opts.automergeEnabled ?? true;
+  let holdOptedIn = false;
+  let holdForcedByLabel = false;
+  if (holdSuggestionCount > 0 && holdDeployOn && settingsForHold) {
+    try {
+      const prLabels = (pr.labels ?? []) as AutomergeLabelList;
+      const names = resolveAutomergeLabelNames(settingsForHold);
+      const hasNo = hasAutomergeLabel(prLabels, names.noAutomergeLabel);
+      const hasAuto = hasAutomergeLabel(prLabels, names.automergeLabel);
+      if (!hasNo) {
+        if (hasAuto) {
+          const effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, settingsForHold);
+          const closerForLabel = extractWorkingIssueNumber(pr) ?? pr.number;
+          const verdict = await isAutomergeLabelAdmitted({
+            api: forgeApi,
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: pr.number,
+            issueNumber: closerForLabel,
+            automergeLabel: names.automergeLabel,
+            botUsername: opts.botUsername,
+            trustedSenderLogins: effectiveTrusted,
+            log,
+          });
+          holdForcedByLabel = verdict.admitted;
+          holdOptedIn = isAutomergeOptedIn(settingsForHold, prLabels, verdict.admitted);
+        } else {
+          holdOptedIn = isAutomergeOptedIn(settingsForHold, prLabels, false);
+        }
+      }
+    } catch (err) {
+      log(`suggestion hold labels unreadable for ${reviewLabel}: ${errorMessage(err)}`);
+    }
+  }
   const holdEnabled =
     holdSuggestionCount > 0 &&
+    holdOptedIn &&
     settingsForHold != null &&
-    isSuggestionHoldEnabled(settingsForHold, holdDeployOn) &&
+    isSuggestionHoldEnabled(settingsForHold, holdDeployOn, holdForcedByLabel) &&
     isSuggestionFollowupEnabled(settingsForHold);
   if (holdEnabled && opts.skipLatches) {
     try {
@@ -1812,8 +1861,8 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     }
   } else if (
     holdSuggestionCount > 0 &&
-    settingsForHold?.state === "valid" &&
-    settingsForHold.automerge === true &&
+    holdOptedIn &&
+    settingsForHold != null &&
     holdDeployOn &&
     !isSuggestionFollowupEnabled(settingsForHold)
   ) {
@@ -1821,8 +1870,8 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     description = suggestionHoldSkippedDescription(holdSuggestionCount, "suggestions disabled");
   } else if (
     holdSuggestionCount > 0 &&
+    holdOptedIn &&
     settingsForHold?.state === "valid" &&
-    settingsForHold.automerge === true &&
     holdDeployOn &&
     settingsForHold.mode !== "full"
   ) {
@@ -2764,6 +2813,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         automergeRepos: opts.automergeRepos,
         ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
         ...(opts.automergeEnabled !== undefined ? { automergeEnabled: opts.automergeEnabled } : {}),
+        ...(opts.trustedSenderLogins !== undefined ? { trustedSenderLogins: opts.trustedSenderLogins } : {}),
         resultMarkdown: gatedMarkdown,
         resultRunner: runner,
         logger: log,
