@@ -78,6 +78,7 @@ Notes (not keys): `JUMI_ROLE` is required (`router`, `engine`, or `control`; uns
 - `BOARD_PEER_URL`
 - `BOARD_PEER_TOKEN`
 - `BOARD_MCP_TOKEN`
+- `BOARD_MCP_KICK_TOKEN`
 - `JUMI_ALLOW_UNSANDBOXED_REVIEWS`
 
 #### required constraints
