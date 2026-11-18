@@ -856,12 +856,10 @@ export async function handleGithubWebhookEvent(
         } catch {
           effectivePolicy = policy;
         }
-        if (dep.blockedOwner === dep.triggerOwner && dep.blockedRepo === dep.triggerRepo) {
-          try {
-            assertRepositoryPolicy(dep.triggerRepository, effectivePolicy);
-          } catch {
-            return skipped("repository not allowed", logger);
-          }
+        try {
+          assertRepositoryPolicy(dep.triggerRepository, policy);
+        } catch {
+          return skipped("repository not allowed", logger);
         }
         const partial = await enqueueEligibleBlockedIssue(
           { owner: dep.blockedOwner, repo: dep.blockedRepo, number: dep.blockedNumber },
