@@ -158,9 +158,11 @@ describe("findReviewEnvViolations", () => {
         GITHUB_TOKEN: "token",
         BOARD_PEER_TOKEN: "token",
         BOARD_MCP_TOKEN: "token",
+        BOARD_MCP_KICK_TOKEN: "token",
         REVIEW_MCP_KEY: "secret",
       })
     ).toEqual([
+      "BOARD_MCP_KICK_TOKEN",
       "BOARD_MCP_TOKEN",
       "BOARD_PEER_TOKEN",
       "GITEA_BOT_TOKEN",

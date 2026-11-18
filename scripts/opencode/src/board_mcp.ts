@@ -1,14 +1,16 @@
 /**
- * Read-only board MCP server for operator agents.
+ * Read-only board MCP server for operator agents, plus an opt-in `kick`
+ * tool behind a separate bearer.
  *
  * Served by the router on the board listener (`POST /mcp`, same port as the
  * operator board, never the webhook host). Stateless Streamable HTTP: one
  * `McpServer` plus one `WebStandardStreamableHTTPServerTransport` per
  * request, no SSE, no session. Auth happens at the HTTP layer in `board.ts`
- * (`BOARD_MCP_TOKEN` bearer only); this module never reads edge identity
- * headers and never sees the bearer.
+ * (`BOARD_MCP_TOKEN` bearer for reads, `BOARD_MCP_KICK_TOKEN` bearer for the
+ * kick tool); this module never reads edge identity headers and never sees
+ * the bearer.
  *
- * Tools (all read-only; nothing mutates the ledger, the forge, or a login):
+ * Tools:
  * - `board`: the same `in_progress` / `needs_kick` / `sitting` groups as
  *   `GET /api/board`, for this factory only (no peer hop). Optional
  *   owner/repo filter. Kick payloads are returned as data; nothing performs
@@ -18,6 +20,9 @@
  *   skip latch, the router sit, and matching kick-log entries.
  * - `runners`: current runner cooldowns (engine and worker roles) plus runner
  *   quota resets, so "why is nothing running?" has an answer.
+ * - `kick` (only when the kick bearer authenticated this request): runs the
+ *   same kick as `POST /api/board/kick` for this factory only (no peer hop).
+ *   The kick-log actor is always `board-mcp`, never a caller argument.
  *
  * Every returned string passes through `redactGitSecrets` with the router's
  * known secrets. Long ledger strings (`error`, `resultReason`) are truncated
@@ -34,6 +39,15 @@ import { redactGitSecrets } from "./workspace.ts";
 
 /** Env: bearer for the read-only board MCP endpoint. Unset or empty disables `/mcp` (404). */
 export const BOARD_MCP_TOKEN_ENV = "BOARD_MCP_TOKEN";
+
+/** Env: bearer that additionally arms the `kick` tool on the board MCP endpoint. Unset or empty means no kick tool. */
+export const BOARD_MCP_KICK_TOKEN_ENV = "BOARD_MCP_KICK_TOKEN";
+
+/** MCP tool that performs the same kick as `POST /api/board/kick`, local factory only. */
+export const BOARD_MCP_KICK_TOOL_NAME = "kick";
+
+/** Kick-log actor for every MCP kick. Never taken from a tool argument. */
+export const BOARD_MCP_KICK_ACTOR = "board-mcp";
 
 /** Board listener path serving the Streamable HTTP endpoint. POST only. */
 export const BOARD_MCP_PATH = "/mcp";
@@ -59,6 +73,20 @@ export interface BoardMcpDeps {
   /** Router secrets redacted from every returned string (bot token, webhook secrets, peer/MCP tokens). */
   secrets?: Array<string | undefined>;
   logger?: (message: string) => void;
+  /**
+   * True when this request authenticated with the kick bearer. Only then is
+   * the `kick` tool listed; a `kick` call without it is a tool error and
+   * never a kick.
+   */
+  canKick?: boolean;
+  /**
+   * Runs one kick through the same body-level handlers as
+   * `POST /api/board/kick` (same validation, refusals, kick-log entries and
+   * idempotency replay) with the actor fixed to `board-mcp`. Local factory
+   * only: never forwards over the peer hop. The returned `Response` carries
+   * the same JSON the HTTP route returns.
+   */
+  runKick?: (body: unknown, idempotencyKey: string) => Promise<Response>;
 }
 
 /** Cut a ledger string at a byte boundary; short strings pass through untouched. */
@@ -273,6 +301,82 @@ export function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
       }
     }
   );
+
+  if (deps.canKick === true) {
+    const runKick = deps.runKick;
+    server.registerTool(
+      BOARD_MCP_KICK_TOOL_NAME,
+      {
+        description:
+          "Perform the board kick for one row of this factory (same effect as POST /api/board/kick): sit-clear, same-commit requeue, reopen, implement, or stuck. Local factory only: a peer-forge argument is refused and nothing is forwarded. The kick-log actor is always board-mcp.",
+        inputSchema: {
+          owner: z.string().min(1).describe("Repository owner (exact match)"),
+          repo: z.string().min(1).describe("Repository name (exact match)"),
+          number: z.number().int().positive().describe("Issue or pull number (shared number space)"),
+          kick: z
+            .string()
+            .min(1)
+            .describe("Kick id from the board row (sit-clear, the requeue id, reopen, implement, stuck)"),
+          commit: z.string().optional().describe("Commit SHA (required for requeue kicks, as on the HTTP route)"),
+          idempotency_key: z
+            .string()
+            .optional()
+            .describe("Optional idempotency key; a repeat replays the first outcome"),
+          forge: z.string().optional().describe("Must be absent or this factory; a peer forge is refused"),
+        },
+      },
+      async (args: {
+        owner: string;
+        repo: string;
+        number: number;
+        kick: string;
+        commit?: string;
+        idempotency_key?: string;
+        forge?: string;
+      }) => {
+        const started = Date.now();
+        const owner = args.owner.trim();
+        const repo = args.repo.trim();
+        const number = args.number;
+        const kickId = args.kick.trim();
+        const coords = `${owner}/${repo}#${number}`;
+        const logLine = (code: string): string =>
+          redact(
+            `[board-mcp] tool=kick ${coords} kick=${JSON.stringify(kickId)} result=${code} ms=${Date.now() - started}`,
+            secrets
+          );
+        try {
+          if (typeof runKick !== "function") {
+            logger(logLine("error"));
+            return mcpError(redact("kick unavailable", secrets));
+          }
+          const body: Record<string, unknown> = { owner, repo, number, kick: kickId };
+          if (typeof args.commit === "string" && args.commit.trim() !== "") body.commit = args.commit.trim();
+          if (typeof args.idempotency_key === "string" && args.idempotency_key.trim() !== "") {
+            body.idempotency_key = args.idempotency_key.trim();
+          }
+          if (typeof args.forge === "string" && args.forge.trim() !== "") body.forge = args.forge.trim();
+          const response = await runKick(body, "");
+          let payload: unknown = { error: "kick unavailable" };
+          try {
+            payload = await response.json();
+          } catch {
+            // Keep the fallback payload.
+          }
+          const rec = (payload ?? {}) as Record<string, unknown>;
+          const code =
+            typeof rec.code === "string" && rec.code.trim() !== "" ? rec.code : rec.ok === true ? "ok" : "error";
+          logger(logLine(code));
+          const text = redact(JSON.stringify(payload), secrets);
+          if (response.status >= 200 && response.status < 300) return mcpResult(text);
+          return mcpError(text);
+        } catch (err) {
+          logger(logLine("error"));
+          return mcpError(redact(`kick unavailable: ${errorMessage(err)}`, secrets));
+        }
+      }
+    );
+  }
 
   return server;
 }

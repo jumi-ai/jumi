@@ -384,6 +384,7 @@ describe("deploy/contract.md", () => {
       "BOARD_PEER_URL",
       "BOARD_PEER_TOKEN",
       "BOARD_MCP_TOKEN",
+      "BOARD_MCP_KICK_TOKEN",
       "JUMI_ALLOW_UNSANDBOXED_REVIEWS",
     ]);
     expect(parsed.worker.requiredEnv).toEqual(["GITEA_URL", "GITEA_BOT_TOKEN", "GITEA_WEBHOOK_SECRET"]);

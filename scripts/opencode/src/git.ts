@@ -632,6 +632,7 @@ export function buildEnv(
       if (key.startsWith("GITEA_") || key.startsWith("GITHUB_APP_") || key === "GITHUB_WEBHOOK_SECRET") continue;
       if (key === "BOARD_PEER_TOKEN") continue;
       if (key === "BOARD_MCP_TOKEN") continue;
+      if (key === "BOARD_MCP_KICK_TOKEN") continue;
       // The file-resolved key wins: a caller-supplied key via extraEnv must not
       // silently override it (no current caller does this; latent hardening).
       if (key === OPENCODE_API_KEY_ENV || key === OPENCODE_API_KEY_FILE_ENV) continue;

@@ -6,7 +6,7 @@ import {
   handleDeviceLoginStart,
   handleDeviceLoginStatus,
 } from "./board_device_login.ts";
-import { BOARD_MCP_PATH, handleBoardMcp } from "./board_mcp.ts";
+import { BOARD_MCP_KICK_ACTOR, BOARD_MCP_PATH, handleBoardMcp } from "./board_mcp.ts";
 import {
   disabledKickWhy,
   isFailingVerdictRow,
@@ -34,6 +34,7 @@ import {
 } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
 import { errorMessage } from "./util/error.ts";
+import { redactGitSecrets } from "./workspace.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
 
 /**
@@ -952,6 +953,13 @@ export interface BoardHandlerDeps {
    */
   mcpToken?: string;
   /**
+   * Bearer that additionally arms the MCP `kick` tool (`POST /mcp`). Unset
+   * or empty means no kick tool for anyone and `/mcp` behaves as without it.
+   * Never the read token and never the peer token: when it equals either,
+   * the kick tool stays disarmed. Never an edge identity header.
+   */
+  mcpKickToken?: string;
+  /**
    * Router secrets redacted from every MCP string (bot token, webhook
    * secrets, peer/MCP tokens). The bearer itself is never logged or returned.
    */
@@ -1757,24 +1765,56 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
   // never calls back, so the other factory still cannot reach the homelab forge.
   const shouldFetchPeer = isHomelabForge(localForge) && peerUrl !== "" && peerToken !== "";
   const homelab = isHomelabForge(localForge);
+  // MCP kick arming (static per process): the kick bearer arms `kick` only
+  // when set and distinct from both the read bearer and the peer bearer. A
+  // clash disarms the tool and logs one startup line saying why (never the
+  // token itself).
+  const mcpTokenStatic = (deps.mcpToken ?? "").trim();
+  const mcpKickTokenStatic = (deps.mcpKickToken ?? "").trim();
+  let mcpKickArmed = false;
+  if (mcpKickTokenStatic !== "") {
+    if (mcpTokenStatic !== "" && mcpKickTokenStatic === mcpTokenStatic) {
+      logger("board mcp kick disabled: kick token equals the read token");
+    } else if (peerToken !== "" && mcpKickTokenStatic === peerToken) {
+      logger("board mcp kick disabled: kick token equals the peer token");
+    } else if (mcpTokenStatic !== "") {
+      mcpKickArmed = true;
+    }
+  }
   return async function fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") return json(200, { ok: true });
     const pathname = normalizePathname(url.pathname);
-    // Read-only MCP for operator agents. Bearer only, same on both forges:
-    // unset or empty token disables the endpoint (404, nothing else changes);
-    // missing or wrong bearer is 401. Never reads edge identity headers, and
-    // the peer token never authenticates here. Other methods are 405.
+    // Board MCP for operator agents. Bearer only, same on both forges:
+    // unset or empty read token disables the endpoint (404, nothing else
+    // changes); missing or wrong bearer is 401. The read bearer lists the
+    // three read tools; the kick bearer additionally arms `kick`. A kick
+    // bearer equal to the read or peer bearer never arms the tool. Never
+    // reads edge identity headers, and the peer token never authenticates
+    // here. Other methods are 405.
     if (pathname === BOARD_MCP_PATH) {
       if (request.method !== "POST") return json(405, { error: "method not allowed" });
       const mcpToken = (deps.mcpToken ?? "").trim();
       if (mcpToken === "") return json(404, { error: "not found" });
-      if (!hasBearerAuth(request, mcpToken)) return json(401, { error: "missing bearer" });
+      const mcpKickToken = (deps.mcpKickToken ?? "").trim();
+      const kickBearer = mcpKickArmed && mcpKickToken !== "" && hasBearerAuth(request, mcpKickToken);
+      const readBearer = hasBearerAuth(request, mcpToken);
+      if (!kickBearer && !readBearer) return json(401, { error: "missing bearer" });
+      const canKick = kickBearer;
       return handleBoardMcp(request, {
         store: deps.store,
         forge: localForge,
         secrets: deps.mcpSecrets ?? [],
         logger,
+        canKick,
+        runKick: async (body: unknown, idempotencyKey: string) => {
+          // Inner kick logs echo the refusal `why`, which can carry a
+          // planted secret from the ledger: redact them with the same MCP
+          // secrets before they reach the server log.
+          const mcpSecrets = deps.mcpSecrets ?? [];
+          const mcpLogger = (message: string) => logger(redactGitSecrets(message, mcpSecrets));
+          return handleMcpKick(body, idempotencyKey, deps.store, mcpLogger, deps.forgeApi, localForge);
+        },
       });
     }
     // Same-commit requeue kick plus sit-clear kick, both forge-gated.
@@ -1973,17 +2013,48 @@ async function handleKick(
   } catch {
     return json(400, { error: "invalid JSON" });
   }
+  const headerKey = idempotencyKeyOf(request);
   // Peer-forge forwarding (homelab only, one-way). A peer row the peer marks
   // kickable is applied to the peer store, never the homelab store. Forge is
   // pinned server-side: only an exact PEER_FORGE value forwards, and the hop
   // URL is derived from the server-configured peerUrl plus a fixed path.
-  if (!isPeer && isPeerForgeKick(body)) {
-    return handleForwardedKick(request, body, store, logger, {
+  const peer =
+    !isPeer && isPeerForgeKick(body)
+      ? {
+          peerUrl: opts?.peerUrl ?? "",
+          peerToken: opts?.peerToken ?? "",
+          fetchFn: opts?.fetchFn ?? fetch,
+          peerTimeoutMs: opts?.peerTimeoutMs ?? PEER_KICK_TIMEOUT_MS,
+        }
+      : undefined;
+  return handleKickBody(body, headerKey, store, logger, forgeApi, actor, peer, isPeer ? undefined : actor);
+}
+
+/**
+ * Body-level kick shared by the HTTP route and the MCP `kick` tool. The
+ * `Request`-level checks (edge identity, content-type, Origin) live in
+ * `handleKick`; the MCP path replaces them with its bearer check and calls
+ * this directly. No kick logic is duplicated: sit-clear, requeue, reopen,
+ * implement and stuck run the same handlers with the same validation,
+ * refusals, kick-log entries and idempotency replay.
+ */
+async function handleKickBody(
+  body: unknown,
+  headerIdempotencyKey: string,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  forgeApi: BoardPullForge | undefined,
+  actor: string,
+  peer?: { peerUrl: string; peerToken: string; fetchFn: BoardFetchFn; peerTimeoutMs: number },
+  sitActor?: string
+): Promise<Response> {
+  if (peer && isPeerForgeKick(body)) {
+    return handleForwardedKick(headerIdempotencyKey, body, store, logger, {
       actor,
-      peerUrl: opts?.peerUrl ?? "",
-      peerToken: opts?.peerToken ?? "",
-      fetchFn: opts?.fetchFn ?? fetch,
-      peerTimeoutMs: opts?.peerTimeoutMs ?? PEER_KICK_TIMEOUT_MS,
+      peerUrl: peer.peerUrl,
+      peerToken: peer.peerToken,
+      fetchFn: peer.fetchFn,
+      peerTimeoutMs: peer.peerTimeoutMs,
     });
   }
   // Sit-clear kick (default branch): an owner/repo/number-only payload clears
@@ -1993,18 +2064,18 @@ async function handleKick(
   // The implement kick carries kick=implement and requeues a no-changes
   // implement without opening a pull request.
   if (isSitClearPayload(body)) {
-    return handleSitClear(request, body, store, logger, isPeer ? undefined : actor);
+    return handleSitClearBody(body, store, logger, sitActor);
   }
   if (isReopenKickId(rawKickIdOf(body))) {
-    return handleReopenKick(request, body, store, logger, forgeApi, actor);
+    return handleReopenKickBody(body, headerIdempotencyKey, store, logger, forgeApi, actor);
   }
   if (isImplementKickId(rawKickIdOf(body))) {
-    return handleImplementKick(request, body, store, logger, forgeApi, actor);
+    return handleImplementKickBody(body, headerIdempotencyKey, store, logger, forgeApi, actor);
   }
   if (isStuckKickId(rawKickIdOf(body))) {
-    return handleStuckKick(request, body, store, logger, actor);
+    return handleStuckKickBody(body, headerIdempotencyKey, store, logger, actor);
   }
-  const parsed = parseKickBody(body, idempotencyKeyOf(request));
+  const parsed = parseKickBody(body, headerIdempotencyKey);
   if ("error" in parsed) return json(400, { error: parsed.error });
   const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
   try {
@@ -2060,6 +2131,49 @@ async function handleKick(
 }
 
 /**
+ * MCP `kick` entry point. Same body-level kick as the HTTP route (same
+ * validation, refusals, kick-log entries and idempotency replay) with the
+ * actor fixed to `board-mcp`. Local factory only: a `forge` argument naming
+ * any other factory (including the peer forge) is a tool-level refusal, and
+ * nothing is ever forwarded over the peer hop.
+ */
+export async function handleMcpKick(
+  body: unknown,
+  headerIdempotencyKey: string,
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  forgeApi: BoardPullForge | undefined,
+  localForge: string
+): Promise<Response> {
+  const forgeField = peerForgeFieldOf(body);
+  if (forgeField !== "" && forgeField !== localForge) {
+    const rec = body as Record<string, unknown>;
+    const owner = typeof rec.owner === "string" ? rec.owner.trim() : "";
+    const repo = typeof rec.repo === "string" ? rec.repo.trim() : "";
+    const coords = owner && repo ? `${owner}/${repo}` : "-/-";
+    logger(
+      `board mcp kick refused actor=${BOARD_MCP_KICK_ACTOR} forge=${forgeField} ${coords}: peer forge kicks are not supported over MCP`
+    );
+    return json(400, {
+      error: "peer forge kicks are not supported over MCP: configure one MCP server per factory",
+      code: "bad-request",
+      terminalJobId: null,
+      newJobId: null,
+    });
+  }
+  return handleKickBody(
+    body,
+    headerIdempotencyKey,
+    store,
+    logger,
+    forgeApi,
+    BOARD_MCP_KICK_ACTOR,
+    undefined,
+    BOARD_MCP_KICK_ACTOR
+  );
+}
+
+/**
  * Forward a peer-forge kick to the peer board listener.
  *
  * Keeps every homelab check (edge identity and Origin already passed at the
@@ -2070,14 +2184,14 @@ async function handleKick(
  * and peer auth failures are 503 with a clear error, never a fake success.
  */
 async function handleForwardedKick(
-  request: Request,
+  headerIdempotencyKey: string,
   body: unknown,
   store: ReviewJobStore,
   logger: (message: string) => void,
   opts: { actor: string; peerUrl: string; peerToken: string; fetchFn: BoardFetchFn; peerTimeoutMs: number }
 ): Promise<Response> {
   const { actor, peerUrl, peerToken, fetchFn, peerTimeoutMs } = opts;
-  const headerKey = idempotencyKeyOf(request);
+  const headerKey = headerIdempotencyKey;
   const identity = extractForwardIdentity(body);
   if (!identity) return json(400, { error: "invalid kick payload" });
   const rec = body as Record<string, unknown>;
@@ -2256,15 +2370,15 @@ function isNotFoundForgeError(err: unknown): boolean {
  * webhook wake enqueues, and the board waits for that row. An already-open
  * pull is a no-op: an open pull is never closed to "refresh" it.
  */
-async function handleReopenKick(
-  request: Request,
+async function handleReopenKickBody(
   body: unknown,
+  headerIdempotencyKey: string,
   store: ReviewJobStore,
   logger: (message: string) => void,
   forgeApi: BoardPullForge | undefined,
   actor: string
 ): Promise<Response> {
-  const parsed = parseReopenKickBody(body, idempotencyKeyOf(request));
+  const parsed = parseReopenKickBody(body, headerIdempotencyKey);
   if ("error" in parsed) return json(400, { error: parsed.error });
   const item = { owner: parsed.owner, repo: parsed.repo, number: parsed.number, kick: parsed.kick };
 
@@ -2548,15 +2662,15 @@ async function recordReopenBestEffort(
  * dedupes against the queued row instead of inserting a second job. It
  * never opens a pull request; the worker owns PR creation.
  */
-async function handleImplementKick(
-  request: Request,
+async function handleImplementKickBody(
   body: unknown,
+  headerIdempotencyKey: string,
   store: ReviewJobStore,
   logger: (message: string) => void,
   forgeApi: BoardPullForge | undefined,
   actor: string
 ): Promise<Response> {
-  const parsed = parseImplementKickBody(body, idempotencyKeyOf(request));
+  const parsed = parseImplementKickBody(body, headerIdempotencyKey);
   if ("error" in parsed) return json(400, { error: parsed.error });
   const item = { owner: parsed.owner, repo: parsed.repo, issueNumber: parsed.number, kick: parsed.kick };
 
@@ -2932,16 +3046,12 @@ function isSitClearPayload(body: unknown): boolean {
   return true;
 }
 
-async function handleSitClear(
-  request: Request,
+async function handleSitClearBody(
   body: unknown,
   store: ReviewJobStore,
   logger: (message: string) => void,
   kickActor?: string
 ): Promise<Response> {
-  const contentType = request.headers.get("content-type")?.split(";")[0].trim().toLowerCase();
-  if (contentType !== "application/json") return json(400, { error: "invalid kick payload" });
-  if (!isAllowedBoardOrigin(request)) return json(403, { error: "forbidden" });
   const record = body as { owner?: unknown; repo?: unknown; number?: unknown };
   const owner = typeof record.owner === "string" ? record.owner.trim() : "";
   const repo = typeof record.repo === "string" ? record.repo.trim() : "";
@@ -2998,14 +3108,14 @@ async function handleSitClear(
  * a second pull, never unassigns, and never adds a pickup label: the
  * inserted job is the wake. The implement retry path is untouched.
  */
-async function handleStuckKick(
-  request: Request,
+async function handleStuckKickBody(
   body: unknown,
+  headerIdempotencyKey: string,
   store: ReviewJobStore,
   logger: (message: string) => void,
   actor: string
 ): Promise<Response> {
-  const parsed = parseStuckKickBody(body, idempotencyKeyOf(request));
+  const parsed = parseStuckKickBody(body, headerIdempotencyKey);
   if ("error" in parsed) return json(400, { error: parsed.error });
   const item = { owner: parsed.owner, repo: parsed.repo, issueNumber: parsed.number, kick: parsed.kick };
 
