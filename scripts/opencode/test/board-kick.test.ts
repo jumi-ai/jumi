@@ -640,8 +640,8 @@ describe("board implement kick contract (#164)", () => {
     await other.enqueueIssue(makeIssueJob({ delivery: "d-other" }));
     const leasedOther = await other.lease("worker", 60_000, new Date(), ["implement"]);
     if (!leasedOther) throw new Error("expected an implement lease");
-    await other.saveResult(leasedOther.id, "worker", { kind: "skip", reason: "blocked on #196" });
-    await other.markPublished(leasedOther.id, "worker", { state: "skipped", reason: "blocked on #196" });
+    await other.saveResult(leasedOther.id, "worker", { kind: "skip", reason: "stuck: dependency cycle" });
+    await other.markPublished(leasedOther.id, "worker", { state: "skipped", reason: "stuck: dependency cycle" });
     const otherHandler = createBoardFetchHandler({
       store: other,
       getGrantNotice: () => undefined,

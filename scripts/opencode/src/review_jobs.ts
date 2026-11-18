@@ -75,6 +75,14 @@ export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
 
+/** Prefix for a terminal implement skipped behind open issue dependencies. */
+export const BLOCKED_ON_PREFIX = "blocked on ";
+
+/** True when a terminal implement reason is a dependency-blocked row. */
+export function isBlockedOnReason(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && reason.startsWith(BLOCKED_ON_PREFIX);
+}
+
 export type { PersistReviewResult };
 
 /**
@@ -260,6 +268,8 @@ export interface ReviewJobStore {
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   /** Terminal review rows for the operator board requeue kick. No forge calls. Throws when the ledger is down. */
   listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]>;
+  /** Terminal implement rows for the operator board blocked kick. No forge calls. Throws when the ledger is down. */
+  listTerminalImplements?(limit?: number): Promise<ReviewJobRecord[]>;
   /**
    * Rows where the number is the `prNumber` or the `issueNumber` (issue and
    * pull share one number space), any kind, any state, newest first.
@@ -310,6 +320,12 @@ export interface ReviewJobStore {
    * pulls that must not be pushed.
    */
   recordReopenKick(input: RecordReopenKickInput): Promise<KickLogRecord>;
+  /**
+   * Record an implement kick call that queued nothing (for example a
+   * still-blocked dependency re-check). Never inserts a job. Shares the
+   * review_kicks idempotency key space with the other kicks.
+   */
+  recordImplementKick(input: RecordImplementKickInput): Promise<KickLogRecord>;
   readonly skipLatches: SkipLatchStore;
   readonly sits: RouterSitStore;
   /** Durable writer provenance for published PR heads. Old heads stay unknown; never guessed from prose. */
@@ -435,7 +451,7 @@ export type RequeueKickOutcome =
     }
   | {
       status: "rejected";
-      code: "bad-request" | "not-found" | "stale-kick" | "conflict" | "not-kickable";
+      code: "bad-request" | "not-found" | "stale-kick" | "conflict" | "not-kickable" | "still-blocked";
       why: string;
       terminalId: number | null;
       newJobId: number | null;
@@ -484,6 +500,19 @@ export interface ImplementKickInput {
 }
 
 export type ImplementKickOutcome = RequeueKickOutcome;
+
+/** Direct kick-log write for a blocked implement that queued nothing. */
+export interface RecordImplementKickInput {
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  kick: string;
+  actor: string;
+  idempotencyKey: string;
+  result: string;
+  terminalJobId: number | null;
+  newJobId: number | null;
+}
 
 export interface StuckKickInput {
   owner: string;
@@ -1741,6 +1770,17 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
+  listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
+    return this.locked(() => {
+      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+      return this.rows
+        .filter((row) => rowKind(row) === "implement" && (row.state === "succeeded" || row.state === "skipped"))
+        .sort((a, b) => b.id - a.id)
+        .slice(0, cap)
+        .map((row) => ({ ...row }));
+    });
+  }
+
   listRowsForNumber(owner: string, repo: string, number: number, limit = 50): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
       const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 50;
@@ -1952,7 +1992,9 @@ export class MemoryReviewJobStore implements ReviewJobStore {
                   ? "stale-kick"
                   : prior.result === "not-found"
                     ? "not-found"
-                    : "not-kickable",
+                    : prior.result === "still-blocked"
+                      ? "still-blocked"
+                      : "not-kickable",
             why: prior.result === "ok" ? "already kicked" : `already decided: ${prior.result}`,
             terminalId: prior.terminalJobId,
             newJobId: prior.newJobId,
@@ -2023,7 +2065,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
-      if (terminal.resultReason !== "no-changes") {
+      if (terminal.resultReason !== "no-changes" && !isBlockedOnReason(terminal.resultReason)) {
         const entry = record(terminal.id, null, "not-kickable");
         return {
           status: "rejected",
@@ -2382,6 +2424,38 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         result: input.result,
         terminalJobId: null,
         newJobId: null,
+        createdAt: Date.now(),
+      };
+      this.kickLog.push(entry);
+      return { ...entry };
+    });
+  }
+
+  recordImplementKick(input: RecordImplementKickInput): Promise<KickLogRecord> {
+    return this.locked(() => {
+      if (input.idempotencyKey) {
+        const prior = this.kickLog.find((entry) => entry.idempotencyKey === input.idempotencyKey);
+        if (prior) {
+          throw Object.assign(
+            new Error(`duplicate key value violates unique constraint "review_kicks_idempotency_key"`),
+            {
+              code: "23505",
+            }
+          );
+        }
+      }
+      const entry: KickLogRecord = {
+        id: this.nextKickId++,
+        idempotencyKey: input.idempotencyKey,
+        actor: input.actor,
+        owner: input.owner,
+        repo: input.repo,
+        number: input.issueNumber,
+        commit: "",
+        kick: input.kick,
+        result: input.result,
+        terminalJobId: input.terminalJobId,
+        newJobId: input.newJobId,
         createdAt: Date.now(),
       };
       this.kickLog.push(entry);
@@ -3964,6 +4038,17 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.map(mapRow);
   }
 
+  async listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
+    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+    const rows = asRows<ReviewJobRow>(
+      await this.sql.unsafe(
+        `SELECT * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY id DESC LIMIT $1`,
+        [cap]
+      )
+    );
+    return rows.map(mapRow);
+  }
+
   async listRowsForNumber(owner: string, repo: string, number: number, limit = 50): Promise<ReviewJobRecord[]> {
     const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 50) : 50;
     const rows = asRows<ReviewJobRow>(
@@ -4815,7 +4900,9 @@ export class PgReviewJobStore implements ReviewJobStore {
             ? ("stale-kick" as const)
             : prior.result === "not-found"
               ? ("not-found" as const)
-              : ("not-kickable" as const);
+              : prior.result === "still-blocked"
+                ? ("still-blocked" as const)
+                : ("not-kickable" as const);
       return {
         status: "rejected",
         code,
@@ -4876,7 +4963,7 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as ImplementKickOutcome;
         }
-        if (terminal.resultReason !== "no-changes") {
+        if (terminal.resultReason !== "no-changes" && !isBlockedOnReason(terminal.resultReason)) {
           const logged = await this.insertImplementKickLog(tx, input, "not-kickable", terminal.id, null);
           return {
             status: "rejected",
@@ -5004,7 +5091,9 @@ export class PgReviewJobStore implements ReviewJobStore {
                 ? ("stale-kick" as const)
                 : prior.result === "not-found"
                   ? ("not-found" as const)
-                  : ("not-kickable" as const);
+                  : prior.result === "still-blocked"
+                    ? ("still-blocked" as const)
+                    : ("not-kickable" as const);
           return {
             status: "rejected",
             code,
@@ -5391,6 +5480,43 @@ export class PgReviewJobStore implements ReviewJobStore {
           input.commit,
           input.kick,
           input.result,
+        ]
+      )
+    );
+    const row = rows[0];
+    if (!row) throw new Error("failed to record kick");
+    return this.mapKickRow(row);
+  }
+
+  async recordImplementKick(input: RecordImplementKickInput): Promise<KickLogRecord> {
+    const rows = asRows<{
+      id: unknown;
+      idempotency_key: unknown;
+      actor: unknown;
+      owner: unknown;
+      repo: unknown;
+      number: unknown;
+      commit: unknown;
+      kick: unknown;
+      result: unknown;
+      terminal_job_id: unknown;
+      new_job_id: unknown;
+      created_at: unknown;
+    }>(
+      await this.sql.unsafe(
+        `INSERT INTO review_kicks (idempotency_key, actor, owner, repo, number, commit, kick, result, terminal_job_id, new_job_id)
+         VALUES (NULLIF($1, ''), $2, $3, $4, $5, '', $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          input.idempotencyKey,
+          input.actor,
+          input.owner,
+          input.repo,
+          input.issueNumber,
+          input.kick,
+          input.result,
+          input.terminalJobId,
+          input.newJobId,
         ]
       )
     );
