@@ -20,9 +20,12 @@ import { isWipOrDraft } from "./gitea_issues.ts";
 import { githubInstallationFromPayload } from "./github_auth.ts";
 import {
   blockedIssueJobsToEnqueue,
+  enqueueEligibleBlockedIssue,
   type IssueWebhookDecision,
+  isDependencyRemoveAction,
   isDependencyWakeAction,
   issueJobFrom,
+  parseIssueDependenciesPayload,
   parseIssuesPayload,
 } from "./issue_webhook.ts";
 import { withIssueAuthorPermission } from "./permissions.ts";
@@ -829,6 +832,68 @@ export async function handleGithubWebhookEvent(
   if (!deps.worker) return skipped(`unsupported event ${event ?? "unknown"}`, logger);
 
   try {
+    if (event === "issue_dependencies") {
+      const action = peekWebhookAction(rawBody);
+      if (!action || !isDependencyRemoveAction(action)) {
+        return skipped(action ? `unsupported action ${action}` : "unsupported action unknown", logger);
+      }
+      if (!deps.worker.api?.getIssue) return skipped("no blocked issues to wake", logger);
+      try {
+        const dep = parseIssueDependenciesPayload(rawBody);
+        const branch = dep.blockedDefaultBranch ?? dep.triggerRepository.default_branch;
+        let effectivePolicy: GithubWebhookPolicy = policy;
+        try {
+          if (dep.blockedOwner && dep.blockedRepo) {
+            effectivePolicy = await effectiveGithubPolicyForRepo(
+              deps.worker.api,
+              dep.blockedOwner,
+              dep.blockedRepo,
+              branch,
+              policy,
+              logger
+            );
+          }
+        } catch {
+          effectivePolicy = policy;
+        }
+        try {
+          assertRepositoryPolicy(dep.triggerRepository, policy);
+        } catch {
+          return skipped("repository not allowed", logger);
+        }
+        const partial = await enqueueEligibleBlockedIssue(
+          { owner: dep.blockedOwner, repo: dep.blockedRepo, number: dep.blockedNumber },
+          {
+            owner: dep.triggerOwner,
+            repo: dep.triggerRepo,
+            repository: dep.triggerRepository,
+            action: dep.action,
+            policy: effectivePolicy,
+            api: { getIssue: deps.worker.api.getIssue, getRepo: deps.worker.api.getRepo },
+          }
+        );
+        if (!partial) return skipped("no blocked issues to wake", logger);
+        const job: IssueJob = {
+          ...(await withIssueAuthorPermission(partial, deps.worker.api)),
+          delivery,
+          receivedAt: new Date().toISOString(),
+        };
+        const result: EnqueueResult = await deps.worker.queue.enqueue(job);
+        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        if (result.queued) {
+          const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
+          if (cleared) return cleared;
+        }
+        return json(202, result);
+      } catch (err) {
+        if (isQueueUnavailable(err)) {
+          logger(`queue unavailable: ${(err as Error).message}`);
+          return json(503, { error: "queue unavailable" });
+        }
+        return skipped("malformed issue_dependencies payload", logger);
+      }
+    }
+
     if (GITHUB_CI_EVENTS.has(event ?? "")) {
       const action = peekWebhookAction(rawBody);
       if (action && action !== "completed") return skipped(`unsupported action ${action}`, logger);
