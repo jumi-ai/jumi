@@ -2070,7 +2070,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         return {
           status: "rejected",
           code: "not-kickable",
-          why: `No kick: implement is ${terminal.state} (${terminal.resultReason ?? "no reason"}), only a no-changes row can be retried.`,
+          why: `No kick: implement is ${terminal.state} (${terminal.resultReason ?? "no reason"}), only a no-changes or blocked-on row can be retried.`,
           terminalId: terminal.id,
           newJobId: null,
           kickLogId: entry.id,
@@ -4968,7 +4968,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           return {
             status: "rejected",
             code: "not-kickable",
-            why: `No kick: implement is ${terminal.state} (${terminal.resultReason ?? "no reason"}), only a no-changes row can be retried.`,
+            why: `No kick: implement is ${terminal.state} (${terminal.resultReason ?? "no reason"}), only a no-changes or blocked-on row can be retried.`,
             terminalId: terminal.id,
             newJobId: null,
             kickLogId: logged.id,

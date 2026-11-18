@@ -470,8 +470,7 @@ function blockedImplementItem(row: ReviewJobRecord, reason: string, forge?: stri
 function isBlockedImplementRow(row: ReviewJobRecord): boolean {
   if (row.kind !== "implement") return false;
   if (row.state !== "skipped") return false;
-  const reason = (row.resultReason ?? "").trim();
-  return reason.startsWith("blocked on ");
+  return isBlockedOnReason((row.resultReason ?? "").trim());
 }
 
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
@@ -2593,7 +2592,7 @@ async function handleImplementKick(
   // the store, exactly as today.
   let blockedTerminal: ReviewJobRecord | undefined;
   try {
-    const rows = await store.listRowsForNumber(item.owner, item.repo, item.issueNumber, 20);
+    const rows = await store.listRowsForNumber(item.owner, item.repo, item.issueNumber, 50);
     const implTerminals = rows
       .filter((row) => row.kind === "implement" && (row.state === "succeeded" || row.state === "skipped"))
       .sort((a, b) => a.id - b.id);
