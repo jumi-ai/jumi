@@ -23,6 +23,105 @@ import { errorMessage } from "./util/error.ts";
 export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
 export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
 export const AUTOMERGE_NOTE_MARKER = "<!-- jumi-automerge -->";
+/** Stable marker inside the automerge sticky body: the forge refused the schedule at open. */
+export const AUTOMERGE_REFUSED_MARKER = "<!-- jumi-automerge:refused -->";
+
+export function hasAutomergeRefusedMarker(body: unknown): boolean {
+  return typeof body === "string" && body.includes(AUTOMERGE_REFUSED_MARKER);
+}
+
+/**
+ * Public note when the forge refuses a schedule. Carries only the HTTP
+ * status and the forge's `message` field (no URL or token) plus a second
+ * hidden marker so a later Jumi push can tell "refused" apart from a
+ * person-cancelled or never-wanted schedule.
+ */
+export function automergeRefusedNote(detail?: string, retryAfterPush = true): string {
+  const reason = detail ? ` but the forge refused (${detail})` : " but the forge refused";
+  const retry = retryAfterPush
+    ? "Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green."
+    : "A person needs to merge once reviews and CI are green.";
+  return `Jumi tried to schedule auto-merge on this pull request${reason}. ${retry}\n${AUTOMERGE_REFUSED_MARKER}`;
+}
+
+/** Short sticky replacing the refused note once a later schedule succeeds. */
+export function automergeScheduledNote(): string {
+  return `Auto-merge is now scheduled.`;
+}
+
+/**
+ * Short `status: message` excerpt from a forge refusal error. Parses the
+ * `→ <status>: <body>` shape `forgeRequestError` produces and lifts the
+ * JSON `message` field; never includes the request URL or any token.
+ */
+export function forgeRefusalDetail(err: unknown): string | undefined {
+  const msg = errorMessage(err);
+  const match = /→ (\d+)\s*:/.exec(msg);
+  if (!match?.[1]) return undefined;
+  const status = match[1];
+  const after = msg.slice((match.index ?? 0) + match[0].length).trim();
+  let extracted: string | undefined;
+  if (after.startsWith("{")) {
+    const cleaned = after.endsWith("…") ? after.slice(0, -1).trim() : after;
+    try {
+      const parsed = JSON.parse(cleaned) as { message?: unknown };
+      if (typeof parsed.message === "string" && parsed.message.trim()) {
+        extracted = parsed.message.trim().replace(/\s+/g, " ");
+      }
+    } catch {
+      // Fall through to the regex below (truncated bodies).
+    }
+  }
+  if (!extracted) {
+    const messageMatch = /"message"\s*:\s*"([^"]{1,200})/.exec(after);
+    if (messageMatch?.[1]) extracted = messageMatch[1].trim().replace(/\s+/g, " ");
+  }
+  if (extracted) {
+    const short = extracted.length > 200 ? `${extracted.slice(0, 200).trim()}…` : extracted;
+    return `${status}: ${short}`;
+  }
+  const excerpt = after.replace(/\s+/g, " ").trim();
+  if (excerpt) {
+    const short = excerpt.length > 200 ? `${excerpt.slice(0, 200).trim()}…` : excerpt;
+    return `${status}: ${short}`;
+  }
+  return status;
+}
+
+/**
+ * Whether the PR's automerge sticky currently holds the refused-schedule
+ * note. Reads `listIssueComments` (the sticky finder only returns an id)
+ * and requires both the sticky marker and the refused marker; a missing
+ * list entrypoint or an unreadable thread means "no retry", preserving the
+ * person-cancelled guarantee.
+ */
+async function hasRefusedAutomergeNote(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  botUsername: string,
+  log: (message: string) => void
+): Promise<boolean> {
+  try {
+    const list = (api as Partial<Pick<Forge, "listIssueComments">>).listIssueComments;
+    if (typeof list !== "function") return false;
+    const comments = await list.call(api, owner, repo, prNumber);
+    if (!Array.isArray(comments)) return false;
+    return comments.some((comment) => {
+      const body = (comment as { body?: unknown }).body;
+      if (!hasAutomergeRefusedMarker(body)) return false;
+      if (typeof body !== "string" || !body.includes(AUTOMERGE_NOTE_MARKER)) return false;
+      const login = (comment as { user?: { login?: string } }).user?.login;
+      // Fail closed like findStickyIssueComment: a missing or foreign author
+      // never counts as Jumi's own refused note.
+      return typeof login === "string" && login.trim() !== "" && login.toLowerCase() === botUsername.toLowerCase();
+    });
+  } catch (err) {
+    log(`automerge refused note unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return false;
+  }
+}
 
 export { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL };
 
@@ -39,7 +138,7 @@ type AutomergeApi = Pick<
   | "addIssueLabel"
   | "getCollaboratorPermission"
 > &
-  Partial<Pick<Forge, "getPRFiles" | "getRepoFile" | "cancelAutoMerge" | "listIssueTimeline">>;
+  Partial<Pick<Forge, "getPRFiles" | "getRepoFile" | "cancelAutoMerge" | "listIssueTimeline" | "listIssueComments">>;
 
 /**
  * Whether a (possibly partial) webhook forge client has every method the
@@ -948,13 +1047,17 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     return { scheduled: true };
   } catch (err) {
     log(`automerge schedule failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
+    // Only the Gitea cancel-only branch retries the refused schedule after
+    // Jumi's next push; on forges with a readable schedule state (GitHub) the
+    // note must not promise a push retry that never runs.
+    const retryAfterPush = !forgeCapabilities(input.forgeKind).supportsAutoMergeRestore;
     await postAutomergeNote(
       api,
       input.owner,
       input.repo,
       input.prNumber,
       input.botUsername,
-      `Jumi tried to schedule auto-merge on this pull request but the forge refused. A person needs to merge once reviews and CI are green.`
+      automergeRefusedNote(forgeRefusalDetail(err), retryAfterPush)
     );
     return { scheduled: false };
   }
@@ -1220,9 +1323,12 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     // drives the note (conflict still names itself). One repo+settings read
     // serves both the excluded and the label checks.
     let prLabels: AutomergeLabelList = [];
+    let prBaseBranch: string | undefined;
     try {
       const pr = await noteApi.getPR(input.owner, input.repo, input.prNumber);
       prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
+      const baseRef = (pr as { base?: { ref?: unknown } }).base?.ref;
+      if (typeof baseRef === "string" && baseRef.trim()) prBaseBranch = baseRef.trim();
     } catch (err) {
       log(`automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
       return;
@@ -1297,6 +1403,38 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     }
     if (hasNo) {
       await cancelAutomergeSchedule(noteApi, input.forgeKind, input.owner, input.repo, input.prNumber, log);
+      return;
+    }
+    // The schedule at open was refused but Jumi's own sticky says so: this
+    // push may have made the PR mergeable, so run the full gate again.
+    // Any other sticky (or none) keeps today's behaviour, so a
+    // person-cancelled schedule is still left alone.
+    if (await hasRefusedAutomergeNote(noteApi, input.owner, input.repo, input.prNumber, input.botUsername, log)) {
+      const baseBranch = prBaseBranch ?? defaultBranch;
+      const result = await scheduleAutomergeForPr({
+        api: noteApi,
+        forgeKind: input.forgeKind,
+        owner: input.owner,
+        repo: input.repo,
+        prNumber: input.prNumber,
+        baseBranch,
+        automergeRepos: input.automergeRepos,
+        botUsername: input.botUsername,
+        automergeEnabled: input.automergeEnabled,
+        trustedSenderLogins: input.trustedSenderLogins,
+        issueNumber: input.issueNumber,
+        log,
+      });
+      if (result.scheduled) {
+        await postAutomergeNote(
+          noteApi,
+          input.owner,
+          input.repo,
+          input.prNumber,
+          input.botUsername,
+          automergeScheduledNote()
+        );
+      }
     }
     return;
   }
@@ -1668,6 +1806,7 @@ export async function handleAutomergeLabelChange(opts: {
     await cancelAutomergeSchedule(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
     return { action: "cancelled" };
   }
+  const hadRefused = await hasRefusedAutomergeNote(api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, log);
   const result = await scheduleAutomergeForPr({
     api,
     forgeKind: opts.forgeKind,
@@ -1683,5 +1822,8 @@ export async function handleAutomergeLabelChange(opts: {
     prLabels,
     log,
   });
+  if (result.scheduled && hadRefused) {
+    await postAutomergeNote(api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, automergeScheduledNote());
+  }
   return { action: result.scheduled ? "scheduled" : "none" };
 }
