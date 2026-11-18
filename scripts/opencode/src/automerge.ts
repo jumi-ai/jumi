@@ -36,13 +36,12 @@ export function hasAutomergeRefusedMarker(body: unknown): boolean {
  * hidden marker so a later Jumi push can tell "refused" apart from a
  * person-cancelled or never-wanted schedule.
  */
-export function automergeRefusedNote(detail?: string): string {
+export function automergeRefusedNote(detail?: string, retryAfterPush = true): string {
   const reason = detail ? ` but the forge refused (${detail})` : " but the forge refused";
-  return (
-    `Jumi tried to schedule auto-merge on this pull request${reason}. ` +
-    `Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green.\n` +
-    AUTOMERGE_REFUSED_MARKER
-  );
+  const retry = retryAfterPush
+    ? "Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green."
+    : "A person needs to merge once reviews and CI are green.";
+  return `Jumi tried to schedule auto-merge on this pull request${reason}. ${retry}\n${AUTOMERGE_REFUSED_MARKER}`;
 }
 
 /** Short sticky replacing the refused note once a later schedule succeeds. */
@@ -111,13 +110,12 @@ async function hasRefusedAutomergeNote(
     if (!Array.isArray(comments)) return false;
     return comments.some((comment) => {
       const body = (comment as { body?: unknown }).body;
-      if (typeof body !== "string") return false;
-      if (!body.includes(AUTOMERGE_NOTE_MARKER) || !body.includes(AUTOMERGE_REFUSED_MARKER)) return false;
+      if (!hasAutomergeRefusedMarker(body)) return false;
+      if (typeof body !== "string" || !body.includes(AUTOMERGE_NOTE_MARKER)) return false;
       const login = (comment as { user?: { login?: string } }).user?.login;
-      if (typeof login === "string" && login.trim() && login.toLowerCase() !== botUsername.toLowerCase()) {
-        return false;
-      }
-      return true;
+      // Fail closed like findStickyIssueComment: a missing or foreign author
+      // never counts as Jumi's own refused note.
+      return typeof login === "string" && login.trim() !== "" && login.toLowerCase() === botUsername.toLowerCase();
     });
   } catch (err) {
     log(`automerge refused note unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
@@ -1049,13 +1047,17 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     return { scheduled: true };
   } catch (err) {
     log(`automerge schedule failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
+    // Only the Gitea cancel-only branch retries the refused schedule after
+    // Jumi's next push; on forges with a readable schedule state (GitHub) the
+    // note must not promise a push retry that never runs.
+    const retryAfterPush = !forgeCapabilities(input.forgeKind).supportsAutoMergeRestore;
     await postAutomergeNote(
       api,
       input.owner,
       input.repo,
       input.prNumber,
       input.botUsername,
-      automergeRefusedNote(forgeRefusalDetail(err))
+      automergeRefusedNote(forgeRefusalDetail(err), retryAfterPush)
     );
     return { scheduled: false };
   }
