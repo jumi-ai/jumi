@@ -26,6 +26,7 @@ import { parseSkipWhy } from "./pr_decision.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
   implementIdempotencyMismatch,
+  isBlockedOnReason,
   isQueueUnavailable,
   isUniqueViolation,
   reopenIdempotencyMismatch,
@@ -300,6 +301,9 @@ export { kickForSit };
 /** Server-provided effect for the same-commit requeue kick. The page confirms this text. */
 export const REQUEUE_KICK_EFFECT = "Rerun the review on the same commit, with no push and no CI rerun";
 
+/** Server-provided effect for a blocked-implement re-check kick. The page confirms this text. */
+export const BLOCKED_IMPLEMENT_KICK_EFFECT = "Re-check dependencies and queue implement if nothing blocks it";
+
 function boardCatalogHash(input: string): string {
   let hash = 5381;
   for (let index = 0; index < input.length; index++) {
@@ -321,6 +325,7 @@ export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
     ids: SIT_KICK_IDS,
     none: [...NO_KICK_SITS].sort(),
     requeue: REQUEUE_KICK_EFFECT,
+    blockedImplement: BLOCKED_IMPLEMENT_KICK_EFFECT,
     stuckConflict: STUCK_CONFLICT_EFFECT,
     peerForward: "peer-kick-v1",
   })
@@ -397,6 +402,7 @@ function sitItem(
 export interface BoardStore {
   listInflight(limit?: number): Promise<ReviewJobRecord[]>;
   listTerminalReviews?(limit?: number): Promise<ReviewJobRecord[]>;
+  listTerminalImplements?(limit?: number): Promise<ReviewJobRecord[]>;
   /** Stuck skip reason per issue, when the ledger tracks it. Lets an implement-latch sit name conflict resolution. */
   readIssueSkipLatch?(owner: string, repo: string, issueNumber: number): Promise<{ skipReason: string | null }>;
   sits: {
@@ -442,11 +448,37 @@ function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): Boar
   return item;
 }
 
+function blockedImplementItem(row: ReviewJobRecord, reason: string, forge?: string): BoardItem {
+  const trimmed = reason.trim();
+  const issueNumber =
+    typeof row.issueNumber === "number" && Number.isFinite(row.issueNumber) && row.issueNumber > 0
+      ? row.issueNumber
+      : row.prNumber;
+  const item: BoardItem = {
+    reason: "implement skipped",
+    message: trimmed,
+    owner: row.owner,
+    repo: row.repo,
+    number: issueNumber,
+    kind: "implement",
+    kick: { effect: BLOCKED_IMPLEMENT_KICK_EFFECT, kick: "implement" },
+  };
+  if (forge) item.forge = forge;
+  return item;
+}
+
+function isBlockedImplementRow(row: ReviewJobRecord): boolean {
+  if (row.kind !== "implement") return false;
+  if (row.state !== "skipped") return false;
+  return isBlockedOnReason((row.resultReason ?? "").trim());
+}
+
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
-  const [inflight, sits, terminals, closedPulls] = await Promise.all([
+  const [inflight, sits, terminals, terminalImplements, closedPulls] = await Promise.all([
     store.listInflight(200),
     store.sits.list(),
     store.listTerminalReviews ? store.listTerminalReviews(200) : Promise.resolve([]),
+    store.listTerminalImplements ? store.listTerminalImplements(200) : Promise.resolve([]),
     store.sits.listClosedPulls ? store.sits.listClosedPulls() : Promise.resolve([]),
   ]);
   const closedKeys = new Set(
@@ -492,6 +524,36 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     if ((row.headSha ?? "").trim() === "") continue;
     needs_kick.push(requeueItem(row, reason, forge));
     requeueKeys.add(key);
+  }
+  // Latest blocked implement per issue only: an open issue whose latest
+  // implement is skipped behind dependencies is offered as an implement
+  // kick. The row goes away once a new implement row is queued (in-flight)
+  // or the issue closes.
+  const latestImplementByIssue = new Map<string, ReviewJobRecord>();
+  for (const row of terminalImplements) {
+    if (row.kind !== "implement") continue;
+    const issueNumber =
+      typeof row.issueNumber === "number" && Number.isFinite(row.issueNumber) && row.issueNumber > 0
+        ? row.issueNumber
+        : row.prNumber;
+    if (!Number.isFinite(issueNumber) || issueNumber <= 0) continue;
+    const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${issueNumber}`;
+    const existing = latestImplementByIssue.get(key);
+    if (!existing || row.id > existing.id) latestImplementByIssue.set(key, row);
+  }
+  for (const row of latestImplementByIssue.values()) {
+    if (!isBlockedImplementRow(row)) continue;
+    const issueNumber =
+      typeof row.issueNumber === "number" && Number.isFinite(row.issueNumber) && row.issueNumber > 0
+        ? row.issueNumber
+        : row.prNumber;
+    const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${issueNumber}`;
+    if (inflightKeys.has(key)) continue;
+    if (closedKeys.has(key)) continue;
+    if (inflightJobKeys.has(row.jobKey)) continue;
+    const reason = (row.resultReason ?? "").trim();
+    if (reason === "") continue;
+    needs_kick.push(blockedImplementItem(row, reason, forge));
   }
   const sitting: BoardItem[] = [];
   // Resolve stuck reasons up front so an implement-latch sit on a
@@ -919,6 +981,9 @@ export interface BoardPullForge {
   addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
   getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
+  /** Dependency re-check surface for a blocked implement kick. Optional; absent means no re-check. */
+  listIssueDependencies?(owner: string, repo: string, index: number): Promise<import("./ports.ts").LinkedIssue[]>;
+  listOpenPulls?(owner: string, repo: string): Promise<import("./ports.ts").Pull[]>;
 }
 
 function normalizePathname(raw: string): string {
@@ -1177,6 +1242,7 @@ function kickLabelOf(item) {
     if (/conflict/i.test(effect)) return "Clear latch and queue conflict resolution";
     return "Clear latch and queue follow-up";
   }
+  if (id === "implement") return "Re-check and queue implement";
   const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
   if (effect === REQUEUE_EFFECT) return "Requeue review";
   if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
@@ -2520,6 +2586,97 @@ async function handleImplementKick(
     return json(503, { error: "forge unavailable" });
   }
 
+  // A blocked implement re-checks live dependencies before queueing anything.
+  // Peek the latest implement terminal: only a `blocked on ` row needs the
+  // forge check. A no-changes row (and every other refusal) goes straight to
+  // the store, exactly as today.
+  let blockedTerminal: ReviewJobRecord | undefined;
+  try {
+    const rows = await store.listRowsForNumber(item.owner, item.repo, item.issueNumber, 50);
+    const implTerminals = rows
+      .filter((row) => row.kind === "implement" && (row.state === "succeeded" || row.state === "skipped"))
+      .sort((a, b) => a.id - b.id);
+    const latest = implTerminals.length > 0 ? implTerminals[implTerminals.length - 1] : undefined;
+    if (latest && latest.state === "skipped" && isBlockedOnReason(latest.resultReason)) blockedTerminal = latest;
+  } catch (err) {
+    logger(`implement kick unavailable: ${errorMessage(err)}`);
+    return json(503, { error: "queue unavailable" });
+  }
+
+  if (blockedTerminal) {
+    const listDeps = forgeApi.listIssueDependencies;
+    const listPulls = forgeApi.listOpenPulls;
+    if (typeof listDeps !== "function" || typeof listPulls !== "function") {
+      logger(`implement kick unavailable actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: no forge`);
+      return json(503, { error: "forge unavailable" });
+    }
+    let check: Awaited<ReturnType<typeof import("./dependencies.ts").checkIssueBlockers>>;
+    try {
+      const { checkIssueBlockers } = await import("./dependencies.ts");
+      check = await checkIssueBlockers(
+        {
+          listIssueDependencies: (owner, repo, index) =>
+            (listDeps as NonNullable<typeof listDeps>).call(forgeApi, owner, repo, index) as never,
+          listOpenPulls: (owner, repo) =>
+            (listPulls as NonNullable<typeof listPulls>).call(forgeApi, owner, repo) as never,
+        },
+        item.owner,
+        item.repo,
+        item.issueNumber
+      );
+    } catch (err) {
+      logger(
+        `implement kick forge unavailable actor=${actor} ${item.owner}/${item.repo}#${item.issueNumber}: ${errorMessage(err)}`
+      );
+      return json(503, { error: "forge unavailable" });
+    }
+    if (check.status === "stuck") {
+      const logged = await recordImplementKickBestEffort(
+        store,
+        logger,
+        parsed,
+        actor,
+        blockedTerminal.id,
+        "not-kickable"
+      );
+      if (logged === "conflict") return await replayImplementKeyConflict(store, parsed, item);
+      if (logged === "unavailable") return json(503, { error: "queue unavailable" });
+      logger(
+        `implement kick not-kickable actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)}: ${check.reason}`
+      );
+      return json(422, {
+        error: check.reason,
+        code: "not-kickable",
+        terminalJobId: blockedTerminal.id,
+        newJobId: null,
+      });
+    }
+    if (check.status === "blocked") {
+      const { blockedOnComment } = await import("./dependencies.ts");
+      const why = blockedOnComment(check.blockers, item.owner, item.repo);
+      const logged = await recordImplementKickBestEffort(
+        store,
+        logger,
+        parsed,
+        actor,
+        blockedTerminal.id,
+        "still-blocked"
+      );
+      if (logged === "conflict") return await replayImplementKeyConflict(store, parsed, item);
+      if (logged === "unavailable") return json(503, { error: "queue unavailable" });
+      logger(
+        `implement kick still-blocked actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} kick=${JSON.stringify(parsed.kick)}: ${why}`
+      );
+      return json(409, {
+        error: why,
+        code: "still-blocked",
+        terminalJobId: blockedTerminal.id,
+        newJobId: null,
+      });
+    }
+    // Ready falls through to the store queue below, exactly as the no-changes retry.
+  }
+
   const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
   let outcome: Awaited<ReturnType<ReviewJobStore["implementKick"]>>;
   try {
@@ -2615,7 +2772,7 @@ async function handleImplementKick(
   const status =
     outcome.code === "not-found"
       ? 404
-      : outcome.code === "stale-kick" || outcome.code === "conflict"
+      : outcome.code === "stale-kick" || outcome.code === "conflict" || outcome.code === "still-blocked"
         ? 409
         : outcome.code === "not-kickable"
           ? 422
@@ -2627,6 +2784,60 @@ async function handleImplementKick(
     newJobId: outcome.newJobId,
     ...(outcome.deduped ? { deduped: true } : {}),
   });
+}
+
+async function recordImplementKickBestEffort(
+  store: ReviewJobStore,
+  logger: (message: string) => void,
+  parsed: { owner: string; repo: string; number: number; kick: string; idempotencyKey: string },
+  actor: string,
+  terminalJobId: number | null,
+  result: string
+): Promise<"ok" | "conflict" | "unavailable"> {
+  try {
+    await store.recordImplementKick({
+      owner: parsed.owner,
+      repo: parsed.repo,
+      issueNumber: parsed.number,
+      kick: parsed.kick,
+      actor,
+      idempotencyKey: parsed.idempotencyKey,
+      result,
+      terminalJobId,
+      newJobId: null,
+    });
+    return "ok";
+  } catch (err) {
+    if (parsed.idempotencyKey && isUniqueViolation(err)) return "conflict";
+    if (isQueueUnavailable(err)) {
+      logger(`implement kick unavailable: ${errorMessage(err)}`);
+      return "unavailable";
+    }
+    throw err;
+  }
+}
+
+async function replayImplementKeyConflict(
+  store: ReviewJobStore,
+  parsed: { owner: string; repo: string; number: number; kick: string; idempotencyKey: string },
+  item: { owner: string; repo: string; issueNumber: number; kick: string }
+): Promise<Response> {
+  let prior: KickLogRecord | undefined;
+  try {
+    prior = await store.getKickByIdempotencyKey(parsed.idempotencyKey);
+  } catch {
+    return json(503, { error: "queue unavailable" });
+  }
+  if (!prior) return json(503, { error: "queue unavailable" });
+  if (implementIdempotencyMismatch(item, prior)) {
+    return json(400, {
+      error: `Idempotency key was already used for ${prior.owner}/${prior.repo}#${prior.number} @ ${prior.commit} with a different kick; use a fresh key for a different item.`,
+      code: "bad-request",
+      terminalJobId: null,
+      newJobId: null,
+    });
+  }
+  return replayImplementPrior(store, prior, item);
 }
 
 async function replayImplementPrior(
@@ -2677,6 +2888,15 @@ async function replayImplementPrior(
     return json(status, {
       error: `already decided: ${prior.result}`,
       code,
+      terminalJobId: prior.terminalJobId,
+      newJobId: prior.newJobId,
+      deduped: true,
+    });
+  }
+  if (prior.result === "still-blocked") {
+    return json(409, {
+      error: "already decided: still-blocked",
+      code: "still-blocked",
       terminalJobId: prior.terminalJobId,
       newJobId: prior.newJobId,
       deduped: true,
