@@ -123,6 +123,129 @@ type BlockApi = {
 
 type RepoRef = { default_branch: string; clone_url: string; full_name: string; html_url?: string };
 
+export type BlockEligibilityApi = Pick<BlockApi, "getIssue" | "getRepo">;
+
+export type BlockEligibilityContext = {
+  owner: string;
+  repo: string;
+  repository: RepoRef;
+  action: string;
+  policy: IssueWebhookPolicy;
+  api: BlockEligibilityApi;
+};
+
+export async function enqueueEligibleBlockedIssue(
+  row: Pick<LinkedIssue, "owner" | "repo" | "number">,
+  opts: BlockEligibilityContext
+): Promise<Omit<IssueJob, "delivery" | "receivedAt"> | undefined> {
+  let issue: Task;
+  try {
+    issue = await opts.api.getIssue(row.owner, row.repo, row.number);
+  } catch {
+    return undefined;
+  }
+  if (isPullRequestIssue(issue) || issue.state !== "open") return undefined;
+  if (!isIssuePickedUp(issue, opts.policy)) return undefined;
+
+  let cloneRepo: { default_branch: string; clone_url: string };
+  if (row.owner === opts.owner && row.repo === opts.repo) {
+    cloneRepo = opts.repository;
+  } else if (opts.api.getRepo) {
+    try {
+      const fetched = await opts.api.getRepo(row.owner, row.repo);
+      try {
+        assertRepositoryPolicy(fetched, opts.policy);
+      } catch {
+        return undefined;
+      }
+      cloneRepo = fetched;
+    } catch {
+      return undefined;
+    }
+  } else {
+    return undefined;
+  }
+
+  return issueJobFrom(row.owner, row.repo, issue, cloneRepo, opts.action);
+}
+
+export const DEPENDENCY_REMOVE_ACTIONS = new Set(["blocked_by_removed", "blocking_removed"]);
+
+export function isDependencyRemoveAction(action: string | undefined): boolean {
+  return typeof action === "string" && DEPENDENCY_REMOVE_ACTIONS.has(action);
+}
+
+export type IssueDependenciesRef = {
+  action: string;
+  blockedOwner: string;
+  blockedRepo: string;
+  blockedNumber: number;
+  triggerOwner: string;
+  triggerRepo: string;
+  triggerRepository: RepoRef;
+  blockedDefaultBranch?: string;
+};
+
+function requireRepoRef(value: unknown, name: string): RepoRef {
+  if (!isObjectLike(value)) throw new Error(`Invalid webhook payload: missing ${name}`);
+  requireString(value.full_name, `${name}.full_name`);
+  requireString(value.default_branch, `${name}.default_branch`);
+  requireString(value.clone_url, `${name}.clone_url`);
+  return value as unknown as RepoRef;
+}
+
+function splitFullName(fullName: string, name: string): { owner: string; repo: string } {
+  const [owner, repo] = fullName.split("/");
+  if (!owner || !repo) throw new Error(`Invalid webhook payload: missing ${name}`);
+  return { owner, repo };
+}
+
+export function parseIssueDependenciesPayload(rawBody: Uint8Array): IssueDependenciesRef {
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+  if (!isObjectLike(parsed)) throw new Error("Invalid webhook payload: expected object");
+  const action = parsed.action;
+  if (typeof action !== "string" || !action) throw new Error("Invalid webhook payload: missing action");
+  if (!isDependencyRemoveAction(action)) throw new Error(`Invalid webhook payload: unsupported action ${action}`);
+  const repository = requireRepoRef(parsed.repository, "repository");
+  const { owner: triggerOwner, repo: triggerRepo } = splitFullName(repository.full_name, "repository.full_name");
+  const blockedIssue = parsed.blocked_issue;
+  if (!isObjectLike(blockedIssue)) throw new Error("Invalid webhook payload: missing blocked_issue");
+  const blockedNumber = requireNumber(blockedIssue.number, "blocked_issue.number");
+  if (action === "blocked_by_removed") {
+    const { owner, repo } = splitFullName(repository.full_name, "repository.full_name");
+    return {
+      action,
+      blockedOwner: owner,
+      blockedRepo: repo,
+      blockedNumber,
+      triggerOwner,
+      triggerRepo,
+      triggerRepository: repository,
+    };
+  }
+  const blockedRepoValue = parsed.blocked_issue_repo;
+  if (!isObjectLike(blockedRepoValue)) throw new Error("Invalid webhook payload: missing blocked_issue_repo");
+  requireString(blockedRepoValue.full_name, "blocked_issue_repo.full_name");
+  const { owner, repo } = splitFullName(
+    blockedRepoValue.full_name as unknown as string,
+    "blocked_issue_repo.full_name"
+  );
+  const branch =
+    typeof blockedRepoValue.default_branch === "string" && blockedRepoValue.default_branch
+      ? (blockedRepoValue.default_branch as string)
+      : undefined;
+  return {
+    action,
+    blockedOwner: owner,
+    blockedRepo: repo,
+    blockedNumber,
+    triggerOwner,
+    triggerRepo,
+    triggerRepository: repository,
+    ...(branch ? { blockedDefaultBranch: branch } : {}),
+  };
+}
+
 function issueKey(owner: string, repo: string, number: number): string {
   return `${owner}/${repo}#${number}`;
 }
@@ -140,37 +263,7 @@ export async function blockedIssueJobsFrom(
   const seen = new Set<string>();
   const stack = new Set<string>();
 
-  const enqueueIfEligible = async (row: LinkedIssue): Promise<void> => {
-    let issue: Task;
-    try {
-      issue = await api.getIssue(row.owner, row.repo, row.number);
-    } catch {
-      return;
-    }
-    if (isPullRequestIssue(issue) || issue.state !== "open") return;
-    if (!isIssuePickedUp(issue, policy)) return;
-
-    let cloneRepo: { default_branch: string; clone_url: string };
-    if (row.owner === owner && row.repo === repo) {
-      cloneRepo = repository;
-    } else if (api.getRepo) {
-      try {
-        const fetched = await api.getRepo(row.owner, row.repo);
-        try {
-          assertRepositoryPolicy(fetched, policy);
-        } catch {
-          return;
-        }
-        cloneRepo = fetched;
-      } catch {
-        return;
-      }
-    } else {
-      return;
-    }
-
-    jobs.push(issueJobFrom(row.owner, row.repo, issue, cloneRepo, action));
-  };
+  const context: BlockEligibilityContext = { owner, repo, repository, action, policy, api };
 
   const walk = async (curOwner: string, curRepo: string, index: number): Promise<void> => {
     const key = issueKey(curOwner, curRepo, index);
@@ -189,7 +282,8 @@ export async function blockedIssueJobsFrom(
       } catch {
         continue;
       }
-      await enqueueIfEligible(row);
+      const job = await enqueueEligibleBlockedIssue(row, context);
+      if (job) jobs.push(job);
       await walk(row.owner, row.repo, row.number);
     }
     stack.delete(key);

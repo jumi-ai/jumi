@@ -330,6 +330,8 @@ Event map (router mailbox):
 - `ping` → `200 {"ok":true}`
 - other events → `202` skip
 
+On `FORGE=github` the GitHub App must also subscribe to the **Issue dependencies** event. When a `blocked by` link is removed (`issue_dependencies` `blocked_by_removed` or `blocking_removed`), the router re-enqueues implement for the blocked issue through the same eligibility check as the close wake (open, labelled, not a pull request, in an allowed repository); the worker remains the authority on any remaining blockers. Added links (`blocked_by_added`, `blocking_added`) and malformed or out-of-policy deliveries skip `202` with nothing queued.
+
 Skip follow-up when the sender is the bot, the comment was `edited`/`deleted`, the body is empty or contains `<!-- jumi-worker:` / `<!-- jumi-check:`, the PR is a fork/draft/`WIP:`, the closing issue is not assigned to the bot, or a foreign PR is not assigned to the bot.
 
 The service also exposes:
