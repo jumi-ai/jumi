@@ -1396,3 +1396,201 @@ describe("worker POST /webhooks/github", () => {
     expect(queue.jobs).toHaveLength(0);
   });
 });
+
+describe("issue_dependencies", () => {
+  const blockerRepo = makeRepo({
+    owner: makeUser({ login: "kirmanak" }),
+    name: "blocker",
+    full_name: "kirmanak/blocker",
+    html_url: "https://github.com/kirmanak/blocker",
+    clone_url: "https://github.com/kirmanak/blocker.git",
+  });
+
+  function depPolicy() {
+    return githubWebhookPolicy({
+      webhookSecret: "webhook-secret",
+      maxWebhookBytes: 1_048_576,
+      allowedOrgs: ["kirmanak"],
+      allowedRepos: [],
+      botUsername: "kirmanak-jumi[bot]",
+    });
+  }
+
+  function depApi(
+    issueOverrides: Parameters<typeof githubIssue>[0] = {},
+    getRepo?: (owner: string, repo: string) => Promise<ReturnType<typeof makeRepo>>
+  ) {
+    return {
+      listOpenPulls: async () => [],
+      getIssue: async () => githubIssue({ number: 12, ...issueOverrides }),
+      ...(getRepo ? { getRepo } : { getRepo: async () => githubRepo }),
+      getCollaboratorPermission: async () => ({ permission: "write" }),
+    };
+  }
+
+  function depDeps(store: MemoryReviewJobStore, api: ReturnType<typeof depApi>) {
+    return {
+      logger: (_message: string) => {},
+      worker: {
+        queue: { enqueue: (job: IssueJob) => store.enqueueIssue(job) },
+        api,
+        sits: store.sits,
+      },
+    };
+  }
+
+  async function depResponse(
+    store: MemoryReviewJobStore,
+    body: unknown,
+    api: ReturnType<typeof depApi>,
+    delivery: string = crypto.randomUUID()
+  ) {
+    return handleGithubWebhookEvent(encodeJson(body), "issue_dependencies", delivery, depPolicy(), depDeps(store, api));
+  }
+
+  function blockedByRemovedBody(overrides: Record<string, unknown> = {}) {
+    return { action: "blocked_by_removed", repository: githubRepo, blocked_issue: { number: 12 }, ...overrides };
+  }
+
+  function blockingRemovedBody(blockedRepo: ReturnType<typeof makeRepo> = githubRepo, number = 12) {
+    return {
+      action: "blocking_removed",
+      repository: blockerRepo,
+      blocked_issue: { number },
+      blocked_issue_repo: blockedRepo,
+    };
+  }
+
+  test("blocked_by_removed queues one implement job for the blocked issue", async () => {
+    const store = new MemoryReviewJobStore();
+    const response = await depResponse(store, blockedByRemovedBody(), depApi());
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0]?.kind).toBe("implement");
+    expect(store.rows[0]?.issueNumber).toBe(12);
+  });
+
+  test("blocking_removed delivered on the blocker repository queues the blocked_issue", async () => {
+    const store = new MemoryReviewJobStore();
+    const response = await depResponse(store, blockingRemovedBody(), depApi());
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows).toHaveLength(1);
+    expect(store.rows[0]?.owner).toBe("kirmanak");
+    expect(store.rows[0]?.repo).toBe("demo");
+    expect(store.rows[0]?.issueNumber).toBe(12);
+  });
+
+  test("a skipped blocked-on implement row gets a new queued row from blocked_by_removed", async () => {
+    const store = new MemoryReviewJobStore();
+    const api = depApi();
+    const first = await depResponse(store, blockedByRemovedBody(), api, "delivery-first");
+    expect(await responseJson(first)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leased?.state).toBe("leased");
+    await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "blocked on #196" });
+    const second = await depResponse(store, blockedByRemovedBody(), api, "delivery-second");
+    expect(await responseJson(second)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(store.rows).toHaveLength(2);
+    expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(1);
+  });
+
+  test("added actions skip 202 with nothing queued", async () => {
+    for (const action of ["blocked_by_added", "blocking_added"]) {
+      const store = new MemoryReviewJobStore();
+      const response = await depResponse(
+        store,
+        { action, repository: githubRepo, blocked_issue: { number: 12 } },
+        depApi()
+      );
+      expect(response.status).toBe(202);
+      expect(await responseJson(response)).toEqual({ skipped: `unsupported action ${action}` });
+      expect(store.rows).toHaveLength(0);
+    }
+  });
+
+  test("closed, unlabelled, and pull-request targets queue nothing", async () => {
+    const closedStore = new MemoryReviewJobStore();
+    const closed = await depResponse(
+      closedStore,
+      blockedByRemovedBody(),
+      depApi({ state: "closed", labels: [{ name: "jumi" }] })
+    );
+    expect(closed.status).toBe(202);
+    expect(await responseJson(closed)).toEqual({ skipped: "no blocked issues to wake" });
+    expect(closedStore.rows).toHaveLength(0);
+
+    const unlabelledStore = new MemoryReviewJobStore();
+    const unlabelled = await depResponse(unlabelledStore, blockedByRemovedBody(), depApi({ labels: [] }));
+    expect(unlabelled.status).toBe(202);
+    expect(await responseJson(unlabelled)).toEqual({ skipped: "no blocked issues to wake" });
+    expect(unlabelledStore.rows).toHaveLength(0);
+
+    const prStore = new MemoryReviewJobStore();
+    const pr = await depResponse(
+      prStore,
+      blockedByRemovedBody(),
+      depApi({ pull_request: { url: "https://github.com/kirmanak/demo/pulls/12" } })
+    );
+    expect(pr.status).toBe(202);
+    expect(await responseJson(pr)).toEqual({ skipped: "no blocked issues to wake" });
+    expect(prStore.rows).toHaveLength(0);
+  });
+
+  test("a blocked_issue_repo outside the repository policy queues nothing", async () => {
+    const store = new MemoryReviewJobStore();
+    const other = makeRepo({
+      owner: makeUser({ login: "other" }),
+      name: "demo",
+      full_name: "other/demo",
+      html_url: "https://github.com/other/demo",
+      clone_url: "https://github.com/other/demo.git",
+    });
+    const response = await depResponse(
+      store,
+      {
+        action: "blocking_removed",
+        repository: blockerRepo,
+        blocked_issue: { number: 12 },
+        blocked_issue_repo: other,
+      },
+      depApi({}, async () => other)
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "no blocked issues to wake" });
+    expect(store.rows).toHaveLength(0);
+  });
+
+  test("a trigger repository outside the policy queues nothing", async () => {
+    const store = new MemoryReviewJobStore();
+    const foreign = makeRepo({
+      owner: makeUser({ login: "other" }),
+      name: "blocker",
+      full_name: "other/blocker",
+      html_url: "https://github.com/other/blocker",
+      clone_url: "https://github.com/other/blocker.git",
+    });
+    const response = await depResponse(
+      store,
+      {
+        action: "blocking_removed",
+        repository: foreign,
+        blocked_issue: { number: 12 },
+        blocked_issue_repo: githubRepo,
+      },
+      depApi({}, async () => githubRepo)
+    );
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "repository not allowed" });
+    expect(store.rows).toHaveLength(0);
+  });
+
+  test("a malformed payload skips 202 with nothing queued", async () => {
+    const store = new MemoryReviewJobStore();
+    const response = await depResponse(store, { action: "blocked_by_removed", repository: githubRepo }, depApi());
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "malformed issue_dependencies payload" });
+    expect(store.rows).toHaveLength(0);
+  });
+});

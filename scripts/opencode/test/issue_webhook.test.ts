@@ -4,6 +4,9 @@ import { hasJumiLabel } from "../src/github_webhook.ts";
 import {
   assignedIssueJobsToEnqueue,
   blockedIssueJobsToEnqueue,
+  enqueueEligibleBlockedIssue,
+  isDependencyRemoveAction,
+  parseIssueDependenciesPayload,
   parseIssuesPayload,
   pullWaitClearJobsToEnqueue,
   shouldEnqueueIssue,
@@ -689,5 +692,147 @@ describe("pullWaitClearJobsToEnqueue", () => {
       }
     );
     expect(jobs.map((job) => job.issueNumber)).toEqual([206]);
+  });
+});
+
+describe("isDependencyRemoveAction", () => {
+  test("accepts only the remove actions", () => {
+    expect(isDependencyRemoveAction("blocked_by_removed")).toBe(true);
+    expect(isDependencyRemoveAction("blocking_removed")).toBe(true);
+    expect(isDependencyRemoveAction("blocked_by_added")).toBe(false);
+    expect(isDependencyRemoveAction("blocking_added")).toBe(false);
+    expect(isDependencyRemoveAction(undefined)).toBe(false);
+  });
+});
+
+describe("parseIssueDependenciesPayload", () => {
+  test("blocked_by_removed wakes the issue in the delivery repository", () => {
+    const repository = makeRepo();
+    const ref = parseIssueDependenciesPayload(
+      encodeJson({ action: "blocked_by_removed", repository, blocked_issue: { number: 12 } })
+    );
+    expect(ref.action).toBe("blocked_by_removed");
+    expect(ref.blockedOwner).toBe("kirmanak");
+    expect(ref.blockedRepo).toBe("demo");
+    expect(ref.blockedNumber).toBe(12);
+    expect(ref.triggerOwner).toBe("kirmanak");
+    expect(ref.triggerRepo).toBe("demo");
+  });
+
+  test("blocking_removed wakes blocked_issue in blocked_issue_repo", () => {
+    const repository = makeRepo({ name: "blocker", full_name: "kirmanak/blocker" });
+    const blockedIssueRepo = makeRepo();
+    const ref = parseIssueDependenciesPayload(
+      encodeJson({
+        action: "blocking_removed",
+        repository,
+        blocked_issue: { number: 12 },
+        blocked_issue_repo: blockedIssueRepo,
+      })
+    );
+    expect(ref.action).toBe("blocking_removed");
+    expect(ref.blockedOwner).toBe("kirmanak");
+    expect(ref.blockedRepo).toBe("demo");
+    expect(ref.blockedNumber).toBe(12);
+    expect(ref.triggerOwner).toBe("kirmanak");
+    expect(ref.triggerRepo).toBe("blocker");
+  });
+
+  test("rejects added actions and malformed payloads", () => {
+    const repository = makeRepo();
+    expect(() =>
+      parseIssueDependenciesPayload(
+        encodeJson({ action: "blocked_by_added", repository, blocked_issue: { number: 12 } })
+      )
+    ).toThrow("unsupported action");
+    expect(() =>
+      parseIssueDependenciesPayload(encodeJson({ action: "blocking_added", repository, blocked_issue: { number: 12 } }))
+    ).toThrow("unsupported action");
+    expect(() => parseIssueDependenciesPayload(encodeJson({ action: "blocked_by_removed" }))).toThrow(
+      "missing repository"
+    );
+    expect(() => parseIssueDependenciesPayload(encodeJson({ action: "blocked_by_removed", repository }))).toThrow(
+      "missing blocked_issue"
+    );
+    expect(() =>
+      parseIssueDependenciesPayload(
+        encodeJson({ action: "blocking_removed", repository, blocked_issue: { number: 12 } })
+      )
+    ).toThrow("missing blocked_issue_repo");
+    expect(() => parseIssueDependenciesPayload(new TextEncoder().encode("not-json"))).toThrow();
+  });
+});
+
+describe("enqueueEligibleBlockedIssue", () => {
+  const repository = makeRepo();
+
+  function context(
+    overrides: Partial<Parameters<typeof enqueueEligibleBlockedIssue>[1]> = {}
+  ): Parameters<typeof enqueueEligibleBlockedIssue>[1] {
+    return {
+      owner: "kirmanak",
+      repo: "demo",
+      repository,
+      action: "blocked_by_removed",
+      policy,
+      api: { getIssue: async () => makeIssue({ number: 12 }) },
+      ...overrides,
+    };
+  }
+
+  test("enqueues an open issue picked up by the bot", async () => {
+    const job = await enqueueEligibleBlockedIssue({ owner: "kirmanak", repo: "demo", number: 12 }, context());
+    expect(job?.issueNumber).toBe(12);
+    expect(job?.action).toBe("blocked_by_removed");
+    expect(job?.cloneUrl).toBe(repository.clone_url);
+  });
+
+  test("skips closed, unpicked, and pull-request targets", async () => {
+    const closed = await enqueueEligibleBlockedIssue(
+      { owner: "kirmanak", repo: "demo", number: 1 },
+      context({ api: { getIssue: async () => makeIssue({ number: 1, state: "closed" }) } })
+    );
+    const unpicked = await enqueueEligibleBlockedIssue(
+      { owner: "kirmanak", repo: "demo", number: 2 },
+      context({
+        api: {
+          getIssue: async () =>
+            makeIssue({ number: 2, assignee: makeUser({ login: "alice" }), assignees: [makeUser({ login: "alice" })] }),
+        },
+      })
+    );
+    const pr = await enqueueEligibleBlockedIssue(
+      { owner: "kirmanak", repo: "demo", number: 3 },
+      context({ api: { getIssue: async () => makeIssue({ number: 3, pull_request: { merged_at: null } }) } })
+    );
+    expect(closed).toBeUndefined();
+    expect(unpicked).toBeUndefined();
+    expect(pr).toBeUndefined();
+  });
+
+  test("skips a cross-repo blocked issue outside the repository policy", async () => {
+    const other = makeRepo({ name: "other", full_name: "evil/other" });
+    const job = await enqueueEligibleBlockedIssue(
+      { owner: "evil", repo: "other", number: 10 },
+      context({
+        api: {
+          getIssue: async (_owner, _repo, index) =>
+            makeIssue({
+              number: index,
+              html_url: "https://gitea.kirmanak.stream/evil/other/issues/10",
+            }),
+          getRepo: async () => other,
+        },
+      })
+    );
+    expect(job).toBeUndefined();
+  });
+
+  test("skips a cross-repo blocked issue when there is no getRepo", async () => {
+    const job = await enqueueEligibleBlockedIssue(
+      { owner: "kirmanak", repo: "other", number: 10 },
+      context({ api: { getIssue: async () => makeIssue({ number: 10 }) } })
+    );
+    expect(job).toBeUndefined();
   });
 });
