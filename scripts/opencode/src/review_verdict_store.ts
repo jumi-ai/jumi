@@ -351,7 +351,10 @@ export class ReviewVerdictStore {
     }
     const valid = this.hunks.get(usable);
     if (!valid || valid.size === 0 || !valid.has(numeric)) {
-      return { ok: false, error: `line outside hunks: ${usable}:${numeric}` };
+      return {
+        ok: false,
+        error: `line outside hunks: ${usable}:${numeric} (no diff hunks cover this line; record the finding with no path and line if it still applies)`,
+      };
     }
     return { ok: true, path: usable, line: numeric };
   }

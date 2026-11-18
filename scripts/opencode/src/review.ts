@@ -1178,6 +1178,131 @@ function prepareFiles(
   return { files: prepared, notes };
 }
 
+/**
+ * One batched `git diff` can cover every file whose forge patch is missing
+ * (Gitea's files API has no `patch` field): split the combined output back
+ * into per-file patches for the verdict store's hunk map. A forge-supplied
+ * patch still wins; only files without one are filled in. Prompt patch
+ * budgets and `review_files` byte counts are untouched: this is only the
+ * hunk map the MCP validates `add_finding` locations against.
+ */
+function parseDiffGitHeader(header: string): { a?: string; b?: string } | undefined {
+  const rest = header.slice("diff --git ".length);
+  const tokens: string[] = [];
+  let cur = "";
+  let quoted = false;
+  for (let i = 0; i < rest.length; i++) {
+    const ch = rest[i];
+    if (quoted) {
+      cur += ch;
+      if (ch === "\\" && i + 1 < rest.length) {
+        cur += rest[i + 1];
+        i++;
+      } else if (ch === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+      cur += ch;
+      continue;
+    }
+    if (ch === " " || ch === "\t") {
+      if (cur) {
+        tokens.push(cur);
+        cur = "";
+      }
+      continue;
+    }
+    cur += ch;
+  }
+  if (cur) tokens.push(cur);
+  if (tokens.length < 2) return undefined;
+  const strip = (token: string, prefix: string): string | undefined => {
+    let value = token;
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      value = value
+        .slice(1, -1)
+        .replace(/\\(["\\])/g, "$1")
+        .replace(/\\t/g, "\t");
+    }
+    if (!value.startsWith(prefix)) return undefined;
+    return value.slice(prefix.length);
+  };
+  return { a: strip(tokens[0] ?? "", "a/"), b: strip(tokens[1] ?? "", "b/") };
+}
+
+export function splitGitDiffByFile(diffText: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!diffText.trim()) return out;
+  const lines = diffText.split("\n");
+  const starts: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith("diff --git ")) starts.push(i);
+  }
+  if (starts.length === 0) return out;
+  for (let s = 0; s < starts.length; s++) {
+    const start = starts[s] ?? 0;
+    const end = s + 1 < starts.length ? (starts[s + 1] ?? lines.length) : lines.length;
+    const section = lines.slice(start, end).join("\n");
+    const paths = parseDiffGitHeader(lines[start] ?? "");
+    if (!paths) continue;
+    const { a, b } = paths;
+    if (b && b !== "dev/null") {
+      const prev = out.get(b);
+      out.set(b, prev ? `${prev}\n${section}` : section);
+    }
+    if (a && a !== "dev/null" && a !== b && !out.has(a)) {
+      out.set(a, section);
+    }
+  }
+  return out;
+}
+
+/** Batched git-diff chunk size for the hunk-map backfill. One `git diff` call covers a whole chunk. */
+export const MISSING_PATCH_DIFF_BATCH_SIZE = 100;
+
+export async function fillMissingVerdictPatches(opts: {
+  git: GitRunner;
+  cwd: string;
+  env: Record<string, string | undefined>;
+  changedFiles: PullFile[];
+  excludedFiles?: readonly string[];
+  log?: (message: string) => void;
+}): Promise<PullFile[]> {
+  const excluded = new Set(opts.excludedFiles ?? []);
+  const missing = opts.changedFiles.filter(
+    (file) => !excluded.has(file.filename) && !(typeof file.patch === "string" && file.patch !== "")
+  );
+  if (missing.length === 0) return opts.changedFiles;
+  const byFile = new Map<string, string>();
+  for (let i = 0; i < missing.length; i += MISSING_PATCH_DIFF_BATCH_SIZE) {
+    const batch = missing.slice(i, i + MISSING_PATCH_DIFF_BATCH_SIZE);
+    const names = batch.map((file) => file.filename);
+    let diffText: string;
+    try {
+      diffText = await opts.git(["diff", "jumi/target...HEAD", "--", ...names], { cwd: opts.cwd, env: opts.env });
+    } catch (err) {
+      opts.log?.(`git diff for hunk map unavailable: ${errorMessage(err)}`);
+      continue;
+    }
+    if (!diffText.trim()) continue;
+    for (const [name, section] of splitGitDiffByFile(diffText)) {
+      const prev = byFile.get(name);
+      byFile.set(name, prev ? `${prev}\n${section}` : section);
+    }
+  }
+  if (byFile.size === 0) return opts.changedFiles;
+  return opts.changedFiles.map((file) => {
+    if (excluded.has(file.filename)) return file;
+    if (typeof file.patch === "string" && file.patch !== "") return file;
+    const patch = byFile.get(file.filename);
+    if (!patch) return file;
+    return { ...file, patch };
+  });
+}
+
 async function loadPrComments(
   api: ReviewApi,
   owner: string,
@@ -2645,8 +2770,24 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // file and call the server (see docs/review-sandbox.md). When the store
     // holds anything at exit it wins and any JUMI_REVIEW.md in the worktree
     // is ignored (transition fallback for runners without tool support).
-    const verdictStore = new ReviewVerdictStore({
+    // Gitea's files API has no `patch` field, so a changed file would have no
+    // hunk set and every located `add_finding` would fail as "line outside
+    // hunks". Fill those gaps from the review checkout (`jumi/target` is the
+    // base, HEAD is the pull head) with the same unified-diff shape GitHub
+    // supplies. A forge patch still wins; files that stay hunkless (binary,
+    // pure renames) keep rejecting located findings with a hint to record
+    // them unlocated. Prompt budgets and `review_files` counts use the forge
+    // patches only.
+    const verdictChangedFiles = await fillMissingVerdictPatches({
+      git,
+      cwd: opts.workspace,
+      env: gitCmdEnv,
       changedFiles: prFiles,
+      ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
+      log,
+    });
+    const verdictStore = new ReviewVerdictStore({
+      changedFiles: verdictChangedFiles,
       ...(excludedFiles.length > 0 ? { excludedFiles } : {}),
       ...((delta?.findings ?? previousReview?.findings)?.length
         ? { previousFindings: (delta?.findings ?? previousReview?.findings) as string[] }
