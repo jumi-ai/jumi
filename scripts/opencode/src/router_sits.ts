@@ -172,6 +172,13 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   // Maintainer-only review question: the worker cannot act, a human answers on the forge.
   if (text === "waiting on maintainer") return "waiting-maintainer";
   if (text === "waiting-maintainer") return "waiting-maintainer";
+  // Router-side maintainer-hold release that kept the hold: still waiting.
+  if (text.startsWith("maintainer hold kept")) return "waiting-maintainer";
+  // Release-only skips that must not read as a generic not-labeled pickup sit.
+  if (text === "maintainer hold disabled") return undefined;
+  if (text === "no held maintainer review") return undefined;
+  if (text.startsWith("maintainer hold skipped")) return undefined;
+  if (text === "failed to load pull request") return undefined;
   // Shared CI failure: this PR waits for another open PR's fix to land.
   // Boards as waiting (never stuck) so waiters read as `waiting on #N`.
   if (text.startsWith("waiting on #")) return "waiting-maintainer";

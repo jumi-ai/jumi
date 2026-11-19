@@ -359,7 +359,7 @@ export function parseReviewedCommitSha(body: string): string | undefined {
   return undefined;
 }
 
-function commitMatchesHead(stickySha: string, headSha: string): boolean {
+export function commitMatchesHead(stickySha: string, headSha: string): boolean {
   const sticky = stickySha.toLowerCase();
   const head = headSha.toLowerCase();
   if (!sticky || !head) return false;
@@ -672,6 +672,77 @@ export function blockingOpenQuestionCountWithInlines(
   return bodyCount + inlineCount;
 }
 
+/**
+ * Shared maintainer-hold release predicate: the same release conditions the
+ * worker follow-up uses, reused by the router-side release-only path so the
+ * two cannot drift. Counts body plus open Jumi inlines for the review.
+ */
+export interface MaintainerHoldReleaseAssessment {
+  releasable: boolean;
+  keepReason?: string;
+  completeSuccess: boolean;
+  openBugs: number;
+  openRisks: number;
+  openBlockingQuestions: number;
+  openMaintainers: number;
+  openSuggestions: number;
+  holdEnabled: boolean;
+  description: string;
+}
+
+export function assessMaintainerHoldRelease(opts: {
+  reviewBody: string | null | undefined;
+  inlines: readonly InlineComment[];
+  prAuthorLogin?: string | null;
+  blockingAuthors?: readonly string[] | null;
+  botUsername?: string;
+  holdEnabled: boolean;
+}): MaintainerHoldReleaseAssessment {
+  const reviewBody = opts.reviewBody ?? "";
+  const parsed = parseReviewOutput(reviewBody);
+  const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
+  const openBugs = openBugsForReview(reviewBody, opts.inlines, opts.botUsername);
+  const openRisks = openRisksForReview(reviewBody, opts.inlines, opts.botUsername);
+  const openBlockingQuestions = blockingOpenQuestionCountWithInlines(
+    reviewBody,
+    opts.inlines,
+    opts.prAuthorLogin,
+    opts.blockingAuthors,
+    opts.botUsername
+  );
+  const openMaintainers = openMaintainerQuestionsForReview(reviewBody, opts.inlines, opts.botUsername);
+  const openSuggestions = countSuggestionFindings(parsed.comment);
+  const releasable =
+    completeSuccess &&
+    openBugs === 0 &&
+    openRisks === 0 &&
+    openBlockingQuestions === 0 &&
+    openMaintainers > 0 &&
+    opts.holdEnabled;
+  let keepReason: string | undefined;
+  if (!releasable) {
+    if (!opts.holdEnabled) keepReason = "hold disabled";
+    else if (!completeSuccess) keepReason = "not complete success";
+    else if (openBugs > 0) keepReason = `${openBugs} blocking`;
+    else if (openRisks > 0) keepReason = `${openRisks} risk`;
+    else if (openBlockingQuestions > 0) keepReason = `${openBlockingQuestions} blocking questions`;
+    else if (openMaintainers === 0) keepReason = "no open maintainer questions";
+  }
+  const description = openSuggestions > 0 ? describeSuggestionsReason(openSuggestions) : "No blocking issues";
+  return {
+    releasable,
+    ...(keepReason !== undefined ? { keepReason } : {}),
+    completeSuccess,
+    openBugs,
+    openRisks,
+    openBlockingQuestions,
+    openMaintainers,
+    openSuggestions,
+    holdEnabled: opts.holdEnabled,
+    description,
+  };
+}
+
 function isBlockingQuestionFinding(
   body: string,
   opts: ReviewFindingMatchOpts = {},
@@ -704,7 +775,7 @@ function isSuggestionOnlyBody(
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
  * match, plus orphans without a review id (both forges normally set it, but
  * an orphan must not silently drop a blocking question). */
-function inlinesForPullReview(reviewId: number, inlines: readonly InlineComment[]): InlineComment[] {
+export function inlinesForPullReview(reviewId: number, inlines: readonly InlineComment[]): InlineComment[] {
   return inlines.filter(
     (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === reviewId
   );
@@ -2902,48 +2973,26 @@ export async function implementFollowUp(
           const reviewInlines = isPullReview
             ? inlinesForPullReview(pendingLastReview.id, pendingItems.jumiInlines)
             : [];
-          const parsed = parseReviewOutput(reviewBody);
-          const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
-          const openBugs = openBugsForReview(reviewBody, reviewInlines, opts.botUsername);
-          const openRisks = openRisksForReview(reviewBody, reviewInlines, opts.botUsername);
-          const openBlockingQuestions = blockingOpenQuestionCountWithInlines(
+          const assessment = assessMaintainerHoldRelease({
             reviewBody,
-            reviewInlines,
-            pr.user?.login,
-            snapshot.lists.blockingAuthors,
-            opts.botUsername
-          );
-          const openMaintainers = openMaintainerQuestionsForReview(reviewBody, reviewInlines, opts.botUsername);
-          const holdEnabled = isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot));
-          if (
-            completeSuccess &&
-            openBugs === 0 &&
-            openRisks === 0 &&
-            openBlockingQuestions === 0 &&
-            openMaintainers > 0 &&
-            holdEnabled
-          ) {
-            const openSuggestions = countSuggestionFindings(parsed.comment);
-            const description = openSuggestions > 0 ? describeSuggestionsReason(openSuggestions) : "No blocking issues";
-            await postSuggestionHoldSuccess(opts.api, owner, repo, pr.head.sha, description, pr.html_url);
-            log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${openMaintainers} answered`);
+            inlines: reviewInlines,
+            prAuthorLogin: pr.user?.login,
+            blockingAuthors: snapshot.lists.blockingAuthors,
+            botUsername: opts.botUsername,
+            holdEnabled: isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot)),
+          });
+          if (assessment.releasable) {
+            await postSuggestionHoldSuccess(opts.api, owner, repo, pr.head.sha, assessment.description, pr.html_url);
+            log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${assessment.openMaintainers} answered`);
           } else {
             const trailer = lastCheckTrailer(reviewBody);
             const trailerMentionsMaintainer = (trailer?.reason ?? "").toLowerCase().includes("maintainer");
-            if (completeSuccess && (openMaintainers > 0 || trailerMentionsMaintainer)) {
-              const keepReason = !holdEnabled
-                ? "hold disabled"
-                : openBugs > 0
-                  ? `${openBugs} blocking`
-                  : openRisks > 0
-                    ? `${openRisks} risk`
-                    : openBlockingQuestions > 0
-                      ? `${openBlockingQuestions} blocking questions`
-                      : "no open maintainer questions";
+            if (assessment.completeSuccess && (assessment.openMaintainers > 0 || trailerMentionsMaintainer)) {
+              const keepReason = assessment.keepReason ?? "no open maintainer questions";
               log(
                 `maintainer hold kept for ${owner}/${repo}#${pr.number}: ${keepReason} ` +
-                  `(maintainers=${openMaintainers} bugs=${openBugs} risks=${openRisks} ` +
-                  `blocking=${openBlockingQuestions} completeSuccess=${completeSuccess})`
+                  `(maintainers=${assessment.openMaintainers} bugs=${assessment.openBugs} risks=${assessment.openRisks} ` +
+                  `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess})`
               );
             }
           }

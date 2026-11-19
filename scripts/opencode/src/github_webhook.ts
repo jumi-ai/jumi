@@ -28,6 +28,7 @@ import {
   parseIssueDependenciesPayload,
   parseIssuesPayload,
 } from "./issue_webhook.ts";
+import { isReleaseCandidateSkipReason, tryReleaseMaintainerHold } from "./maintainer_hold_release.ts";
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -1083,7 +1084,50 @@ export async function handleGithubWebhookEvent(
               : undefined;
         if (fullName) {
           const [owner, repo] = fullName.split("/");
-          if (owner && repo && typeof prNumber === "number") {
+          if (owner && repo && typeof prNumber === "number" && isReleaseCandidateSkipReason(decision.reason)) {
+            try {
+              const senderLogin =
+                isObjectLike(parsed) && isObjectLike(parsed.sender) && typeof parsed.sender.login === "string"
+                  ? (parsed.sender.login as string)
+                  : undefined;
+              const defaultBranch =
+                isObjectLike(parsed) &&
+                isObjectLike(parsed.repository) &&
+                typeof parsed.repository.default_branch === "string"
+                  ? (parsed.repository.default_branch as string)
+                  : undefined;
+              const release = await tryReleaseMaintainerHold({
+                api: deps.worker.api as never,
+                owner,
+                repo,
+                prNumber,
+                senderLogin,
+                botUsername: effectiveFollowupPolicy.botUsername,
+                trustedSenderLogins: effectiveFollowupPolicy.trustedSenderLogins,
+                followupIgnoreLogins: effectiveFollowupPolicy.followupIgnoreLogins,
+                defaultBranch,
+                logger,
+              });
+              if (release.outcome === "released") {
+                const cleared = await clearGithubSit(deps.worker.sits, owner, repo, prNumber, logger);
+                if (cleared) return cleared;
+                return json(202, { released: true, key: `${owner}/${repo}#${prNumber}` });
+              }
+              if (release.reason !== decision.reason) {
+                const remembered = await rememberGithubSkip(
+                  deps.worker.sits,
+                  owner,
+                  repo,
+                  prNumber,
+                  release.reason,
+                  logger
+                );
+                if (remembered) return remembered;
+                return skipped(release.reason, logger);
+              }
+            } catch {
+              // Fall through to the original skip below.
+            }
             const remembered = await rememberGithubSkip(
               deps.worker.sits,
               owner,

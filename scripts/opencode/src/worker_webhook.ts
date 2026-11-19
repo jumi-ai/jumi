@@ -22,6 +22,7 @@ import {
   pullWaitClearJobsToEnqueue,
   shouldEnqueueIssue,
 } from "./issue_webhook.ts";
+import { isReleaseCandidateSkipReason, tryReleaseMaintainerHold } from "./maintainer_hold_release.ts";
 import { withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -125,12 +126,15 @@ type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "findStickyIssueComment"
       | "createIssueComment"
       | "updateIssueComment"
+      | "listIssueComments"
+      | "listPullReviews"
+      | "listPullReviewComments"
       | "getBranch"
       | "scheduleAutoMerge"
       | "cancelAutoMerge"
     >
   > &
-  Partial<Pick<import("./ports.ts").Forge, "getPRFiles" | "listIssueTimeline">> & {
+  Partial<Pick<import("./ports.ts").Forge, "getPRFiles" | "listIssueTimeline" | "createCommitStatus">> & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -888,6 +892,43 @@ export async function handleWorkerWebhookEvent(
         const fullName = rawPayload?.repository?.full_name;
         const [owner, repo] = (fullName ?? "").split("/");
         const prNumber = rawPayload?.pull_request?.number ?? rawPayload?.issue?.number;
+        if (owner && repo && typeof prNumber === "number" && isReleaseCandidateSkipReason(decision.reason)) {
+          try {
+            const parsed = JSON.parse(new TextDecoder().decode(rawBody)) as {
+              sender?: { login?: string };
+              repository?: { default_branch?: string };
+            };
+            const release = await tryReleaseMaintainerHold({
+              api: deps.api as never,
+              owner,
+              repo,
+              prNumber,
+              senderLogin: parsed.sender?.login,
+              botUsername: effectiveFollowupPolicy.botUsername,
+              trustedSenderLogins: effectiveFollowupPolicy.trustedSenderLogins,
+              followupIgnoreLogins: effectiveFollowupPolicy.followupIgnoreLogins,
+              defaultBranch: parsed.repository?.default_branch ?? rawPayload?.repository?.default_branch,
+              logger,
+            });
+            if (release.outcome === "released") {
+              if (deps.sits) {
+                try {
+                  await deps.sits.clear(owner, repo, prNumber);
+                } catch (err) {
+                  logger(`sit clear failed: ${errorMessage(err)}`);
+                }
+              }
+              return json(202, { released: true, key: `${owner}/${repo}#${prNumber}` });
+            }
+            if (release.reason !== decision.reason) {
+              const remembered = await rememberSkipSit(deps.sits, owner, repo, prNumber, release.reason, logger);
+              if (remembered) return remembered;
+              return skipped(release.reason, logger);
+            }
+          } catch {
+            // Fall through to the original skip below.
+          }
+        }
         if (owner && repo && typeof prNumber === "number") {
           const remembered = await rememberSkipSit(deps.sits, owner, repo, prNumber, decision.reason, logger);
           if (remembered) return remembered;
