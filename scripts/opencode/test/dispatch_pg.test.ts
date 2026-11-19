@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,9 +16,7 @@ import type { SqlClient } from "../src/sql_client.ts";
 import { makeIssueJob } from "./fixtures.ts";
 import { createFakeK8s } from "./harness/k8s.ts";
 import { withWorkspace } from "./harness/temp.ts";
-
-const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-const describePg = databaseUrl ? describe : describe.skip;
+import { describePg, pgDatabaseUrl } from "./pg.ts";
 
 function baseTemplate(): Record<string, unknown> {
   return {
@@ -51,7 +49,7 @@ function testConfig(templateFile: string, maxJobs = 5): ControlConfig {
     k8sTokenFile: "/nonexistent-token-file",
     k8sCaFile: "/nonexistent-ca.crt",
     pollMs: 60_000,
-    databaseUrl,
+    databaseUrl: pgDatabaseUrl,
     jobNamespace: "test-ns",
     jobStartupTimeoutMs: 10 * 60 * 1000,
     dispatchPollMs: 10_000,
@@ -65,14 +63,14 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
   let store!: PgReviewJobStore;
 
   beforeAll(async () => {
-    if (!databaseUrl) return;
-    sql = createBunSqlClient(databaseUrl);
+    if (!pgDatabaseUrl) return;
+    sql = createBunSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await store.migrate();
   });
 
   beforeEach(async () => {
-    if (!databaseUrl) return;
+    if (!pgDatabaseUrl) return;
     resetDispatchMetricsForTests();
     await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
     await sql.unsafe(`TRUNCATE role_gates`);
