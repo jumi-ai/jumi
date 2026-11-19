@@ -31,7 +31,7 @@ Only the router migrates (`PgReviewJobStore.migrate` under a Postgres advisory l
 From `scripts/opencode`, after `bun install --frozen-lockfile`:
 
 - `bun run ci` runs `biome check`, `tsc --noEmit`, and `bun test`. That is the `checks` job. It does not start Postgres.
-- `bun run test:pg` is the queue, lease, and one-shot suite (`review_jobs_pg`, `provenance_pg`, `job_pg`). It needs `JUMI_TEST_DATABASE_URL`. CI runs it only in `postgres-queue`. Do not treat `bun run ci` as proof that job passed.
+- `bun run test:pg` runs every `test/*_pg.test.ts` file against Postgres. It needs `JUMI_TEST_DATABASE_URL`. CI runs it only in `postgres-queue`. Do not treat `bun run ci` as proof that job passed. A Postgres-only suite belongs in a `*_pg.test.ts` file using the `describePg` helper from `test/pg.ts` (it fails instead of skipping when `JUMI_TEST_PG_REQUIRED=1`); the `pg_suite_guard` test in the `checks` job fails any other test file that reads `JUMI_TEST_DATABASE_URL`.
 
 Biome is 2-space indent, double quotes, semicolons, line width 120. Do not reformat unrelated files.
 
