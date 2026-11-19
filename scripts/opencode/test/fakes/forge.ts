@@ -592,11 +592,6 @@ export interface ForgePreset {
    * `deleteCheckpointRefViaForge` tests.
    */
   refDeleteError(): Error;
-  /**
-   * Raw classic-protection read refusal (`→ 403` on GitHub, `→ 404` on
-   * Gitea where the classic endpoint is absent), for `getBranch` tests.
-   */
-  classicBranchError(): Error;
 }
 
 function giteaPullFile(filename = "src/demo.ts"): PullFile {
@@ -618,7 +613,6 @@ export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
     pullFile: giteaPullFile,
     taskWithAutomergeLabel,
     refDeleteError: () => new Error("Gitea API DELETE /repos/o/r/git/refs/jumi/wip/12 → 405: unsupported"),
-    classicBranchError: () => new Error("Gitea API GET /repos/o/r/branches/main/protection → 404: not found"),
   },
   github: {
     name: "github",
@@ -626,59 +620,11 @@ export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
     pullFile: githubPullFile,
     taskWithAutomergeLabel,
     refDeleteError: () => new Error("GitHub API DELETE /repos/o/r/git/refs/jumi/wip/12 → 422: exists"),
-    classicBranchError: () =>
-      new Error("GitHub API GET /repos/o/r/branches/main/protection/required_status_checks → 403: forbidden"),
   },
 };
 
 export function forgePreset(name: ForgePresetName): ForgePreset {
   return FORGE_PRESETS[name];
-}
-
-/** Neutral `Forge` fake wired to one preset's capabilities and file shape. */
-export function makeForgeApiForPreset(preset: ForgePreset, overrides: Partial<Forge> = {}): ForgeFake<Forge> {
-  return makeForgeApi({
-    capabilities: preset.capabilities,
-    getPRFiles: async (...args) => {
-      void args;
-      return [preset.pullFile()];
-    },
-    ...overrides,
-  });
-}
-
-/** Neutral `ReviewApi` fake wired to one preset's capabilities and file shape. */
-export function makeReviewApiForPreset(
-  preset: ForgePreset,
-  overrides: Partial<ReviewApi> & { capabilities?: ForgeCapabilities } = {}
-): ForgeFake<ReviewApi> & { capabilities: ForgeCapabilities } {
-  return makeReviewApi({
-    capabilities: preset.capabilities,
-    getPRFiles: async (...args) => {
-      void args;
-      return [preset.pullFile()];
-    },
-    getIssue: async (...args) => {
-      void args;
-      return preset.taskWithAutomergeLabel();
-    },
-    ...overrides,
-  });
-}
-
-/** Neutral `IssueApi` fake wired to one preset's capabilities and label shape. */
-export function makeIssueApiForPreset(
-  preset: ForgePreset,
-  overrides: Partial<IssueApi> & { capabilities?: ForgeCapabilities } = {}
-): ForgeFake<IssueApi> & { capabilities: ForgeCapabilities } {
-  return makeIssueApi({
-    capabilities: preset.capabilities,
-    getIssue: async (...args) => {
-      void args;
-      return preset.taskWithAutomergeLabel();
-    },
-    ...overrides,
-  });
 }
 
 /**
