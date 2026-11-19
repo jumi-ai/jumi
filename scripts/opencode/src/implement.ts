@@ -121,8 +121,6 @@ import {
   workerOpenCodeChildEnvWithGradleSeed,
 } from "./workspace.ts";
 
-export { HEARTBEAT_INTERVAL_MS } from "./claimed_worktree.ts";
-
 const PARENT_PROSE_MAX_CHARS = 8000;
 export const PR_DESCRIPTION_FILE = "JUMI_PR.md";
 export const SKIP_FILE = "JUMI_SKIP.md";
@@ -158,7 +156,7 @@ export function workerPublishSecrets(
 }
 
 /** Non-empty regular file text, else null: missing, empty, directory, and symlink are incomplete. */
-export async function readValidatedSkip(worktree: string): Promise<string | null> {
+async function readValidatedSkip(worktree: string): Promise<string | null> {
   const path = join(worktree, SKIP_FILE);
   try {
     const info = await lstat(path);
@@ -596,7 +594,7 @@ export async function failProvenanceIntent(
   }
 }
 
-export function issueBranchName(issueNumber: number, title: string, branchPrefix?: string): string {
+function issueBranchName(issueNumber: number, title: string, branchPrefix?: string): string {
   const prefix = (branchPrefix ?? "jumi").trim() || "jumi";
   const slug =
     title
@@ -629,7 +627,7 @@ export function issueJobKey(job: {
 }
 
 /** Hidden-ref checkpoint for a job; undefined when the job has no stable id. */
-export function checkpointRefForRun(job: IssueJob): string | undefined {
+function checkpointRefForRun(job: IssueJob): string | undefined {
   try {
     return checkpointRefForJob(job);
   } catch {
@@ -806,7 +804,7 @@ function pullRequestText(
 }
 
 /** Render the PR title template for one forge issue. Defaults to the issue title verbatim. */
-export function renderPrTitle(template: string | undefined, title: string, issueNumber: number): string {
+function renderPrTitle(template: string | undefined, title: string, issueNumber: number): string {
   return renderIssueTemplate(template ?? DEFAULT_PR_TITLE_TEMPLATE, title, issueNumber);
 }
 
@@ -816,7 +814,7 @@ export function renderCommitMessage(template: string | undefined, title: string,
 }
 
 /** Whether conventions differ from today's formats (used to augment the worker prompt). */
-export function hasCustomConventions(conventions: RepoConventions): boolean {
+function hasCustomConventions(conventions: RepoConventions): boolean {
   const defaults = defaultRepoConventions();
   return (
     conventions.branchPrefix !== defaults.branchPrefix ||
@@ -890,7 +888,7 @@ export function seedPullRequestDescription(region: string): string {
   return text ? `${text}\n` : "";
 }
 
-export async function readPullRequestDescription(worktree: string): Promise<string | null> {
+async function readPullRequestDescription(worktree: string): Promise<string | null> {
   const path = join(worktree, PR_DESCRIPTION_FILE);
   try {
     const info = await lstat(path);

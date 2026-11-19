@@ -22,7 +22,7 @@ import {
 import { errorMessage } from "./util/error.ts";
 
 /** Forge file read accepted by the resolver (the only forge surface it touches). */
-export type RepoPolicyFileApi = Pick<Forge, "getRepoFile">;
+type RepoPolicyFileApi = Pick<Forge, "getRepoFile">;
 
 /** Who and where to read the default-branch `.jumi.yml` for. */
 export interface RepoPolicyContext {
@@ -44,7 +44,7 @@ export interface RepoPolicyDeployment {
   maxConflictRounds: number;
 }
 
-export type RepoPolicyStatus = "ok" | "missing" | "invalid" | "unreadable";
+type RepoPolicyStatus = "ok" | "missing" | "invalid" | "unreadable";
 
 /** Derived per-repository job policy plus the load it came from. */
 export interface RepoPolicy {

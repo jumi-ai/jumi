@@ -45,7 +45,7 @@ function pickString(payload: JsonObject, event: JsonObject, key: string): string
   return nonEmptyString(payload[key]) ?? (payload === event ? undefined : nonEmptyString(event[key]));
 }
 
-export function parseAgyUsage(usage: unknown): Record<TokenType, number> | undefined {
+function parseAgyUsage(usage: unknown): Record<TokenType, number> | undefined {
   if (!isRecord(usage)) return undefined;
   const tokens: Record<TokenType, number> = {
     input: count(usage.input_tokens),

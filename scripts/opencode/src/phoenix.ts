@@ -14,8 +14,8 @@ import {
 } from "./otlp.ts";
 
 export const PHOENIX_OTLP_TIMEOUT_MS = 15_000;
-export const PHOENIX_OTLP_MAX_BYTES = 4 * 1024 * 1024;
-export const PHOENIX_ATTR_CEILING_CHARS = 64 * 1024;
+const PHOENIX_OTLP_MAX_BYTES = 4 * 1024 * 1024;
+const PHOENIX_ATTR_CEILING_CHARS = 64 * 1024;
 const KIND_ATTR = "openinference.span.kind";
 const PROTECTED_ATTRS = new Set([
   KIND_ATTR,
@@ -38,7 +38,7 @@ const PROTECTED_ATTRS = new Set([
   "output.mime_type",
 ]);
 
-export type { TraceContext, TraceKind } from "./engine.ts";
+export type { TraceContext } from "./engine.ts";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 

@@ -36,7 +36,7 @@ const QUOTA_PATTERNS = [
  * is too low to access the Anthropic API ...`). Bare `credit` / `billing` /
  * `balance` alone never matches, the same care the auth-death patterns take
  * with bare `401`. */
-export const CREDIT_BALANCE_RE = /Credit balance is too low/i;
+const CREDIT_BALANCE_RE = /Credit balance is too low/i;
 
 /** Engine result message for credit exhaustion. Parallel to
  * `QUOTA_MESSAGE`, but distinct so the operator can tell a monthly credit
@@ -44,14 +44,14 @@ export const CREDIT_BALANCE_RE = /Credit balance is too low/i;
  * `classifyOpenCodeExit`), never as a task or infra failure. */
 export const CREDIT_QUOTA_MESSAGE = "opencode stuck: credit balance is too low";
 
-export const QUOTA_ERROR_RE =
+const QUOTA_ERROR_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|stuck:\s*usage limit exceeded|Credit balance is too low/i;
 
 /** Narrow live pattern for the retry poll. Drops the parent's own
  * `stuck:` dialect (which OpenCode never emits) so tool traces or echoed file
  * content containing that literal cannot kill a healthy run. Kept in
  * `QUOTA_ERROR_RE`/`isQuotaText` for thrown errors and stuck comments. */
-export const QUOTA_LIVE_RE =
+const QUOTA_LIVE_RE =
   /FreeUsageLimitError|GoUsageLimitError|Free usage exceeded|Free limit reached|Go limit reached|free_tier_limit|account_rate_limit|Rate limit exceeded\. Please try again later\.|Insufficient balance|Credit balance is too low/i;
 
 export type QuotaClass = "resetting" | "hard";
@@ -62,8 +62,8 @@ const RESETTING_QUOTA_RE =
 
 export const QUOTA_WAIT_PREFIX = "quota-wait:";
 export const QUOTA_WAIT_DEFAULT_MS = 60 * 60 * 1000;
-export const QUOTA_WAIT_MIN_MS = 60 * 60 * 1000;
-export const QUOTA_WAIT_MAX_MS = 24 * 60 * 60 * 1000;
+const QUOTA_WAIT_MIN_MS = 60 * 60 * 1000;
+const QUOTA_WAIT_MAX_MS = 24 * 60 * 60 * 1000;
 export const QUOTA_WAIT_BUDGET_MS = 30 * 60 * 60 * 1000;
 export const QUOTA_WAIT_MAX_ATTEMPTS = 48;
 
@@ -398,9 +398,7 @@ export function isQuotaWaitMarker(error: string | null | undefined): boolean {
   return Boolean(error?.startsWith(QUOTA_WAIT_PREFIX));
 }
 
-export function parseQuotaWaitMarker(
-  error: string | null | undefined
-): { count: number; firstHitAt: number } | undefined {
+function parseQuotaWaitMarker(error: string | null | undefined): { count: number; firstHitAt: number } | undefined {
   if (!isQuotaWaitMarker(error) || !error) return undefined;
   const parts = error.slice(QUOTA_WAIT_PREFIX.length).split(":");
   const count = Number(parts[0]);
@@ -504,5 +502,5 @@ export class QuotaCooldown {
   }
 }
 
-export const workerQuotaCooldown = new QuotaCooldown();
-export const engineQuotaCooldown = new QuotaCooldown();
+const workerQuotaCooldown = new QuotaCooldown();
+const engineQuotaCooldown = new QuotaCooldown();

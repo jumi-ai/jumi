@@ -3,7 +3,7 @@ import type { Forge, Pull, Tracker } from "./ports.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { loginEquals } from "./util/login.ts";
 
-export type { IssueApi, LinkedIssue, Tracker } from "./ports.ts";
+export type { IssueApi, Tracker } from "./ports.ts";
 
 export function workerMarker(owner: string, repo: string, issueNumber: number): string {
   return `<!-- jumi-worker:${owner}/${repo}#${issueNumber} -->`;
@@ -89,17 +89,17 @@ export function isVisibleClosingMatch(text: string, index: number, length: numbe
   return !isIgnoredAt(closingIgnoredRanges(text), index, length);
 }
 
-export const JUMI_ISSUE_BRANCH = /^jumi\/issue-(\d+)-/;
+const JUMI_ISSUE_BRANCH = /^jumi\/issue-(\d+)-/;
 
 /** Default branch prefix for Jumi issue branches. */
-export const DEFAULT_JUMI_BRANCH_PREFIX = "jumi";
+const DEFAULT_JUMI_BRANCH_PREFIX = "jumi";
 
 function escapeBranchPrefix(prefix: string): string {
   return prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Branch pattern for one prefix: `<prefix>/issue-<N>-`. */
-export function issueBranchPattern(prefix: string): RegExp {
+function issueBranchPattern(prefix: string): RegExp {
   return new RegExp(`^${escapeBranchPrefix(prefix)}/issue-(\\d+)-`);
 }
 
@@ -109,7 +109,7 @@ export function issueBranchPattern(prefix: string): RegExp {
  * a custom prefix both `<prefix>/issue-<N>-` and the default shape match, so
  * PRs opened before a prefix change keep working.
  */
-export function jumiIssueBranchNumber(ref: string | undefined, branchPrefix?: string): number | undefined {
+function jumiIssueBranchNumber(ref: string | undefined, branchPrefix?: string): number | undefined {
   if (!ref) return undefined;
   const prefix = (branchPrefix ?? DEFAULT_JUMI_BRANCH_PREFIX).trim() || DEFAULT_JUMI_BRANCH_PREFIX;
   if (prefix !== DEFAULT_JUMI_BRANCH_PREFIX) {
@@ -132,7 +132,7 @@ export function pullRequestClosesIssue(
   return pattern.test(visibleClosingText(pr.title)) || pattern.test(visibleClosingText(pr.body ?? ""));
 }
 
-export function pullRequestRefsIssue(
+function pullRequestRefsIssue(
   pr: { title: string; body?: string | null; state?: string },
   issueNumber: number
 ): boolean {
@@ -157,7 +157,7 @@ export function pullRequestWorkingOnIssue(
   return jumiIssueBranchNumber(pr.head?.ref, branchPrefix) === issueNumber;
 }
 
-export function extractRefsIssueNumber(pr: {
+function extractRefsIssueNumber(pr: {
   title: string;
   body?: string | null;
   head?: { ref?: string };

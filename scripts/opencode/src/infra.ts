@@ -9,7 +9,7 @@ export function looksLikeProviderUnavailable(text: string): boolean {
   return PROVIDER_UNAVAILABLE_RE.test(text);
 }
 
-export const INFRA_SHORT_MS = 2_000;
+const INFRA_SHORT_MS = 2_000;
 export const INFRA_MAX_RETRIES = 8;
 export const INFRA_BUDGET_MS = 20 * 60 * 1000;
 export const INFRA_BREAKER_CONSECUTIVE = 3;
@@ -25,7 +25,7 @@ export function looksLikeInfraStderr(text: string): boolean {
   return INFRA_STDERR_RE.test(text);
 }
 
-export function sessionDbGrew(dbBefore: number | null | undefined, dbAfter: number | null | undefined): boolean {
+function sessionDbGrew(dbBefore: number | null | undefined, dbAfter: number | null | undefined): boolean {
   return dbAfter != null && dbAfter > 0 && (dbBefore == null || dbAfter > dbBefore);
 }
 
@@ -56,7 +56,7 @@ export function isInfraRetryMarker(error: string | null | undefined): boolean {
   return Boolean(error?.startsWith(INFRA_RETRY_PREFIX));
 }
 
-export function parseInfraMarker(error: string | null | undefined): { count: number; firstFailAt: number } | undefined {
+function parseInfraMarker(error: string | null | undefined): { count: number; firstFailAt: number } | undefined {
   if (!isInfraRetryMarker(error) || !error) return undefined;
   const parts = error.slice(INFRA_RETRY_PREFIX.length).split(":");
   const count = Number(parts[0]);
@@ -69,7 +69,7 @@ export function encodeInfraMarker(count: number, firstFailAt: number): string {
   return `${INFRA_RETRY_PREFIX}${count}:${firstFailAt}`;
 }
 
-export function infraBackoffMs(count: number): number {
+function infraBackoffMs(count: number): number {
   const index = Math.min(Math.max(count, 1), INFRA_BACKOFF_MS.length) - 1;
   return INFRA_BACKOFF_MS[index] ?? 60_000;
 }
@@ -136,5 +136,5 @@ export class InfraCircuitBreaker {
   }
 }
 
-export const engineInfraBreaker = new InfraCircuitBreaker();
-export const workerInfraBreaker = new InfraCircuitBreaker();
+const engineInfraBreaker = new InfraCircuitBreaker();
+const workerInfraBreaker = new InfraCircuitBreaker();

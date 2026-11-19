@@ -19,7 +19,7 @@ import { errorMessage } from "./util/error.ts";
  * - Push events are out of scope and never touch sits.
  */
 
-export const ROUTER_SIT_REASONS = [
+const ROUTER_SIT_REASONS = [
   "ci-not-completed",
   "draft-wip",
   "foreign-branch",
@@ -436,7 +436,7 @@ export class PgRouterSitStore implements RouterSitStore {
   }
 }
 
-export async function createPgRouterSitStore(databaseUrl: string, sql?: SqlClient): Promise<PgRouterSitStore> {
+async function createPgRouterSitStore(databaseUrl: string, sql?: SqlClient): Promise<PgRouterSitStore> {
   const store = new PgRouterSitStore(sql ?? createBunSqlClient(databaseUrl));
   await store.migrate();
   return store;

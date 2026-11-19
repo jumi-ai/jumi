@@ -266,7 +266,7 @@ function ownerRepoOf(issue: GithubIssue, fallbackOwner: string, fallbackRepo: st
   );
 }
 
-export function toRepo(repo: GithubRepo): Repo {
+function toRepo(repo: GithubRepo): Repo {
   return {
     name: repo.name,
     full_name: repo.full_name,
@@ -281,7 +281,7 @@ export function toRepo(repo: GithubRepo): Repo {
   };
 }
 
-export function toTask(issue: GithubIssue): Task {
+function toTask(issue: GithubIssue): Task {
   return {
     trackerRef: String(issue.number),
     number: issue.number,
@@ -318,7 +318,7 @@ export function toLinkedIssue(issue: GithubIssue, fallbackOwner: string, fallbac
   };
 }
 
-export function toPull(pr: GithubPR): Pull {
+function toPull(pr: GithubPR): Pull {
   return {
     forgeRef: String(pr.number),
     number: pr.number,
@@ -346,7 +346,7 @@ export function toPull(pr: GithubPR): Pull {
   };
 }
 
-export function toComment(comment: GithubComment): Comment {
+function toComment(comment: GithubComment): Comment {
   return {
     id: comment.id,
     body: comment.body ?? "",
@@ -391,7 +391,7 @@ function toCommitPerson(value: unknown): { name?: string; email?: string; login?
   return { ...(name ? { name } : {}), ...(email ? { email } : {}), ...(login ? { login } : {}) };
 }
 
-export function toGithubPullCommit(value: unknown): PullCommit {
+function toGithubPullCommit(value: unknown): PullCommit {
   if (!value || typeof value !== "object") return {};
   const commit = value as {
     sha?: unknown;
@@ -444,7 +444,7 @@ export function checkRunState(status?: string, conclusion?: string | null): Chec
   }
 }
 
-export function toCheck(status: GithubStatus): Check {
+function toCheck(status: GithubStatus): Check {
   return {
     id: status.id,
     context: status.context,
@@ -487,7 +487,7 @@ function toCheckFromActionJob(job: GithubJob): Check {
   };
 }
 
-export function toCheckPayload(status: GithubStatus | CheckPayload): CheckPayload {
+function toCheckPayload(status: GithubStatus | CheckPayload): CheckPayload {
   return {
     state: status.state as CheckState,
     context: status.context,
@@ -533,7 +533,7 @@ export function toInlineComment(comment: GithubReviewComment, resolved = false, 
   };
 }
 
-export function toActionJob(job: GithubJob, headBranch?: string): ActionJob {
+function toActionJob(job: GithubJob, headBranch?: string): ActionJob {
   return {
     id: job.id,
     name: job.name,

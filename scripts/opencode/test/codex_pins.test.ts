@@ -347,7 +347,7 @@ describe("codex build consumes one effective pin and fails closed", () => {
       expect(text).toContain("CODEX_VERSION=${{ env.CODEX_VERSION }}");
       expect(text).toContain("CODEX_SHA256_AMD64=${{ env.CODEX_SHA256_AMD64 }}");
       expect(text).toContain("CODEX_SHA256_ARM64=${{ env.CODEX_SHA256_ARM64 }}");
-      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
     }
     for (const path of [".gitea/scripts/build-reviewer-image.sh", ".gitea/scripts/build-worker-image.sh"]) {
       const text = readFileSync(join(repoRoot, path), "utf8");

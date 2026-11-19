@@ -16,11 +16,11 @@ export type DispatchRole = "engine" | "worker";
 
 const ENGINE_KINDS: readonly JobKind[] = [REVIEW_KIND];
 
-export function kindsForDispatchRole(role: DispatchRole): readonly JobKind[] {
+function kindsForDispatchRole(role: DispatchRole): readonly JobKind[] {
   return role === "engine" ? ENGINE_KINDS : WORKER_JOB_KINDS;
 }
 
-export function roleGateForDispatchRole(role: DispatchRole): RoleGateRole {
+function roleGateForDispatchRole(role: DispatchRole): RoleGateRole {
   return role;
 }
 
@@ -255,7 +255,7 @@ export async function k8sDeleteJob(opts: {
   throw new Error(`Job delete failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ""}`);
 }
 
-export async function k8sListPodsForJob(opts: {
+async function k8sListPodsForJob(opts: {
   apiUrl: string;
   namespace: string;
   token: string;
@@ -279,7 +279,7 @@ export async function k8sListPodsForJob(opts: {
 
 // ---- template ----
 
-export async function loadJobTemplate(templateFile: string): Promise<Record<string, unknown>> {
+async function loadJobTemplate(templateFile: string): Promise<Record<string, unknown>> {
   const raw = await readFile(templateFile, "utf8");
   const parsed = JSON.parse(raw) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {

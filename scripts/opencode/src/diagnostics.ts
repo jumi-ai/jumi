@@ -23,7 +23,7 @@ function parseKbLine(text: string, key: string): number | null {
 }
 
 /** Best-effort process RSS from /proc (Linux). */
-export async function readProcessRssBytes(pid: number): Promise<number | null> {
+async function readProcessRssBytes(pid: number): Promise<number | null> {
   try {
     const text = await Bun.file(`/proc/${pid}/status`).text();
     return parseKbLine(text, "VmRSS");
@@ -33,7 +33,7 @@ export async function readProcessRssBytes(pid: number): Promise<number | null> {
 }
 
 /** Best-effort cgroup memory.current (cgroup v2) or memory.usage_in_bytes (v1). */
-export async function readCgroupMemoryBytes(): Promise<number | null> {
+async function readCgroupMemoryBytes(): Promise<number | null> {
   const candidates = ["/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory/memory.usage_in_bytes"];
   for (const path of candidates) {
     try {

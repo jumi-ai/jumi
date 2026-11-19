@@ -28,13 +28,13 @@ export async function withWorkspace<T>(run: (workspace: string) => Promise<T> | 
 }
 
 /** Create a throwaway empty dir with a matching cleanup callback. */
-export async function tempDir(prefix = "jumi-temp-"): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+async function tempDir(prefix = "jumi-temp-"): Promise<{ dir: string; cleanup: () => Promise<void> }> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
   return { dir, cleanup: async () => rm(dir, { recursive: true, force: true }) };
 }
 
 /** Create a throwaway git repo (initialized, no commits) with a matching cleanup callback. */
-export async function tempGitRepo(prefix = "jumi-git-"): Promise<{ dir: string; cleanup: () => Promise<void> }> {
+async function tempGitRepo(prefix = "jumi-git-"): Promise<{ dir: string; cleanup: () => Promise<void> }> {
   const { dir, cleanup } = await tempDir(prefix);
   const proc = Bun.spawn(["git", "init", "-q", dir], { stdout: "ignore", stderr: "ignore" });
   await proc.exited;

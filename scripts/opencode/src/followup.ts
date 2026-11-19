@@ -172,12 +172,12 @@ export type FollowUpResult =
   | { status: "skipped"; reason: string }
   | { status: "cancelled" };
 
-export interface HandledReviewFinding {
+interface HandledReviewFinding {
   id: number;
   sha: string;
 }
 
-export interface SuggestionHoldLatch {
+interface SuggestionHoldLatch {
   consumed?: boolean;
   headSha?: string;
   count?: number;
@@ -197,8 +197,6 @@ export interface FollowUpState {
 function logDefault(message: string) {
   console.log(`[followup] ${message}`);
 }
-
-export { followUpStatePath };
 
 function emptyFollowUpState(): FollowUpState {
   return {
@@ -246,11 +244,7 @@ export async function readFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey
   return parseFollowUpState((await store.get(key)).followup);
 }
 
-export async function writeFollowUpLatch(
-  store: SkipLatchStore,
-  key: SkipLatchKey,
-  state: FollowUpState
-): Promise<void> {
+async function writeFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey, state: FollowUpState): Promise<void> {
   await store.put(key, { followup: state });
 }
 
@@ -325,7 +319,7 @@ export async function writeFollowUpState(path: string, state: FollowUpState): Pr
   await writeFollowUpLatch(latch.store, latch.key, state);
 }
 
-export function isInScopeHumanComment(
+function isInScopeHumanComment(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername: string,
   ignoreLogins: readonly string[] = []
@@ -390,7 +384,7 @@ export function isJumiReviewSticky(
 
 const EMPTY_SUCCESS_RE = /^No blocking issues\.?$/i;
 
-export function isEmptySuccessReview(body: string | null | undefined): boolean {
+function isEmptySuccessReview(body: string | null | undefined): boolean {
   const trimmed = (body ?? "").trim();
   if (!trimmed) return true;
   return EMPTY_SUCCESS_RE.test(trimmed);
@@ -411,7 +405,7 @@ export function isJumiPullReviewWriteup(review: PullReview, botUsername: string)
   return lastCheckTrailer(body) !== undefined;
 }
 
-export function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
+function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
 }
@@ -475,7 +469,7 @@ export function isJumiPullReviewFinding(
   return (opts.extraHeadShas ?? []).some((extra) => commitMatchesHead(sha, extra));
 }
 
-export function isUnresolvedInline(comment: InlineComment): boolean {
+function isUnresolvedInline(comment: InlineComment): boolean {
   return comment.resolved !== true && comment.resolver == null;
 }
 
@@ -533,7 +527,7 @@ export function isBlockingQuestionInline(inline: InlineComment, botUsername?: st
 }
 
 /** Whether an open Jumi inline carries an actionable `🔴` bug finding. */
-export function isBugInline(inline: InlineComment, botUsername?: string): boolean {
+function isBugInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
   if (typeof inline.path === "string" && inline.path.trim() && isBugFindingFirstLine(inline.path)) return true;
   const body = inline.body ?? "";
@@ -541,7 +535,7 @@ export function isBugInline(inline: InlineComment, botUsername?: string): boolea
 }
 
 /** Whether an open Jumi inline carries an actionable `🟡` risk finding. */
-export function isRiskInline(inline: InlineComment, botUsername?: string): boolean {
+function isRiskInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isOpenJumiInline(inline, botUsername)) return false;
   if (typeof inline.path === "string" && inline.path.trim() && isRiskFindingFirstLine(inline.path)) return true;
   const body = inline.body ?? "";
@@ -549,7 +543,7 @@ export function isRiskInline(inline: InlineComment, botUsername?: string): boole
 }
 
 /** Whether an open Jumi inline carries a `❓ maintainer:` question. */
-export function isMaintainerInline(inline: InlineComment, botUsername?: string): boolean {
+function isMaintainerInline(inline: InlineComment, botUsername?: string): boolean {
   if (!isBlockingQuestionInline(inline, botUsername)) return false;
   return isMaintainerQuestionInline(inline.path, inline.body ?? "");
 }
@@ -560,7 +554,7 @@ export function isMaintainerInline(inline: InlineComment, botUsername?: string):
  * be a complete success, mirroring the hold side. Pass only the inlines
  * for this review (see `inlinesForPullReview`).
  */
-export function openQuestionsForReview(
+function openQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -589,7 +583,7 @@ export function openQuestionsForReview(
  * maintainer-hold release and `isMaintainerOnlyPullReview` so the two
  * cannot drift apart. Pass only the inlines for this review.
  */
-export function openMaintainerQuestionsForReview(
+function openMaintainerQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -613,7 +607,7 @@ export function openMaintainerQuestionsForReview(
  * one per open Jumi bug inline belonging to that review. Pass only the
  * inlines for this review.
  */
-export function openBugsForReview(
+function openBugsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -632,7 +626,7 @@ export function openBugsForReview(
  * one per open Jumi risk inline belonging to that review. Pass only the
  * inlines for this review.
  */
-export function openRisksForReview(
+function openRisksForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -647,7 +641,7 @@ export function openRisksForReview(
 }
 
 /** Open blocking-question inlines among the given Jumi inlines. */
-export function blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
+function blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
   return inlines.filter((inline) => isBlockingQuestionInline(inline, botUsername));
 }
 
@@ -758,7 +752,7 @@ export function pickLatestJumiReview(stickies: readonly Comment[], headSha: stri
   return [...pool].sort(byDate).at(-1);
 }
 
-export function pickLatestJumiPullReview(reviews: readonly PullReview[], headSha: string): PullReview | undefined {
+function pickLatestJumiPullReview(reviews: readonly PullReview[], headSha: string): PullReview | undefined {
   if (reviews.length === 0) return undefined;
   const byDate = (a: PullReview, b: PullReview) =>
     (a.submitted_at ?? a.updated_at ?? a.created_at ?? "").localeCompare(
@@ -772,7 +766,7 @@ export function pickLatestJumiPullReview(reviews: readonly PullReview[], headSha
   return [...pool].sort(byDate).at(-1);
 }
 
-export function isInScopeFollowUpComment(
+function isInScopeFollowUpComment(
   comment: { body?: string | null; user?: { login?: string } },
   botUsername: string,
   headSha: string,
@@ -787,7 +781,7 @@ export function isInScopeFollowUpComment(
   );
 }
 
-export function prHeadChangedReason(from: string, to: string): string {
+function prHeadChangedReason(from: string, to: string): string {
   return `PR head changed from ${from} to ${to}`;
 }
 
@@ -797,12 +791,12 @@ export function parsePrHeadChangedReason(reason: string): { from: string; to: st
   return { from: match[1], to: match[2] };
 }
 
-export function isRequestChangesReview(review: PullReview): boolean {
+function isRequestChangesReview(review: PullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
   return blob.includes("request_changes") || blob.includes("reject");
 }
 
-export function isCommentReview(review: PullReview): boolean {
+function isCommentReview(review: PullReview): boolean {
   const blob = `${review.state ?? ""} ${review.type ?? ""}`.toLowerCase();
   return blob.includes("comment");
 }

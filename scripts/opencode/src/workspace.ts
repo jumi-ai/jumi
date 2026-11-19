@@ -20,7 +20,7 @@ export interface GitAuth {
 
 export type GitAuthResolver = () => Promise<GitAuth>;
 
-export type GitCredentials = {
+type GitCredentials = {
   username: string;
   token: string;
   embedTokenInUrl?: boolean;
@@ -96,7 +96,7 @@ export function validateCloneUrl(value: string, forgeUrl: string): string {
   return clone.toString();
 }
 
-export function authenticatedCloneUrl(cloneUrl: string, username: string, token: string): string {
+function authenticatedCloneUrl(cloneUrl: string, username: string, token: string): string {
   const url = new URL(cloneUrl);
   url.username = username;
   url.password = token;
@@ -317,7 +317,7 @@ function isWritableDirSync(path: string): boolean {
  * not writable, fall back to `$WORKDIR/.home` (per job, never shared) and log
  * one line. Only caches are shared via `JUMI_CACHE_DIR`.
  */
-export function resolveEffectiveWorkerHome(opts?: {
+function resolveEffectiveWorkerHome(opts?: {
   home?: string;
   workRoot?: string;
   logger?: (message: string) => void;
@@ -335,7 +335,7 @@ export function resolveEffectiveWorkerHome(opts?: {
   return fallback;
 }
 
-export interface WorkerToolCaches {
+interface WorkerToolCaches {
   gradleHome: string;
   androidHome: string;
   androidSdk: string;
@@ -367,7 +367,7 @@ function inferOwnerRepo(workdir: string, workRoot: string): { owner?: string; re
  * the rest under `$WORKDIR/.cache`). Nothing returned here is inside the
  * worktree or `.jumi-tmp`: only the JVM tmpdir lives there.
  */
-export function workerToolCacheEnv(
+function workerToolCacheEnv(
   workdir: string,
   opts?: { owner?: string; repo?: string; workRoot?: string; cacheDir?: string }
 ): WorkerToolCaches {
@@ -626,7 +626,7 @@ export async function createReviewWorkspace(root: string, job: ReviewJob): Promi
 }
 
 /** Bare mirror kept on the workspace root. Not the worker cache at `_cache`. */
-export const REVIEW_MIRROR_DIR = "_review-mirrors";
+const REVIEW_MIRROR_DIR = "_review-mirrors";
 
 const reviewMirrorWaits = new Map<string, Promise<void>>();
 

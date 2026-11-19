@@ -9,7 +9,7 @@ import { quotaSchemaErrors, resetQuotaSchemaErrorsForTests } from "./quota.ts";
 export const TOKEN_TYPES = ["input", "cached_input", "output", "cache_write", "reasoning"] as const;
 export type TokenType = (typeof TOKEN_TYPES)[number];
 /** Harness that produced the tokens; exported as the existing `source` label. */
-export type TokenSource = "opencode" | "claude" | "agy" | "codex";
+type TokenSource = "opencode" | "claude" | "agy" | "codex";
 /** Per-model token totals for one harness run. */
 export type ModelTokenUsage = Map<string, Record<TokenType, number>>;
 

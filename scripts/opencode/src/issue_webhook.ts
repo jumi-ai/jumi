@@ -105,7 +105,7 @@ export function shouldEnqueueIssue(payload: GiteaIssuePayload, policy: IssueWebh
 }
 
 const WAKE_ACTIONS = new Set(["closed", "reopened"]);
-export const PULL_WAIT_CLEAR_ACTIONS = new Set(["closed", "merged", "unassigned"]);
+const PULL_WAIT_CLEAR_ACTIONS = new Set(["closed", "merged", "unassigned"]);
 
 export function isDependencyWakeAction(action: string): boolean {
   return WAKE_ACTIONS.has(action);
@@ -123,7 +123,7 @@ type BlockApi = {
 
 type RepoRef = { default_branch: string; clone_url: string; full_name: string; html_url?: string };
 
-export type BlockEligibilityApi = Pick<BlockApi, "getIssue" | "getRepo">;
+type BlockEligibilityApi = Pick<BlockApi, "getIssue" | "getRepo">;
 
 export type BlockEligibilityContext = {
   owner: string;
@@ -169,7 +169,7 @@ export async function enqueueEligibleBlockedIssue(
   return issueJobFrom(row.owner, row.repo, issue, cloneRepo, opts.action);
 }
 
-export const DEPENDENCY_REMOVE_ACTIONS = new Set(["blocked_by_removed", "blocking_removed"]);
+const DEPENDENCY_REMOVE_ACTIONS = new Set(["blocked_by_removed", "blocking_removed"]);
 
 export function isDependencyRemoveAction(action: string | undefined): boolean {
   return typeof action === "string" && DEPENDENCY_REMOVE_ACTIONS.has(action);
@@ -250,7 +250,7 @@ function issueKey(owner: string, repo: string, number: number): string {
   return `${owner}/${repo}#${number}`;
 }
 
-export async function blockedIssueJobsFrom(
+async function blockedIssueJobsFrom(
   owner: string,
   repo: string,
   number: number,

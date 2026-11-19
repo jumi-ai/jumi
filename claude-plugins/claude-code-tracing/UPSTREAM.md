@@ -78,3 +78,8 @@ Keep this list current when re-syncing with upstream.
 - **Age-based state GC.** A child killed by timeout or a quota abort never fires
   `SessionEnd`, so `session_start.sh` also drops session state files older than
   a day instead of leaking them onto the `HOME` volume.
+- **Split `build_span` locals (shellcheck SC2318).** Upstream declares
+  `local parent=... start=... end="${7:-$start}"` in one line, so `end`
+  defaults to the caller's `$start`, not `$6`. Jumi splits the `local`s so
+  `end` defaults to the `start` local, and references `kind` (`: "$kind"`)
+  since Jumi derives the span kind from attributes (SC2034).

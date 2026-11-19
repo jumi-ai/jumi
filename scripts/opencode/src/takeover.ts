@@ -7,7 +7,7 @@ import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
 export const TAKEOVER_NOTE_MARKER = "<!-- jumi-takeover -->";
-export const TAKEOVER_REFUSED_REASON = "takeover author not admitted";
+const TAKEOVER_REFUSED_REASON = "takeover author not admitted";
 
 export function isTakeoverAuthor(
   login: string | undefined | null,
@@ -43,7 +43,7 @@ export function isTakeoverEligiblePull(
   return true;
 }
 
-export function takeoverRefusedNote(authorLogin: string, detail: string, pickupLabel = "jumi"): string {
+function takeoverRefusedNote(authorLogin: string, detail: string, pickupLabel = "jumi"): string {
   const who = authorLogin.trim() || "listed author";
   const label = pickupLabel.trim() ? pickupLabel.trim() : "jumi";
   return (
@@ -61,7 +61,7 @@ export type TakeoverFileApi = {
   ) => Promise<{ found: boolean; content?: string }>;
 };
 
-export type TakeoverTrustApi = {
+type TakeoverTrustApi = {
   getCollaboratorPermission?: (
     owner: string,
     repo: string,
@@ -69,7 +69,7 @@ export type TakeoverTrustApi = {
   ) => Promise<import("./ports.ts").CollaboratorPermission>;
 };
 
-export type TakeoverMarkerApi = {
+type TakeoverMarkerApi = {
   addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
   addIssueAssignees?(owner: string, repo: string, index: number, assignees: string[]): Promise<unknown>;
   findStickyIssueComment?(

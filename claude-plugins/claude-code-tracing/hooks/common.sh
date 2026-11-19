@@ -263,8 +263,14 @@ jumi_attrs() {
 # --- Build OTLP span ---
 build_span() {
   local name="$1" kind="$2" span_id="$3" trace_id="$4"
-  local parent="${5:-}" start="$6" end="${7:-$start}" attrs
-  attrs="${8:-"{}"}"
+  local parent="${5:-}"
+  local start="$6"
+  # Jumi: `end` defaults to `$6` via the `start` local above, not the caller's
+  # `$start` (SC2318). `kind` is part of the upstream argv but Jumi derives the
+  # span kind from attributes, so reference it to mark the intentional unused.
+  local end="${7:-$start}"
+  local attrs="${8:-"{}"}"
+  : "$kind"
   attrs=$(echo "$attrs" | jq -c --argjson jumi "$(jumi_attrs)" '. + $jumi')
 
   local parent_json=""

@@ -220,7 +220,7 @@ describe("infra CLI build consumes one effective pin and fails closed", () => {
       expect(text).toContain("TOFU_VERSION=${{ env.TOFU_VERSION }}");
       expect(text).toContain("KUBECONFORM_VERSION=${{ env.KUBECONFORM_VERSION }}");
       expect(text).toContain("KUBECTL_VERSION=${{ env.KUBECTL_VERSION }}");
-      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
     }
   });
 });

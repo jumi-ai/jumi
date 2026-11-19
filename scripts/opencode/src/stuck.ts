@@ -8,14 +8,14 @@ import { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./skip
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { parseReviewFindings, parseReviewOutput } from "./verdict.ts";
 
-export const SAME_ACTION_LIMIT = 4;
-export const SAME_ERROR_LIMIT = 3;
-export const SAME_FINDING_LIMIT = 3;
-export const STUCK_HISTORY_LIMIT = 32;
+const SAME_ACTION_LIMIT = 4;
+const SAME_ERROR_LIMIT = 3;
+const SAME_FINDING_LIMIT = 3;
+const STUCK_HISTORY_LIMIT = 32;
 
 export const SAME_FINDING_STUCK = SAME_FINDING_STUCK_TEXT;
 
-export type StuckKind = "action" | "ci" | "error" | "finding";
+type StuckKind = "action" | "ci" | "error" | "finding";
 export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
 
 export interface StuckFingerprint {
@@ -23,7 +23,7 @@ export interface StuckFingerprint {
   hash: string;
 }
 
-export interface QuotaStuck {
+interface QuotaStuck {
   reason: string;
   updatedAt: string;
 }
@@ -35,8 +35,6 @@ export interface StuckState {
   quota?: QuotaStuck;
 }
 
-export { reviewStuckStatePath, stuckStatePath };
-
 export function stuckComment(reason: StuckReason): string {
   if (reason === "repeated-action") return "stuck: repeated action";
   if (reason === "repeated-error") return "stuck: repeated error";
@@ -47,7 +45,6 @@ export function stuckComment(reason: StuckReason): string {
 export function isSkipLatchReason(reason: string | null | undefined): boolean {
   return parseSkipWhy(reason).latches;
 }
-
 /**
  * Follow-up round-cap latch. A closer that has used its follow-up rounds
  * stores `stuck: too many follow-up rounds` as the issue skip latch. A later
@@ -56,8 +53,7 @@ export function isSkipLatchReason(reason: string | null | undefined): boolean {
  * publishing skipped from this latch. Every other `stuck:` latch still
  * refuses every kind.
  */
-export { TOO_MANY_FOLLOWUP_ROUNDS_REASON };
-export function isTooManyFollowupRoundsReason(reason: string | null | undefined): boolean {
+function isTooManyFollowupRoundsReason(reason: string | null | undefined): boolean {
   return parseSkipWhy(reason).why === "round-cap";
 }
 
@@ -65,13 +61,13 @@ export function stuckMarker(owner: string, repo: string, index: number): string 
   return `<!-- jumi-stuck:${owner}/${repo}#${index} -->`;
 }
 
-export function hashText(text: string): string {
+function hashText(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
 const BOILERPLATE = new Set(["", "(no trigger body)", "no review comments this round. address jumi_ci.md."]);
 
-export function normalizeFinding(text: string): string {
+function normalizeFinding(text: string): string {
   let value = text.replace(/\r\n/g, "\n");
   value = value.replace(/<!--\s*jumi-(?:review|check|stuck|worker):[\s\S]*?-->/gi, " ");
   value = value.replace(/^Reviewed commit:\s*`[0-9a-fA-F]+`\s*$/gim, "");
@@ -144,7 +140,7 @@ export function fingerprintError(error: string | null | undefined): string | und
  * markdown, case, punctuation, and word order do not count.
  */
 
-export function bucketFindingLine(line: number): number {
+function bucketFindingLine(line: number): number {
   if (!Number.isSafeInteger(line) || line < 1) return 0;
   return Math.floor((line - 1) / 5) * 5 + 1;
 }
@@ -230,7 +226,7 @@ function firstContentSentence(paragraph: string): string {
   return cleaned[0] ?? "";
 }
 
-export function findingSummarySignature(body: string): string {
+function findingSummarySignature(body: string): string {
   let text = stripSeverityPrefix(body);
   text = text.replace(/<!--\s*jumi-(?:review|check|stuck|worker)[\s\S]*?-->/gi, " ");
   text = text.replace(/\b[0-9a-f]{7,40}\b/gi, " ");
@@ -320,7 +316,7 @@ function firstSentenceForDisplay(body: string): string {
 }
 
 /** Human display for the latch/board: `path:line emoji summary`, truncated. */
-export function sameFindingDisplay(markdown: string | null | undefined): string | undefined {
+function sameFindingDisplay(markdown: string | null | undefined): string | undefined {
   if (!markdown?.trim()) return undefined;
   const findings = parseReviewFindings(markdown);
   for (const finding of findings) {
@@ -341,7 +337,7 @@ export type FindingInlineInput = {
   body?: string | null | undefined;
 };
 
-export function findingIdentityFromInline(
+function findingIdentityFromInline(
   path: string | null | undefined,
   line: number | null | undefined,
   body: string | null | undefined
@@ -357,7 +353,7 @@ export function findingIdentityFromInline(
 }
 
 /** Blocking identities from a top-level review body plus unresolved Jumi inlines. */
-export function blockingFindingIdentitiesFromParts(
+function blockingFindingIdentitiesFromParts(
   reviewBody: string | null | undefined,
   inlines?: readonly FindingInlineInput[] | null | undefined
 ): string[] {
@@ -409,7 +405,7 @@ export function sameFindingDisplayFromParts(
   return undefined;
 }
 
-export function sameFindingLatchReason(markdown: string | null | undefined): string {
+function sameFindingLatchReason(markdown: string | null | undefined): string {
   const display = sameFindingDisplay(markdown);
   if (!display) return SAME_FINDING_STUCK;
   const reason = `${SAME_FINDING_STUCK} (${display})`;
@@ -515,7 +511,7 @@ export async function readStuckLatch(store: SkipLatchStore, key: SkipLatchKey): 
   return parseStuckState((await store.get(key)).stuck);
 }
 
-export async function writeStuckLatch(store: SkipLatchStore, key: SkipLatchKey, state: StuckState): Promise<void> {
+async function writeStuckLatch(store: SkipLatchStore, key: SkipLatchKey, state: StuckState): Promise<void> {
   await store.put(key, { stuck: state });
 }
 
@@ -594,7 +590,7 @@ export function isReviewQuotaStuck(state: StuckState | undefined | null, nowMs: 
   return nowMs - updatedMs < REVIEW_QUOTA_TTL_MS;
 }
 
-export function quotaStuckReason(state: StuckState | undefined | null): string | undefined {
+function quotaStuckReason(state: StuckState | undefined | null): string | undefined {
   const reason = state?.quota?.reason?.trim();
   return reason ? reason : undefined;
 }
@@ -638,7 +634,7 @@ export async function clearQuotaStuck(path: string, now = () => new Date()): Pro
   });
 }
 
-export function reviewLatchKey(owner: string, repo: string, prNumber: number): SkipLatchKey {
+function reviewLatchKey(owner: string, repo: string, prNumber: number): SkipLatchKey {
   return { owner, repo, issueNumber: prNumber };
 }
 
@@ -651,7 +647,7 @@ export async function readReviewStuckLatch(
   return parseStuckState((await store.get(reviewLatchKey(owner, repo, prNumber))).reviewStuck);
 }
 
-export async function writeReviewStuckLatch(
+async function writeReviewStuckLatch(
   store: SkipLatchStore,
   owner: string,
   repo: string,
@@ -696,7 +692,7 @@ export async function markReviewQuotaStuckLatch(
   });
 }
 
-export async function clearReviewQuotaStuckLatch(
+async function clearReviewQuotaStuckLatch(
   store: SkipLatchStore,
   owner: string,
   repo: string,
@@ -800,7 +796,7 @@ export async function clearReviewQuotaStuckState(ref: ReviewStuckRef, now = () =
 /** Reviewer-side kill-switch: delete the per-PR quota/fingerprint file so the
  * next run re-checks instead of skipping forever. Human equivalent of the
  * worker `cancelIssueWork` clear path. */
-export async function deleteReviewStuckState(
+async function deleteReviewStuckState(
   home: string,
   owner: string,
   repo: string,

@@ -42,12 +42,12 @@ import { errorMessage } from "./util/error.ts";
 export const REVIEW_SANDBOX_MIN_ABI = 6;
 export const REVIEW_SANDBOX_WRAPPER_ENV = "JUMI_REVIEW_SANDBOX_WRAPPER";
 export const ALLOW_UNSANDBOXED_REVIEWS_ENV = "JUMI_ALLOW_UNSANDBOXED_REVIEWS";
-export const SANDBOX_UNAVAILABLE_EXIT = 100;
+const SANDBOX_UNAVAILABLE_EXIT = 100;
 
 const WRAPPER_FILE = "review_sandbox.py";
 
 /** System paths a review agent may read (and traverse) but never write. */
-export const REVIEW_SANDBOX_READ_ONLY_SYSTEM: readonly string[] = [
+const REVIEW_SANDBOX_READ_ONLY_SYSTEM: readonly string[] = [
   "/usr",
   "/bin",
   "/sbin",
@@ -69,12 +69,12 @@ export const REVIEW_SANDBOX_READ_ONLY_SYSTEM: readonly string[] = [
  * outside temp and its MCP bearer-token configs readable too. Shells get
  * `TMPDIR` pointing at scratch, so tools that need temp space still work.
  */
-export const REVIEW_SHELL_READ_ONLY_SYSTEM: readonly string[] = REVIEW_SANDBOX_READ_ONLY_SYSTEM.filter(
+const REVIEW_SHELL_READ_ONLY_SYSTEM: readonly string[] = REVIEW_SANDBOX_READ_ONLY_SYSTEM.filter(
   (path) => path !== "/tmp"
 );
 
 /** Provider keys a review agent holds but its shells must never see. */
-export const REVIEW_SHELL_SCRUB_KEYS: readonly string[] = [
+const REVIEW_SHELL_SCRUB_KEYS: readonly string[] = [
   "OPENCODE_API_KEY",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_API_KEY",
@@ -85,7 +85,7 @@ export const REVIEW_SHELL_SCRUB_KEYS: readonly string[] = [
 ];
 
 /** Sandboxed HOME for model-run shells, under scratch so tools can still write. */
-export function sandboxedShellHome(scratchDir: string): string {
+function sandboxedShellHome(scratchDir: string): string {
   return join(scratchDir, "sandbox-home");
 }
 
@@ -113,7 +113,7 @@ export async function makeReviewHarnessTempRoot(): Promise<string> {
 }
 
 /** Device paths that also need /dev/null-style writes (tools open O_RDWR). Never grants creation. */
-export const REVIEW_SANDBOX_DEVICE_PATHS: readonly string[] = ["/dev"];
+const REVIEW_SANDBOX_DEVICE_PATHS: readonly string[] = ["/dev"];
 
 export interface ReviewSandboxRules {
   readWrite: string[];
@@ -200,7 +200,7 @@ export function reviewShellSandboxRules(input: ReviewShellSandboxRuleInput): Rev
 }
 
 /** Single-quote `arg` for `sh -c`. */
-export function shellEscape(arg: string): string {
+function shellEscape(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -217,7 +217,7 @@ export interface ShellWrapperPrefixInput {
  * `printenv` in pull code learns nothing; HOME override hides the agent's
  * login configs.
  */
-export function reviewShellWrapperPrefix(
+function reviewShellWrapperPrefix(
   rules: ReviewSandboxRules,
   input: ShellWrapperPrefixInput = {},
   env: Record<string, string | undefined> = process.env
@@ -507,7 +507,7 @@ export function resolveReviewSpawnSandbox(
 }
 
 /** Runner types Jumi can sandbox per-shell with a Jumi-owned hook. */
-export const REVIEW_SANDBOXABLE_RUNNERS: readonly string[] = ["opencode", "claude", "codex", "agy"] as const;
+const REVIEW_SANDBOXABLE_RUNNERS: readonly string[] = ["opencode", "claude", "codex", "agy"] as const;
 
 /**
  * Fail-closed per-runner support check. Every review runner must come through
@@ -565,9 +565,9 @@ export function reviewShellDeniedReadPrefixes(input: ReviewShellHookInput): stri
  * credential paths. The hook `matcher` strings below are built from these
  * same lists so the matcher and the script branch cannot drift apart.
  */
-export const CLAUDE_REVIEW_FILE_TOOLS: readonly string[] = ["Read", "Edit", "Write", "Grep", "Glob"];
-export const AGY_REVIEW_SHELL_TOOL = "run_command";
-export const AGY_REVIEW_FILE_TOOLS: readonly string[] = [
+const CLAUDE_REVIEW_FILE_TOOLS: readonly string[] = ["Read", "Edit", "Write", "Grep", "Glob"];
+const AGY_REVIEW_SHELL_TOOL = "run_command";
+const AGY_REVIEW_FILE_TOOLS: readonly string[] = [
   "view_file",
   "list_dir",
   "find_by_name",
@@ -761,12 +761,12 @@ export function reviewShellDenyPredicateSnippet(
 }
 
 /** Matcher for the Claude/Codex `PreToolUse` hook: Bash plus every file tool. */
-export function claudeReviewHookMatcher(): string {
+function claudeReviewHookMatcher(): string {
   return ["Bash", ...CLAUDE_REVIEW_FILE_TOOLS].join("|");
 }
 
 /** Matcher for the Agy `PreToolUse` hook: shell plus every file/dir tool. */
-export function agyReviewHookMatcher(): string {
+function agyReviewHookMatcher(): string {
   return [AGY_REVIEW_SHELL_TOOL, ...AGY_REVIEW_FILE_TOOLS].join("|");
 }
 

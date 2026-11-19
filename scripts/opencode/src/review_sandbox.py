@@ -24,6 +24,7 @@ import argparse
 import ctypes
 import os
 import sys
+from typing import NoReturn
 
 MIN_ABI = 6
 SANDBOX_UNAVAILABLE_EXIT = 100
@@ -129,7 +130,7 @@ def build_ruleset(libc: ctypes.CDLL, numbers: tuple, ro: list, dev: list, rw: li
             fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
         except OSError as err:
             if required:
-                raise OSError(f"required sandbox path missing: {path}: {err}")
+                raise OSError(f"required sandbox path missing: {path}: {err}") from err
             print(f"review-sandbox: skipping absent read-only path: {path}", file=sys.stderr)
             return
         try:

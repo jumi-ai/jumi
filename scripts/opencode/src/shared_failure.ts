@@ -21,15 +21,15 @@ export function sharedFailureLockKey(owner: string, repo: string, fingerprint: s
   return `shared-failure:${owner}/${repo}#${fingerprint}`;
 }
 
-export function sharedFailureSticky(firstPr: number, check: string, defaultBranch: string): string {
+function sharedFailureSticky(firstPr: number, check: string, defaultBranch: string): string {
   return sharedFailureStickyFor(firstPr, check, defaultBranch);
 }
 
-export function sharedFailureReason(firstPr: number, check: string): string {
+function sharedFailureReason(firstPr: number, check: string): string {
   return sharedFailureReasonFor(firstPr, check);
 }
 
-export function isSharedFailureReason(reason: string | null | undefined): boolean {
+function isSharedFailureReason(reason: string | null | undefined): boolean {
   return typeof reason === "string" && reason.startsWith("waiting on #");
 }
 

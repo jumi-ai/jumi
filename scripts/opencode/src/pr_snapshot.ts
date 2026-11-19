@@ -52,7 +52,7 @@ import {
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 
-export const FOLLOWUP_CI_PENDING_RETRY_MS = 2000;
+const FOLLOWUP_CI_PENDING_RETRY_MS = 2000;
 
 function sleepDefault(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -66,7 +66,7 @@ function memoize<T>(fn: () => Promise<T>): () => Promise<T> {
   };
 }
 
-export interface PrSnapshotPr {
+interface PrSnapshotPr {
   number: number;
   headSha: string;
   headRef: string;
@@ -77,19 +77,19 @@ export interface PrSnapshotPr {
   author: string | undefined | null;
 }
 
-export interface PrSnapshotTrigger {
+interface PrSnapshotTrigger {
   event?: string;
   commentId?: number;
   reviewId?: number;
 }
 
-export interface PrSnapshotPolicy {
+interface PrSnapshotPolicy {
   maxFollowupRounds: number;
   maxConflictRounds: number;
   followupOnSuggestions: boolean;
 }
 
-export interface PrSnapshotLists {
+interface PrSnapshotLists {
   blockingAuthors: string[];
   followupIgnore: string[];
   trusted: readonly string[] | undefined;
@@ -97,7 +97,7 @@ export interface PrSnapshotLists {
   ignoreAuthors: string[] | undefined;
 }
 
-export interface PrSnapshotDeployment {
+interface PrSnapshotDeployment {
   maxFollowupRounds: number;
   maxConflictRounds: number;
   blockingQuestionAuthors?: readonly string[] | undefined | null;

@@ -18,7 +18,7 @@ import type { GitRunner } from "./workspace.ts";
  * head adds one.
  */
 
-export const REVIEW_MD = "REVIEW.md";
+const REVIEW_MD = "REVIEW.md";
 export const DEFAULT_MAX_REVIEW_MD_BYTES = 24_000;
 /** Never pull more than this off disk, whatever the prompt budget. */
 const MAX_REVIEW_MD_READ_BYTES = 1_048_576;

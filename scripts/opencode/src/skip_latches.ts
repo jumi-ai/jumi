@@ -47,15 +47,15 @@ ALTER TABLE issue_skip_latches ADD COLUMN IF NOT EXISTS review_stuck JSONB NOT N
 
 const memoryByHome = new Map<string, MemorySkipLatchStore>();
 
-export function skipLatchKey(owner: string, repo: string, issueNumber: number): SkipLatchKey {
+function skipLatchKey(owner: string, repo: string, issueNumber: number): SkipLatchKey {
   return { owner, repo, issueNumber };
 }
 
-export function latchMapKey(key: SkipLatchKey): string {
+function latchMapKey(key: SkipLatchKey): string {
   return `${key.owner}/${key.repo}#${key.issueNumber}`;
 }
 
-export function emptySkipLatchRecord(): IssueSkipLatchRecord {
+function emptySkipLatchRecord(): IssueSkipLatchRecord {
   return { followup: {}, conflict: {}, ci: {}, stuck: {}, reviewStuck: {} };
 }
 
@@ -218,7 +218,7 @@ export class PgSkipLatchStore implements SkipLatchStore {
   }
 }
 
-export async function createPgSkipLatchStore(databaseUrl: string, sql?: SqlClient): Promise<PgSkipLatchStore> {
+async function createPgSkipLatchStore(databaseUrl: string, sql?: SqlClient): Promise<PgSkipLatchStore> {
   const store = new PgSkipLatchStore(sql ?? createBunSqlClient(databaseUrl));
   await store.migrate();
   return store;

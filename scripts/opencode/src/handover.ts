@@ -33,23 +33,17 @@ export function isMaintainerOnlyTrailer(markdown: string | null | undefined, rec
   return reviewVerdictView({ markdown, record }).isMaintainerOnly;
 }
 
-export function isCurrentHeadFailureTrailer(
-  markdown: string | null | undefined,
-  record?: ReviewRecord | null
-): boolean {
+function isCurrentHeadFailureTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
   const view = reviewVerdictView({ markdown, record });
   return !view.incomplete && view.state === "failure";
 }
 
-export function isLeftoverSimplificationTrailer(
-  markdown: string | null | undefined,
-  record?: ReviewRecord | null
-): boolean {
+function isLeftoverSimplificationTrailer(markdown: string | null | undefined, record?: ReviewRecord | null): boolean {
   const view = reviewVerdictView({ markdown, record });
   return !view.incomplete && view.state === "success" && view.suggestionCount > 0;
 }
 
-export function isBlockingQuestionTrailer(
+function isBlockingQuestionTrailer(
   markdown: string | null | undefined,
   prAuthorLogin: string | undefined | null,
   blockingAuthors: readonly string[] | undefined | null,

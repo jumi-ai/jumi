@@ -8,10 +8,10 @@ import { EngineFailedError, type EngineResult } from "./engine.ts";
 import { isCreditBalanceText, isQuotaError } from "./quota.ts";
 import { errorMessage } from "./util/error.ts";
 
-export const RUNNER_QUOTA_COOLDOWN_DEFAULT_MS = 60 * 60 * 1000;
-export const RUNNER_QUOTA_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
-export const RUNNER_CREDIT_COOLDOWN_DEFAULT_MS = 6 * 60 * 60 * 1000;
-export const RUNNER_AUTH_COOLDOWN_DEFAULT_MS = 30 * 60 * 1000;
+const RUNNER_QUOTA_COOLDOWN_DEFAULT_MS = 60 * 60 * 1000;
+const RUNNER_QUOTA_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
+const RUNNER_CREDIT_COOLDOWN_DEFAULT_MS = 6 * 60 * 60 * 1000;
+const RUNNER_AUTH_COOLDOWN_DEFAULT_MS = 30 * 60 * 1000;
 
 export interface RunnerCooldownConfig {
   quotaMs: number;
@@ -27,7 +27,7 @@ export const DEFAULT_RUNNER_COOLDOWN_CONFIG: RunnerCooldownConfig = {
   authMs: RUNNER_AUTH_COOLDOWN_DEFAULT_MS,
 };
 
-export function resolveRunnerCooldown(input?: Partial<RunnerCooldownConfig> | null): RunnerCooldownConfig {
+function resolveRunnerCooldown(input?: Partial<RunnerCooldownConfig> | null): RunnerCooldownConfig {
   if (!input) return { ...DEFAULT_RUNNER_COOLDOWN_CONFIG };
   return {
     quotaMs: input.quotaMs ?? DEFAULT_RUNNER_COOLDOWN_CONFIG.quotaMs,
@@ -214,22 +214,19 @@ export class RunnerCooldownStore {
   }
 }
 
-export const engineRunnerCooldowns = new RunnerCooldownStore();
-export const workerRunnerCooldowns = new RunnerCooldownStore();
+const engineRunnerCooldowns = new RunnerCooldownStore();
+const workerRunnerCooldowns = new RunnerCooldownStore();
 
-export function isCreditFailureResult(result: EngineResult): boolean {
+function isCreditFailureResult(result: EngineResult): boolean {
   return result.status === "stuck" && isCreditBalanceText(result.message ?? "");
 }
 
-export function isCreditFailureError(err: unknown): boolean {
+function isCreditFailureError(err: unknown): boolean {
   if (err instanceof EngineFailedError) return isCreditBalanceText(err.message ?? "");
   return false;
 }
 
-export function classifyCooldownFailure(input: {
-  result?: EngineResult;
-  err?: unknown;
-}): RunnerCooldownReason | undefined {
+function classifyCooldownFailure(input: { result?: EngineResult; err?: unknown }): RunnerCooldownReason | undefined {
   if (input.result) {
     const r = input.result;
     if (isCreditFailureResult(r)) return "credit";
@@ -280,7 +277,7 @@ export function recordRunnerCooldownForFailure(
   return store.recordQuota(runnerName, { retryAfterMs, nowMs: input.nowMs, config: input.config });
 }
 
-export function healthyRunnerNames(
+function healthyRunnerNames(
   chain: readonly { name: string }[],
   store: RunnerCooldownStore | undefined,
   nowMs: number,
@@ -328,7 +325,7 @@ export function logRunnerCooldown(
   });
 }
 
-export function logRunnerSkippedCooldown(
+function logRunnerSkippedCooldown(
   log: (message: string) => void,
   input: { runner: string; untilMs: number; reason: RunnerCooldownReason }
 ): void {
@@ -340,7 +337,7 @@ export function logRunnerSkippedCooldown(
 }
 
 /** Short stable hash of credential material. The value is never logged. */
-export function fingerprintString(value: string): string {
+function fingerprintString(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 32);
 }
 

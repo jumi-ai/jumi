@@ -30,8 +30,11 @@ Only the router migrates (`PgReviewJobStore.migrate` under a Postgres advisory l
 
 From `scripts/opencode`, after `bun install --frozen-lockfile`:
 
-- `bun run ci` runs `biome check`, `tsc --noEmit`, and `bun test`. That is the `checks` job. It does not start Postgres.
+- `bun run ci` runs `biome check`, `tsc --noEmit`, `bun run lint:repo`, `bun run knip`, and `bun test`. That is the `checks` job. It does not start Postgres.
 - `bun run test:pg` is the queue, lease, and one-shot suite (`review_jobs_pg`, `provenance_pg`, `job_pg`). It needs `JUMI_TEST_DATABASE_URL`. CI runs it only in `postgres-queue`. Do not treat `bun run ci` as proof that job passed.
+- `bun run lint:repo` runs shellcheck (`-S warning` on `scripts/opencode/entrypoint.sh`, `.gitea/scripts/*.sh`, `claude-plugins/claude-code-tracing/hooks/*.sh`), actionlint and zizmor (`--min-severity medium`) on `.github/workflows`, and ruff (`--select F,B`) on the Python under `scripts/opencode/src`. Pins live in `.gitea/tool-versions.env` (`ACTIONLINT_*`, `SHELLCHECK_*`, `ZIZMOR_VERSION`, `RUFF_VERSION`).
+- The file-size ratchet (`src/file-size-baseline.json`, enforced by `test/file_size_ratchet.test.ts` in `bun run ci`) fails a new `src/*.ts` file over 2,000 lines and an existing file more than 50 lines past its baseline; the failure names the file and tells you to split it. Lower the baseline freely; raising it is a visible baseline edit.
+- `bun run knip` (`knip.json`, `--include files,dependencies,exports,types`) must report 0 unused files, dependencies, exports and types. Entry points are `src/server.ts` (via `package.json`), `src/job.ts`, `src/control.ts`, `src/worker.ts`, `src/worker_server.ts`, `src/release.ts`, `src/repo_lint.ts` (via `package.json`), `src/searxng_server.ts`, `src/*_probe.ts`, and `test/shutdown_signal_harness.ts`.
 
 Biome is 2-space indent, double quotes, semicolons, line width 120. Do not reformat unrelated files.
 

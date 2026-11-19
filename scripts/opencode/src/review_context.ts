@@ -2,12 +2,12 @@ import { byteLength } from "./diagnostics.ts";
 import type { Comment, InlineComment, PullReview, Task } from "./ports.ts";
 
 export const DEFAULT_MAX_THREAD_BYTES = 200_000;
-export const MAX_COMMENT_BODY_BYTES = 32_768;
-export const MAX_LINKED_ISSUE_BODY_BYTES = 8_192;
+const MAX_COMMENT_BODY_BYTES = 32_768;
+const MAX_LINKED_ISSUE_BODY_BYTES = 8_192;
 const OMITTED_BODY = "[omitted; thread budget]";
 const encoder = new TextEncoder();
 
-export type ReviewCommentIntent = "product" | "discussion";
+type ReviewCommentIntent = "product" | "discussion";
 
 export interface ReviewComment {
   id: number;
@@ -81,7 +81,7 @@ export interface FitReviewThreadResult {
   threadBytes: number;
 }
 
-export function escapeXml(str: string): string {
+function escapeXml(str: string): string {
   return str
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -90,7 +90,7 @@ export function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-export function intentForWriteAccess(hasWrite: boolean): ReviewCommentIntent {
+function intentForWriteAccess(hasWrite: boolean): ReviewCommentIntent {
   return hasWrite ? "product" : "discussion";
 }
 
@@ -394,7 +394,7 @@ function truncateUtf8(text: string, maxBytes: number): string {
  */
 const ACCEPTANCE_HEADING_RE = /^#{1,6}\s+.*?(done\s+when|acceptance|tests).*?$/gim;
 
-export function acceptanceSectionStart(body: string): number {
+function acceptanceSectionStart(body: string): number {
   ACCEPTANCE_HEADING_RE.lastIndex = 0;
   const match = ACCEPTANCE_HEADING_RE.exec(body);
   ACCEPTANCE_HEADING_RE.lastIndex = 0;
@@ -410,7 +410,7 @@ const ACCEPTANCE_OMISSION_NOTE = "\n\n[truncated to keep Done-when/Acceptance se
  * alone is over budget, its head is kept. Without such a section this is a
  * plain head truncation.
  */
-export function truncateLinkedIssueBody(body: string, maxBytes: number): string {
+function truncateLinkedIssueBody(body: string, maxBytes: number): string {
   if (byteLength(body) <= maxBytes) return body;
   const start = acceptanceSectionStart(body);
   if (start < 0) return truncateUtf8(body, maxBytes);

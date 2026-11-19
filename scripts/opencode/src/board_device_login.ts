@@ -26,11 +26,11 @@ import { errorMessage } from "./util/error.ts";
  *   these paths with 404 and the page hides the sections there.
  */
 
-export const DEVICE_LOGIN_ORDINAL_PORT = 3010;
-export const DEVICE_LOGIN_PROVIDER = "xai";
-export const DEVICE_LOGIN_PROVIDER_XAI = "xai";
-export const DEVICE_LOGIN_PROVIDER_CODEX = "codex";
-export type DeviceLoginProviderName = typeof DEVICE_LOGIN_PROVIDER_XAI | typeof DEVICE_LOGIN_PROVIDER_CODEX;
+const DEVICE_LOGIN_ORDINAL_PORT = 3010;
+const DEVICE_LOGIN_PROVIDER = "xai";
+const DEVICE_LOGIN_PROVIDER_XAI = "xai";
+const DEVICE_LOGIN_PROVIDER_CODEX = "codex";
+type DeviceLoginProviderName = typeof DEVICE_LOGIN_PROVIDER_XAI | typeof DEVICE_LOGIN_PROVIDER_CODEX;
 
 export const DEVICE_LOGIN_BOARD_STATUS_PATH = "/api/board/device-login/status";
 export const DEVICE_LOGIN_BOARD_START_PATH = "/api/board/device-login/start";
@@ -40,16 +40,16 @@ const ORDINAL_STATUS_PATH = "/api/device-login/status";
 const ORDINAL_START_PATH = "/api/device-login/start";
 const ORDINAL_CANCEL_PATH = "/api/device-login/cancel";
 
-export const DEVICE_LOGIN_FETCH_TIMEOUT_MS = 5_000;
+const DEVICE_LOGIN_FETCH_TIMEOUT_MS = 5_000;
 /**
  * Start-hop budget: the ordinal waits up to 30s for the CLI to print the
  * URL and code, so the router must wait longer or it 502s while the ordinal
  * keeps a live waiting flow. Status/cancel stay on the short budget.
  */
-export const DEVICE_LOGIN_START_FETCH_TIMEOUT_MS = 35_000;
-export const DEVICE_LOGIN_FETCH_MAX_BYTES = 1_048_576;
+const DEVICE_LOGIN_START_FETCH_TIMEOUT_MS = 35_000;
+const DEVICE_LOGIN_FETCH_MAX_BYTES = 1_048_576;
 
-export type DeviceLoginBoardState = "idle" | "waiting" | "signed-in" | "expired" | "denied" | "error" | "cancelled";
+type DeviceLoginBoardState = "idle" | "waiting" | "signed-in" | "expired" | "denied" | "error" | "cancelled";
 
 export interface DeviceLoginBoardStatus {
   ordinal: string;
@@ -71,7 +71,7 @@ export interface DeviceLoginBoardStatus {
   loginDeadReason?: string;
 }
 
-export type BoardDeviceFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
+type BoardDeviceFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
 const DNS_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -79,7 +79,7 @@ export function isValidDeviceRole(value: unknown): value is "engine" | "worker" 
   return value === "engine" || value === "worker" || value === "control";
 }
 
-export function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProviderName {
+function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProviderName {
   return value === DEVICE_LOGIN_PROVIDER_XAI || value === DEVICE_LOGIN_PROVIDER_CODEX;
 }
 
@@ -202,10 +202,7 @@ export function sanitizeDeviceLoginStatus(
   return status;
 }
 
-export function deviceLoginOrdinalUnavailable(
-  ordinal: string,
-  role: "engine" | "worker" | "control"
-): DeviceLoginBoardStatus {
+function deviceLoginOrdinalUnavailable(ordinal: string, role: "engine" | "worker" | "control"): DeviceLoginBoardStatus {
   return {
     ordinal,
     role,

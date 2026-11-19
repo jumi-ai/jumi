@@ -34,12 +34,12 @@ import {
 } from "./runners.ts";
 import { isAbortError } from "./util/error.ts";
 
-export const OPENCODE_SESSION_DB = "opencode-session.db";
+const OPENCODE_SESSION_DB = "opencode-session.db";
 /** Conversation id of the last `agy` child in this worktree; resumed only by the same runner. */
-export const AGY_CONVERSATION_FILE = "agy-conversation-id";
+const AGY_CONVERSATION_FILE = "agy-conversation-id";
 /** Thread id of the last `codex` child in this worktree; resumed only by the same runner. */
-export const CODEX_THREAD_FILE = "codex-thread-id";
-export const CODEX_THREAD_USAGE_FILE = "codex-thread-usage";
+const CODEX_THREAD_FILE = "codex-thread-id";
+const CODEX_THREAD_USAGE_FILE = "codex-thread-usage";
 
 /** @deprecated Import from `./infra.ts` instead. Re-exported here so existing callers keep working. */
 export { looksLikeProviderUnavailable } from "./infra.ts";
@@ -81,7 +81,7 @@ export interface EngineChainOptions extends ModelHopOptions {
   authFingerprints?: Record<string, string | undefined>;
 }
 
-export function modelProviderPrefix(model: string): string {
+function modelProviderPrefix(model: string): string {
   const slash = model.indexOf("/");
   if (slash <= 0) return "";
   return model.slice(0, slash).toLowerCase();
@@ -316,7 +316,7 @@ function settleQuotaSigterm(opts: EngineRunOptions, result: EngineResult, hopped
 }
 
 /** Why a hop happened, for the `opencode_hop` line and alerts. */
-export type HopCause = "quota" | "auth" | "provider-down" | "incomplete";
+type HopCause = "quota" | "auth" | "provider-down" | "incomplete";
 
 function hopCauseFromResult(result: EngineResult): HopCause {
   if (result.auth === true) return "auth";

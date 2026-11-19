@@ -9,17 +9,17 @@ type CiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJob
 
 export const JUMI_REVIEW_CONTEXT = "jumi/opencode-review";
 export const CI_LOG_FILE = "JUMI_CI.md";
-export const CI_LOG_MAX_BYTES = 64 * 1024;
-export const CI_LOG_MIN_BYTES = 32 * 1024;
-export const CI_LOG_CONTEXT_LINES = 80;
+const CI_LOG_MAX_BYTES = 64 * 1024;
+const CI_LOG_MIN_BYTES = 32 * 1024;
+const CI_LOG_CONTEXT_LINES = 80;
 
-export interface CiHandledCheck {
+interface CiHandledCheck {
   sha: string;
   checkName: string;
   logHash: string;
 }
 
-export interface FlakeRerunRecord {
+interface FlakeRerunRecord {
   sha: string;
   checkName: string;
 }
@@ -78,7 +78,7 @@ export const CI_ABSENT_NOTE = "This repository has no CI checks on this head.";
 export const CI_LOOKUP_BACKOFF_MS = [15_000, 30_000, 60_000, 120_000, 300_000] as const;
 export const CI_LOOKUP_MAX_ATTEMPTS = 8;
 export const CI_LOOKUP_BUDGET_MS = 10 * 60 * 1000;
-export const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
+const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
 
 /**
  * Router-side waiting markers for review rows whose CI is not yet ready.
@@ -87,16 +87,16 @@ export const CI_LOOKUP_RETRY_PREFIX = "ci-lookup-retry:";
  * without any forge access. The CI-completion wake promotes the same row to
  * dispatchable; the Job's own CI check stays as a race backstop.
  */
-export const CI_PENDING_WAIT_PREFIX = "ci-wait-pending:";
-export const CI_ABSENT_WAIT_PREFIX = "ci-wait-absent:";
+const CI_PENDING_WAIT_PREFIX = "ci-wait-pending:";
+const CI_ABSENT_WAIT_PREFIX = "ci-wait-absent:";
 /** Fallback so a missed wake does not hide a pending row forever. */
-export const CI_PENDING_WAIT_FALLBACK_MS = 24 * 60 * 60 * 1000;
+const CI_PENDING_WAIT_FALLBACK_MS = 24 * 60 * 60 * 1000;
 
-export function isCiPendingWaitMarker(error: string | null | undefined): boolean {
+function isCiPendingWaitMarker(error: string | null | undefined): boolean {
   return Boolean(error?.startsWith(CI_PENDING_WAIT_PREFIX));
 }
 
-export function isCiAbsentWaitMarker(error: string | null | undefined): boolean {
+function isCiAbsentWaitMarker(error: string | null | undefined): boolean {
   return Boolean(error?.startsWith(CI_ABSENT_WAIT_PREFIX));
 }
 
@@ -113,7 +113,7 @@ export function encodeCiAbsentWait(firstSeenMs: number): string {
   return `${CI_ABSENT_WAIT_PREFIX}${firstSeenMs}`;
 }
 
-export function parseCiWaitMarker(
+function parseCiWaitMarker(
   error: string | null | undefined
 ): { kind: "pending" | "absent"; firstSeen: number } | undefined {
   if (!error) return undefined;
@@ -173,9 +173,7 @@ export function isCiLookupRetryMarker(error: string | null | undefined): boolean
   return Boolean(error?.startsWith(CI_LOOKUP_RETRY_PREFIX));
 }
 
-export function parseCiLookupMarker(
-  error: string | null | undefined
-): { count: number; firstFailAt: number } | undefined {
+function parseCiLookupMarker(error: string | null | undefined): { count: number; firstFailAt: number } | undefined {
   if (!isCiLookupRetryMarker(error) || !error) return undefined;
   const parts = error.slice(CI_LOOKUP_RETRY_PREFIX.length).split(":");
   const count = Number(parts[0]);
@@ -188,7 +186,7 @@ export function encodeCiLookupMarker(count: number, firstFailAt: number): string
   return `${CI_LOOKUP_RETRY_PREFIX}${count}:${firstFailAt}`;
 }
 
-export function ciLookupBackoffMs(count: number): number {
+function ciLookupBackoffMs(count: number): number {
   const index = Math.min(Math.max(count, 1), CI_LOOKUP_BACKOFF_MS.length) - 1;
   return CI_LOOKUP_BACKOFF_MS[index] ?? 300_000;
 }
@@ -305,7 +303,7 @@ export function reviewSkipReasonForCi(ci: CiInspection, wait?: CiGateWait): stri
   return undefined;
 }
 
-export function commitStatusState(status: Check): CheckState | undefined {
+function commitStatusState(status: Check): CheckState | undefined {
   return status.state ?? status.status;
 }
 
@@ -325,7 +323,7 @@ export function branchRequiresReviewCheck(
 }
 
 /** Required contexts that gate `pending`, with Jumi's own review check removed. */
-export function requiredCiContextsForPending(requiredContexts: readonly string[] | undefined): string[] {
+function requiredCiContextsForPending(requiredContexts: readonly string[] | undefined): string[] {
   return (requiredContexts ?? []).filter(
     (context) => typeof context === "string" && context.length > 0 && !isJumiReviewContext(context)
   );
@@ -338,7 +336,7 @@ export function requiredCiContextsForPending(requiredContexts: readonly string[]
  * `workflow / job (event)` context (or the reverse) so a naming-shape
  * difference never reads a reported check as missing.
  */
-export function requiredMatchesCheck(checkContext: string | undefined, required: string): boolean {
+function requiredMatchesCheck(checkContext: string | undefined, required: string): boolean {
   if (!checkContext) return false;
   if (checkContext === required) return true;
   if (checkContext.endsWith(` / ${required}`)) return true;
@@ -642,7 +640,7 @@ export function normalizeFailureLine(line: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-export function normalizeFailureLines(lines: readonly string[]): string[] {
+function normalizeFailureLines(lines: readonly string[]): string[] {
   return lines.map((line) => normalizeFailureLine(line)).filter((line) => line.length > 0);
 }
 
@@ -704,7 +702,7 @@ export async function readCiLatch(store: SkipLatchStore, key: SkipLatchKey): Pro
   return parseCiState((await store.get(key)).ci);
 }
 
-export async function writeCiLatch(store: SkipLatchStore, key: SkipLatchKey, state: CiFollowUpState): Promise<void> {
+async function writeCiLatch(store: SkipLatchStore, key: SkipLatchKey, state: CiFollowUpState): Promise<void> {
   await store.put(key, { ci: state });
 }
 
@@ -748,7 +746,7 @@ function parseHandled(value: unknown): CiHandledCheck[] {
   return out;
 }
 
-export async function writeCiState(path: string, state: CiFollowUpState): Promise<void> {
+async function writeCiState(path: string, state: CiFollowUpState): Promise<void> {
   const latch = skipLatchStoreFromPath(path);
   if (!latch) return;
   await writeCiLatch(latch.store, latch.key, state);
@@ -796,7 +794,7 @@ export async function recordCiHandled(opts: {
 }
 
 /** Budget: one automatic rerun per (head SHA, check name). Log hashes stay out. */
-export const FLAKE_RERUN_BUDGET_TOTAL = 1;
+const FLAKE_RERUN_BUDGET_TOTAL = 1;
 
 function flakeRerunKey(sha: string, checkName: string): string {
   return `${sha.toLowerCase()}:${checkName}`;
@@ -881,7 +879,7 @@ export function flakeSkipReason(checks: FailedCheck[]): string {
   return `CI infra flake: ${uniqueFlakeReasons(checks).join("; ")}`;
 }
 
-export function flakeComment(checks: FailedCheck[]): string {
+function flakeComment(checks: FailedCheck[]): string {
   const names = checks.map((check) => check.name).join(", ");
   return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
 }

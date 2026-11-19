@@ -191,7 +191,7 @@ export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<Ch
  * No credentials appear here — only the proxy URL, which cannot authenticate
  * without the parent-held token.
  */
-export function childProxyGitConfigEntries(
+function childProxyGitConfigEntries(
   proxyUrl: string,
   opts: { forgeUrl: string; forgeHost: string }
 ): Array<[string, string]> {

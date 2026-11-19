@@ -109,7 +109,7 @@ function isScratchStatusLine(line: string): boolean {
   return path === ENGINE_TEMP_DIR || path.startsWith(`${ENGINE_TEMP_DIR}/`);
 }
 
-export function engineScratchShowsIgnored(ignoredPorcelain: string): boolean {
+function engineScratchShowsIgnored(ignoredPorcelain: string): boolean {
   return ignoredPorcelain.split(/\r?\n/).some((line) => line.startsWith("!!") && isScratchStatusLine(line));
 }
 

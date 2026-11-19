@@ -117,7 +117,7 @@ export interface NewRunUsageRow {
   buildSeconds?: number | null;
 }
 
-export interface RunUsageContext {
+interface RunUsageContext {
   jobId: number | null;
   jobKey: string;
   kind: JobKind;

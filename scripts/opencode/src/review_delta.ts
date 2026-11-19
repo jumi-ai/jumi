@@ -6,7 +6,7 @@ import type { GitRunner } from "./workspace.ts";
 
 const REVIEW_MARKER = "<!-- jumi-review:";
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
-export const MAX_DELTA_COMMITS = 200;
+const MAX_DELTA_COMMITS = 200;
 
 /** The latest Jumi review on this pull: the SHA it covered and its finding lines. */
 export interface PreviousReview {

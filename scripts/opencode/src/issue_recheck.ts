@@ -64,7 +64,7 @@ async function sticky(
   });
 }
 
-export async function abandonShipBecauseIssueClosed(opts: {
+async function abandonShipBecauseIssueClosed(opts: {
   api: RecheckApi;
   owner: string;
   repo: string;

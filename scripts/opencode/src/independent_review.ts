@@ -15,29 +15,29 @@ export function isIndependentReviewRefusal(reason: string | null | undefined): b
  * and an API-key Claude on the same model are the same writer. Same family
  * across levels or billing stays one family. Nothing is guessed from harness,
  * provider prefix, or fuzzy model-name matching. */
-export function independenceIdentityKey(type: string, model: string): string {
+function independenceIdentityKey(type: string, model: string): string {
   return `${type.trim().toLowerCase()}|${model.trim()}`;
 }
 
-export function identityKeyOfStamp(stamp: RunnerStamp): string | undefined {
+function identityKeyOfStamp(stamp: RunnerStamp): string | undefined {
   const type = (stamp.type ?? "").trim();
   const model = (stamp.model ?? "").trim();
   if (!type || !model) return undefined;
   return independenceIdentityKey(type, model);
 }
 
-export function identityKeyOfRunner(runner: { type?: string; model: string }): string | undefined {
+function identityKeyOfRunner(runner: { type?: string; model: string }): string | undefined {
   const type = (runner.type ?? "opencode").trim();
   const model = (runner.model ?? "").trim();
   if (!type || !model) return undefined;
   return independenceIdentityKey(type, model);
 }
 
-export function describeIdentity(type: string, model: string): string {
+function describeIdentity(type: string, model: string): string {
   return `${type.trim()}:${model.trim()}`;
 }
 
-export function buildFamilyMap(policy: IndependentReviewConfig): Map<string, string> {
+function buildFamilyMap(policy: IndependentReviewConfig): Map<string, string> {
   const map = new Map<string, string>();
   for (const [family, members] of Object.entries(policy.groups)) {
     for (const member of members) {
@@ -54,22 +54,19 @@ export function buildFamilyMap(policy: IndependentReviewConfig): Map<string, str
   return map;
 }
 
-export function familyOfStamp(stamp: RunnerStamp, familyMap: Map<string, string>): string | undefined {
+function familyOfStamp(stamp: RunnerStamp, familyMap: Map<string, string>): string | undefined {
   const key = identityKeyOfStamp(stamp);
   if (!key) return undefined;
   return familyMap.get(key);
 }
 
-export function familyOfRunner(
-  runner: { type?: string; model: string },
-  familyMap: Map<string, string>
-): string | undefined {
+function familyOfRunner(runner: { type?: string; model: string }, familyMap: Map<string, string>): string | undefined {
   const key = identityKeyOfRunner(runner);
   if (!key) return undefined;
   return familyMap.get(key);
 }
 
-export interface IndependentReviewDiagnostics {
+interface IndependentReviewDiagnostics {
   head: string;
   policy: "enabled" | "disabled";
   provenanceStatus: string;

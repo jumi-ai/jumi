@@ -23,22 +23,22 @@ export interface RepoTimeouts {
   conflict?: number;
 }
 
-export const REPO_SETUP_ON_FAILURES = ["continue", "fail"] as const;
+const REPO_SETUP_ON_FAILURES = ["continue", "fail"] as const;
 
-export type RepoSetupOnFailure = (typeof REPO_SETUP_ON_FAILURES)[number];
+type RepoSetupOnFailure = (typeof REPO_SETUP_ON_FAILURES)[number];
 
 /** Repository setup kinds: the `timeouts` spelling (`followup`, not `follow-up`). */
-export const REPO_SETUP_KINDS = ["review", "implement", "followup", "conflict"] as const;
-export type RepoSetupKind = (typeof REPO_SETUP_KINDS)[number];
+const REPO_SETUP_KINDS = ["review", "implement", "followup", "conflict"] as const;
+type RepoSetupKind = (typeof REPO_SETUP_KINDS)[number];
 
 /** Known sub-keys of the `setup` mapping. */
-export const SETUP_KEYS = ["run", "timeout", "on_failure", "kinds"] as const;
+const SETUP_KEYS = ["run", "timeout", "on_failure", "kinds"] as const;
 
 /** Default per-repository setup timeout: 10 minutes. */
-export const DEFAULT_SETUP_TIMEOUT_MINUTES = 10;
+const DEFAULT_SETUP_TIMEOUT_MINUTES = 10;
 
 /** Default setup failure policy: run the job anyway. */
-export const DEFAULT_SETUP_ON_FAILURE: RepoSetupOnFailure = "continue";
+const DEFAULT_SETUP_ON_FAILURE: RepoSetupOnFailure = "continue";
 
 /** Default setup timeout in milliseconds. */
 export const DEFAULT_SETUP_TIMEOUT_MS = DEFAULT_SETUP_TIMEOUT_MINUTES * 60 * 1000;
@@ -60,7 +60,7 @@ export interface ConflictRegenerateEntry {
 }
 
 /** Basenames the built-in helm handling owns. A `conflict_regenerate` entry may not reuse one. */
-export const CONFLICT_REGENERATE_RESERVED = new Set(["Chart.lock", "requirements.lock"]);
+const CONFLICT_REGENERATE_RESERVED = new Set(["Chart.lock", "requirements.lock"]);
 
 export interface RepoReviewBudget {
   maxFiles?: number;
@@ -84,7 +84,7 @@ export type RepoSettingResult<Value> = { ok: true; value: Value } | { ok: false;
  * `trusted_senders` / `followup_ignore_logins` quirk: the old copy spread them
  * unconditionally, so `in` sees them on every load).
  */
-export type RepoSettingPresence = "required" | "optional" | "always";
+type RepoSettingPresence = "required" | "optional" | "always";
 
 export interface RepoSettingDef<Field extends string, Value> {
   /** The exact YAML spelling (snake_case). */
@@ -154,7 +154,7 @@ type SettingValue<Entry> = Entry extends RepoSettingDef<string, infer Value> ? V
  * required field, every other entry an optional one. Field value types come
  * from each entry's parser.
  */
-export type RepoSettings = {
+type RepoSettings = {
   [Entry in RegistryEntry as Entry extends { presence: "required" } ? Entry["field"] : never]: SettingValue<Entry>;
 } & {
   [Entry in RegistryEntry as Entry extends { presence: "required" } ? never : Entry["field"]]?: SettingValue<Entry>;
@@ -164,19 +164,19 @@ export type RepoClosingKeyword = "closes" | "refs";
 
 export type RepoMode = "full" | "review-only" | "off";
 
-export const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
+const REPO_MODES: readonly RepoMode[] = ["full", "review-only", "off"];
 
 /** CI gate wait mode: `required` waits only for required checks, `all` waits for every check, `none` never waits. */
 export type CiGateWait = "all" | "required" | "none";
 
-export const CI_GATE_WAITS: readonly CiGateWait[] = ["all", "required", "none"];
+const CI_GATE_WAITS: readonly CiGateWait[] = ["all", "required", "none"];
 
 export const DEFAULT_CI_GATE_WAIT: CiGateWait = "required";
 
 /** Known sub-keys of the `ci_gate` mapping. */
-export const CI_GATE_KEYS = ["wait"] as const;
+const CI_GATE_KEYS = ["wait"] as const;
 
-export const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
+const AUTOMERGE_METHODS = ["merge", "squash", "rebase", "rebase-merge", "fast-forward-only"] as const;
 export type RepoAutomergeMethod = (typeof AUTOMERGE_METHODS)[number];
 
 export const REPO_MODE_DISABLED_NOTE =
@@ -189,39 +189,39 @@ export type RepoSettingsParse = { ok: true; settings: RepoSettings } | { ok: fal
 
 /** Repository timeout keys: `followup` controls `follow-up` jobs. Values are whole minutes. */
 export const TIMEOUT_KEYS = ["review", "implement", "followup", "conflict"] as const;
-export type RepoTimeoutKey = (typeof TIMEOUT_KEYS)[number];
+type RepoTimeoutKey = (typeof TIMEOUT_KEYS)[number];
 
 /** Documented minimum for every repository timeout: 1 minute. Below this the file is invalid. */
-export const MIN_TIMEOUT_MINUTES = 1;
+const MIN_TIMEOUT_MINUTES = 1;
 
-export const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
+const TIMEOUT_LEASE_BUFFER_MS = 10 * 60 * 1000;
 
 /** Repository review-budget keys: `max_files` caps changed files, `max_patch_bytes` caps patch bytes. */
 export const REVIEW_BUDGET_KEYS = ["max_files", "max_patch_bytes"] as const;
-export type RepoReviewBudgetKey = (typeof REVIEW_BUDGET_KEYS)[number];
+type RepoReviewBudgetKey = (typeof REVIEW_BUDGET_KEYS)[number];
 
 /** Documented minimum for every repository review-budget value: 1. Below this the file is invalid. */
-export const MIN_REVIEW_BUDGET_VALUE = 1;
+const MIN_REVIEW_BUDGET_VALUE = 1;
 
 /** Default per-issue auto-merge opt-in label. Repository `.jumi.yml` may rename it. */
 export const DEFAULT_AUTOMERGE_LABEL = "automerge";
 /** Default per-issue auto-merge opt-out label. Repository `.jumi.yml` may rename it. */
 export const DEFAULT_NO_AUTOMERGE_LABEL = "no-automerge";
 /** Default GitHub pickup label. Repository `.jumi.yml` may rename it with `pickup_label`. Gitea ignores it. */
-export const DEFAULT_PICKUP_LABEL = "jumi";
+const DEFAULT_PICKUP_LABEL = "jumi";
 /** Default ignore-conflicts label. Repository `.jumi.yml` may rename it with `ignore_conflicts_label`. */
-export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
+const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
 
 /** Default branch prefix: `jumi/issue-<N>-<slug>`. */
-export const DEFAULT_BRANCH_PREFIX = "jumi";
+const DEFAULT_BRANCH_PREFIX = "jumi";
 /** Default PR title template: the issue title verbatim. */
 export const DEFAULT_PR_TITLE_TEMPLATE = "{title}";
 /** Default commit message template for the parent's leftover commit. */
 export const DEFAULT_COMMIT_MESSAGE_TEMPLATE = "Implement #{issue}: {title}";
 /** Default closing behavior: closing keywords that close the issue on merge. */
-export const DEFAULT_CLOSING_KEYWORD: RepoClosingKeyword = "closes";
+const DEFAULT_CLOSING_KEYWORD: RepoClosingKeyword = "closes";
 
-export const REPO_CLOSING_KEYWORDS: readonly RepoClosingKeyword[] = ["closes", "refs"];
+const REPO_CLOSING_KEYWORDS: readonly RepoClosingKeyword[] = ["closes", "refs"];
 
 /**
  * One entry per top-level `.jumi.yml` key, in today's parser order: the first
@@ -627,7 +627,7 @@ export const KNOWN_KEYS = new Set(REPO_SETTINGS_REGISTRY.map((def) => def.key));
  * check-ref-format` rules. Prefixes colliding with Jumi's internal refs
  * (`jumi/target`, `jumi/pr-*`, `refs/jumi/wip/`) are rejected.
  */
-export function validateBranchPrefix(value: string): { ok: true; prefix: string } | { ok: false; error: string } {
+function validateBranchPrefix(value: string): { ok: true; prefix: string } | { ok: false; error: string } {
   const prefix = value.trim();
   if (!prefix) return { ok: false, error: `"branch_prefix" must be a non-blank string` };
   if (prefix.startsWith("/") || prefix.endsWith("/")) {
@@ -703,7 +703,7 @@ function checkRefFormatError(ref: string): string | undefined {
  * are `{title}` and `{issue}`; any other `{...}` or stray brace makes the
  * whole file invalid.
  */
-export function validatePrTemplate(
+function validatePrTemplate(
   key: "pr_title" | "commit_message",
   value: string
 ): { ok: true; template: string } | { ok: false; error: string } {
@@ -1131,7 +1131,7 @@ export function failOpenLoadFromSnapshot(snapshot: SettingsSnapshot): RepoSettin
 }
 
 /** Ledger kind to repository timeout key: `follow-up` reads `followup`. */
-export function timeoutKeyForKind(kind: string): RepoTimeoutKey | undefined {
+function timeoutKeyForKind(kind: string): RepoTimeoutKey | undefined {
   if (kind === "follow-up") return "followup";
   if ((TIMEOUT_KEYS as readonly string[]).includes(kind)) return kind as RepoTimeoutKey;
   return undefined;
@@ -1165,7 +1165,7 @@ export function effectiveLeaseMs(configLeaseMs: number, effectiveTimeoutMs: numb
 }
 
 /** Setup key for a ledger kind: `follow-up` reads `followup`, like `timeouts`. */
-export function setupKeyForKind(kind: string): RepoSetupKind | undefined {
+function setupKeyForKind(kind: string): RepoSetupKind | undefined {
   const normalized = kind === "follow-up" ? "followup" : kind;
   if ((REPO_SETUP_KINDS as readonly string[]).includes(normalized)) return normalized as RepoSetupKind;
   return undefined;
@@ -1186,7 +1186,7 @@ export function setupForKind(load: RepoSettingsLoad, kind: string): RepoSetup | 
 }
 
 /** Whether this job kind runs the repository setup. */
-export function setupAppliesToKind(load: RepoSettingsLoad, kind: string): boolean {
+function setupAppliesToKind(load: RepoSettingsLoad, kind: string): boolean {
   return setupForKind(load, kind) !== undefined;
 }
 
@@ -1262,7 +1262,7 @@ export async function loadReviewDraftsEnabled(
  * deployer maximum (`max`) applies as the maximum. Unset, the maximum is
  * the deployment value itself, so a repository can only lower the budget.
  */
-export function effectiveReviewBudgetValue(
+function effectiveReviewBudgetValue(
   load: RepoSettingsLoad,
   key: "maxFiles" | "maxPatchBytes",
   base: number,
@@ -1306,7 +1306,7 @@ export function effectiveReviewBudget(
  * budget. Missing, invalid, or unreadable files fall back to the deployment
  * values. Never throws.
  */
-export async function loadEffectiveReviewBudget(
+async function loadEffectiveReviewBudget(
   api: RepoSettingsFileApi,
   owner: string,
   repo: string,
@@ -1340,7 +1340,7 @@ export function effectiveSuggestionCap(load: RepoSettingsLoad, ceiling: number):
  * Load the default-branch settings file and resolve the effective 💡 cap.
  * Missing, invalid, or unreadable files fall back to the ceiling. Never throws.
  */
-export async function loadEffectiveSuggestionCap(
+async function loadEffectiveSuggestionCap(
   api: RepoSettingsFileApi,
   owner: string,
   repo: string,
@@ -1571,7 +1571,7 @@ export function isMaintainerQuestionsHoldEnabled(load: RepoSettingsLoad | undefi
   return load.maintainerQuestionsHoldMerge !== false;
 }
 
-export interface RepoFollowupPolicy {
+interface RepoFollowupPolicy {
   followupOnSuggestions: boolean;
   maxFollowupRounds: number;
   maxConflictRounds: number;
@@ -1583,7 +1583,7 @@ export interface RepoFollowupPolicy {
  * suggestions on) and never throws. Callers that need fail-closed (auto-
  * merge) keep using `loadRepoSettings` directly.
  */
-export async function loadRepoFollowupPolicy(
+async function loadRepoFollowupPolicy(
   api: RepoSettingsFileApi,
   owner: string,
   repo: string,
@@ -1847,25 +1847,25 @@ export async function loadEffectivePickupLabel(
 }
 
 /** Effective branch prefix: the file's `branch_prefix` or `jumi`. Missing/invalid/unreadable falls back to `jumi`. */
-export function effectiveBranchPrefix(settings: RepoSettingsLoad): string {
+function effectiveBranchPrefix(settings: RepoSettingsLoad): string {
   if (settings.state !== "valid" || !settings.branchPrefix) return DEFAULT_BRANCH_PREFIX;
   return settings.branchPrefix;
 }
 
 /** Effective PR title template: the file's `pr_title` or `{title}`. */
-export function effectivePrTitleTemplate(settings: RepoSettingsLoad): string {
+function effectivePrTitleTemplate(settings: RepoSettingsLoad): string {
   if (settings.state !== "valid" || !settings.prTitle) return DEFAULT_PR_TITLE_TEMPLATE;
   return settings.prTitle;
 }
 
 /** Effective commit message template: the file's `commit_message` or the default. */
-export function effectiveCommitMessageTemplate(settings: RepoSettingsLoad): string {
+function effectiveCommitMessageTemplate(settings: RepoSettingsLoad): string {
   if (settings.state !== "valid" || !settings.commitMessage) return DEFAULT_COMMIT_MESSAGE_TEMPLATE;
   return settings.commitMessage;
 }
 
 /** Effective closing keyword: the file's `closing_keyword` or `closes`. */
-export function effectiveClosingKeyword(settings: RepoSettingsLoad): RepoClosingKeyword {
+function effectiveClosingKeyword(settings: RepoSettingsLoad): RepoClosingKeyword {
   if (settings.state !== "valid" || !settings.closingKeyword) return DEFAULT_CLOSING_KEYWORD;
   return settings.closingKeyword;
 }

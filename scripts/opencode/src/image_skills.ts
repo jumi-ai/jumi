@@ -4,7 +4,7 @@ import type { TraceKind } from "./engine.ts";
 import { errorMessage } from "./util/error.ts";
 
 /** Shared pack in the image. Reviewer and worker skills stay separate files. */
-export const IMAGE_SKILLS_ROOT = "/app/review-skills";
+const IMAGE_SKILLS_ROOT = "/app/review-skills";
 export const REVIEW_PROOF_SKILL = "review-proof";
 export const WORKER_PROOF_SKILL = "worker-proof";
 
@@ -12,7 +12,7 @@ export const WORKER_PROOF_SKILL = "worker-proof";
 export const IMAGE_SKILLS_PLUGIN = "shared";
 
 /** Workdir root Agy and Codex both scan for repo skills. */
-export const WORKDIR_AGENT_SKILLS = join(".agents", "skills");
+const WORKDIR_AGENT_SKILLS = join(".agents", "skills");
 
 /** Which image skills a spawn may see. Review gets the reviewer skill only; workers get the worker skill only. */
 export function imageSkillNamesForKind(kind: TraceKind | undefined): string[] {

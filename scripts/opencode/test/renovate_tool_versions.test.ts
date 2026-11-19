@@ -76,7 +76,7 @@ describe("renovate tool-versions config", () => {
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(14);
+    expect(managers?.length).toBe(18);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
@@ -130,6 +130,21 @@ describe("renovate tool-versions config", () => {
     expect(tofuManagers?.some((m) => m.matchStrings?.[0]?.includes("TOFU_ARM64_TAG"))).toBe(true);
     expect(kubeconformManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECONFORM_AMD64_TAG"))).toBe(true);
     expect(kubeconformManagers?.some((m) => m.matchStrings?.[0]?.includes("KUBECONFORM_ARM64_TAG"))).toBe(true);
+    // actionlint/shellcheck per-arch checksum managers move with the version like yq/uv/codex.
+    const actionlintManagers = managers?.filter((m) => m.depNameTemplate === "rhysd/actionlint");
+    const shellcheckManagers = managers?.filter((m) => m.depNameTemplate === "koalaman/shellcheck");
+    expect(actionlintManagers?.length).toBe(2);
+    expect(shellcheckManagers?.length).toBe(2);
+    for (const m of [...(actionlintManagers ?? []), ...(shellcheckManagers ?? [])]) {
+      expect(m?.datasourceTemplate).toBe("github-release-attachments");
+      expect(m?.matchStrings?.length).toBe(1);
+      expect(m?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
+      expect(m?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    }
+    expect(actionlintManagers?.some((m) => m.matchStrings?.[0]?.includes("ACTIONLINT_AMD64_TAG"))).toBe(true);
+    expect(actionlintManagers?.some((m) => m.matchStrings?.[0]?.includes("ACTIONLINT_ARM64_TAG"))).toBe(true);
+    expect(shellcheckManagers?.some((m) => m.matchStrings?.[0]?.includes("SHELLCHECK_AMD64_TAG"))).toBe(true);
+    expect(shellcheckManagers?.some((m) => m.matchStrings?.[0]?.includes("SHELLCHECK_ARM64_TAG"))).toBe(true);
     // Node and kubectl per-arch tags/SHAs are manual (see NOTE(node) and
     // NOTE(kubectl) in tool-versions.env): no manager may claim them.
     for (const m of managers ?? []) {
@@ -260,7 +275,7 @@ describe("worker image consumes the full pinned reference", () => {
     const checksWorkflow = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
     const buildScript = readFileSync(join(repoRoot, ".gitea/scripts/build-worker-image.sh"), "utf8");
     for (const content of [workerWorkflow, checksWorkflow]) {
-      expect(content).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(content).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
       expect(content).toContain("TEMURIN_TAG=${{ env.TEMURIN_TAG }}");
     }
     expect(buildScript).toContain('--build-arg "TEMURIN_TAG=${TEMURIN_TAG}"');
@@ -333,7 +348,7 @@ describe("node LTS pin coherence", () => {
       expect(text).toContain("NODE_VERSION=${{ env.NODE_VERSION }}");
       expect(text).toContain("NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}");
       expect(text).toContain("NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}");
-      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
     }
   });
 

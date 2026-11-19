@@ -13,9 +13,9 @@ import { buildCheckTrailer } from "./verdict.ts";
 
 export type ReviewMcpSeverity = "bug" | "risk" | "question" | "suggestion";
 
-export const REVIEW_MCP_SEVERITIES: readonly ReviewMcpSeverity[] = ["bug", "risk", "question", "suggestion"];
+const REVIEW_MCP_SEVERITIES: readonly ReviewMcpSeverity[] = ["bug", "risk", "question", "suggestion"];
 
-export function isReviewMcpSeverity(value: unknown): value is ReviewMcpSeverity {
+function isReviewMcpSeverity(value: unknown): value is ReviewMcpSeverity {
   return value === "bug" || value === "risk" || value === "question" || value === "suggestion";
 }
 
@@ -41,7 +41,7 @@ export interface ReviewMcpVerdict {
   reason?: string;
 }
 
-export interface ReviewRecordFinding {
+interface ReviewRecordFinding {
   id: string;
   path?: string;
   line?: number;
@@ -50,7 +50,7 @@ export interface ReviewRecordFinding {
   body: string;
 }
 
-export interface ReviewRecordCounts {
+interface ReviewRecordCounts {
   bug: number;
   risk: number;
   question: number;
@@ -120,7 +120,7 @@ export interface ReviewVerdictStoreOpts {
 const COULD_NOT_FINISH_RE =
   /could not finish|incomplete|no (output|artifact|verdict|findings)|dirty tree|head moved|missing/i;
 
-export function severityMarker(severity: ReviewMcpSeverity): string {
+function severityMarker(severity: ReviewMcpSeverity): string {
   switch (severity) {
     case "bug":
       return "🔴 bug";
@@ -247,9 +247,7 @@ function canonicalFindingLine(
  * count). A `❓ maintainer:` buried in the middle of both parts does not
  * count, matching the text parser which only reads the published first line.
  */
-export function isMaintainerStoreFinding(
-  finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">
-): boolean {
+function isMaintainerStoreFinding(finding: Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">): boolean {
   if (finding.severity !== "question") return false;
   // Agreement with the text parser runs on the canonical markdown, not the
   // raw input: each part is canonicalized separately by `toMarkdown()`, so a
@@ -259,7 +257,7 @@ export function isMaintainerStoreFinding(
 }
 
 /** Count the maintainer-only `❓` findings among stored findings. */
-export function countMaintainerStoreFindings(
+function countMaintainerStoreFindings(
   findings: ReadonlyArray<Pick<ReviewMcpFindingRecord, "severity" | "title" | "body">>
 ): number {
   let count = 0;

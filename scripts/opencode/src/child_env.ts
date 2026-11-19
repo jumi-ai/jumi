@@ -50,7 +50,7 @@ export const CHILD_PROVIDER_ALLOWLIST = [
   "XAI_API_KEY",
 ] as const;
 
-export const CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY";
+const CLAUDE_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
 function isForbiddenKey(key: string): boolean {
   if ((CHILD_FORBIDDEN_KEYS as readonly string[]).includes(key)) return true;
@@ -101,7 +101,7 @@ export function auditChildEnv(env: Record<string, string>, opts?: ChildEnvAuditO
 }
 
 /** Values the parent redacts from child output and published prose (git token only). */
-export function gitSecretsFromEnv(env: Record<string, string | undefined>): string[] {
+function gitSecretsFromEnv(env: Record<string, string | undefined>): string[] {
   const out: string[] = [];
   if (env.GIT_AUTH_TOKEN) out.push(env.GIT_AUTH_TOKEN);
   return out;

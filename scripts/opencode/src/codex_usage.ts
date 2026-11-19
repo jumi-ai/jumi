@@ -12,7 +12,7 @@
 import { type ModelTokenUsage, TOKEN_TYPES, type TokenType } from "./token_metrics.ts";
 import { isRecord } from "./util/object.ts";
 
-export interface CodexItem {
+interface CodexItem {
   type: string;
   id?: string;
   text?: string;

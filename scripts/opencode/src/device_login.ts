@@ -39,10 +39,10 @@ import { durableAuthPath, isXaiModel, readAuthFile, readXaiCredential } from "./
  */
 
 export const ORDINAL_DEVICE_LOGIN_PORT = 3010;
-export const XAI_PROVIDER = "xai";
-export const CODEX_PROVIDER = "codex";
+const XAI_PROVIDER = "xai";
+const CODEX_PROVIDER = "codex";
 export type DeviceLoginProvider = typeof XAI_PROVIDER | typeof CODEX_PROVIDER;
-export const DEVICE_LOGIN_PROVIDERS: readonly DeviceLoginProvider[] = [XAI_PROVIDER, CODEX_PROVIDER];
+const DEVICE_LOGIN_PROVIDERS: readonly DeviceLoginProvider[] = [XAI_PROVIDER, CODEX_PROVIDER];
 export const SUPERGROK_SUBSCRIPTION_METHOD = "SuperGrok Subscription";
 export const OPENCODE_DEVICE_LOGIN_CMD = [
   "opencode",
@@ -60,15 +60,15 @@ export const CODEX_DEVICE_LOGIN_CMD = ["codex", "login", "--device-auth"] as con
 export const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
 
 /** Device-code grant lifetime surfaced when the CLI prints no expiry. */
-export const DEVICE_CODE_TTL_MS = 15 * 60 * 1000;
+const DEVICE_CODE_TTL_MS = 15 * 60 * 1000;
 /** Budget to wait for the CLI to print the URL and code before failing closed. */
-export const DEVICE_LOGIN_START_TIMEOUT_MS = 30_000;
+const DEVICE_LOGIN_START_TIMEOUT_MS = 30_000;
 
-export const DEVICE_LOGIN_STATUS_PATH = "/api/device-login/status";
-export const DEVICE_LOGIN_START_PATH = "/api/device-login/start";
-export const DEVICE_LOGIN_CANCEL_PATH = "/api/device-login/cancel";
+const DEVICE_LOGIN_STATUS_PATH = "/api/device-login/status";
+const DEVICE_LOGIN_START_PATH = "/api/device-login/start";
+const DEVICE_LOGIN_CANCEL_PATH = "/api/device-login/cancel";
 
-export type DeviceLoginStateName = "idle" | "waiting" | "signed-in" | "expired" | "denied" | "error" | "cancelled";
+type DeviceLoginStateName = "idle" | "waiting" | "signed-in" | "expired" | "denied" | "error" | "cancelled";
 
 export interface DeviceLoginState {
   state: DeviceLoginStateName;
@@ -196,18 +196,18 @@ function stripTrailingPunct(value: string): string {
   return value.replace(/[.,;:)"'\]]+$/, "").trim() || value.trim();
 }
 
-export function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProvider {
+function isValidDeviceLoginProvider(value: unknown): value is DeviceLoginProvider {
   return value === XAI_PROVIDER || value === CODEX_PROVIDER;
 }
 
-export function normalizeDeviceLoginProvider(value: unknown): DeviceLoginProvider | undefined {
+function normalizeDeviceLoginProvider(value: unknown): DeviceLoginProvider | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim().toLowerCase();
   if (isValidDeviceLoginProvider(trimmed)) return trimmed;
   return undefined;
 }
 
-export function deviceLoginCmd(provider: DeviceLoginProvider): readonly string[] {
+function deviceLoginCmd(provider: DeviceLoginProvider): readonly string[] {
   return provider === CODEX_PROVIDER ? CODEX_DEVICE_LOGIN_CMD : OPENCODE_DEVICE_LOGIN_CMD;
 }
 
@@ -251,7 +251,7 @@ export function chainHasCodex(config: { runners: Record<string, RunnerConfig>; c
   return false;
 }
 
-export type SpawnLoginFn = (opts: {
+type SpawnLoginFn = (opts: {
   cmd: readonly string[];
   home: string;
   onStdout: (chunk: string) => void;
@@ -259,7 +259,7 @@ export type SpawnLoginFn = (opts: {
   onExit: (code: number | null, signal: string | null) => void;
 }) => { kill: (signal?: NodeJS.Signals) => void };
 
-export const defaultSpawnLogin: SpawnLoginFn = (opts) => {
+const defaultSpawnLogin: SpawnLoginFn = (opts) => {
   const env: Record<string, string | undefined> = { ...process.env, HOME: opts.home };
   // Mirror the Codex runner child (`src/codex.ts`): no `CODEX_HOME` override,
   // so the credential lands at `$HOME/.codex/auth.json` on this ordinal.
@@ -715,10 +715,7 @@ export interface OrdinalDeviceLoginServerOptions extends DeviceLoginManagerOptio
  * free-form command is accepted. Absent means xAI, so older boards keep
  * working. Returns undefined for an unknown provider name.
  */
-export function ordinalRequestProvider(
-  bodyText: string,
-  query: URLSearchParams
-): DeviceLoginProvider | undefined | "invalid" {
+function ordinalRequestProvider(bodyText: string, query: URLSearchParams): DeviceLoginProvider | undefined | "invalid" {
   let bodyProvider: unknown;
   try {
     const parsed = (bodyText.trim() === "" ? {} : JSON.parse(bodyText)) as Record<string, unknown>;
@@ -731,7 +728,7 @@ export function ordinalRequestProvider(
   return normalizeDeviceLoginProvider(raw) ?? "invalid";
 }
 
-export function deviceLoginRefusedMessage(reason: string | undefined, provider: DeviceLoginProvider): string {
+function deviceLoginRefusedMessage(reason: string | undefined, provider: DeviceLoginProvider): string {
   if (reason === "leased") return "Ordinal holds a leased job; refusing login";
   if (reason === "ephemeral-home") return "Refusing device login on an ephemeral HOME";
   if (reason === "no-codex-runner") return "codex runner not configured in chain";

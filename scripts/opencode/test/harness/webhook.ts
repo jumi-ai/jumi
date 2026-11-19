@@ -79,7 +79,7 @@ export function reviewerRequest(body: unknown, overrides: WebhookOverrides = {})
 }
 
 /** Worker-queue double used by the worker webhook tests. */
-export function makeWorkerQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
+function makeWorkerQueue(): WorkerQueueLike & { jobs: IssueJob[] } {
   const jobs: IssueJob[] = [];
   return {
     jobs,

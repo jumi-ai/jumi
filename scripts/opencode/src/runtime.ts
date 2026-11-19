@@ -51,21 +51,21 @@ export const STANDING_POD_RUNTIME: RuntimeName = "standing-pod";
  * than cloning on the host itself; the implementation lives here so the
  * runtime owns the bare cache and the worktree attach/detach.
  */
-export async function runtimeEnsureBareCache(
+async function runtimeEnsureBareCache(
   loop: ClaimedLoop,
   opts: { cloneUrl: string; giteaUrl: string; abortSignal?: AbortSignal; log: (message: string) => void }
 ): Promise<void> {
   return ensureBareCache(loop, opts);
 }
 
-export async function runtimeAttachIssueWorktree(
+async function runtimeAttachIssueWorktree(
   loop: ClaimedLoop,
   opts: { branch: string; defaultBranch: string; abortSignal?: AbortSignal; log: (message: string) => void }
 ): Promise<string> {
   return attachIssueWorktree(loop, opts);
 }
 
-export async function runtimeAttachPrWorktree(
+async function runtimeAttachPrWorktree(
   loop: ClaimedLoop,
   opts: { branch: string; defaultBranch: string; abortSignal?: AbortSignal; log: (message: string) => void }
 ): Promise<{ headSha: string; baseSha: string } | ClaimedEarlyResult> {

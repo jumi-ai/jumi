@@ -49,9 +49,9 @@ import {
 import type { DeliveryDedupe } from "./webhook_delivery.ts";
 import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
 
-export const JUMI_LABEL = "jumi";
-export const GITHUB_ORIGIN = "https://github.com";
-export const GITHUB_REVIEW_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
+const JUMI_LABEL = "jumi";
+const GITHUB_ORIGIN = "https://github.com";
+const GITHUB_REVIEW_ACTIONS = new Set(["opened", "reopened", "synchronize", "ready_for_review"]);
 const GITHUB_FOLLOWUP_EVENTS = new Set(["issue_comment", "pull_request_review", "pull_request_review_comment"]);
 const GITHUB_FOLLOWUP_CREATED = new Set(["created", "submitted"]);
 const GITHUB_CI_EVENTS = new Set(["workflow_job", "workflow_run"]);
@@ -73,7 +73,7 @@ export type GithubMailboxConfig = {
   automergeEnabled?: boolean;
 };
 
-export type GithubReviewQueue = {
+type GithubReviewQueue = {
   enqueue(job: ReviewJob, opts?: import("./review_jobs.ts").EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 };
 
@@ -164,7 +164,7 @@ function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
 
-export function githubMailboxSecret(config: GithubMailboxConfig): string {
+function githubMailboxSecret(config: GithubMailboxConfig): string {
   if (config.githubWebhookSecret) return config.githubWebhookSecret;
   if (config.forge === "github") return config.webhookSecret;
   return "";
@@ -208,17 +208,17 @@ export function hasJumiLabel(issue: IssueAssignees): boolean {
   return hasLabel(issue, JUMI_LABEL);
 }
 
-export function pickupLabelForPolicy(policy: { pickupLabel?: string } | undefined): string {
+function pickupLabelForPolicy(policy: { pickupLabel?: string } | undefined): string {
   const raw = policy?.pickupLabel;
   return typeof raw === "string" && raw.trim() ? raw.trim() : JUMI_LABEL;
 }
 
-export function hasPickupLabel(issue: IssueAssignees, pickupLabel?: string): boolean {
+function hasPickupLabel(issue: IssueAssignees, pickupLabel?: string): boolean {
   const label = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
   return hasLabel(issue, label);
 }
 
-export function isJumiLabel(label: { name?: string } | string | null | undefined, pickupLabel?: string): boolean {
+function isJumiLabel(label: { name?: string } | string | null | undefined, pickupLabel?: string): boolean {
   const name = typeof label === "string" ? label : (label?.name ?? "");
   const needle = (pickupLabel ?? "").trim() ? (pickupLabel as string).trim() : JUMI_LABEL;
   return name.toLowerCase() === needle.toLowerCase();
@@ -293,7 +293,7 @@ export async function effectiveGithubPolicyForRepo(
   };
 }
 
-export function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
+function isFactoryBotSender(sender: { login?: string } | undefined, botUsername: string): boolean {
   if (!sender?.login) return false;
   return sender.login.toLowerCase() === botUsername.toLowerCase();
 }
@@ -351,7 +351,7 @@ export function shouldEnqueueGithubIssue(
   return { type: "skip", reason: `unsupported action ${payload.action}` };
 }
 
-export function validateGithubReview(
+function validateGithubReview(
   payload: ReturnType<typeof parsePullRequestPayload>,
   policy: WebhookPolicy,
   opts?: { reviewDrafts?: boolean }

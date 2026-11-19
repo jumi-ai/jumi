@@ -23,10 +23,10 @@ export const CODEX_DEFAULT_EFFORT = "high";
  * Listed under `required constraints` so a later removal is a major bump.
  */
 export const ANTIGRAVITY_HOMELAB_CONSTRAINT = "Antigravity refused unless FORGE=github";
-export const SYNTHESIZED_PRIMARY = "primary";
-export const SYNTHESIZED_FALLBACK = "fallback";
+const SYNTHESIZED_PRIMARY = "primary";
+const SYNTHESIZED_FALLBACK = "fallback";
 
-export interface OpenCodeRunnerConfig {
+interface OpenCodeRunnerConfig {
   type: typeof OPENCODE_RUNNER_TYPE;
   model: string;
   variant?: string;
@@ -40,7 +40,7 @@ export interface OpenCodeRunnerConfig {
   authEnv?: string;
 }
 
-export interface ClaudeRunnerConfig {
+interface ClaudeRunnerConfig {
   type: typeof CLAUDE_RUNNER_TYPE;
   model: string;
   effort?: string;
@@ -50,7 +50,7 @@ export interface ClaudeRunnerConfig {
   authEnv?: string;
 }
 
-export interface AgyRunnerConfig {
+interface AgyRunnerConfig {
   type: typeof AGY_RUNNER_TYPE;
   model: string;
   effort?: string;
@@ -60,7 +60,7 @@ export interface AgyRunnerConfig {
   authEnv?: string;
 }
 
-export interface CodexRunnerConfig {
+interface CodexRunnerConfig {
   type: typeof CODEX_RUNNER_TYPE;
   model: string;
   effort: string;
@@ -100,7 +100,7 @@ export function usesEffort(
 
 export type NamedRunner = RunnerConfig & { name: string };
 
-export interface IndependenceGroupMember {
+interface IndependenceGroupMember {
   type: string;
   model: string;
 }
@@ -113,7 +113,7 @@ export interface IndependentReviewConfig {
 export const RUNNER_SELECTION_ORDERED = "ordered" as const;
 export const RUNNER_SELECTION_RANDOM_START = "random-start" as const;
 export type RunnerSelectionMode = typeof RUNNER_SELECTION_ORDERED | typeof RUNNER_SELECTION_RANDOM_START;
-export const RUNNER_SELECTION_MODES: readonly RunnerSelectionMode[] = [
+const RUNNER_SELECTION_MODES: readonly RunnerSelectionMode[] = [
   RUNNER_SELECTION_ORDERED,
   RUNNER_SELECTION_RANDOM_START,
 ];
@@ -262,7 +262,7 @@ function parseRunner(name: string, spec: unknown): RunnerConfig {
   fail(`Unknown runner type: ${String(spec.type)}`);
 }
 
-export function parseIndependentReview(raw: unknown): IndependentReviewConfig | undefined {
+function parseIndependentReview(raw: unknown): IndependentReviewConfig | undefined {
   if (raw == null) return undefined;
   if (!isPlainObject(raw)) fail(`Invalid ${RUNNERS_FILE_ENV}: independentReview must be an object`);
   const enabled = (raw as Record<string, unknown>).enabled;
@@ -321,7 +321,7 @@ export function parseIndependentReview(raw: unknown): IndependentReviewConfig | 
   return { enabled: true, groups };
 }
 
-export function parseRunnerSelection(raw: unknown): RunnerSelectionMode | undefined {
+function parseRunnerSelection(raw: unknown): RunnerSelectionMode | undefined {
   if (raw == null) return undefined;
   if (raw === RUNNER_SELECTION_ORDERED) return RUNNER_SELECTION_ORDERED;
   if (raw === RUNNER_SELECTION_RANDOM_START) return RUNNER_SELECTION_RANDOM_START;
@@ -549,7 +549,7 @@ export function describeAttemptOrder(chain: readonly NamedRunner[]): string {
  * the ledger row when a previous attempt failed; `-1` when unknown so the
  * caller falls back to a fresh draw.
  */
-export function indexOfRunnerByName(chain: readonly NamedRunner[], name: string | null | undefined): number {
+function indexOfRunnerByName(chain: readonly NamedRunner[], name: string | null | undefined): number {
   if (!name) return -1;
   return chain.findIndex((runner) => runner.name === name);
 }
@@ -646,7 +646,7 @@ export interface RunnerStamp {
 }
 
 /** Normalized credential marker: `"api-key"` for API-key runners, else absent. */
-export function runnerAuth(runner: { auth?: string | undefined }): string | undefined {
+function runnerAuth(runner: { auth?: string | undefined }): string | undefined {
   return runner.auth === RUNNER_AUTH_API_KEY ? RUNNER_AUTH_API_KEY : undefined;
 }
 
@@ -679,5 +679,3 @@ export function appendRunnerStamp(body: string, runner: RunnerStamp | string | u
   const text = body.trimEnd();
   return text ? `${text}\n\n${line}` : line;
 }
-
-export { buildOpenCodeArgs } from "./git.ts";

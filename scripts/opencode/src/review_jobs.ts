@@ -39,19 +39,18 @@ import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 export {
   createBunSqlClient,
   isQueueUnavailable,
-  pgTextArrayLiteral,
   QueueUnavailableError,
 } from "./sql_client.ts";
 
-export const REVIEW_JOB_STATES = ["queued", "leased", "succeeded", "skipped", "failed", "cancelled"] as const;
+const REVIEW_JOB_STATES = ["queued", "leased", "succeeded", "skipped", "failed", "cancelled"] as const;
 export type ReviewJobState = (typeof REVIEW_JOB_STATES)[number];
 
-export const JOB_KINDS = ["review", "implement", "follow-up", "conflict"] as const;
+const JOB_KINDS = ["review", "implement", "follow-up", "conflict"] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
 export const REVIEW_KIND: JobKind = "review";
 export const WORKER_JOB_KINDS: readonly JobKind[] = ["implement", "follow-up", "conflict"];
 
-export interface IssueJobPayload {
+interface IssueJobPayload {
   issueNumber: number;
   title: string;
   body: string;
@@ -76,7 +75,7 @@ export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
 
 /** Prefix for a terminal implement skipped behind open issue dependencies. */
-export const BLOCKED_ON_PREFIX = "blocked on ";
+const BLOCKED_ON_PREFIX = "blocked on ";
 
 /** True when a terminal implement reason is a dependency-blocked row. */
 export function isBlockedOnReason(reason: string | null | undefined): boolean {
@@ -566,7 +565,7 @@ export function stuckIdempotencyMismatch(
  * `follow-up`; the live `mergeable === false` check in `stuckKickJobKind`
  * remains the forge-state override.
  */
-export function isConflictStuckReason(reason: string | null | undefined): boolean {
+function isConflictStuckReason(reason: string | null | undefined): boolean {
   return parseSkipWhy(reason).kickKind === "conflict";
 }
 
@@ -576,7 +575,7 @@ export function isConflictStuckReason(reason: string | null | undefined): boolea
  * (the same `conflict:<owner>/<repo>#<closer>:<head>` identity the router
  * uses for a conflict wake); any other stuck latch queues `follow-up`.
  */
-export function stuckKickJobKind(input: { mergeable?: boolean | null }, skipReason: string | null): JobKind {
+function stuckKickJobKind(input: { mergeable?: boolean | null }, skipReason: string | null): JobKind {
   if (input.mergeable === false) return "conflict";
   if (parseSkipWhy(skipReason).kickKind === "conflict") return "conflict";
   return "follow-up";
@@ -608,7 +607,7 @@ function implementIdempotencyMismatchOutcome(
   };
 }
 
-export function emptyIssueSkipLatch(): IssueSkipLatch {
+function emptyIssueSkipLatch(): IssueSkipLatch {
   return { generation: 0, skipReason: null };
 }
 
@@ -717,7 +716,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
 `;
 
-export const REVIEW_KICKS_SCHEMA_SQL = `
+const REVIEW_KICKS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS review_kicks (
   id BIGSERIAL PRIMARY KEY,
   idempotency_key TEXT,
@@ -738,7 +737,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS review_kicks_idempotency_key
   WHERE idempotency_key IS NOT NULL AND idempotency_key <> '';
 `;
 
-export const ROLE_GATES_SCHEMA_SQL = `
+const ROLE_GATES_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS role_gates (
   role TEXT PRIMARY KEY,
   infra_consecutive INTEGER NOT NULL DEFAULT 0,
@@ -748,7 +747,7 @@ CREATE TABLE IF NOT EXISTS role_gates (
 );
 `;
 
-export const RUNNER_COOLDOWNS_SCHEMA_SQL = `
+const RUNNER_COOLDOWNS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS runner_cooldowns (
   role TEXT NOT NULL,
   runner TEXT NOT NULL,
@@ -761,7 +760,7 @@ CREATE TABLE IF NOT EXISTS runner_cooldowns (
 );
 `;
 
-export const REVIEW_SUGGESTIONS_SCHEMA_SQL = `
+const REVIEW_SUGGESTIONS_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS jumi_review_suggestions (
   id BIGSERIAL PRIMARY KEY,
   runner TEXT NOT NULL,
@@ -788,7 +787,7 @@ export interface RoleGateStatus {
   quotaUntil: number | null;
 }
 
-export function emptyRoleGateStatus(role: RoleGateRole): RoleGateStatus {
+function emptyRoleGateStatus(role: RoleGateRole): RoleGateStatus {
   return {
     role,
     mayStart: true,
@@ -800,7 +799,7 @@ export function emptyRoleGateStatus(role: RoleGateRole): RoleGateStatus {
   };
 }
 
-export function roleGateStatusFromMs(input: {
+function roleGateStatusFromMs(input: {
   role: RoleGateRole;
   infraConsecutive: number;
   infraOpenUntil: number | null;
@@ -832,7 +831,7 @@ export function hasPersistedResult(row: ReviewJobRecord): boolean {
   return Boolean(row.error && !isBackoffMarker(row.error));
 }
 
-export function maxAttemptsReasonFor(kind: JobKind): string {
+function maxAttemptsReasonFor(kind: JobKind): string {
   return isWorkerKind(kind) ? WORKER_MAX_ATTEMPTS_REASON : MAX_ATTEMPTS_REASON;
 }
 
@@ -877,7 +876,7 @@ function hasNewerInflight(rows: ReviewJobRecord[], job: ReviewJob, key: string):
   );
 }
 
-export function workerJobKind(job: IssueJob): JobKind {
+function workerJobKind(job: IssueJob): JobKind {
   return job.mode ?? "implement";
 }
 
@@ -896,7 +895,7 @@ export function workerJobKey(job: IssueJob): string {
   return base;
 }
 
-export function issueJobPayload(job: IssueJob): IssueJobPayload {
+function issueJobPayload(job: IssueJob): IssueJobPayload {
   return {
     issueNumber: job.issueNumber,
     title: job.title,
@@ -3175,7 +3174,7 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
  * migrators serialize instead of conflicting. `SKIP LOCKED` on the reclaim
  * and lease paths keeps the worker safe alongside the router.
  */
-export async function withLedgerMigrationLock(sql: SqlClient, fn: (tx: SqlClient) => Promise<void>): Promise<void> {
+async function withLedgerMigrationLock(sql: SqlClient, fn: (tx: SqlClient) => Promise<void>): Promise<void> {
   await sql.begin(async (tx) => {
     await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, ["jumi_ledger_migrate"]);
     await fn(tx);

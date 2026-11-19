@@ -18,7 +18,7 @@
  * token, so baking in one forge host would leave the other factory open.
  */
 
-export const PERMISSION_DENY_RE = /Permission denied:\s*\w+|Blocked by configuration policy/i;
+const PERMISSION_DENY_RE = /Permission denied:\s*\w+|Blocked by configuration policy/i;
 
 export function isPermissionDenyText(text: unknown): boolean {
   if (typeof text !== "string" || !text) return false;

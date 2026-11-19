@@ -23,8 +23,8 @@ export type FollowUpWebhookPolicy = WebhookPolicy &
     pickupLabel?: string;
   };
 
-export const SENDER_CANNOT_PUSH = "sender lacks write access";
-export const SENDER_NOT_TRUSTED = "sender not on trusted list";
+const SENDER_CANNOT_PUSH = "sender lacks write access";
+const SENDER_NOT_TRUSTED = "sender not on trusted list";
 
 export type FollowUpWebhookDecision =
   | { type: "enqueue"; job: Omit<IssueJob, "delivery" | "receivedAt"> }
@@ -55,7 +55,7 @@ export function loginInList(login: string | undefined, logins: readonly string[]
   return false;
 }
 
-export function isPullThread(issue: GiteaIssue): boolean {
+function isPullThread(issue: GiteaIssue): boolean {
   return isPullRequestIssue(issue) || issue.is_pull === true;
 }
 
@@ -104,7 +104,7 @@ export function parsePullRejectedPayload(rawBody: Uint8Array): GiteaPRPayload {
   return parsed as unknown as GiteaPRPayload;
 }
 
-export function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): GiteaPR {
+function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): GiteaPR {
   return {
     id: issue.id,
     number: issue.number,
@@ -136,7 +136,7 @@ export function prFromCommentIssue(issue: GiteaIssue, repository: GiteaRepo): Gi
   };
 }
 
-export function followUpIssueNumber(
+function followUpIssueNumber(
   pr: GiteaPR,
   issue: GiteaIssue | undefined,
   botUsername: string,

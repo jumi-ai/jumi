@@ -9,11 +9,11 @@ export const ATTACHMENTS_MANIFEST = "JUMI_ATTACHMENTS.md";
 const ATTACHMENTS_EXCLUDE = `${ATTACHMENTS_DIR}/`;
 
 /** Caps keep one issue from exhausting the worktree or the child context. */
-export const MAX_ATTACHMENT_FILES = 10;
-export const MAX_ATTACHMENT_BYTES_PER_FILE = 2 * 1024 * 1024;
-export const MAX_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
+const MAX_ATTACHMENT_FILES = 10;
+const MAX_ATTACHMENT_BYTES_PER_FILE = 2 * 1024 * 1024;
+const MAX_ATTACHMENT_TOTAL_BYTES = 5 * 1024 * 1024;
 
-export interface ForgeAttachment {
+interface ForgeAttachment {
   id?: number;
   uuid?: string;
   name: string;
@@ -185,7 +185,7 @@ function excludeListsAttachments(text: string): boolean {
   });
 }
 
-export async function ensureAttachmentsIgnored(worktree: string): Promise<boolean> {
+async function ensureAttachmentsIgnored(worktree: string): Promise<boolean> {
   const excludePath = await attachmentsExcludePath(worktree);
   if (!excludePath) return false;
   await mkdir(dirname(excludePath), { recursive: true });
@@ -201,7 +201,7 @@ export async function ensureAttachmentsIgnored(worktree: string): Promise<boolea
   return true;
 }
 
-export function isAttachmentsPath(path: string): boolean {
+function isAttachmentsPath(path: string): boolean {
   return path === ATTACHMENTS_DIR || path.startsWith(`${ATTACHMENTS_DIR}/`);
 }
 

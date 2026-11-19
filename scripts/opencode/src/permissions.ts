@@ -31,7 +31,7 @@ export function hasWriteAccessFromPermission(info: CollaboratorPermission | unde
   return hasWritePermission(info.permission, info.role_name);
 }
 
-export function normalizePermission(permission: string | undefined | null): string {
+function normalizePermission(permission: string | undefined | null): string {
   if (typeof permission !== "string" || !permission.trim()) return "none";
   return permission.trim().toLowerCase();
 }

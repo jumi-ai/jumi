@@ -1,6 +1,6 @@
 export type CheckState = "pending" | "success" | "error" | "failure" | "warning";
 
-export interface Actor {
+interface Actor {
   login: string;
 }
 
@@ -61,7 +61,7 @@ export interface LinkedIssue {
   is_pull?: boolean;
 }
 
-export interface PullHead {
+interface PullHead {
   ref: string;
   sha: string;
   repo: { full_name: string; clone_url?: string } | null;
@@ -108,7 +108,7 @@ export interface PullFile {
   patch?: string;
 }
 
-export interface PullCommitIdentity {
+interface PullCommitIdentity {
   name?: string;
   email?: string;
   login?: string;
@@ -242,7 +242,7 @@ export interface AttachmentMeta {
 }
 
 /** Parent-side attachment reads. Optional so existing fakes keep working. */
-export interface AttachmentSupport {
+interface AttachmentSupport {
   listIssueAttachments?(owner: string, repo: string, index: number): Promise<AttachmentMeta[]>;
   listIssueCommentAttachments?(owner: string, repo: string, commentId: number): Promise<AttachmentMeta[]>;
   downloadAttachmentBytes?(url: string): Promise<Uint8Array>;

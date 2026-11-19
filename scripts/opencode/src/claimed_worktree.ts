@@ -31,9 +31,7 @@ import {
   validateCloneUrl,
 } from "./workspace.ts";
 
-export { ENGINE_TEMP_DIR } from "./engine_scratch.ts";
-
-export const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 export type ClaimedEarlyResult = { status: "skipped"; reason: string } | { status: "cancelled" };
 
