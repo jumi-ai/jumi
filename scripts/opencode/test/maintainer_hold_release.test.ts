@@ -326,6 +326,31 @@ describe("tryReleaseMaintainerHold on a non-Jumi PR", () => {
     expect(statuses.filter((status) => status.state === "success")).toHaveLength(0);
     expect(logged.some((line) => line.includes("maintainer hold skipped"))).toBe(true);
   });
+
+  test("status write failure skips without reporting released", async () => {
+    const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+    const api = releaseApi({ statuses });
+    (api as { createCommitStatus: unknown }).createCommitStatus = async () => {
+      throw new Error("forge exploded");
+    };
+    const logged: string[] = [];
+    const outcome = await tryReleaseMaintainerHold({
+      api: api as never,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 15,
+      senderLogin: "kirmanak",
+      botUsername: "jumi",
+      trustedSenderLogins: [],
+      followupIgnoreLogins: [],
+      defaultBranch: "main",
+      logger: (message) => logged.push(message),
+    });
+    expect(outcome).toEqual({ outcome: "skip", reason: "failed to post status" });
+    expect(statuses).toHaveLength(0);
+    expect(logged.some((line) => line.includes("maintainer hold released for"))).toBe(false);
+    expect(logged.some((line) => line.includes("failed to post status"))).toBe(true);
+  });
 });
 
 describe("router release-only path on both forges", () => {
@@ -404,6 +429,34 @@ describe("router release-only path on both forges", () => {
     expect(queue.jobs).toHaveLength(0);
     expect(statuses).toHaveLength(0);
     expect(await sits.get("kirmanak", "demo", 15)).toMatchObject({ reason: "no-write-access" });
+  });
+
+  test("gitea issue_comment with a status write failure skips without clearing the sit", async () => {
+    const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+    const base = releaseApi({ statuses });
+    const api = {
+      ...base,
+      createCommitStatus: async () => {
+        throw new Error("forge exploded");
+      },
+      getRepo: async () => makeRepo(),
+    };
+    const queue = makeQueue();
+    const sits = new MemoryRouterSitStore();
+    const logs: string[] = [];
+    const handler = createWorkerFetchHandler(makeWorkerConfig(), {
+      queue,
+      api: api as never,
+      sits,
+      logger: (message: string) => logs.push(message),
+    });
+    const response = await handler(await workerIssueCommentRequest(giteaCommentRequest(), { event: "issue_comment" }));
+    expect(response.status).toBe(202);
+    expect(await responseJson(response)).toEqual({ skipped: "failed to post status" });
+    expect(queue.jobs).toHaveLength(0);
+    expect(statuses).toHaveLength(0);
+    expect(logs.some((line) => line.includes("maintainer hold released for kirmanak/demo#15"))).toBe(false);
+    expect(logs.some((line) => line.includes("failed to post status"))).toBe(true);
   });
 
   test("github pull_request_review on a non-Jumi PR releases with no worker job", async () => {

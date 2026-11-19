@@ -17,7 +17,8 @@ import {
   isMaintainerQuestionsHoldEnabled,
   loadSettingsSnapshot,
 } from "./repo_settings.ts";
-import { type HoldStatusPort, postSuggestionHoldSuccess } from "./suggestion_hold.ts";
+import { type HoldStatusPort, postSuggestionHoldSuccessOrThrow } from "./suggestion_hold.ts";
+import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
 
 export type MaintainerHoldReleaseApi = Pick<
@@ -183,7 +184,14 @@ export async function tryReleaseMaintainerHold(opts: {
   });
   if (assessment.releasable) {
     const targetUrl = pr.html_url || undefined;
-    await postSuggestionHoldSuccess(api, opts.owner, opts.repo, headSha, assessment.description, targetUrl);
+    try {
+      await postSuggestionHoldSuccessOrThrow(api, opts.owner, opts.repo, headSha, assessment.description, targetUrl);
+    } catch (err) {
+      log(
+        `maintainer hold release failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: failed to post status (${errorMessage(err)})`
+      );
+      return { outcome: "skip", reason: "failed to post status" };
+    }
     log(
       `maintainer hold released for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${assessment.openMaintainers} answered`
     );
