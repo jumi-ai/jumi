@@ -1,4 +1,4 @@
-export interface AssigneeLike {
+interface AssigneeLike {
   login?: string;
   username?: string;
 }
@@ -27,7 +27,7 @@ export function isAssignedToBot(issue: IssueAssignees, botUsername: string): boo
   return (issue.assignees ?? []).some((assignee) => loginOf(assignee) === bot);
 }
 
-export function labelName(label: LabelLike): string {
+function labelName(label: LabelLike): string {
   return typeof label === "string" ? label : (label.name ?? "");
 }
 

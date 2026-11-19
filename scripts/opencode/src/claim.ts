@@ -105,7 +105,7 @@ export async function readSkipLatchGeneration(path: string): Promise<number> {
   return 0;
 }
 
-export async function writeSkipLatchGeneration(path: string, generation: number): Promise<void> {
+async function writeSkipLatchGeneration(path: string, generation: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify({ generation }, null, 2)}\n`);
 }

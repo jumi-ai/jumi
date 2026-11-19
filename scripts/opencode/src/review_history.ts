@@ -14,7 +14,7 @@ export const MAX_RECENT_HISTORY_COMMITS = 8;
 /** About 2 KiB of text: keeps the block cheap, including for Renovate PRs. */
 export const MAX_RECENT_HISTORY_BYTES = 2 * 1024;
 /** Stable target ref the checkout prepares; the base branch history lives here. */
-export const RECENT_HISTORY_REF = "jumi/target";
+const RECENT_HISTORY_REF = "jumi/target";
 
 export interface RecentHistoryCommit {
   sha: string;

@@ -44,7 +44,7 @@ export const BOARD_MCP_TOKEN_ENV = "BOARD_MCP_TOKEN";
 export const BOARD_MCP_KICK_TOKEN_ENV = "BOARD_MCP_KICK_TOKEN";
 
 /** MCP tool that performs the same kick as `POST /api/board/kick`, local factory only. */
-export const BOARD_MCP_KICK_TOOL_NAME = "kick";
+const BOARD_MCP_KICK_TOOL_NAME = "kick";
 
 /** Kick-log actor for every MCP kick. Never taken from a tool argument. */
 export const BOARD_MCP_KICK_ACTOR = "board-mcp";
@@ -52,11 +52,11 @@ export const BOARD_MCP_KICK_ACTOR = "board-mcp";
 /** Board listener path serving the Streamable HTTP endpoint. POST only. */
 export const BOARD_MCP_PATH = "/mcp";
 
-export const BOARD_MCP_SERVER_NAME = "jumi-board";
+const BOARD_MCP_SERVER_NAME = "jumi-board";
 
-export const BOARD_MCP_TOOL_NAMES = ["board", "issue_history", "runners"] as const;
+const BOARD_MCP_TOOL_NAMES = ["board", "issue_history", "runners"] as const;
 
-export type BoardMcpToolName = (typeof BOARD_MCP_TOOL_NAMES)[number];
+type BoardMcpToolName = (typeof BOARD_MCP_TOOL_NAMES)[number];
 
 /** Ledger strings longer than this are cut per field; the marker shows the cut. */
 export const BOARD_MCP_TEXT_MAX_BYTES = 2 * 1024;
@@ -64,7 +64,7 @@ export const BOARD_MCP_TEXT_MAX_BYTES = 2 * 1024;
 export const BOARD_MCP_TRUNCATION_MARKER = "…[truncated at 2 KiB]";
 
 /** Newest `issue_history` rows returned at most. */
-export const BOARD_MCP_HISTORY_LIMIT = 50;
+const BOARD_MCP_HISTORY_LIMIT = 50;
 
 export interface BoardMcpDeps {
   store: ReviewJobStore;
@@ -90,7 +90,7 @@ export interface BoardMcpDeps {
 }
 
 /** Cut a ledger string at a byte boundary; short strings pass through untouched. */
-export function truncateBoardMcpText(text: string, maxBytes: number = BOARD_MCP_TEXT_MAX_BYTES): string {
+function truncateBoardMcpText(text: string, maxBytes: number = BOARD_MCP_TEXT_MAX_BYTES): string {
   const encoder = new TextEncoder();
   if (encoder.encode(text).byteLength <= maxBytes) return text;
   let out = "";
@@ -135,7 +135,7 @@ function mcpError(text: string): { content: Array<{ type: "text"; text: string }
   return { content: [{ type: "text", text }], isError: true };
 }
 
-export function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
+function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
   const store = deps.store;
   const forge = (deps.forge ?? "gitea").trim() || "gitea";
   const secrets = deps.secrets ?? [];

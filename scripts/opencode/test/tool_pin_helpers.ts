@@ -1,9 +1,9 @@
 export const STABLE_SEMVER_RE = /^[0-9]+\.[0-9]+\.[0-9]+$/;
-export const HEX64_RE = /^[0-9a-f]{64}$/;
+const HEX64_RE = /^[0-9a-f]{64}$/;
 
-export type TagScheme = "rust-v" | "v" | "bare";
+type TagScheme = "rust-v" | "v" | "bare";
 
-export function tagForScheme(version: string, scheme: TagScheme): string {
+function tagForScheme(version: string, scheme: TagScheme): string {
   if (scheme === "rust-v") return `rust-v${version}`;
   if (scheme === "v") return `v${version}`;
   return version;

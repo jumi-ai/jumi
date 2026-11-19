@@ -12,7 +12,7 @@ import { reviewVerdictView } from "./verdict.ts";
  * pushes, never touches CI, and never creates an empty commit.
  */
 
-export const KICK_PATHS = new Set(["/api/board/kick", "/board/kick"]);
+const KICK_PATHS = new Set(["/api/board/kick", "/board/kick"]);
 
 /**
  * Reopen-a-pull kick ("wake without a push").
@@ -22,7 +22,7 @@ export const KICK_PATHS = new Set(["/api/board/kick", "/board/kick"]);
  * never pushes and never inserts a job. The existing reopen webhook wake is
  * the enqueue; the board waits for that row.
  */
-export const REOPEN_KICK_ID = "reopen";
+const REOPEN_KICK_ID = "reopen";
 
 export function isReopenKickId(kick: string | null | undefined): boolean {
   return typeof kick === "string" && kick.trim() === REOPEN_KICK_ID;
@@ -37,7 +37,7 @@ export function isReopenKickId(kick: string | null | undefined): boolean {
  * request itself; the worker owns PR creation and already skips when a
  * closer exists. The label change alone is never the wake.
  */
-export const IMPLEMENT_KICK_ID = "implement";
+const IMPLEMENT_KICK_ID = "implement";
 
 export function isImplementKickId(kick: string | null | undefined): boolean {
   return typeof kick === "string" && kick.trim() === IMPLEMENT_KICK_ID;
@@ -55,7 +55,7 @@ export function isImplementKickId(kick: string | null | undefined): boolean {
  * is the wake. Distinct from the implement retry, which only retries a
  * no-changes implement and refuses a succeeded implement.
  */
-export const STUCK_KICK_ID = "stuck";
+const STUCK_KICK_ID = "stuck";
 
 /** Accepted aliases for the stuck-latch kick. The board sends STUCK_KICK_ID. */
 export const STUCK_KICK_ALIASES: ReadonlySet<string> = new Set(["stuck", "follow-up", "followup", "stuck-latch"]);
@@ -69,7 +69,7 @@ export function isKickPath(pathname: string): boolean {
   return KICK_PATHS.has(normalized);
 }
 
-export interface KickItem {
+interface KickItem {
   owner: string;
   repo: string;
   /** PR number (review jobs only). */
@@ -85,28 +85,28 @@ export interface KickRequest extends KickItem {
   idempotencyKey: string;
 }
 
-export type KickRejectCode = "bad-request" | "not-found" | "stale-kick" | "conflict" | "not-kickable";
+type KickRejectCode = "bad-request" | "not-found" | "stale-kick" | "conflict" | "not-kickable";
 
-export interface KickNotKickable {
+interface KickNotKickable {
   kickable: false;
   code: KickRejectCode;
   /** Why there is no kick. A new commit would fail the same way for auth/forge. */
   why: string;
 }
 
-export interface Kickable {
+interface Kickable {
   kickable: true;
 }
 
 const STATUS_DESCRIPTION_RE =
   /status description|description[\s\S]{0,80}(reject|422|validat|too long|too large|exceed|invalid)|422[\s\S]{0,80}description|validat[\s\S]{0,80}description/i;
 
-export function isStatusDescriptionRejection(reason: string | null | undefined): boolean {
+function isStatusDescriptionRejection(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return STATUS_DESCRIPTION_RE.test(reason);
 }
 
-export function isAuthFailureReason(reason: string | null | undefined): boolean {
+function isAuthFailureReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   return looksLikeProviderAuthDeath(reason) || reason.includes(AUTH_DEATH_REASON);
 }
@@ -198,7 +198,7 @@ export function disabledKickWhy(reason: string): string | undefined {
 }
 
 /** Terminal states eligible for a same-commit requeue. Succeeded/cancelled never are. */
-export function isKickableTerminalState(state: string): boolean {
+function isKickableTerminalState(state: string): boolean {
   return state === "failed" || state === "skipped";
 }
 
@@ -248,7 +248,7 @@ export function parseKickBody(body: unknown, headerIdempotencyKey: string): Kick
 }
 
 /** Current reason of a terminal row: the publish reason, else the error text. */
-export function terminalReasonOf(row: { resultReason: string | null; error: string | null }): string {
+function terminalReasonOf(row: { resultReason: string | null; error: string | null }): string {
   return (row.resultReason ?? row.error ?? "").trim();
 }
 

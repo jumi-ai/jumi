@@ -31,7 +31,7 @@ function modelLabel(value: unknown, fallback = "unknown"): string {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
-export function parseClaudeModelUsage(modelUsage: unknown): ModelTokenUsage | undefined {
+function parseClaudeModelUsage(modelUsage: unknown): ModelTokenUsage | undefined {
   if (!isRecord(modelUsage)) return undefined;
   const usage: ModelTokenUsage = new Map();
   for (const [key, value] of Object.entries(modelUsage)) {

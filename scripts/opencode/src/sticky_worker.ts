@@ -146,7 +146,7 @@ export function logStickyWorkerSelection(
 }
 
 /** Worktree dirtiness probe backed by parent git status (excludes scratch). */
-export function worktreeDirtyProbe(loop: ClaimedLoop): () => Promise<boolean | undefined> {
+function worktreeDirtyProbe(loop: ClaimedLoop): () => Promise<boolean | undefined> {
   return async () => {
     try {
       const porcelain = await worktreePorcelain(loop);
@@ -228,9 +228,7 @@ export async function buildActiveWorkerEngine(input: {
   return { chain: activeChain, engine, collector, resolution };
 }
 
-export function baseWorkerEngine(opts: { engine?: Engine; openCodeRunner?: Engine }, fallback: Engine): Engine {
+function baseWorkerEngine(opts: { engine?: Engine; openCodeRunner?: Engine }, fallback: Engine): Engine {
   return resolveEngine(opts, fallback);
 }
-
 // Re-export for callers that already order chains themselves.
-export { orderChainForJob };

@@ -6,7 +6,7 @@ import { parseSkipWhy } from "./pr_decision.ts";
 import type { SettingsSnapshot } from "./repo_settings.ts";
 import { errorMessage } from "./util/error.ts";
 
-export const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
+const DEFAULT_IGNORE_CONFLICTS_LABEL = "ignore-conflicts";
 
 /** Skip reason when the settings file cannot be read: fail closed, deny the merge. */
 export const IGNORE_CONFLICTS_SETTINGS_UNREADABLE = "ignore-conflicts settings unreadable";
@@ -65,7 +65,7 @@ function expectedEmails(expectation: JumiCommitExpectation): string[] {
   return emails.filter((email): email is string => typeof email === "string" && email.trim() !== "");
 }
 
-export function isJumiCommitIdentity(
+function isJumiCommitIdentity(
   identity: { name?: string; email?: string; login?: string } | undefined,
   expectation: JumiCommitExpectation
 ): boolean {
@@ -82,7 +82,7 @@ export function isJumiCommitIdentity(
   return false;
 }
 
-export function isJumiCommit(commit: PullCommit, expectation: JumiCommitExpectation): boolean {
+function isJumiCommit(commit: PullCommit, expectation: JumiCommitExpectation): boolean {
   return isJumiCommitIdentity(commit.author, expectation) || isJumiCommitIdentity(commit.committer, expectation);
 }
 

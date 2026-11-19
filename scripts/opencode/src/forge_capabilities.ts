@@ -1,7 +1,7 @@
 import type { ForgeKind } from "./forge.ts";
 
 /** Repository merge flags read by the merge-method strategy. */
-export interface ForgeRepoMergeInfo {
+interface ForgeRepoMergeInfo {
   allowAutoMerge?: boolean;
   allowMergeCommit?: boolean;
   allowSquashMerge?: boolean;
@@ -14,9 +14,7 @@ export interface ForgeRepoMergeInfo {
 }
 
 /** Result of the default (unconfigured) merge-method lookup. */
-export type MergeDefaultResult =
-  | { ok: true; mergeMethod: string }
-  | { ok: false; reason: "no-method" | "unknown-style" };
+type MergeDefaultResult = { ok: true; mergeMethod: string } | { ok: false; reason: "no-method" | "unknown-style" };
 
 /**
  * Merge-method strategy selected from the capabilities. GitHub speaks
@@ -25,7 +23,7 @@ export type MergeDefaultResult =
  * refuse unknown styles fail-closed (the caller keeps the PR open with the
  * same sticky note text as today).
  */
-export interface MergePolicy {
+interface MergePolicy {
   isAutoMergeDisabled(repo: ForgeRepoMergeInfo): boolean;
   methodForConfiguredRepo(repo: ForgeRepoMergeInfo, method: string): string | undefined;
   defaultMethod(repo: ForgeRepoMergeInfo): MergeDefaultResult;

@@ -46,7 +46,7 @@ export async function readK8sCa(caFile: string | undefined): Promise<string | un
   }
 }
 
-export type K8sFetchInit = RequestInit & { tls?: { ca?: string | Buffer | Array<string | Buffer> } };
+type K8sFetchInit = RequestInit & { tls?: { ca?: string | Buffer | Array<string | Buffer> } };
 
 /**
  * Wrap a fetch implementation so every call trusts the cluster CA via Bun's

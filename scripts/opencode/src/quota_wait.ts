@@ -14,8 +14,6 @@ import {
 import { allRunnersCooled, earliestCooldownEnd, type RunnerCooldownStore } from "./runner_cooldown.ts";
 import { errorMessage } from "./util/error.ts";
 
-export { isQuotaWaitError, QuotaWaitError } from "./quota.ts";
-
 export function isResettingQuotaResult(result: EngineResult): boolean {
   return quotaClassOf({ quota: result.quota, message: result.message }) === "resetting";
 }
@@ -38,7 +36,7 @@ function stampedProducerModel(input: {
   return input.runnerModel ?? input.result?.runner?.model ?? thrownRunner(input.err)?.model;
 }
 
-export function laterModelsAfter(
+function laterModelsAfter(
   chain: readonly { model: string }[] | undefined,
   producerModel: string | undefined,
   chainIndex?: number
@@ -63,7 +61,7 @@ function hopWasRefused(input: { result?: EngineResult; err?: unknown; hopRefused
   );
 }
 
-export function laterRunnerCanTakeQuota(
+function laterRunnerCanTakeQuota(
   producerModel: string | undefined,
   laterModels: readonly string[] | undefined,
   hopRefused: boolean

@@ -38,7 +38,7 @@ function actor(user: GiteaUser | { login?: string } | null | undefined): { login
   return { login: user?.login ?? "" };
 }
 
-export function toRepo(repo: GiteaRepo): Repo {
+function toRepo(repo: GiteaRepo): Repo {
   return {
     name: repo.name,
     full_name: repo.full_name,
@@ -94,7 +94,7 @@ function ownerRepoOf(issue: GiteaIssue, fallbackOwner: string, fallbackRepo: str
   return { owner: fallbackOwner, repo: fallbackRepo };
 }
 
-export function toLinkedIssue(issue: GiteaIssue, fallbackOwner: string, fallbackRepo: string): LinkedIssue {
+function toLinkedIssue(issue: GiteaIssue, fallbackOwner: string, fallbackRepo: string): LinkedIssue {
   const { owner, repo } = ownerRepoOf(issue, fallbackOwner, fallbackRepo);
   return {
     owner,
@@ -138,7 +138,7 @@ export function toPull(pr: GiteaPR): Pull {
   };
 }
 
-export function toComment(comment: GiteaComment): Comment {
+function toComment(comment: GiteaComment): Comment {
   return {
     id: comment.id,
     body: comment.body,
@@ -148,7 +148,7 @@ export function toComment(comment: GiteaComment): Comment {
   };
 }
 
-export function toPullFile(file: GiteaPRFile): PullFile {
+function toPullFile(file: GiteaPRFile): PullFile {
   return {
     filename: file.filename,
     status: file.status,
@@ -170,7 +170,7 @@ function commitPerson(value: unknown): { name?: string; email?: string; login?: 
   return { ...(name ? { name } : {}), ...(email ? { email } : {}), ...(login ? { login } : {}) };
 }
 
-export function toPullCommit(value: unknown): PullCommit {
+function toPullCommit(value: unknown): PullCommit {
   if (!value || typeof value !== "object") return {};
   const commit = value as {
     sha?: unknown;
@@ -215,7 +215,7 @@ function pullCommitDate(commit: {
   return undefined;
 }
 
-export function toCheck(status: GiteaCommitStatus): Check {
+function toCheck(status: GiteaCommitStatus): Check {
   return {
     id: status.id,
     context: status.context,
@@ -229,7 +229,7 @@ export function toCheck(status: GiteaCommitStatus): Check {
   };
 }
 
-export function toCheckPayload(status: GiteaCommitStatusPayload): CheckPayload {
+function toCheckPayload(status: GiteaCommitStatusPayload): CheckPayload {
   return {
     state: status.state,
     context: status.context,
@@ -267,7 +267,7 @@ export function toInlineComment(comment: GiteaPullReviewComment): InlineComment 
   };
 }
 
-export function toActionJob(job: GiteaActionJob): ActionJob {
+function toActionJob(job: GiteaActionJob): ActionJob {
   return {
     id: job.id,
     name: job.name,
@@ -280,7 +280,7 @@ export function toActionJob(job: GiteaActionJob): ActionJob {
   };
 }
 
-export interface GiteaBranch {
+interface GiteaBranch {
   name?: string;
   protected?: boolean;
   enable_status_check?: boolean;
@@ -289,7 +289,7 @@ export interface GiteaBranch {
   user_can_merge?: boolean;
 }
 
-export function toBranchProtection(branch: GiteaBranch): BranchProtection {
+function toBranchProtection(branch: GiteaBranch): BranchProtection {
   return {
     ...(branch.protected !== undefined ? { protected: branch.protected } : {}),
     ...(branch.enable_status_check !== undefined ? { enableStatusCheck: branch.enable_status_check } : {}),

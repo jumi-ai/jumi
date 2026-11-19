@@ -109,12 +109,12 @@ ${files}
  * `JUMI_SEARXNG_URL` set every runner searches through the same searxng
  * backend, otherwise each runner keeps its native tools (or none).
  */
-export interface PromptRunner {
+interface PromptRunner {
   runnerType: string;
   cap: RunnerWebCapabilities;
 }
 
-export function promptRunnerFor(runnerType: string | undefined): PromptRunner {
+function promptRunnerFor(runnerType: string | undefined): PromptRunner {
   const type = runnerType ?? "opencode";
   return { runnerType: type, cap: webCapabilitiesForRunner(type, searxngUrlFromEnv() !== undefined) };
 }
@@ -196,7 +196,7 @@ export interface PROpenedPromptOptions {
 }
 
 /** Hard cap for the `<ci_results>` block: at most 50 checks and 4 KiB. */
-export const CI_RESULTS_MAX_CHECKS = 50;
+const CI_RESULTS_MAX_CHECKS = 50;
 export const CI_RESULTS_MAX_BYTES = 4 * 1024;
 
 export function formatClosingIssues(issues: readonly number[]): string {

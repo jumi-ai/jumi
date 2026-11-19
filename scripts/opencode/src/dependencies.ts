@@ -120,10 +120,10 @@ export async function checkIssueBlockers(
 
 export const QUEUE_FILE = "JUMI_QUEUE.md";
 export const BLOCKED_BY_FILE = "JUMI_BLOCKED.md";
-export const QUEUE_CANDIDATE_CAP = 32;
-export const QUEUE_CITATION_CAP = 16;
+const QUEUE_CANDIDATE_CAP = 32;
+const QUEUE_CITATION_CAP = 16;
 
-export type QueueCandidateKind = "issue" | "closer" | "cited" | "dependency";
+type QueueCandidateKind = "issue" | "closer" | "cited" | "dependency";
 
 export type QueueCandidate = {
   owner: string;

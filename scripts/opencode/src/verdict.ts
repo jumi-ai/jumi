@@ -1,7 +1,7 @@
 import type { CheckState } from "./ports.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
 
-export interface ReviewVerdict {
+interface ReviewVerdict {
   state: Extract<CheckState, "success" | "failure">;
   description: string;
   incomplete: boolean;
@@ -27,8 +27,8 @@ export interface ReviewFinding {
  * finding is never counted twice: once from the body line and once from its
  * inline.
  */
-export const FINDINGS_LIST_START = "<!-- jumi-findings-list:start -->";
-export const FINDINGS_LIST_END = "<!-- jumi-findings-list:end -->";
+const FINDINGS_LIST_START = "<!-- jumi-findings-list:start -->";
+const FINDINGS_LIST_END = "<!-- jumi-findings-list:end -->";
 
 const FINDINGS_LIST_START_RE = /<!--\s*jumi-findings-list:start\s*-->/;
 const FINDINGS_LIST_END_RE = /<!--\s*jumi-findings-list:end\s*-->/;
@@ -133,7 +133,7 @@ function usableFindingPath(path: string): string | undefined {
   return value;
 }
 
-export function normalizeFindingText(text: string): string {
+function normalizeFindingText(text: string): string {
   return text
     .replace(/<!--\s*jumi-review:[^>]*-->/g, "")
     .replace(/\s+/g, " ")
@@ -657,7 +657,7 @@ function blockingLineParts(first: string): { hasLocation: boolean; body: string 
  * `bug:` (or `🟡` / `risk:`) line that publishes with a location or a body
  * of its own. Marker-only lines with neither never fail the check.
  */
-export function isActionableBlockingFirstLine(original: string): boolean {
+function isActionableBlockingFirstLine(original: string): boolean {
   const stripped = stripFindingPrefix(original);
   if (!BLOCKING_MARKER_RE.test(stripped)) return false;
   const { hasLocation, body } = blockingLineParts(original);
@@ -722,7 +722,7 @@ export function describeSuggestionsReason(count: number): string {
 }
 
 /** Canonical success reason fragment from the open maintainer questions that actually publish. */
-export function describeMaintainerQuestionReason(count: number): string {
+function describeMaintainerQuestionReason(count: number): string {
   return `${count} maintainer question${count === 1 ? "" : "s"}`;
 }
 
@@ -835,10 +835,7 @@ export function maintainerHoldPendingDescription(count: number): string {
 }
 
 /** Open maintainer `❓` count for a published body (text path for the hold). */
-export function openMaintainerQuestionCount(
-  markdown: string | null | undefined,
-  opts?: { singleFilePath?: string }
-): number {
+function openMaintainerQuestionCount(markdown: string | null | undefined, opts?: { singleFilePath?: string }): number {
   if (!markdown) return 0;
   const parsed = parseReviewOutput(markdown);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;

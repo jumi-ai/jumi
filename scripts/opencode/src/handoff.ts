@@ -20,7 +20,7 @@ export function handoffKey(forge: string, owner: string, repo: string, issueNumb
   return { forge: normalizeForge(forge), owner, repo, issueNumber };
 }
 
-export function handoffMapKey(key: Pick<HandoffKey, "forge" | "owner" | "repo" | "issueNumber">): string {
+function handoffMapKey(key: Pick<HandoffKey, "forge" | "owner" | "repo" | "issueNumber">): string {
   return `${normalizeForge(key.forge)}/${key.owner}/${key.repo}#${key.issueNumber}`;
 }
 
@@ -45,7 +45,7 @@ export function capHandoffNote(text: string, maxBytes: number = HANDOFF_MAX_BYTE
   return sliced.trimEnd();
 }
 
-export function isValidHandoffText(text: string | null | undefined): boolean {
+function isValidHandoffText(text: string | null | undefined): boolean {
   if (text == null) return false;
   return text.replaceAll("\0", "").trim().length > 0;
 }

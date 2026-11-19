@@ -40,9 +40,9 @@ import { errorMessage } from "./util/error.ts";
  * of asking the binary to refresh.
  */
 
-export const CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token";
-export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-export const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+const CODEX_REFRESH_TOKEN_URL = "https://auth.openai.com/oauth/token";
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 
 /**
  * Refresh when remaining life drops below this fraction of total lifetime.
@@ -55,19 +55,19 @@ export const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV = "CODEX_REFRESH_TOKEN_URL_OVE
 export const CODEX_REFRESH_THRESHOLD_FRACTION = 0.5;
 
 /** Cap on the one refresh POST. Runs on the control loop, not per job. */
-export const CODEX_TOKEN_TIMEOUT_MS = 30_000;
+const CODEX_TOKEN_TIMEOUT_MS = 30_000;
 
 /** Max bytes of a token-endpoint error body kept for classification. Never logged with tokens. */
 const MAX_ERROR_BODY = 8_000;
 
 /** K8s Secret data key job pods mount. */
-export const CODEX_SECRET_DATA_KEY = "auth.json";
+const CODEX_SECRET_DATA_KEY = "auth.json";
 
 export type CodexAuthFile = Record<string, unknown>;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-export class CodexGrantError extends Error {
+class CodexGrantError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CodexGrantError";
@@ -84,7 +84,7 @@ export class CodexLoginDeadError extends CodexGrantError {
   }
 }
 
-export class CodexPublishError extends Error {
+class CodexPublishError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CodexPublishError";
@@ -123,7 +123,7 @@ function codexIssuedAtMs(token: string | undefined): number | undefined {
   return iat * 1000;
 }
 
-export interface CodexTokens {
+interface CodexTokens {
   access_token: string;
   refresh_token: string;
   id_token: string;
@@ -204,7 +204,7 @@ export function codexRefreshTokenUrl(override?: string): string {
   return CODEX_REFRESH_TOKEN_URL;
 }
 
-export interface CodexRefreshResponse {
+interface CodexRefreshResponse {
   access_token?: unknown;
   refresh_token?: unknown;
   id_token?: unknown;
@@ -423,7 +423,7 @@ export interface K8sPublishDeps {
   dataKey?: string;
 }
 
-export function k8sSecretUrl(apiUrl: string, namespace: string, secretName: string): string {
+function k8sSecretUrl(apiUrl: string, namespace: string, secretName: string): string {
   const base = apiUrl.replace(/\/+$/, "");
   return `${base}/api/v1/namespaces/${encodeURIComponent(namespace)}/secrets/${encodeURIComponent(secretName)}`;
 }

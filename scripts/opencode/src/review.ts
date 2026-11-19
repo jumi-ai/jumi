@@ -196,7 +196,7 @@ async function logParentDiag(
 
 export type { ReviewApi } from "./ports.ts";
 
-export type OpenCodeRunner = Engine;
+type OpenCodeRunner = Engine;
 export type WorkspacePreparer = (opts: {
   workdir: string;
   repo: Repo;
@@ -804,7 +804,8 @@ const REVIEW_ARTIFACT = "JUMI_REVIEW.md";
 const DEFAULT_MAX_OUTPUT_BYTES = 80_000;
 export const MAX_INCOMPLETE_RETRIES = 2;
 export { INCOMPLETE_REVIEW_STUCK };
-export const INCOMPLETE_NO_FINDINGS_REASON = "Incomplete review: no findings";
+
+const INCOMPLETE_NO_FINDINGS_REASON = "Incomplete review: no findings";
 
 function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
   for (const line of porcelain.split(/\r?\n/)) {
@@ -869,7 +870,7 @@ function statusForResult(
   return verdict ?? parseReviewOutput("").verdict;
 }
 
-export function isPersonalJumiRepo(owner: string, repo: string): boolean {
+function isPersonalJumiRepo(owner: string, repo: string): boolean {
   return owner === "personal" && repo === "jumi";
 }
 
@@ -995,7 +996,7 @@ export async function inspectOtherChecks(
   return ci;
 }
 
-export async function skipReasonForOtherChecks(
+async function skipReasonForOtherChecks(
   opts: Pick<ReviewOptions, "api" | "owner" | "repo" | "prNumber" | "home" | "abortSignal" | "ciRelistDelayMs"> & {
     relist?: boolean;
     baseBranch?: string;
@@ -1103,7 +1104,7 @@ export function isTerminalSkipReason(reason: string | null | undefined): boolean
   );
 }
 
-export function activeReviewChain(
+function activeReviewChain(
   opts: Pick<ReviewOptions, "model" | "variant" | "fallbackModel" | "fallbackVariant" | "chain">
 ): NamedRunner[] {
   if (opts.chain && opts.chain.length > 0) return [...opts.chain];
@@ -1261,7 +1262,7 @@ export function splitGitDiffByFile(diffText: string): Map<string, string> {
 }
 
 /** Batched git-diff chunk size for the hunk-map backfill. One `git diff` call covers a whole chunk. */
-export const MISSING_PATCH_DIFF_BATCH_SIZE = 100;
+const MISSING_PATCH_DIFF_BATCH_SIZE = 100;
 
 export async function fillMissingVerdictPatches(opts: {
   git: GitRunner;
@@ -1483,7 +1484,7 @@ export async function invalidHeadSettingsFailure(opts: {
 }
 
 /** Max left-out files named in the published note; longer lists name the count. */
-export const MAX_LISTED_EXCLUDED_FILES = 10;
+const MAX_LISTED_EXCLUDED_FILES = 10;
 
 /**
  * Shared truncated backtick list for left-out files: names up to

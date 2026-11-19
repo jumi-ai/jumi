@@ -100,7 +100,7 @@ export function inspectClaudeCreditExhaustion(text: string | null | undefined): 
 }
 
 /** Claude-side MCP tool name (`mcp__<server>__<tool>`). */
-export function claudeMcpTool(serverName: string, toolName: string): string {
+function claudeMcpTool(serverName: string, toolName: string): string {
   return `mcp__${serverName}__${toolName}`;
 }
 
@@ -262,7 +262,7 @@ export function isClaudeApiKeyRunner(opts: Pick<EngineRunOptions, "auth">): bool
 }
 
 /** Display name for logs: the catalog entry name, else `claude/<model>`. */
-export function claudeRunnerDisplayName(opts: Pick<EngineRunOptions, "model" | "runnerName">): string {
+function claudeRunnerDisplayName(opts: Pick<EngineRunOptions, "model" | "runnerName">): string {
   const name = opts.runnerName?.trim();
   if (name) return name;
   return runnerForAuthDeath({ type: "claude", model: opts.model });
@@ -829,4 +829,4 @@ export async function runClaude(opts: EngineRunOptions): Promise<EngineResult> {
   }
 }
 
-export const claudeEngine: Engine = runClaude;
+const claudeEngine: Engine = runClaude;

@@ -33,13 +33,13 @@ export const REVIEW_MCP_TOOL_NAMES = [
   "previous_findings",
 ] as const;
 
-export type ReviewMcpToolName = (typeof REVIEW_MCP_TOOL_NAMES)[number];
+type ReviewMcpToolName = (typeof REVIEW_MCP_TOOL_NAMES)[number];
 
 export function randomReviewMcpToken(): string {
   return randomBytes(32).toString("hex");
 }
 
-export function reviewMcpAuthHeaders(token: string): Record<string, string> {
+function reviewMcpAuthHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}` };
 }
 

@@ -103,11 +103,11 @@ export async function effectiveWorkerPolicyForRepo(
   };
 }
 
-export interface WorkerWebhookQueue {
+interface WorkerWebhookQueue {
   enqueue(job: IssueJob): EnqueueResult | Promise<EnqueueResult>;
 }
 
-export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
+type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
   Partial<
     Pick<
       IssueApi,
@@ -134,7 +134,7 @@ export type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
-export interface WorkerReviewQueue {
+interface WorkerReviewQueue {
   enqueue(job: ReviewJob, opts?: import("./review_jobs.ts").EnqueueReviewOpts): EnqueueResult | Promise<EnqueueResult>;
 }
 
@@ -181,7 +181,7 @@ export function isWorkflowJobWebhookEvent(event: string | null, eventType: strin
   return event === "workflow_job" || eventType === "workflow_job";
 }
 
-export function isCommitStatusWebhookEvent(event: string | null, eventType: string | null): boolean {
+function isCommitStatusWebhookEvent(event: string | null, eventType: string | null): boolean {
   return event === "status" || eventType === "status";
 }
 

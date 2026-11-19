@@ -218,7 +218,7 @@ export function looksLikeCodexAuthDeath(text: string): boolean {
   return CODEX_AUTH_RE.test(text) || looksLikeProviderAuthDeath(text);
 }
 
-export function looksLikeCodexUsageLimit(text: string | null | undefined): QuotaClass | undefined {
+function looksLikeCodexUsageLimit(text: string | null | undefined): QuotaClass | undefined {
   if (!text || !CODEX_USAGE_LIMIT_RE.test(text)) return undefined;
   return "resetting";
 }
@@ -703,4 +703,4 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   }
 }
 
-export const codexEngine: Engine = runCodex;
+const codexEngine: Engine = runCodex;

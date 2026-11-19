@@ -65,7 +65,7 @@ export const BOARD_PEER_URL_ENV = "BOARD_PEER_URL";
 export const BOARD_PEER_TOKEN_ENV = "BOARD_PEER_TOKEN";
 
 /** Peer board fetch budget: a slow peer must not hang the homelab board. */
-export const PEER_BOARD_TIMEOUT_MS = 5_000;
+const PEER_BOARD_TIMEOUT_MS = 5_000;
 
 /** Peer board body cap: a compromised peer must not spike homelab memory per poll. */
 export const PEER_BOARD_MAX_BYTES = 1_048_576;
@@ -74,10 +74,10 @@ export const PEER_BOARD_MAX_BYTES = 1_048_576;
 export const PEER_FORGE = "github";
 
 /** Peer kick forward budget: a slow peer must not hang the homelab kick. */
-export const PEER_KICK_TIMEOUT_MS = PEER_BOARD_TIMEOUT_MS;
+const PEER_KICK_TIMEOUT_MS = PEER_BOARD_TIMEOUT_MS;
 
 /** Peer kick response cap: a compromised peer must not spike homelab memory per kick. */
-export const PEER_KICK_MAX_BYTES = PEER_BOARD_MAX_BYTES;
+const PEER_KICK_MAX_BYTES = PEER_BOARD_MAX_BYTES;
 
 const BOARD_API_PATH = "/api/board";
 const BOARD_KICK_PATH = "/api/board/kick";
@@ -93,7 +93,7 @@ const EDGE_IDENTITY_HEADERS = [
   "x-remote-user",
 ] as const;
 
-export function hasEdgeIdentity(request: Request): boolean {
+function hasEdgeIdentity(request: Request): boolean {
   return boardUsername(request) !== undefined;
 }
 
@@ -110,7 +110,7 @@ export function boardUsername(request: Request): string | undefined {
   return undefined;
 }
 
-export function edgeActor(request: Request): string {
+function edgeActor(request: Request): string {
   return boardUsername(request) ?? "";
 }
 
@@ -118,7 +118,7 @@ export function edgeActor(request: Request): string {
  * Peer bearer check. Accepts `Bearer <token>` (and the bare token, like the
  * webhook auth token). Never reads edge identity headers.
  */
-export function hasBearerAuth(request: Request, expectedToken?: string): boolean {
+function hasBearerAuth(request: Request, expectedToken?: string): boolean {
   const expected = (expectedToken ?? "").trim();
   if (expected === "") return false;
   const actual = (request.headers.get("authorization") ?? "").trim();
@@ -127,7 +127,7 @@ export function hasBearerAuth(request: Request, expectedToken?: string): boolean
 }
 
 /** Only the homelab board fans out. The peer never calls back (one-way hop). */
-export function isHomelabForge(forge?: string): boolean {
+function isHomelabForge(forge?: string): boolean {
   return (forge ?? "gitea") !== PEER_FORGE;
 }
 
@@ -139,7 +139,7 @@ export function isHomelabForge(forge?: string): boolean {
  * not the browser one. Only the ingress can reach the board port and it sets
  * the forwarded protocol/host, so those headers are the public origin.
  */
-export function boardPublicOrigin(request: Request): string {
+function boardPublicOrigin(request: Request): string {
   const url = new URL(request.url);
   const proto = (request.headers.get("x-forwarded-proto") ?? "").split(",")[0].trim().toLowerCase();
   const host = (request.headers.get("x-forwarded-host") ?? "").split(",")[0].trim();
@@ -170,7 +170,7 @@ function idempotencyKeyOf(request: Request): string {
   return value.trim();
 }
 
-export interface BoardKick {
+interface BoardKick {
   /** Server-provided effect text for this kick. */
   effect: string;
   /** Kick id the page must send back. Absent on legacy payloads. */
@@ -260,8 +260,8 @@ export function sitMessage(reason: RouterSitReason): string {
  * a conflict cap, follow-up otherwise. The confirm names the job that will
  * actually run.
  */
-export const STUCK_FOLLOWUP_EFFECT = "Clear the stuck latch and queue follow-up on the open closer";
-export const STUCK_CONFLICT_EFFECT = "Clear the stuck latch and queue conflict resolution on the open closer";
+const STUCK_FOLLOWUP_EFFECT = "Clear the stuck latch and queue follow-up on the open closer";
+const STUCK_CONFLICT_EFFECT = "Clear the stuck latch and queue conflict resolution on the open closer";
 
 const SIT_KICK_EFFECTS: Record<string, string> = {
   "foreign-branch": "Remove this board row only",
@@ -273,7 +273,7 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
 };
 
 /** Effect text for a stuck-latch kick: conflict resolution for a conflict-capped latch, follow-up otherwise. */
-export function stuckKickEffect(stuckReason?: string | null): string {
+function stuckKickEffect(stuckReason?: string | null): string {
   return parseSkipWhy(stuckReason).kickKind === "conflict" ? STUCK_CONFLICT_EFFECT : STUCK_FOLLOWUP_EFFECT;
 }
 
@@ -296,8 +296,6 @@ function kickForSit(reason: RouterSitReason, stuckReason?: string | null): Board
   const kick = SIT_KICK_IDS[reason] ?? "sit-clear";
   return { effect, kick };
 }
-
-export { kickForSit };
 
 /** Server-provided effect for the same-commit requeue kick. The page confirms this text. */
 export const REQUEUE_KICK_EFFECT = "Rerun the review on the same commit, with no push and no CI rerun";
@@ -623,9 +621,9 @@ function peerUnavailable(forge: string = PEER_FORGE): BoardPeerStatus {
   return { available: false, forge, error: "peer unavailable" };
 }
 
-export type BoardFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
+type BoardFetchFn = (input: string, init?: RequestInit) => Promise<Response>;
 
-export async function fetchPeerBoard(
+async function fetchPeerBoard(
   peerUrl: string,
   peerToken: string,
   fetchFn: BoardFetchFn = fetch,
@@ -2137,7 +2135,7 @@ async function handleKickBody(
  * any other factory (including the peer forge) is a tool-level refusal, and
  * nothing is ever forwarded over the peer hop.
  */
-export async function handleMcpKick(
+async function handleMcpKick(
   body: unknown,
   headerIdempotencyKey: string,
   store: ReviewJobStore,

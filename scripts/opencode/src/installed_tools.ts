@@ -1,9 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 
 /** Manifest written at image build time from the same version-check commands. */
-export const INSTALLED_TOOLS_PATH = "/app/installed-tools.txt";
+const INSTALLED_TOOLS_PATH = "/app/installed-tools.txt";
 
-export function resolveInstalledToolsPath(): string {
+function resolveInstalledToolsPath(): string {
   const override = process.env.JUMI_INSTALLED_TOOLS_PATH?.trim();
   if (override) return override;
   return INSTALLED_TOOLS_PATH;

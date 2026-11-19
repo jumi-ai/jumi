@@ -25,17 +25,17 @@ import { errorMessage } from "./util/error.ts";
 import type { GitAuth, GitRunner } from "./workspace.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
-export const SETUP_TIMEOUT_MAX_ENV = "SETUP_TIMEOUT_MAX_MS";
+const SETUP_TIMEOUT_MAX_ENV = "SETUP_TIMEOUT_MAX_MS";
 
 /** Last bytes of setup output kept for the job log and the agent prompt. */
-export const SETUP_OUTPUT_TAIL_BYTES = 4 * 1024;
+const SETUP_OUTPUT_TAIL_BYTES = 4 * 1024;
 
 /** Total setup output kept in memory (tail-kept, size-capped). */
-export const SETUP_OUTPUT_MAX_BYTES = 64 * 1024;
+const SETUP_OUTPUT_MAX_BYTES = 64 * 1024;
 
-export type RepoSetupState = "ok" | "failed" | "timeout" | "dirty";
+type RepoSetupState = "ok" | "failed" | "timeout" | "dirty";
 
-export interface RepoSetupOutcome {
+interface RepoSetupOutcome {
   ran: true;
   state: RepoSetupState;
   exitCode?: number | null;
@@ -60,7 +60,7 @@ function escapeXml(value: string): string {
  * secrets, userinfo. Same shapes `forge_errors.ts` scrubs from forge text, so
  * a token-shaped string in setup output never reaches the log or the prompt.
  */
-export function scrubSetupCredentialShapes(text: string): string {
+function scrubSetupCredentialShapes(text: string): string {
   return text
     .replace(/(:\/\/[^/@\s]+:)[^/@\s]+@/g, "$1***@")
     .replace(
@@ -79,12 +79,12 @@ export function scrubSetupCredentialShapes(text: string): string {
 }
 
 /** Redact setup output the way engine output already is, plus token shapes. */
-export function redactSetupOutput(text: string, secrets: readonly (string | undefined)[] = []): string {
+function redactSetupOutput(text: string, secrets: readonly (string | undefined)[] = []): string {
   return scrubSetupCredentialShapes(redactGitSecrets(text, secrets));
 }
 
 /** Last `maxBytes` of `text` by UTF-8 bytes. */
-export function tailBytes(text: string, maxBytes: number): string {
+function tailBytes(text: string, maxBytes: number): string {
   const bytes = new TextEncoder().encode(text);
   if (bytes.byteLength <= maxBytes) return text;
   // Slice on bytes, then decode with fatal off: a split multi-byte sequence
@@ -103,7 +103,7 @@ export function tailBytes(text: string, maxBytes: number): string {
  * `*_TOKEN`, `*_KEY`, `*_SECRET`, or `*_AUTH` key outside the `GIT_*` plumbing
  * the audit exempts, and never a provider key.
  */
-export function buildRepoSetupEnv(
+function buildRepoSetupEnv(
   auth: Pick<GitAuth, "giteaUrl" | "username" | "authorName" | "authorEmail"> & { token?: string },
   workdir: string,
   opts?: { home?: string; proxyUrl?: string }
@@ -209,7 +209,7 @@ async function readStreamTail(
  * and stderr together, redacted and size-capped. Spawns in its own process
  * group (via `setsid` when available) and kills the group on timeout.
  */
-export async function runRepoSetupScript(opts: {
+async function runRepoSetupScript(opts: {
   workdir: string;
   run: string;
   timeoutMs: number;
@@ -297,10 +297,7 @@ export async function runRepoSetupScript(opts: {
 }
 
 /** Short `<repo_setup>` block for the agent prompt. */
-export function formatRepoSetupPromptBlock(
-  state: RepoSetupState,
-  opts?: { exitCode?: number | null; tail?: string }
-): string {
+function formatRepoSetupPromptBlock(state: RepoSetupState, opts?: { exitCode?: number | null; tail?: string }): string {
   if (state === "ok") return `<repo_setup state="ok"/>`;
   const exit = opts?.exitCode ?? "";
   const tail = opts?.tail ? tailBytes(opts.tail, SETUP_OUTPUT_TAIL_BYTES) : "";
@@ -316,7 +313,7 @@ export function formatRepoSetupPromptBlock(
 }
 
 /** Human reason naming the setup error, for the `fail` policy. */
-export function setupFailureReason(
+function setupFailureReason(
   state: Exclude<RepoSetupState, "ok">,
   opts?: { exitCode?: number | null; timeoutMs?: number }
 ): string {

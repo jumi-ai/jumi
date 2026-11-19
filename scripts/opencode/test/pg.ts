@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 // JUMI_TEST_PG_REQUIRED=1 the suite fails instead of silently skipping, so a
 // misspelled URL in CI cannot turn the whole job into a no-op.
 export const pgDatabaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-export const pgRequired = process.env.JUMI_TEST_PG_REQUIRED === "1";
+const pgRequired = process.env.JUMI_TEST_PG_REQUIRED === "1";
 
 export function describePg(name: string, fn: () => void): void {
   if (pgDatabaseUrl) {

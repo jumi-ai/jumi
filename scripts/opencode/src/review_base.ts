@@ -12,12 +12,12 @@ import type { GitRunner } from "./workspace.ts";
  * Workers keep loading the checkout as today; only `kind === "review"` uses
  * this helper.
  */
-export const BASE_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
-export const BASE_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/skills"] as const;
+const BASE_INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
+const BASE_SKILL_ROOTS = [".claude/skills", ".agents/skills", ".opencode/skills"] as const;
 /** Per-file cap, mirroring `MAX_REVIEW_MD_READ_BYTES` in `review_md.ts`. */
-export const MAX_BASE_FILE_BYTES = 1_048_576;
+const MAX_BASE_FILE_BYTES = 1_048_576;
 /** Total budget for staged base instructions, mirroring the review-md budget. */
-export const DEFAULT_MAX_BASE_BYTES = DEFAULT_MAX_REVIEW_MD_BYTES;
+const DEFAULT_MAX_BASE_BYTES = DEFAULT_MAX_REVIEW_MD_BYTES;
 
 export interface ReviewBaseSource {
   git: GitRunner;

@@ -122,7 +122,7 @@ describe("android sdk wiring", () => {
       const text = readFileSync(join(repoRoot, path), "utf8");
       expect(text).toContain("ANDROID_CMDLINE_TOOLS_VERSION=${{ env.ANDROID_CMDLINE_TOOLS_VERSION }}");
       expect(text).toContain("ANDROID_CMDLINE_TOOLS_SHA256=${{ env.ANDROID_CMDLINE_TOOLS_SHA256 }}");
-      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
     }
     const buildScript = readFileSync(join(repoRoot, ".gitea/scripts/build-worker-image.sh"), "utf8");
     expect(buildScript).toContain('"ANDROID_CMDLINE_TOOLS_VERSION=${ANDROID_CMDLINE_TOOLS_VERSION}"');

@@ -172,7 +172,7 @@ describe("yq/uv build consumes one effective pin and fails closed", () => {
       const text = readFileSync(join(repoRoot, path), "utf8");
       expect(text).toContain("YQ_VERSION=${{ env.YQ_VERSION }}");
       expect(text).toContain("UV_VERSION=${{ env.UV_VERSION }}");
-      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV");
+      expect(text).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
     }
   });
 });

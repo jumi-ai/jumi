@@ -30,9 +30,9 @@ import { errorMessage } from "./util/error.ts";
 
 export const DOCKER_RUNTIME_IMAGE = "docker.io/library/debian:bookworm-slim";
 
-export const DOCKER_RUNTIME_NAME = "docker-test-only";
+const DOCKER_RUNTIME_NAME = "docker-test-only";
 
-export interface DockerExecOpts {
+interface DockerExecOpts {
   env?: Record<string, string | undefined>;
   timeoutMs?: number;
   abortSignal?: AbortSignal;

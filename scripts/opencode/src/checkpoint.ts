@@ -5,9 +5,9 @@ import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { GitRunner } from "./workspace.ts";
 
-export const CHECKPOINT_REF_PREFIX = "refs/jumi/wip/";
+const CHECKPOINT_REF_PREFIX = "refs/jumi/wip/";
 export const DEFAULT_CHECKPOINT_INTERVAL_MS = 300_000;
-export const DEFAULT_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_CHECKPOINT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function checkpointRefForIssue(issueNumber: number): string {
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
@@ -383,7 +383,7 @@ export function beginCheckpointing(
  * A forge that refuses the custom ref namespace disables the ticker with one
  * logged line.
  */
-export function startCheckpointTicker(loop: CheckpointLoop, opts: CheckpointTickerOpts): CheckpointTicker {
+function startCheckpointTicker(loop: CheckpointLoop, opts: CheckpointTickerOpts): CheckpointTicker {
   let lastSha: string | undefined;
   let disabled = !opts.enabled || !(opts.intervalMs > 0);
   let stopped = false;

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/job.ts",
+    "src/control.ts",
+    "src/worker.ts",
+    "src/worker_server.ts",
+    "src/release.ts",
+    "src/searxng_server.ts",
+    "src/*_probe.ts",
+    "test/**/*.test.ts",
+    "test/shutdown_signal_harness.ts"
+  ],
+  "project": ["src/**/*.ts", "test/**/*.ts"]
+}

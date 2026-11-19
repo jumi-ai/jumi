@@ -4,10 +4,10 @@ import { looksLikeProviderUnavailable } from "./infra.ts";
 import type { JobKind } from "./review_jobs.ts";
 import { renderTokenExporterHealth, renderTokenMetrics } from "./token_metrics.ts";
 
-export const WEBHOOK_RESULTS = ["accepted", "skipped", "hmac", "too large", "unavailable", "ping"] as const;
-export type WebhookResult = (typeof WEBHOOK_RESULTS)[number];
+const WEBHOOK_RESULTS = ["accepted", "skipped", "hmac", "too large", "unavailable", "ping"] as const;
+type WebhookResult = (typeof WEBHOOK_RESULTS)[number];
 
-export const WEBHOOK_EVENTS = [
+const WEBHOOK_EVENTS = [
   "check_run",
   "issue_assign",
   "issue_comment",
@@ -25,7 +25,7 @@ export const WEBHOOK_EVENTS = [
   "workflow_job",
   "workflow_run",
 ] as const;
-export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 const WEBHOOK_EVENT_SET = new Set<string>(WEBHOOK_EVENTS);
 
@@ -114,7 +114,7 @@ export function classifyOpenCodeExit(result: {
   return "incomplete";
 }
 
-export function webhookEventLabel(event: string | null | undefined): string {
+function webhookEventLabel(event: string | null | undefined): string {
   return event && WEBHOOK_EVENT_SET.has(event) ? event : "unknown";
 }
 
@@ -173,7 +173,7 @@ export function classifyThrownRunnerOutcome(err: unknown): RunnerExitOutcome {
 }
 
 /** Runners that have recorded at least one outcome this process, sorted. */
-export function runnerNamesWithOutcomes(): string[] {
+function runnerNamesWithOutcomes(): string[] {
   const names = new Set<string>();
   for (const key of runnerExitCounts.keys()) {
     const [, runner] = key.split("\0") as [string, string];
@@ -182,7 +182,7 @@ export function runnerNamesWithOutcomes(): string[] {
   return [...names].sort((a, b) => a.localeCompare(b));
 }
 
-export function recordWebhook(event: string | null | undefined, result: WebhookResult): void {
+function recordWebhook(event: string | null | undefined, result: WebhookResult): void {
   add(webhookCounts, webhookKey(webhookEventLabel(event), result));
 }
 

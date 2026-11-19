@@ -20,7 +20,7 @@ export const RUNNER_AUTH_SUBSCRIPTION = "subscription" as const;
 /** Catalog `auth` value that bills the run to an Anthropic Console API key. */
 export const RUNNER_AUTH_API_KEY = "api-key" as const;
 
-export type RunnerAuthMode = typeof RUNNER_AUTH_SUBSCRIPTION | typeof RUNNER_AUTH_API_KEY;
+type RunnerAuthMode = typeof RUNNER_AUTH_SUBSCRIPTION | typeof RUNNER_AUTH_API_KEY;
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

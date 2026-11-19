@@ -78,7 +78,7 @@ export interface EngineRunOptions {
   baseInstructionsDir?: string;
 }
 
-export type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
+type EngineStatus = "ok" | "timeout" | "exit" | "stuck";
 
 export type QuotaClass = "resetting" | "hard";
 

@@ -15,7 +15,7 @@ import { errorMessage } from "./util/error.ts";
  * no `.jumi.yml` key and a repository cannot point agents at an endpoint of
  * its choice. No authentication in this change.
  */
-export const SEARXNG_URL_ENV = "JUMI_SEARXNG_URL";
+const SEARXNG_URL_ENV = "JUMI_SEARXNG_URL";
 
 /** MCP server name every runner registers (Claude sees `mcp__searxng__search`). */
 export const SEARXNG_SERVER_NAME = "searxng";
@@ -38,7 +38,7 @@ export const SEARXNG_SERVER_FORGE_HOST_ENV = "SEARXNG_FORGE_HOST";
 export const SEARXNG_TIMEOUT_MS = 15_000;
 export const SEARXNG_DEFAULT_RESULTS = 8;
 export const SEARXNG_MAX_RESULTS = 20;
-export const SEARXNG_SNIPPET_MAX_CHARS = 500;
+const SEARXNG_SNIPPET_MAX_CHARS = 500;
 
 /** Base URL validation failure. The message always names the variable. */
 export function parseSearxngUrl(raw: string | undefined): string | undefined {
@@ -261,7 +261,7 @@ export function openCodeSearxngServer(baseUrl: string, forgeHost: string): Recor
 
 // ── Runner web capabilities for prompt text ─────────────────────────────────
 
-export type WebSearchBackend = "native" | "searxng" | null;
+type WebSearchBackend = "native" | "searxng" | null;
 
 export interface RunnerWebCapabilities {
   search: WebSearchBackend;
@@ -290,7 +290,7 @@ export function webCapabilitiesForRunner(
 }
 
 /** Exact tool name the prompt may tell this runner to call for search. */
-export function searchToolLabel(runnerType: string | undefined, cap: RunnerWebCapabilities): string | null {
+function searchToolLabel(runnerType: string | undefined, cap: RunnerWebCapabilities): string | null {
   if (cap.search === null) return null;
   if (cap.search === "native") {
     if (runnerType === CODEX_RUNNER_TYPE) return "web search";
@@ -303,7 +303,7 @@ export function searchToolLabel(runnerType: string | undefined, cap: RunnerWebCa
 }
 
 /** Exact tool name the prompt may tell this runner to call for fetch. */
-export function fetchToolLabel(runnerType: string | undefined): string {
+function fetchToolLabel(runnerType: string | undefined): string {
   if (runnerType === CLAUDE_RUNNER_TYPE) return "`WebFetch`";
   if (runnerType === AGY_RUNNER_TYPE) return "`read_url_content`";
   return "`webfetch`";

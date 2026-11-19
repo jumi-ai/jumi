@@ -42,10 +42,10 @@ export const OPENCODE_REFRESH_SKEW_MS = 120_000;
 export const CLOCK_MARGIN_MS = 60_000;
 
 /** Access tokens last 6 hours (measured 2026-09-22: `expires_in` 21600). */
-export const XAI_DEFAULT_EXPIRES_IN_SECONDS = 21_600;
+const XAI_DEFAULT_EXPIRES_IN_SECONDS = 21_600;
 
 /** Cap on the one refresh POST, which runs under the per-process lock. */
-export const XAI_TOKEN_TIMEOUT_MS = 30_000;
+const XAI_TOKEN_TIMEOUT_MS = 30_000;
 
 /** Marks a sibling written by {@link writeDurableAuth}; see `adoptOrphanXaiSibling`. */
 const TMP_INFIX = ".jumi-";
@@ -85,14 +85,14 @@ export type AuthFile = Record<string, unknown>;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
-export interface XaiTokenResponse {
+interface XaiTokenResponse {
   access_token: string;
   refresh_token?: string;
   expires_in?: number;
 }
 
 /** Fail closed: no Grok this job, and the caller must not POST the grant again. */
-export class XaiGrantError extends Error {
+class XaiGrantError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "XaiGrantError";
@@ -103,7 +103,7 @@ export class XaiGrantError extends Error {
  * The token endpoint answered with a non-success status, or a 2xx with no
  * access token. Only a 400 or 401 means the grant is spent.
  */
-export class XaiRefreshRejected extends Error {
+class XaiRefreshRejected extends Error {
   readonly status: number;
 
   constructor(status: number, body: string) {
@@ -135,7 +135,7 @@ function grantKey(refresh: string): string {
   return createHash("sha256").update(refresh).digest("hex");
 }
 
-export function hasLatchedXaiGrant(): boolean {
+function hasLatchedXaiGrant(): boolean {
   return rejectedGrants.size > 0;
 }
 
@@ -374,7 +374,7 @@ export async function adoptOrphanXaiSibling(home: string, logger?: (message: str
  * Bounded: this runs under the per-process lock, so a token endpoint that never
  * answers would stall every other job behind it, not just this one.
  */
-export async function postXaiRefresh(
+async function postXaiRefresh(
   refresh: string,
   deps: { fetchImpl?: FetchLike; tokenUrl?: string } = {}
 ): Promise<XaiTokenResponse> {

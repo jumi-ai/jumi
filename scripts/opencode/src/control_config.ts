@@ -3,7 +3,7 @@ import { SECRET_ENV_KEYS, SECRETS_DIR_ENV, SECRETS_FILE_ENV } from "./config.ts"
 import { defaultK8sCaFile } from "./k8s_ca.ts";
 import { intEnv, optionalEnv } from "./util/env.ts";
 
-export interface ControlDispatchRoleConfig {
+interface ControlDispatchRoleConfig {
   enabled: boolean;
   maxJobs?: number;
   templateFile?: string;
@@ -73,7 +73,7 @@ function defaultNamespace(): string {
   return "default";
 }
 
-export function parseControlRole(value: string | undefined): "control" {
+function parseControlRole(value: string | undefined): "control" {
   if (value === "control") return "control";
   if (!value) throw new Error("Missing required environment variable: JUMI_ROLE");
   throw new Error(`Invalid JUMI_ROLE for control: ${value}`);

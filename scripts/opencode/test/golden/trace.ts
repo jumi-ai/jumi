@@ -149,11 +149,11 @@ function pendingFor(file: string): PendingFile {
   return pending;
 }
 
-export function __peekPending(file: string): PendingFile | undefined {
+function __peekPending(file: string): PendingFile | undefined {
   return pendingByFile.get(file);
 }
 
-export function __resetPending(): void {
+function __resetPending(): void {
   pendingByFile.clear();
 }
 

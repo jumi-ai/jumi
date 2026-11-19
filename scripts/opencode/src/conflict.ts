@@ -91,7 +91,7 @@ export const MAX_CONFLICT_ROUNDS = 3;
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
 
 /** Per-command bound for a `conflict_regenerate` entry, inside the conflict timeout. */
-export const CONFLICT_REGEN_TIMEOUT_MS = 10 * 60 * 1000;
+const CONFLICT_REGEN_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Shell command runner for a `conflict_regenerate` entry. The default spawn
@@ -118,7 +118,7 @@ export interface ConflictState {
   updatedAt: string;
 }
 
-export type MergeDefaultStatus = "up-to-date" | "merged" | "stuck";
+type MergeDefaultStatus = "up-to-date" | "merged" | "stuck";
 
 export interface MergeDefaultResult {
   status: MergeDefaultStatus;
@@ -207,9 +207,7 @@ function emptyConflictState(): ConflictState {
   return { prNumber: 0, round: 0, lastHeadSha: "", lastBaseSha: "", updatedAt: "" };
 }
 
-export { conflictStatePath };
-
-export function parseConflictState(parsed: unknown): ConflictState {
+function parseConflictState(parsed: unknown): ConflictState {
   if (!parsed || typeof parsed !== "object") return emptyConflictState();
   const state = parsed as ConflictState;
   return {
@@ -393,7 +391,7 @@ function isRegenStrippedKey(key: string): boolean {
  * Only allowlisted safe base keys come from the parent process; every
  * credential-looking key from `extraEnv` is stripped.
  */
-export function buildConflictRegenEnv(
+function buildConflictRegenEnv(
   extraEnv: Record<string, string | undefined>,
   opts: { home?: string; workdir?: string }
 ): Record<string, string | undefined> {

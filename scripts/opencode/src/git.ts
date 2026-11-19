@@ -103,7 +103,7 @@ Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do 
  * The worker scope's web line, worded from the runner's real capabilities so
  * the worker prompt agrees with the reviewer prompt for the same runner.
  */
-export function workerScopeLine(runnerType?: string): string {
+function workerScopeLine(runnerType?: string): string {
   const runner = runnerType ?? "opencode";
   const cap = webCapabilitiesForRunner(runner, searxngUrlFromEnv() !== undefined);
   const reach =
@@ -218,7 +218,7 @@ When conflicts are resolved and no <<<<<<< markers remain, stop.`;
  */
 const WORKER_PROMPT_MARKER = "Stay in this clone. Start from the parent-injected files";
 
-export function isWorkerPrompt(prompt: string): boolean {
+function isWorkerPrompt(prompt: string): boolean {
   return prompt.includes(WORKER_PROMPT_MARKER);
 }
 
@@ -227,7 +227,7 @@ export function isWorkerPrompt(prompt: string): boolean {
  * the scope line is runner-dependent (reach phrase + evidence guidance); the
  * rest (commit rules, handoff instruction) is identical for every runner.
  */
-export function rewordWorkerPromptForRunner(prompt: string, runnerType?: string): string {
+function rewordWorkerPromptForRunner(prompt: string, runnerType?: string): string {
   return prompt.replace(/^Public upstream docs .*$/m, workerScopeLine(runnerType));
 }
 
@@ -249,7 +249,7 @@ function knownGuidanceVariants(): string[] {
   return [...variants].sort((a, b) => b.length - a.length);
 }
 
-export function rewordReviewGuidanceForRunner(text: string, runnerType?: string): string {
+function rewordReviewGuidanceForRunner(text: string, runnerType?: string): string {
   const cap = webCapabilitiesForRunner(runnerType ?? "opencode", searxngUrlFromEnv() !== undefined);
   const want = webEvidenceGuidance(runnerType, cap);
   let out = text;
@@ -283,7 +283,7 @@ export async function listInjectedFiles(workdir: string): Promise<string[]> {
   return present;
 }
 
-export function withInjectedFilesLine(base: string, present: readonly string[]): string {
+function withInjectedFilesLine(base: string, present: readonly string[]): string {
   if (base.includes("Injected files for this job:")) return base;
   return `${base}\n\n${formatInjectedFilesLine(present)}`;
 }
@@ -406,7 +406,7 @@ export function applyOpenCodeInlineConfig(env: Record<string, string>, opts: Ope
  * This spawn's SearXNG endpoint, or undefined when not configured. Exported
  * for the prompt builders.
  */
-export function openCodeSearxngForSpawn(
+function openCodeSearxngForSpawn(
   opts: Pick<OpenCodeRunOptions, "extraEnv">
 ): { baseUrl: string; forgeHost: string } | undefined {
   const baseUrl = searxngUrlFromEnv();
@@ -494,10 +494,10 @@ async function resolveXaiChildCredential(
   }
 }
 
-export const OPENCODE_API_KEY_ENV = "OPENCODE_API_KEY";
-export const OPENCODE_API_KEY_FILE_ENV = "OPENCODE_API_KEY_FILE";
+const OPENCODE_API_KEY_ENV = "OPENCODE_API_KEY";
+const OPENCODE_API_KEY_FILE_ENV = "OPENCODE_API_KEY_FILE";
 
-export interface OpenCodeApiKeyResolution {
+interface OpenCodeApiKeyResolution {
   key: string | undefined;
   filePath: string | undefined;
   fileError: string | undefined;
@@ -514,7 +514,7 @@ export interface OpenCodeApiKeyResolution {
  *   and no env fallback exists, there is no key: the caller fails closed as
  *   a provider-auth failure. Never throws, never logs the key.
  */
-export function resolveOpenCodeApiKey(env: Record<string, string | undefined> = process.env): OpenCodeApiKeyResolution {
+function resolveOpenCodeApiKey(env: Record<string, string | undefined> = process.env): OpenCodeApiKeyResolution {
   const rawPath = env[OPENCODE_API_KEY_FILE_ENV]?.trim();
   const filePath = rawPath ? rawPath : undefined;
   const rawEnvKey = env[OPENCODE_API_KEY_ENV]?.trim();
@@ -545,7 +545,7 @@ export function resolveOpenCodeApiKey(env: Record<string, string | undefined> = 
  * configured but no usable key from either source. Contains the provider
  * auth death phrase so hop and no-kick rules classify it as auth.
  */
-export function openCodeApiKeyConfigError(filePath: string, context?: { role?: string; runner?: string }): string {
+function openCodeApiKeyConfigError(filePath: string, context?: { role?: string; runner?: string }): string {
   return (
     `${OPENCODE_API_KEY_FILE_ENV} is missing, unreadable, or empty (${filePath}) ` +
     `and ${OPENCODE_API_KEY_ENV} is not set: ${providerAuthDeathMessage(context)}`

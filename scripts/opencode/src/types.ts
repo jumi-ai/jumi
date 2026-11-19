@@ -94,14 +94,14 @@ export interface GiteaPullReview {
   created_at?: string;
 }
 
-export interface GiteaCreatePullReviewComment {
+interface GiteaCreatePullReviewComment {
   body: string;
   path: string;
   new_position?: number;
   old_position?: number;
 }
 
-export interface GiteaCreatePullReviewOptions {
+interface GiteaCreatePullReviewOptions {
   body?: string;
   commit_id: string;
   comments?: GiteaCreatePullReviewComment[];
@@ -120,12 +120,12 @@ export interface GiteaPullReviewComment extends GiteaComment {
   resolver?: GiteaUser | null;
 }
 
-export interface GiteaDismissPullReviewOptions {
+interface GiteaDismissPullReviewOptions {
   message?: string;
   priors?: boolean;
 }
 
-export interface GiteaPRReviewRef {
+interface GiteaPRReviewRef {
   id?: number;
   body?: string | null;
   content?: string;
@@ -188,7 +188,7 @@ export interface GiteaIssue {
   repository?: GiteaRepo | GiteaRepositoryMeta;
 }
 
-export interface GiteaRepositoryMeta {
+interface GiteaRepositoryMeta {
   id?: number;
   name?: string;
   owner?: string | GiteaUser;
@@ -261,7 +261,7 @@ export interface GiteaPushPayload {
   commits?: unknown[];
 }
 
-export type GiteaCommitStatusState = "pending" | "success" | "error" | "failure" | "warning";
+type GiteaCommitStatusState = "pending" | "success" | "error" | "failure" | "warning";
 
 export interface GiteaCommitStatusPayload {
   state: GiteaCommitStatusState;
@@ -298,7 +298,7 @@ export interface GiteaActionRun {
   id: number;
 }
 
-export interface GiteaWorkflowJob {
+interface GiteaWorkflowJob {
   id?: number;
   name?: string;
   status?: string;

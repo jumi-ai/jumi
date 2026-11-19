@@ -5,10 +5,10 @@ import type { ForgeKind } from "./forge.ts";
 import { type NamedRunner, type RunnerStamp, runnerStamp } from "./runners.ts";
 import type { SqlClient } from "./sql_client.ts";
 
-export type ProvenanceStatus = "known" | "unknown" | "pending" | "failed";
-export type IntentStatus = "pending" | "confirmed" | "failed";
+type ProvenanceStatus = "known" | "unknown" | "pending" | "failed";
+type IntentStatus = "pending" | "confirmed" | "failed";
 
-export interface ProvenanceContributors {
+interface ProvenanceContributors {
   contributors: RunnerStamp[];
   publisher?: RunnerStamp | null;
 }
@@ -158,7 +158,7 @@ export function provenanceRunnerKey(runner: RunnerStamp): string {
   return `${runner.type}|${runner.model}|${level}|${runner.auth ?? ""}`;
 }
 
-export function normalizeRunnerStamp(runner: RunnerStamp): RunnerStamp | undefined {
+function normalizeRunnerStamp(runner: RunnerStamp): RunnerStamp | undefined {
   const type = (runner.type ?? "").trim();
   const model = (runner.model ?? "").trim();
   if (!type || !model) return undefined;
@@ -184,14 +184,14 @@ export function mergeContributors(existing: RunnerStamp[], incoming: RunnerStamp
   return out;
 }
 
-export function sameContributor(left: RunnerStamp, right: RunnerStamp): boolean {
+function sameContributor(left: RunnerStamp, right: RunnerStamp): boolean {
   return (
     provenanceRunnerKey(normalizeRunnerStamp(left) ?? left) ===
     provenanceRunnerKey(normalizeRunnerStamp(right) ?? right)
   );
 }
 
-export function runnerStampsFromChain(chain: readonly NamedRunner[], uptoIndex?: number): RunnerStamp[] {
+function runnerStampsFromChain(chain: readonly NamedRunner[], uptoIndex?: number): RunnerStamp[] {
   const end = uptoIndex == null ? chain.length - 1 : Math.min(uptoIndex, chain.length - 1);
   const out: RunnerStamp[] = [];
   for (let i = 0; i <= end; i++) {

@@ -16,13 +16,13 @@ import {
   TOO_MANY_FOLLOWUP_ROUNDS_REASON,
 } from "./skip_why_texts.ts";
 
-export { SAME_FINDING_STUCK_TEXT, TOO_MANY_FOLLOWUP_ROUNDS_REASON };
+export { TOO_MANY_FOLLOWUP_ROUNDS_REASON };
 
 export type DecideCaller = "follow-up" | "conflict";
 
 export const CONFLICT_DEFAULT_BRANCH_REASON = "refusing to merge on the default branch";
 
-export type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
+type StuckReason = "repeated-action" | "repeated-error" | "ping-pong" | "same-finding";
 
 export type SkipWhy =
   | "comment-already-handled"
@@ -45,9 +45,9 @@ export type SkipWhy =
 
 export type Resolved<T> = { value: T };
 
-export type StuckKind = "action" | "ci" | "error" | "finding";
+type StuckKind = "action" | "ci" | "error" | "finding";
 
-export interface StuckFingerprintInput {
+interface StuckFingerprintInput {
   kind: StuckKind;
   hash: string;
 }
@@ -80,7 +80,7 @@ export type SkipParamsMap = {
   "stuck-other": Record<string, never>;
 };
 
-export type HoldRelease = { kind: "completed" } | { kind: "skipped"; reason: string };
+type HoldRelease = { kind: "completed" } | { kind: "skipped"; reason: string };
 
 export type Effect =
   | { kind: "log"; message: string }
@@ -125,12 +125,12 @@ export interface LeftToAuthorInfo {
   conflictedLeftToAuthor: boolean;
 }
 
-export interface CurrentFingerprint {
+interface CurrentFingerprint {
   kind: "action" | "ci";
   hash: string;
 }
 
-export interface SameFindingCurrent {
+interface SameFindingCurrent {
   kind: "finding";
   hash: string;
 }
@@ -185,18 +185,18 @@ function fingerprintSameFinding(findingHash: string, diffHash: string): string {
   return hashText(`${findingHash}|${diffHash}`);
 }
 
-export function stuckCommentFor(reason: StuckReason): string {
+function stuckCommentFor(reason: StuckReason): string {
   if (reason === "repeated-action") return "stuck: repeated action";
   if (reason === "repeated-error") return "stuck: repeated error";
   if (reason === "same-finding") return SAME_FINDING_STUCK_TEXT;
   return "stuck: ping-pong";
 }
 
-export function conflictCapReasonFor(round: number, max: number): string {
+function conflictCapReasonFor(round: number, max: number): string {
   return `stuck: cannot resolve conflicts (${round}/${max} conflict rounds)`;
 }
 
-export function conflictCapStickyFor(round: number, max: number): string {
+function conflictCapStickyFor(round: number, max: number): string {
   return `${conflictCapReasonFor(round, max)} — run a stuck kick to retry`;
 }
 
@@ -204,11 +204,11 @@ function uniqueFlakeReasons(checks: CiCheckRef[]): string[] {
   return [...new Set(checks.map((check) => check.flake).filter((value): value is string => Boolean(value)))];
 }
 
-export function flakeSkipReasonFor(checks: CiCheckRef[]): string {
+function flakeSkipReasonFor(checks: CiCheckRef[]): string {
   return `${FLAKE_PREFIX} ${uniqueFlakeReasons(checks).join("; ")}`;
 }
 
-export function flakeCommentFor(checks: CiCheckRef[]): string {
+function flakeCommentFor(checks: CiCheckRef[]): string {
   const names = checks.map((check) => check.name).join(", ");
   return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
 }
@@ -221,7 +221,7 @@ export function sharedFailureStickyFor(firstPr: number, check: string, defaultBr
   return `Same failure as #${firstPr} (check ${check}); waiting for that fix to reach \`${defaultBranch}\`.`;
 }
 
-export function sameFindingLatchReasonFor(display: string | undefined): string {
+function sameFindingLatchReasonFor(display: string | undefined): string {
   if (!display) return SAME_FINDING_STUCK_TEXT;
   const reason = `${SAME_FINDING_STUCK_TEXT} (${display})`;
   return reason.length > 300 ? `${reason.slice(0, 300).trimEnd()}…)` : reason;

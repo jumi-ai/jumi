@@ -26,14 +26,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Load tool versions
-        run: grep -v '^#' .gitea/tool-versions.env >> $GITHUB_ENV
+        run: grep -v '^#' .gitea/tool-versions.env >> "$GITHUB_ENV"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
+          # zizmor cache-poisoning: the published image must not restore a
+          # cache from an untrusted PR build.
+          no-cache: true
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -46,7 +50,7 @@ jobs:
       - name: Compute version
         run: |
           VERSION="$(bun src/release.ts next-version)"
-          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
         working-directory: scripts/opencode
 
       - name: Log in to GHCR

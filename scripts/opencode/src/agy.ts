@@ -60,9 +60,9 @@ export const AGY_OUTPUT_FORMAT = "stream-json";
 /** Unattended auto-approve. Without it print mode soft-denies tools and can return an empty SUCCESS. */
 export const AGY_SKIP_PERMISSIONS = "--dangerously-skip-permissions";
 /** Leave the child time to emit its `result` envelope before the parent kill. */
-export const AGY_PRINT_TIMEOUT_MARGIN_MS = 30_000;
+const AGY_PRINT_TIMEOUT_MARGIN_MS = 30_000;
 /** Linux MAX_ARG_STRLEN is 128 KiB; longer prompts go through a file pointer. */
-export const AGY_ARGV_PROMPT_MAX_BYTES = 96_000;
+const AGY_ARGV_PROMPT_MAX_BYTES = 96_000;
 export const AGY_SETTINGS_DIR = join(".gemini", "antigravity-cli");
 /** Where the pinned `agy` keeps MCP servers (`agy mcp add` writes here). */
 export const AGY_MCP_CONFIG_DIR = join(".gemini", "config");
@@ -86,7 +86,7 @@ const AGY_AUTH_RE =
  */
 const AGY_QUOTA_RE = /resource[_\s-]*exhausted|\b429\b|rate[\s_-]*limit|too many requests/i;
 
-export function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClass | undefined {
+function inspectAgyQuotaLimit(text: string | null | undefined): QuotaClass | undefined {
   if (!text || !AGY_QUOTA_RE.test(text)) return undefined;
   return "resetting";
 }
@@ -128,7 +128,7 @@ export function agyEnv(opts: EngineRunOptions, tempRoot: string, proxyUrl?: stri
 }
 
 /** Hostname safe to embed in `read_url(host)`. Anything else fails the spawn closed. */
-export function agyForgeDenyHostOk(host: string): boolean {
+function agyForgeDenyHostOk(host: string): boolean {
   return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(host) && !host.includes("..");
 }
 
@@ -276,7 +276,7 @@ export async function pruneAgyMcpServer(home: string | undefined): Promise<void>
  * runtime assert. The forge read_url deny is installed separately and is not
  * best-effort.
  */
-export async function seedAgySettings(home: string | undefined): Promise<void> {
+async function seedAgySettings(home: string | undefined): Promise<void> {
   if (!home) return;
   const dir = join(home, AGY_SETTINGS_DIR);
   try {
@@ -397,7 +397,7 @@ export async function installAgyReviewHooks(
  * `jumi-worker` name. Existing entries are preserved; our key is removed on
  * restore. Fail-closed: a spawn that cannot install its entry refuses.
  */
-export async function installAgyWorkerMcp(
+async function installAgyWorkerMcp(
   home: string | undefined,
   workerMcp: { url: string; token: string } | undefined,
   log: (message: string) => void = () => undefined
@@ -514,7 +514,7 @@ function logAgyEnvelopeError(
 }
 
 /** Why a clean exit is not a completed run, or undefined when it is. */
-export function agyIncompleteReason(parser: AgyStreamParser): string | undefined {
+function agyIncompleteReason(parser: AgyStreamParser): string | undefined {
   const result = parser.result();
   if (!result) return undefined;
   if (result.status && result.status.toUpperCase() !== "SUCCESS") {
@@ -831,4 +831,4 @@ export async function runAgy(opts: EngineRunOptions): Promise<EngineResult> {
   }
 }
 
-export const agyEngine: Engine = runAgy;
+const agyEngine: Engine = runAgy;

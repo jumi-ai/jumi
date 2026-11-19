@@ -13,7 +13,7 @@ import {
 import { searxngUrlFromEnv } from "./searxng.ts";
 import { csvEnv, intEnv, optionalEnv } from "./util/env.ts";
 
-export type JumiRole = "router" | "engine";
+type JumiRole = "router" | "engine";
 
 export interface ServiceConfig {
   host: string;
@@ -95,7 +95,7 @@ export const SECRET_ENV_KEYS = [
 ] as const;
 export const SECRETS_FILE_ENV = "JUMI_SECRETS_FILE";
 export const SECRETS_DIR_ENV = "JUMI_SECRETS_DIR";
-export const ENV_SCRUBBED_FLAG = "JUMI_ENV_SCRUBBED";
+const ENV_SCRUBBED_FLAG = "JUMI_ENV_SCRUBBED";
 
 /** Drop forge secrets from the libc environment. Does not rewrite /proc/pid/environ. */
 export function scrubSecretEnv(env: Env = process.env): void {
@@ -129,7 +129,7 @@ function requireEnv(env: Env, name: string): string {
   return value;
 }
 
-export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
+const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
 
 function parseAutomergeEnabled(value: string | undefined): boolean {
   if (value === undefined || value === "") return true;
@@ -225,7 +225,7 @@ export function loadForgeBind(env: Env, opts: { requireWebhookSecret: boolean })
   };
 }
 
-export function parseJumiRole(value: string | undefined): JumiRole {
+function parseJumiRole(value: string | undefined): JumiRole {
   if (value === "router" || value === "engine") return value;
   if (!value) throw new Error("Missing required environment variable: JUMI_ROLE");
   throw new Error(`Invalid JUMI_ROLE: ${value}`);

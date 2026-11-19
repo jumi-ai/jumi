@@ -20,13 +20,13 @@ import {
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
-export const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
-export const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
+const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
+const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
 export const AUTOMERGE_NOTE_MARKER = "<!-- jumi-automerge -->";
 /** Stable marker inside the automerge sticky body: the forge refused the schedule at open. */
 export const AUTOMERGE_REFUSED_MARKER = "<!-- jumi-automerge:refused -->";
 
-export function hasAutomergeRefusedMarker(body: unknown): boolean {
+function hasAutomergeRefusedMarker(body: unknown): boolean {
   return typeof body === "string" && body.includes(AUTOMERGE_REFUSED_MARKER);
 }
 
@@ -36,7 +36,7 @@ export function hasAutomergeRefusedMarker(body: unknown): boolean {
  * hidden marker so a later Jumi push can tell "refused" apart from a
  * person-cancelled or never-wanted schedule.
  */
-export function automergeRefusedNote(detail?: string, retryAfterPush = true): string {
+function automergeRefusedNote(detail?: string, retryAfterPush = true): string {
   const reason = detail ? ` but the forge refused (${detail})` : " but the forge refused";
   const retry = retryAfterPush
     ? "Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green."
@@ -45,7 +45,7 @@ export function automergeRefusedNote(detail?: string, retryAfterPush = true): st
 }
 
 /** Short sticky replacing the refused note once a later schedule succeeds. */
-export function automergeScheduledNote(): string {
+function automergeScheduledNote(): string {
   return `Auto-merge is now scheduled.`;
 }
 
@@ -54,7 +54,7 @@ export function automergeScheduledNote(): string {
  * `→ <status>: <body>` shape `forgeRequestError` produces and lifts the
  * JSON `message` field; never includes the request URL or any token.
  */
-export function forgeRefusalDetail(err: unknown): string | undefined {
+function forgeRefusalDetail(err: unknown): string | undefined {
   const msg = errorMessage(err);
   const match = /→ (\d+)\s*:/.exec(msg);
   if (!match?.[1]) return undefined;
@@ -122,8 +122,6 @@ async function hasRefusedAutomergeNote(
     return false;
   }
 }
-
-export { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL };
 
 type AutomergeApi = Pick<
   IssueApi,
@@ -205,7 +203,7 @@ export function githubMergeMethodForRepo(repo: {
   return fallback.ok ? (fallback.mergeMethod as "MERGE" | "SQUASH" | "REBASE") : undefined;
 }
 
-export function automergeMethodNotAllowedNote(method: string): string {
+function automergeMethodNotAllowedNote(method: string): string {
   return (
     `Jumi did not schedule auto-merge on this pull request: the repository does not allow \`${method}\` merges. ` +
     `A person needs to merge once reviews and CI are green.`
@@ -224,7 +222,7 @@ function unrestoredMethodNotAllowedNote(method: string): string {
  * (no fallback); an unknown flag (older forge, fakes) trusts the setting.
  * A Gitea-only value resolves `undefined` (never scheduled on GitHub).
  */
-export function githubMergeMethodForConfiguredRepo(
+function githubMergeMethodForConfiguredRepo(
   repo: { allowMergeCommit?: boolean; allowSquashMerge?: boolean; allowRebaseMerge?: boolean },
   method: string
 ): "MERGE" | "SQUASH" | "REBASE" | undefined {
@@ -240,7 +238,7 @@ export function githubMergeMethodForConfiguredRepo(
  * Configured Gitea merge style. A `false` allow flag refuses the method
  * (no fallback); an unknown flag (older forge, fakes) trusts the setting.
  */
-export function giteaMergeMethodForConfiguredRepo(
+function giteaMergeMethodForConfiguredRepo(
   repo: {
     allowMergeCommits?: boolean;
     allowSquashMerge?: boolean;
@@ -294,14 +292,14 @@ export interface ScheduleAutomergeInput {
   log?: (message: string) => void;
 }
 
-export function touchedSettingsNote(): string {
+function touchedSettingsNote(): string {
   return (
     `Jumi did not schedule auto-merge on this pull request because it changes the repository settings file ` +
     `\`${REPO_SETTINGS_PATH}\`. Turning auto-merge on, and every later settings change, takes a person's merge.`
   );
 }
 
-export function invalidSettingsNote(error: string): string {
+function invalidSettingsNote(error: string): string {
   return (
     `Jumi did not schedule auto-merge on this pull request: the repository settings file ` +
     `\`${REPO_SETTINGS_PATH}\` is invalid: ${error} A person needs to merge once reviews and CI are green.`
@@ -316,21 +314,21 @@ function cancelledSettingsNote(): string {
 }
 
 /** Max left-out files named in the auto-merge note; longer lists name the count. Mirrors the review's left-out note. */
-export const MAX_LISTED_EXCLUDED_FILES = 10;
+const MAX_LISTED_EXCLUDED_FILES = 10;
 
 /**
  * Shared truncated backtick list for left-out files: names up to
  * `MAX_LISTED_EXCLUDED_FILES`, then "and N more". Same format as the
  * review's left-out note (`review.ts`).
  */
-export function formatExcludedFileList(excludedFiles: readonly string[]): string {
+function formatExcludedFileList(excludedFiles: readonly string[]): string {
   const names = [...new Set(excludedFiles)];
   const shown = names.slice(0, MAX_LISTED_EXCLUDED_FILES);
   const quoted = shown.map((name) => `\`${name}\``).join(", ");
   return names.length > shown.length ? `${quoted} and ${names.length - shown.length} more` : quoted;
 }
 
-export function excludedFilesNote(excludedFiles: readonly string[]): string {
+function excludedFilesNote(excludedFiles: readonly string[]): string {
   const names = [...new Set(excludedFiles)];
   const total = names.length;
   const tail = formatExcludedFileList(names);
@@ -356,7 +354,7 @@ function cancelledExcludedFilesNote(excludedFiles: readonly string[]): string {
   );
 }
 
-export function automergeDisabledNote(): string {
+function automergeDisabledNote(): string {
   return (
     `Jumi did not schedule auto-merge on this pull request because auto-merge is turned off ` +
     `for this Jumi deployment (\`JUMI_AUTOMERGE_ENABLED\` is off). The deployer needs to change that; ` +
@@ -364,7 +362,7 @@ export function automergeDisabledNote(): string {
   );
 }
 
-export function automergeRepoNotListedNote(): string {
+function automergeRepoNotListedNote(): string {
   return (
     `Jumi did not schedule auto-merge on this pull request because this repository is not listed ` +
     `for auto-merge on this Jumi deployment (\`JUMI_AUTOMERGE_REPOS\` does not allow it). ` +
@@ -372,14 +370,14 @@ export function automergeRepoNotListedNote(): string {
   );
 }
 
-export function automergeConflictNote(automergeLabel: string, noAutomergeLabel: string): string {
+function automergeConflictNote(automergeLabel: string, noAutomergeLabel: string): string {
   return (
     `Jumi did not schedule auto-merge on this pull request because it carries both ` +
     `\`${automergeLabel}\` and \`${noAutomergeLabel}\`. Remove one of them; a person needs to merge once reviews and CI are green.`
   );
 }
 
-export function automergeUntrustedNote(automergeLabel: string, adder: string | undefined): string {
+function automergeUntrustedNote(automergeLabel: string, adder: string | undefined): string {
   const who = adder && adder.trim() ? `@${adder.trim()}` : "its labeller";
   return (
     `Jumi did not schedule auto-merge on this pull request: the \`${automergeLabel}\` label was added by ` +
@@ -387,7 +385,7 @@ export function automergeUntrustedNote(automergeLabel: string, adder: string | u
   );
 }
 
-export function automergeLabellerUnreadableNote(automergeLabel: string): string {
+function automergeLabellerUnreadableNote(automergeLabel: string): string {
   return (
     `Jumi did not schedule auto-merge on this pull request: the \`${automergeLabel}\` label history could not be read, ` +
     `so the labeller could not be checked. A person needs to merge once reviews and CI are green.`
@@ -490,7 +488,7 @@ function isUnlabeledKind(kind: string): boolean {
  * names that label. The last event for the label wins: a trailing unlabeled
  * event means the label is gone, so there is no adder.
  */
-export async function findLabelAdder(
+async function findLabelAdder(
   api: Pick<AutomergeApi, "listIssueTimeline">,
   owner: string,
   repo: string,
@@ -1153,7 +1151,7 @@ async function checkAutomergeGates(
  *
  * Never throws: copy failures only log.
  */
-export async function copyIssueAutomergeLabelsToPr(opts: {
+async function copyIssueAutomergeLabelsToPr(opts: {
   api: AutomergeApi;
   owner: string;
   repo: string;
@@ -1685,7 +1683,7 @@ export async function pushClaimedBranchWithAutomergeRestore(
  * the conflict note. `no_automerge` alone wants a silent cancel. Callers
  * re-run the full gate via `scheduleAutomergeForPr` for `"schedule"`.
  */
-export function automergeLabelEventAction(
+function automergeLabelEventAction(
   labels: AutomergeLabelList | null | undefined,
   settings: RepoSettingsLoad
 ): { action: "schedule" | "cancel"; conflict: boolean } {
