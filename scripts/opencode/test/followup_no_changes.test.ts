@@ -424,3 +424,151 @@ describe("maintainer hold release", () => {
     });
   }
 });
+
+describe("maintainer hold release from inlines", () => {
+  const HELD_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const REVIEW_ID = 9101;
+
+  function inlineReviewBody(): string {
+    return [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HELD_SHA}\``,
+      "",
+      "<!-- jumi-findings-list:start -->",
+      "- ❓ [`src/foo.ts:73`](https://gitea.kirmanak.stream/kirmanak/demo/pulls/127#issuecomment-1): maintainer: please file the follow-up issue?",
+      "<!-- jumi-findings-list:end -->",
+      "",
+      "<!-- jumi-check: success; 1 maintainer question -->",
+    ].join("\n");
+  }
+
+  function heldPr() {
+    const repo = makeRepo();
+    return makePR({
+      number: 127,
+      title: "Fix the thing",
+      body: "Fixes #12",
+      user: makeUser({ login: "jumi" }),
+      html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: HELD_SHA,
+        repo,
+        repo_id: repo.id,
+      },
+    });
+  }
+
+  function inlineApi(statuses: Array<{ state: string; description?: string; context?: string }>, inlines: unknown[]) {
+    const review = {
+      id: REVIEW_ID,
+      body: inlineReviewBody(),
+      user: makeUser({ login: "jumi" }),
+      commit_id: HELD_SHA,
+      submitted_at: "2026-11-19T06:47:00Z",
+      updated_at: "2026-11-19T06:47:00Z",
+    };
+    const human = makeComment({ id: 55, body: "answered, thanks", user: makeUser({ login: "alice" }) });
+    return followupApi({
+      listOpenPulls: async () => [heldPr()],
+      getPR: async () => heldPr(),
+      listIssueComments: async () => [human],
+      listPullReviews: async () => [review],
+      listPullReviewComments: async () => inlines,
+      createCommitStatus: async (
+        _owner: string,
+        _repo: string,
+        _sha: string,
+        status: { state: string; description?: string; context?: string }
+      ) => {
+        statuses.push(status);
+        return status as never;
+      },
+    } as never);
+  }
+
+  function maintainerInline() {
+    return {
+      ...makeComment({
+        id: 9001,
+        body: "❓ maintainer: please file the follow-up issue?\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "src/foo.ts",
+      pull_request_review_id: REVIEW_ID,
+    };
+  }
+
+  function riskInline() {
+    return {
+      ...makeComment({
+        id: 9002,
+        body: "🟡 risk: race in the retry loop.\n\n<!-- jumi-review:kirmanak/demo#127 -->",
+        user: makeUser({ login: "jumi" }),
+      }),
+      path: "src/bar.ts",
+      pull_request_review_id: REVIEW_ID,
+    };
+  }
+
+  test("inline-only ❓ maintainer: releases on a trusted reply with no changes", async () => {
+    await withDirs(async (home, workdir) => {
+      const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+      const api = inlineApi(statuses, [maintainerInline()]);
+      const logged: string[] = [];
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: cleanGitRunner(),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: (message: string) => {
+          logged.push(message);
+        },
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      const success = statuses.filter((status) => status.state === "success");
+      expect(success.length).toBeGreaterThan(0);
+      expect(success.at(-1)?.description).toBe("No blocking issues");
+      expect(logged.some((line) => line.includes("maintainer hold released") && line.includes("1 answered"))).toBe(
+        true
+      );
+    });
+  });
+
+  test("inline 🟡 on the same review keeps the hold and logs the kept reason", async () => {
+    await withDirs(async (home, workdir) => {
+      const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+      const logged: string[] = [];
+      const api = inlineApi(statuses, [maintainerInline(), riskInline()]);
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: cleanGitRunner(),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: (message: string) => {
+          logged.push(message);
+        },
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(statuses.filter((status) => status.state === "success")).toHaveLength(0);
+      expect(logged.some((line) => line.includes("maintainer hold kept"))).toBe(true);
+    });
+  });
+});
