@@ -1,3 +1,4 @@
+import { test } from "bun:test";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "../../src/forge_capabilities.ts";
 import type {
   ActionJob,
@@ -561,4 +562,80 @@ export function makeIssueApi(
   };
   applyOverrides(api, calls, issueRest);
   return Object.assign(api, makeProbe(calls));
+}
+
+/**
+ * Forge preset: the port-level values and errors the real adapter produces
+ * for one forge kind. Shapes come from the adapters (`src/api.ts`,
+ * `src/github_api.ts`) and the fix commits, not invented:
+ * - Gitea `PullFile` has no `patch` (b5a3b80: the files API has no patch,
+ *   so located findings need the git-diff backfill).
+ * - Gitea `DELETE /git/refs` surfaces 405 (16aae34: only GET exists, the
+ *   adapter swallows 405/501 like a missing ref).
+ * - Gitea `toTask` maps `labels` like the GitHub mapper (b368698), so an
+ *   `automerge`-labelled issue is visible to the copy/label logic.
+ * - GitHub classic branch protection surfaces 403 to the App (d5c0830:
+ *   the adapter falls back to branch rules on 403 as well as 404).
+ */
+export type ForgePresetName = "gitea" | "github";
+
+export interface ForgePreset {
+  name: ForgePresetName;
+  capabilities: ForgeCapabilities;
+  /** Port-level `PullFile` the real files API yields for a changed file. */
+  pullFile(filename?: string): PullFile;
+  /** Port-level `Task` the real `toTask` yields for an `automerge`-labelled issue. */
+  taskWithAutomergeLabel(): Task;
+  /**
+   * Raw ref-delete refusal the forge surfaces before the adapter swallows
+   * it (`Gitea ... → 405:`, `GitHub ... → 422:`), for `deleteGitRef` /
+   * `deleteCheckpointRefViaForge` tests.
+   */
+  refDeleteError(): Error;
+}
+
+function giteaPullFile(filename = "src/demo.ts"): PullFile {
+  return { filename, status: "modified", additions: 1, deletions: 1, changes: 2 };
+}
+
+function githubPullFile(filename = "src/demo.ts"): PullFile {
+  return { ...neutralFile(), filename };
+}
+
+function taskWithAutomergeLabel(): Task {
+  return { ...neutralIssue(), labels: [{ name: "automerge" }] };
+}
+
+export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
+  gitea: {
+    name: "gitea",
+    capabilities: FORGE_CAPABILITIES.gitea,
+    pullFile: giteaPullFile,
+    taskWithAutomergeLabel,
+    refDeleteError: () => new Error("Gitea API DELETE /repos/o/r/git/refs/jumi/wip/12 → 405: unsupported"),
+  },
+  github: {
+    name: "github",
+    capabilities: FORGE_CAPABILITIES.github,
+    pullFile: githubPullFile,
+    taskWithAutomergeLabel,
+    refDeleteError: () => new Error("GitHub API DELETE /repos/o/r/git/refs/jumi/wip/12 → 422: exists"),
+  },
+};
+
+export function forgePreset(name: ForgePresetName): ForgePreset {
+  return FORGE_PRESETS[name];
+}
+
+/**
+ * Register `name` once per forge preset. The callback receives the preset
+ * for that run so one regression body covers Gitea and GitHub. Where a
+ * scenario does not apply to one forge (capability absent in
+ * `forge_capabilities.ts`), assert the capability-gated behaviour inside
+ * the callback instead of skipping.
+ */
+export function forEachForge(name: string, fn: (preset: ForgePreset) => void | Promise<void>): void {
+  for (const presetName of ["gitea", "github"] as const) {
+    test(`${name} [${presetName}]`, () => fn(forgePreset(presetName)));
+  }
 }

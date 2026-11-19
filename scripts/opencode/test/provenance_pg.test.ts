@@ -1,18 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { PgProvenanceStore } from "../src/provenance.ts";
 import { createBunSqlClient } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
+import { describePg, pgDatabaseUrl } from "./pg.ts";
 
 // Durable path: the same SQL runs against real Postgres, not an in-memory
 // twin. Skipped without JUMI_TEST_DATABASE_URL so `bun test` stays green.
-const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-const pgRequired = process.env.JUMI_TEST_PG_REQUIRED === "1";
-
-test("postgres provenance suite is not silently skipped where CI requires it", () => {
-  expect(pgRequired && databaseUrl === "").toBe(false);
-});
-
-const describePg = databaseUrl ? describe : describe.skip;
 
 describePg("PgProvenanceStore against real postgres", () => {
   let sql!: SqlClient;
@@ -34,7 +27,7 @@ describePg("PgProvenanceStore against real postgres", () => {
   async function setup(): Promise<void> {
     if ((setup as { done?: boolean }).done) return;
     (setup as { done?: boolean }).done = true;
-    sql = createBunSqlClient(databaseUrl);
+    sql = createBunSqlClient(pgDatabaseUrl);
     store = new PgProvenanceStore(sql);
     await sql.unsafe(`DROP TABLE IF EXISTS pr_writer_provenance, pr_publication_intents`);
     await store.migrate();

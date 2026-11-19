@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,9 +22,7 @@ import {
 } from "./fixtures.ts";
 import { frozenGitRunner } from "./harness/git.ts";
 import { withWorkspace } from "./harness/temp.ts";
-
-const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-const describePg = databaseUrl ? describe : describe.skip;
+import { describePg, pgDatabaseUrl } from "./pg.ts";
 
 function jobPgReviewApi() {
   return makeSharedReviewApi({
@@ -38,14 +36,14 @@ describePg("one-shot jobs against real postgres", () => {
   let store!: PgReviewJobStore;
 
   beforeAll(async () => {
-    if (!databaseUrl) return;
-    sql = createBunSqlClient(databaseUrl);
+    if (!pgDatabaseUrl) return;
+    sql = createBunSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await store.migrate();
   });
 
   beforeEach(async () => {
-    if (!databaseUrl) return;
+    if (!pgDatabaseUrl) return;
     await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
     await sql.unsafe(`TRUNCATE role_gates`);
     await store.migrate();

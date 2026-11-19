@@ -3134,6 +3134,30 @@ function parseResultJson(value: unknown): ReviewRecord | undefined {
   return undefined;
 }
 
+/**
+ * `result_json` for a shared-failure row. Bun's SQL driver JSON-encodes bound
+ * values, so a pre-stringified object would come back as a doubly-encoded
+ * string scalar and SQL `? 'sharedFailures'` would miss it. New writes pass
+ * objects; this still accepts the old string form so rows written before the
+ * fix keep working until they age out of the window.
+ */
+function asJsonObject(value: unknown): Record<string, unknown> | undefined {
+  if (value != null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value === "string" && value !== "") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 function mapRow(row: ReviewJobRow): ReviewJobRecord {
   return {
     id: num(row.id),
@@ -5529,7 +5553,7 @@ export class PgReviewJobStore implements ReviewJobStore {
   ): import("./shared_failure.ts").SharedFailureLedgerEntry[] {
     const out: import("./shared_failure.ts").SharedFailureLedgerEntry[] = [];
     for (const row of rows) {
-      const rec = (row.result_json as { sharedFailures?: unknown } | null | undefined)?.sharedFailures;
+      const rec = asJsonObject(row.result_json)?.sharedFailures;
       if (!Array.isArray(rec)) continue;
       for (const entry of rec) {
         if (!entry || typeof entry !== "object") continue;
@@ -5598,15 +5622,13 @@ export class PgReviewJobStore implements ReviewJobStore {
         );
         const timestamp = nowMs;
         const mergeInto = (prev: unknown): Record<string, unknown> => {
-          const base =
-            prev && typeof prev === "object"
-              ? { ...(prev as Record<string, unknown>) }
-              : {
-                  version: 1,
-                  state: "incomplete",
-                  findings: [],
-                  counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
-                };
+          const base: Record<string, unknown> = {
+            version: 1,
+            state: "incomplete",
+            findings: [],
+            counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+            ...asJsonObject(prev),
+          };
           const list = Array.isArray((base as { sharedFailures?: unknown }).sharedFailures)
             ? [...(base as { sharedFailures: unknown[] }).sharedFailures]
             : [];
@@ -5634,7 +5656,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           const merged = mergeInto(rows[0].result_json);
           await tx.unsafe(`UPDATE review_jobs SET result_json = $2::jsonb, updated_at = NOW() WHERE id = $1`, [
             num(rows[0].id),
-            JSON.stringify(merged),
+            merged,
           ]);
           return;
         }
@@ -5653,7 +5675,7 @@ export class PgReviewJobStore implements ReviewJobStore {
             prNumber,
             headSha ?? "",
             `shared-failure-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
-            JSON.stringify(merged),
+            merged,
           ]
         );
       });
@@ -5724,15 +5746,13 @@ export class PgReviewJobStore implements ReviewJobStore {
           )
         );
         const mergeInto = (prev: unknown, waiterFor: number | null): Record<string, unknown> => {
-          const base =
-            prev && typeof prev === "object"
-              ? { ...(prev as Record<string, unknown>) }
-              : {
-                  version: 1,
-                  state: "incomplete",
-                  findings: [],
-                  counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
-                };
+          const base: Record<string, unknown> = {
+            version: 1,
+            state: "incomplete",
+            findings: [],
+            counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+            ...asJsonObject(prev),
+          };
           const list = Array.isArray((base as { sharedFailures?: unknown }).sharedFailures)
             ? [...(base as { sharedFailures: unknown[] }).sharedFailures]
             : [];
@@ -5752,7 +5772,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           const merged = mergeInto(existing[0].result_json, found ?? null);
           await tx.unsafe(`UPDATE review_jobs SET result_json = $2::jsonb, updated_at = NOW() WHERE id = $1`, [
             num(existing[0].id),
-            JSON.stringify(merged),
+            merged,
           ]);
         } else {
           const merged = mergeInto(null, found ?? null);
@@ -5767,7 +5787,7 @@ export class PgReviewJobStore implements ReviewJobStore {
               opts.prNumber,
               opts.headSha ?? "",
               `shared-failure-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`,
-              JSON.stringify(merged),
+              merged,
             ]
           );
         }

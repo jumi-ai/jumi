@@ -10,7 +10,7 @@
     "lint:repo": "bun run src/repo_lint.ts",
     "knip": "knip --include files,dependencies,exports,types",
     "test": "bun test",
-    "test:pg": "bun test ./test/review_jobs_pg.test.ts ./test/provenance_pg.test.ts ./test/job_pg.test.ts ./test/dispatch_pg.test.ts ./test/handoff_pg.test.ts",
+    "test:pg": "bun test ./test/*_pg.test.ts",
     "test:coverage": "bun test --coverage",
     "typecheck": "tsc --noEmit",
     "ci": "bun run lint && bun run typecheck && bun run lint:repo && bun run knip && bun test"

@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,16 +40,7 @@ import { frozenGitRunner } from "./harness/git.ts";
 // that matches substrings cannot fail when one of those clauses is deleted, so this file
 // runs the real `PgReviewJobStore` against a real database. It is skipped when
 // JUMI_TEST_DATABASE_URL is unset so `bun test` stays green without Docker.
-const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-const pgRequired = process.env.JUMI_TEST_PG_REQUIRED === "1";
-
-// A misspelled URL in CI would turn the whole suite below into a silent no-op, so the CI
-// job that owns the service container also sets JUMI_TEST_PG_REQUIRED=1.
-test("postgres queue suite is not silently skipped where CI requires it", () => {
-  expect(pgRequired && databaseUrl === "").toBe(false);
-});
-
-const describePg = databaseUrl ? describe : describe.skip;
+import { describePg, pgDatabaseUrl } from "./pg.ts";
 
 function failingLookupApi(pr = makePR()): {
   api: ReviewApi;
@@ -101,7 +92,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   }
 
   async function waitForBlockedReviewJobsLock(timeoutMs = 5_000): Promise<void> {
-    const probe = createBunSqlClient(databaseUrl);
+    const probe = createBunSqlClient(pgDatabaseUrl);
     const deadline = Date.now() + timeoutMs;
     try {
       while (Date.now() < deadline) {
@@ -121,8 +112,8 @@ describePg("PgReviewJobStore against real postgres", () => {
   }
 
   beforeAll(async () => {
-    if (!databaseUrl) return;
-    sql = createBunSqlClient(databaseUrl);
+    if (!pgDatabaseUrl) return;
+    sql = createBunSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     // Start from an empty database so `migrate()` is exercised from scratch, not against
     // whatever a previous run left behind.
@@ -131,7 +122,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   });
 
   beforeEach(async () => {
-    if (!databaseUrl) return;
+    if (!pgDatabaseUrl) return;
     await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
     await sql.unsafe(`TRUNCATE role_gates`);
     // Re-assert the schema: the migrate test drops an index on purpose.
@@ -507,7 +498,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   }
 
   function secondStore(): { sql2: SqlClient; store2: PgReviewJobStore; close: () => Promise<void> } {
-    const sql2 = createBunSqlClient(databaseUrl);
+    const sql2 = createBunSqlClient(pgDatabaseUrl);
     const store2 = new PgReviewJobStore(sql2);
     return {
       sql2,
@@ -816,7 +807,7 @@ describePg("PgReviewJobStore against real postgres", () => {
 
     // A migrated schema passes the job-mode check and opens without migrating.
     await assertLedgerSchema(sql);
-    const jobStore = await openPgReviewJobStoreForJob(databaseUrl);
+    const jobStore = await openPgReviewJobStoreForJob(pgDatabaseUrl);
     expect(await jobStore.enqueueIssue(makeIssueJob({ delivery: "d-job-open" }))).toEqual({
       key: "implement:kirmanak/demo#12",
       queued: true,
@@ -825,7 +816,7 @@ describePg("PgReviewJobStore against real postgres", () => {
     // A schema older than the router fails clearly instead of migrating.
     await sql.unsafe(`ALTER TABLE review_jobs DROP COLUMN IF EXISTS rewake_requested`);
     await expect(assertLedgerSchema(sql)).rejects.toThrow("router must migrate");
-    await expect(openPgReviewJobStoreForJob(databaseUrl)).rejects.toThrow("router must migrate");
+    await expect(openPgReviewJobStoreForJob(pgDatabaseUrl)).rejects.toThrow("router must migrate");
 
     // Restore the column for the next test; beforeEach re-migrates anyway.
     await store.migrate();
