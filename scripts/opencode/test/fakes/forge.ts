@@ -1,3 +1,4 @@
+import { test } from "bun:test";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "../../src/forge_capabilities.ts";
 import type {
   ActionJob,
@@ -561,4 +562,134 @@ export function makeIssueApi(
   };
   applyOverrides(api, calls, issueRest);
   return Object.assign(api, makeProbe(calls));
+}
+
+/**
+ * Forge preset: the port-level values and errors the real adapter produces
+ * for one forge kind. Shapes come from the adapters (`src/api.ts`,
+ * `src/github_api.ts`) and the fix commits, not invented:
+ * - Gitea `PullFile` has no `patch` (b5a3b80: the files API has no patch,
+ *   so located findings need the git-diff backfill).
+ * - Gitea `DELETE /git/refs` surfaces 405 (16aae34: only GET exists, the
+ *   adapter swallows 405/501 like a missing ref).
+ * - Gitea `toTask` maps `labels` like the GitHub mapper (b368698), so an
+ *   `automerge`-labelled issue is visible to the copy/label logic.
+ * - GitHub classic branch protection surfaces 403 to the App (d5c0830:
+ *   the adapter falls back to branch rules on 403 as well as 404).
+ */
+export type ForgePresetName = "gitea" | "github";
+
+export interface ForgePreset {
+  name: ForgePresetName;
+  capabilities: ForgeCapabilities;
+  /** Port-level `PullFile` the real files API yields for a changed file. */
+  pullFile(filename?: string): PullFile;
+  /** Port-level `Task` the real `toTask` yields for an `automerge`-labelled issue. */
+  taskWithAutomergeLabel(): Task;
+  /**
+   * Raw ref-delete refusal the forge surfaces before the adapter swallows
+   * it (`Gitea ... → 405:`, `GitHub ... → 422:`), for `deleteGitRef` /
+   * `deleteCheckpointRefViaForge` tests.
+   */
+  refDeleteError(): Error;
+  /**
+   * Raw classic-protection read refusal (`→ 403` on GitHub, `→ 404` on
+   * Gitea where the classic endpoint is absent), for `getBranch` tests.
+   */
+  classicBranchError(): Error;
+}
+
+function giteaPullFile(filename = "src/demo.ts"): PullFile {
+  return { filename, status: "modified", additions: 1, deletions: 1, changes: 2 };
+}
+
+function githubPullFile(filename = "src/demo.ts"): PullFile {
+  return { ...neutralFile(), filename };
+}
+
+function taskWithAutomergeLabel(): Task {
+  return { ...neutralIssue(), labels: [{ name: "automerge" }] };
+}
+
+export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
+  gitea: {
+    name: "gitea",
+    capabilities: FORGE_CAPABILITIES.gitea,
+    pullFile: giteaPullFile,
+    taskWithAutomergeLabel,
+    refDeleteError: () => new Error("Gitea API DELETE /repos/o/r/git/refs/jumi/wip/12 → 405: unsupported"),
+    classicBranchError: () => new Error("Gitea API GET /repos/o/r/branches/main/protection → 404: not found"),
+  },
+  github: {
+    name: "github",
+    capabilities: FORGE_CAPABILITIES.github,
+    pullFile: githubPullFile,
+    taskWithAutomergeLabel,
+    refDeleteError: () => new Error("GitHub API DELETE /repos/o/r/git/refs/jumi/wip/12 → 422: exists"),
+    classicBranchError: () =>
+      new Error("GitHub API GET /repos/o/r/branches/main/protection/required_status_checks → 403: forbidden"),
+  },
+};
+
+export function forgePreset(name: ForgePresetName): ForgePreset {
+  return FORGE_PRESETS[name];
+}
+
+/** Neutral `Forge` fake wired to one preset's capabilities and file shape. */
+export function makeForgeApiForPreset(preset: ForgePreset, overrides: Partial<Forge> = {}): ForgeFake<Forge> {
+  return makeForgeApi({
+    capabilities: preset.capabilities,
+    getPRFiles: async (...args) => {
+      void args;
+      return [preset.pullFile()];
+    },
+    ...overrides,
+  });
+}
+
+/** Neutral `ReviewApi` fake wired to one preset's capabilities and file shape. */
+export function makeReviewApiForPreset(
+  preset: ForgePreset,
+  overrides: Partial<ReviewApi> & { capabilities?: ForgeCapabilities } = {}
+): ForgeFake<ReviewApi> & { capabilities: ForgeCapabilities } {
+  return makeReviewApi({
+    capabilities: preset.capabilities,
+    getPRFiles: async (...args) => {
+      void args;
+      return [preset.pullFile()];
+    },
+    getIssue: async (...args) => {
+      void args;
+      return preset.taskWithAutomergeLabel();
+    },
+    ...overrides,
+  });
+}
+
+/** Neutral `IssueApi` fake wired to one preset's capabilities and label shape. */
+export function makeIssueApiForPreset(
+  preset: ForgePreset,
+  overrides: Partial<IssueApi> & { capabilities?: ForgeCapabilities } = {}
+): ForgeFake<IssueApi> & { capabilities: ForgeCapabilities } {
+  return makeIssueApi({
+    capabilities: preset.capabilities,
+    getIssue: async (...args) => {
+      void args;
+      return preset.taskWithAutomergeLabel();
+    },
+    ...overrides,
+  });
+}
+
+/**
+ * Register `name` once per forge preset. The callback receives the preset
+ * for that run so one regression body covers Gitea and GitHub. Where a
+ * scenario does not apply to one forge (capability absent in
+ * `forge_capabilities.ts`), assert the capability-gated behaviour inside
+ * the callback instead of skipping.
+ */
+export function forEachForge(name: string, fn: (preset: ForgePreset) => void | Promise<void>): void {
+  for (const presetName of ["gitea", "github"] as const) {
+    test(`${name} [${presetName}]`, () => fn(forgePreset(presetName)));
+  }
 }
