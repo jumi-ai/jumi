@@ -101,6 +101,23 @@ describe("review isolation", () => {
     }
   });
 
+  test("opencode child env disables bytecode writes for reviews and workers", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "oc-py-env-"));
+    try {
+      const dbPath = join(dir, "db");
+      const worker = buildEnv({ model: "m", workdir: dir, sanitizeEnv: true }, dir, dbPath);
+      expect(worker?.PYTHONDONTWRITEBYTECODE).toBe("1");
+      const review = buildEnv(
+        { model: "m", workdir: dir, sanitizeEnv: true, trace: { kind: "review", owner: "o", repo: "r" } },
+        dir,
+        dbPath
+      );
+      expect(review?.PYTHONDONTWRITEBYTECODE).toBe("1");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test("review prompt carries the base instructions, never the head", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),

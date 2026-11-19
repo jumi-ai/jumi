@@ -581,6 +581,10 @@ export function buildEnv(
       OPENCODE_DB: openCodeDbPath,
       XDG_DATA_HOME: xdgDataHome,
     } as Record<string, string>;
+    // Python must not write bytecode into the checkout: a reviewer `python3`
+    // probe would otherwise dirty the worktree with `__pycache__/*.pyc` and
+    // trip the dirty-tree guard.
+    env.PYTHONDONTWRITEBYTECODE = "1";
     // Reviews never load the head's project config. The forge deny still
     // applies through the inline config below.
     if (isReview) env.OPENCODE_DISABLE_PROJECT_CONFIG = "1";
@@ -598,6 +602,7 @@ export function buildEnv(
     }
     if (configPath) env.OPENCODE_CONFIG = configPath;
     applyOpenCodeInlineConfig(env, opts);
+    env.PYTHONDONTWRITEBYTECODE = "1";
     return env;
   }
 
@@ -609,6 +614,7 @@ export function buildEnv(
     XDG_DATA_HOME: xdgDataHome,
     OPENCODE_MODEL: opts.model,
     OPENCODE_DB: openCodeDbPath,
+    PYTHONDONTWRITEBYTECODE: "1",
   };
   // Reviews never load the head's project config. The forge deny still
   // applies through the seeded global config and the inline config below.
@@ -657,6 +663,9 @@ export function buildEnv(
   }
   // After extraEnv: a job-supplied OPENCODE_CONFIG_CONTENT must not win over the deny.
   applyOpenCodeInlineConfig(env, opts);
+  // After extraEnv: a job-supplied value must not re-enable bytecode writes
+  // into the checkout.
+  env.PYTHONDONTWRITEBYTECODE = "1";
   return env;
 }
 
