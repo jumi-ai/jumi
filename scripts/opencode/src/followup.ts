@@ -145,9 +145,11 @@ import {
   countSuggestionFindings,
   describeSuggestionsReason,
   isBlockingQuestionAuthor,
+  isBugFindingFirstLine,
   isMaintainerOnlyTrailerText,
   isMaintainerQuestionInline,
   isQuestionInline,
+  isRiskFindingFirstLine,
   parseCheckLine,
   parseReviewOutput,
   trailerSuggestionCount,
@@ -505,19 +507,143 @@ export interface ReviewFindingMatchOpts {
 }
 
 /**
- * Whether a Jumi inline holds an open blocking question: Jumi-owned
- * (`<!-- jumi-review:` + bot author), unresolved, and carrying the `❓`
- * marker in its path or body. The marker check uses the same
- * `QUESTION_MARKER_RE` rule the engine used to set `N open questions`.
+ * Whether a Jumi inline is open: Jumi-owned (`<!-- jumi-review:` + bot
+ * author) and unresolved. The marker/type check stays with the caller so
+ * one gate covers every review-body + inline count below.
  */
-export function isBlockingQuestionInline(inline: InlineComment, botUsername?: string): boolean {
+function isOpenJumiInline(inline: InlineComment, botUsername?: string): boolean {
   const body = inline.body ?? "";
   if (!body.includes(REVIEW_MARKER)) return false;
   if (typeof botUsername === "string" && botUsername) {
     if (!loginEquals(inline.user?.login, botUsername)) return false;
   }
   if (!isUnresolvedInline(inline)) return false;
-  return isQuestionInline(inline.path, body);
+  return true;
+}
+
+/**
+ * Whether a Jumi inline holds an open blocking question: Jumi-owned
+ * (`<!-- jumi-review:` + bot author), unresolved, and carrying the `❓`
+ * marker in its path or body. The marker check uses the same
+ * `QUESTION_MARKER_RE` rule the engine used to set `N open questions`.
+ */
+export function isBlockingQuestionInline(inline: InlineComment, botUsername?: string): boolean {
+  if (!isOpenJumiInline(inline, botUsername)) return false;
+  return isQuestionInline(inline.path, inline.body ?? "");
+}
+
+/** Whether an open Jumi inline carries an actionable `🔴` bug finding. */
+export function isBugInline(inline: InlineComment, botUsername?: string): boolean {
+  if (!isOpenJumiInline(inline, botUsername)) return false;
+  if (typeof inline.path === "string" && inline.path.trim() && isBugFindingFirstLine(inline.path)) return true;
+  const body = inline.body ?? "";
+  return body.trim() !== "" && countBugFindings(body) > 0;
+}
+
+/** Whether an open Jumi inline carries an actionable `🟡` risk finding. */
+export function isRiskInline(inline: InlineComment, botUsername?: string): boolean {
+  if (!isOpenJumiInline(inline, botUsername)) return false;
+  if (typeof inline.path === "string" && inline.path.trim() && isRiskFindingFirstLine(inline.path)) return true;
+  const body = inline.body ?? "";
+  return body.trim() !== "" && countRiskFindings(body) > 0;
+}
+
+/** Whether an open Jumi inline carries a `❓ maintainer:` question. */
+export function isMaintainerInline(inline: InlineComment, botUsername?: string): boolean {
+  if (!isBlockingQuestionInline(inline, botUsername)) return false;
+  return isMaintainerQuestionInline(inline.path, inline.body ?? "");
+}
+
+/**
+ * Open `❓` questions on one published review: the body's count plus one
+ * per open Jumi question inline belonging to that review. The trailer must
+ * be a complete success, mirroring the hold side. Pass only the inlines
+ * for this review (see `inlinesForPullReview`).
+ */
+export function openQuestionsForReview(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername?: string
+): number {
+  const body = reviewBody ?? "";
+  if (!body.trim()) return 0;
+  const trailer = lastCheckTrailer(body);
+  if (!trailer || trailer.state !== "success") return 0;
+  const parsed = parseReviewOutput(body);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
+  const bodyCount = countQuestionFindings(parsed.comment);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isBlockingQuestionInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
+}
+
+/**
+ * Open `❓ maintainer:` questions on one published review: the body's
+ * `❓ maintainer:` count plus one per open Jumi `❓ maintainer:` inline
+ * belonging to that review. The hold counted the full finding text before
+ * it split into inlines, while the published body keeps only the
+ * findings-list line (which finding parsers skip by design), so the body
+ * alone reads zero for inline-only questions. This helper feeds both the
+ * maintainer-hold release and `isMaintainerOnlyPullReview` so the two
+ * cannot drift apart. Pass only the inlines for this review.
+ */
+export function openMaintainerQuestionsForReview(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername?: string
+): number {
+  const body = reviewBody ?? "";
+  if (!body.trim()) return 0;
+  const trailer = lastCheckTrailer(body);
+  if (!trailer || trailer.state !== "success") return 0;
+  const parsed = parseReviewOutput(body);
+  if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
+  const bodyCount = countMaintainerQuestionFindings(parsed.comment);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isMaintainerInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
+}
+
+/**
+ * Actionable `🔴` findings on one published review: the body's count plus
+ * one per open Jumi bug inline belonging to that review. Pass only the
+ * inlines for this review.
+ */
+export function openBugsForReview(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername?: string
+): number {
+  const parsed = parseReviewOutput(reviewBody ?? "");
+  const bodyCount = countBugFindings(parsed.comment);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isBugInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
+}
+
+/**
+ * Actionable `🟡` findings on one published review: the body's count plus
+ * one per open Jumi risk inline belonging to that review. Pass only the
+ * inlines for this review.
+ */
+export function openRisksForReview(
+  reviewBody: string | null | undefined,
+  inlines: readonly InlineComment[],
+  botUsername?: string
+): number {
+  const parsed = parseReviewOutput(reviewBody ?? "");
+  const bodyCount = countRiskFindings(parsed.comment);
+  let inlineCount = 0;
+  for (const inline of inlines) {
+    if (isRiskInline(inline, botUsername)) inlineCount++;
+  }
+  return bodyCount + inlineCount;
 }
 
 /** Open blocking-question inlines among the given Jumi inlines. */
@@ -822,20 +948,12 @@ function isMaintainerOnlyPullReview(
   const trailer = lastCheckTrailer(body);
   if (trailer?.state !== "success") return false;
   if (trailerSuggestionCount(trailer.reason) !== 0) return false;
-  const bodyQuestions = countQuestionFindings(body);
-  const bodyMaintainers = countMaintainerQuestionFindings(body);
-  if (bodyQuestions !== bodyMaintainers) return false;
   const inlines = allJumiInlines.filter(
     (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === review.id
   );
-  let inlineQuestions = 0;
-  for (const inline of inlines) {
-    if (!isBlockingQuestionInline(inline, botUsername)) continue;
-    inlineQuestions++;
-    if (!isMaintainerQuestionInline(inline.path, inline.body)) return false;
-  }
-  if (bodyQuestions + inlineQuestions === 0) return false;
-  return true;
+  const total = openQuestionsForReview(body, inlines, botUsername);
+  if (total === 0) return false;
+  return openMaintainerQuestionsForReview(body, inlines, botUsername) === total;
 }
 
 /**
@@ -2780,28 +2898,60 @@ export async function implementFollowUp(
         const trigger = opts.job.trigger;
         const triggeredByReply = trigger != null && (trigger.commentId !== undefined || trigger.reviewId !== undefined);
         if (triggeredByReply && pendingLastReview?.body) {
-          const parsed = parseReviewOutput(pendingLastReview.body);
+          const reviewBody = pendingLastReview.body ?? "";
+          // Body + inline view: the published body keeps only the
+          // findings-list line for posted findings (parsers skip that
+          // section), so an inline-only ❓/🔴/🟡 would read zero from the
+          // body alone. Count the open Jumi inlines for this review too,
+          // the same way `isMaintainerOnlyPullReview` does.
+          const isPullReview = pendingItems.jumiReviews.some((entry) => entry.id === pendingLastReview.id);
+          const reviewInlines = isPullReview
+            ? inlinesForPullReview(pendingLastReview.id, pendingItems.jumiInlines)
+            : [];
+          const parsed = parseReviewOutput(reviewBody);
           const completeSuccess = !parsed.verdict.incomplete && parsed.verdict.state === "success";
-          const openBugs = countBugFindings(parsed.comment);
-          const openRisks = countRiskFindings(parsed.comment);
-          const openBlockingQuestions = blockingOpenQuestionCount(
-            pendingLastReview.body,
+          const openBugs = openBugsForReview(reviewBody, reviewInlines, opts.botUsername);
+          const openRisks = openRisksForReview(reviewBody, reviewInlines, opts.botUsername);
+          const openBlockingQuestions = blockingOpenQuestionCountWithInlines(
+            reviewBody,
+            reviewInlines,
             pr.user?.login,
-            snapshot.lists.blockingAuthors
+            snapshot.lists.blockingAuthors,
+            opts.botUsername
           );
-          const openMaintainers = countMaintainerQuestionFindings(parsed.comment);
+          const openMaintainers = openMaintainerQuestionsForReview(reviewBody, reviewInlines, opts.botUsername);
+          const holdEnabled = isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot));
           if (
             completeSuccess &&
             openBugs === 0 &&
             openRisks === 0 &&
             openBlockingQuestions === 0 &&
             openMaintainers > 0 &&
-            isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot))
+            holdEnabled
           ) {
             const openSuggestions = countSuggestionFindings(parsed.comment);
             const description = openSuggestions > 0 ? describeSuggestionsReason(openSuggestions) : "No blocking issues";
             await postSuggestionHoldSuccess(opts.api, owner, repo, pr.head.sha, description, pr.html_url);
             log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${openMaintainers} answered`);
+          } else {
+            const trailer = lastCheckTrailer(reviewBody);
+            const trailerMentionsMaintainer = (trailer?.reason ?? "").toLowerCase().includes("maintainer");
+            if (completeSuccess && (openMaintainers > 0 || trailerMentionsMaintainer)) {
+              const keepReason = !holdEnabled
+                ? "hold disabled"
+                : openBugs > 0
+                  ? `${openBugs} blocking`
+                  : openRisks > 0
+                    ? `${openRisks} risk`
+                    : openBlockingQuestions > 0
+                      ? `${openBlockingQuestions} blocking questions`
+                      : "no open maintainer questions";
+              log(
+                `maintainer hold kept for ${owner}/${repo}#${pr.number}: ${keepReason} ` +
+                  `(maintainers=${openMaintainers} bugs=${openBugs} risks=${openRisks} ` +
+                  `blocking=${openBlockingQuestions} completeSuccess=${completeSuccess})`
+              );
+            }
           }
         }
       } catch {
