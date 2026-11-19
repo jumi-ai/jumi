@@ -91,6 +91,25 @@ export interface HoldStatusApi {
  */
 export type HoldStatusPort = Partial<HoldStatusApi> & Partial<Pick<IssueApi, "getIssue">>;
 
+/** Resolve a held `pending` to `success` with a note. Throws on failure. */
+export async function postSuggestionHoldSuccessOrThrow(
+  api: HoldStatusPort,
+  owner: string,
+  repo: string,
+  headSha: string,
+  description: string,
+  targetUrl?: string
+): Promise<void> {
+  const create = api.createCommitStatus;
+  if (typeof create !== "function") throw new Error("missing createCommitStatus");
+  await create.call(api, owner, repo, headSha, {
+    state: "success",
+    context: JUMI_REVIEW_CONTEXT,
+    description: holdStatusDescription(description),
+    ...(targetUrl ? { target_url: targetUrl } : {}),
+  });
+}
+
 /** Resolve a held `pending` to `success` with a note. Never throws. */
 export async function postSuggestionHoldSuccess(
   api: HoldStatusPort,

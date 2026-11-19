@@ -1293,6 +1293,10 @@ export function workerMailboxApi(
       api.findStickyIssueComment(owner, repo, index, bot, marker),
     createIssueComment: (owner, repo, index, body) => api.createIssueComment(owner, repo, index, body),
     updateIssueComment: (owner, repo, id, body) => api.updateIssueComment(owner, repo, id, body),
+    listIssueComments: (owner, repo, index) => api.listIssueComments(owner, repo, index),
+    listPullReviews: (owner, repo, index) => api.listPullReviews(owner, repo, index),
+    listPullReviewComments: (owner, repo, index) => api.listPullReviewComments(owner, repo, index),
+    createCommitStatus: (owner, repo, sha, status) => api.createCommitStatus(owner, repo, sha, status),
     rememberInstallation: api.rememberInstallation?.bind(api),
   };
 }
