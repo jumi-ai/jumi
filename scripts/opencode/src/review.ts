@@ -807,12 +807,31 @@ export { INCOMPLETE_REVIEW_STUCK };
 
 const INCOMPLETE_NO_FINDINGS_REASON = "Incomplete review: no findings";
 
-function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
+function isPythonBytecodePath(path: string): boolean {
+  if (path.split("/").includes("__pycache__")) return true;
+  return path.endsWith(".pyc");
+}
+
+function isUntrackedPorcelainLine(line: string): boolean {
+  return line.startsWith("??");
+}
+
+function porcelainOffendingPaths(porcelain: string, limit = 10): string[] {
+  const offending: string[] = [];
   for (const line of porcelain.split(/\r?\n/)) {
     if (!line.trim()) continue;
-    if (porcelainPaths(line).some((path) => path !== REVIEW_ARTIFACT && !isEngineTempPath(path))) return false;
+    const untracked = isUntrackedPorcelainLine(line);
+    for (const path of porcelainPaths(line)) {
+      if (path === REVIEW_ARTIFACT || isEngineTempPath(path)) continue;
+      if (untracked && isPythonBytecodePath(path)) continue;
+      if (offending.length < limit) offending.push(path);
+    }
   }
-  return true;
+  return offending;
+}
+
+function porcelainAllowsOnlyReviewArtifact(porcelain: string): boolean {
+  return porcelainOffendingPaths(porcelain, 1).length === 0;
 }
 
 type ReviewArtifactRead = { status: "ok"; content: string } | { status: "missing" } | { status: "too_large" };
@@ -2993,6 +3012,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
 
         const porcelain = await git(["status", "--porcelain"], { cwd: opts.workspace, env: gitCmdEnv });
         if (!porcelainAllowsOnlyReviewArtifact(porcelain)) {
+          const offending = porcelainOffendingPaths(porcelain);
+          log(`Incomplete review: dirty tree: ${offending.join(", ")}`);
           return await persistSkipAndStatus("Incomplete review: dirty tree", currentPR.html_url);
         }
 

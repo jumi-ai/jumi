@@ -1328,6 +1328,42 @@ describe("reviewPullRequest", () => {
     });
   });
 
+  test("ignores untracked __pycache__ bytecode when checking the dirty tree", async () => {
+    await withWorkspace(async (workspace) => {
+      const result = await reviewPullRequest({
+        ...reviewOptions(
+          workspace,
+          frozenGit({ porcelain: "?? JUMI_REVIEW.md\n?? scripts/__pycache__/x.cpython-312.pyc" })
+        ),
+        api: reviewApi(),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result.status).toBe("posted");
+    });
+  });
+
+  test("still skips on untracked non-bytecode files and logs the path", async () => {
+    await withWorkspace(async (workspace) => {
+      const logs: string[] = [];
+      const result = await reviewPullRequest({
+        ...reviewOptions(workspace, frozenGit({ porcelain: "?? JUMI_REVIEW.md\n?? src/notes.txt" })),
+        logger: (message: string) => {
+          logs.push(message);
+        },
+        api: reviewApi(),
+        openCodeRunner: async () => {
+          await writeReview(workspace, "Looks good\n<!-- jumi-check: success -->");
+          return { status: "ok" };
+        },
+      });
+      expect(result).toEqual({ status: "skipped", reason: "Incomplete review: dirty tree" });
+      expect(logs.some((message) => message.includes("src/notes.txt"))).toBe(true);
+    });
+  });
+
   test("restores a tracked JUMI_TASK.md after the engine instead of deleting it", async () => {
     await withWorkspace(async (workspace) => {
       const original = "# original task from the PR\n";
