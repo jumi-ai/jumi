@@ -1,16 +1,8 @@
-import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { handoffKey } from "../src/handoff.ts";
 import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-
-const databaseUrl = process.env.JUMI_TEST_DATABASE_URL ?? "";
-const pgRequired = process.env.JUMI_TEST_PG_REQUIRED === "1";
-
-test("postgres handoff suite is not silently skipped where CI requires it", () => {
-  expect(pgRequired && databaseUrl === "").toBe(false);
-});
-
-const describePg = databaseUrl ? describe : describe.skip;
+import { describePg, pgDatabaseUrl } from "./pg.ts";
 
 describePg("PgHandoffStore against real postgres", () => {
   let sql!: SqlClient;
@@ -22,8 +14,8 @@ describePg("PgHandoffStore against real postgres", () => {
 
   // bun runs beforeAll at module scope
   beforeAll(async () => {
-    if (!databaseUrl) return;
-    sql = createBunSqlClient(databaseUrl);
+    if (!pgDatabaseUrl) return;
+    sql = createBunSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await sql.unsafe(`DROP TABLE IF EXISTS issue_handoffs`);
     await store.migrate();
@@ -31,7 +23,7 @@ describePg("PgHandoffStore against real postgres", () => {
 
   // bun runs beforeEach at module scope
   beforeEach(async () => {
-    if (!databaseUrl) return;
+    if (!pgDatabaseUrl) return;
     await sql.unsafe(`TRUNCATE issue_handoffs`);
     await store.migrate();
   });
