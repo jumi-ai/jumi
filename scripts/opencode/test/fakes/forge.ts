@@ -577,7 +577,7 @@ export function makeIssueApi(
  * - GitHub classic branch protection surfaces 403 to the App (d5c0830:
  *   the adapter falls back to branch rules on 403 as well as 404).
  */
-export type ForgePresetName = "gitea" | "github";
+type ForgePresetName = "gitea" | "github";
 
 export interface ForgePreset {
   name: ForgePresetName;
@@ -606,7 +606,7 @@ function taskWithAutomergeLabel(): Task {
   return { ...neutralIssue(), labels: [{ name: "automerge" }] };
 }
 
-export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
+const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
   gitea: {
     name: "gitea",
     capabilities: FORGE_CAPABILITIES.gitea,
@@ -623,7 +623,7 @@ export const FORGE_PRESETS: Record<ForgePresetName, ForgePreset> = {
   },
 };
 
-export function forgePreset(name: ForgePresetName): ForgePreset {
+function forgePreset(name: ForgePresetName): ForgePreset {
   return FORGE_PRESETS[name];
 }
 

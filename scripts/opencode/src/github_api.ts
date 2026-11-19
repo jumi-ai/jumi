@@ -281,7 +281,7 @@ function toRepo(repo: GithubRepo): Repo {
   };
 }
 
-function toTask(issue: GithubIssue): Task {
+export function toTask(issue: GithubIssue): Task {
   return {
     trackerRef: String(issue.number),
     number: issue.number,

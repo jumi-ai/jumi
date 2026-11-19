@@ -554,7 +554,7 @@ function isMaintainerInline(inline: InlineComment, botUsername?: string): boolea
  * be a complete success, mirroring the hold side. Pass only the inlines
  * for this review (see `inlinesForPullReview`).
  */
-function openQuestionsForReview(
+export function openQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -583,7 +583,7 @@ function openQuestionsForReview(
  * maintainer-hold release and `isMaintainerOnlyPullReview` so the two
  * cannot drift apart. Pass only the inlines for this review.
  */
-function openMaintainerQuestionsForReview(
+export function openMaintainerQuestionsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -607,7 +607,7 @@ function openMaintainerQuestionsForReview(
  * one per open Jumi bug inline belonging to that review. Pass only the
  * inlines for this review.
  */
-function openBugsForReview(
+export function openBugsForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
@@ -626,7 +626,7 @@ function openBugsForReview(
  * one per open Jumi risk inline belonging to that review. Pass only the
  * inlines for this review.
  */
-function openRisksForReview(
+export function openRisksForReview(
   reviewBody: string | null | undefined,
   inlines: readonly InlineComment[],
   botUsername?: string
