@@ -50,6 +50,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -64,6 +65,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -77,6 +79,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -123,6 +126,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -146,6 +150,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -159,6 +164,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -180,6 +186,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -225,6 +232,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -307,6 +315,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -331,6 +340,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -374,6 +384,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
+      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
