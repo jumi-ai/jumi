@@ -1820,4 +1820,157 @@ describe("gitea refused schedule retry after push", () => {
       expect(api.notes).toEqual([]);
     }
   });
+
+  test("missing file, refused note, trusted automerge label via issue schedules and clears the note", async () => {
+    const api = automergeApi();
+    withRefusedSticky(api, refusedBody());
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: false };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async (
+      _o: string,
+      _r: string,
+      index: number
+    ) => {
+      api.calls.push("listIssueTimeline");
+      if (index === 12) return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+      return [{ event: "labeled", label: "automerge", actor: { login: "jumi" } }];
+    };
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+      api.scheduled.push({});
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      issueNumber: 12,
+      log: () => undefined,
+    });
+    expect(api.calls.filter((call) => call === "scheduleAutoMerge")).toHaveLength(1);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("Auto-merge is now scheduled");
+  });
+
+  test("missing file, refused note, no automerge label schedules nothing", async () => {
+    const api = automergeApi();
+    withRefusedSticky(api, refusedBody());
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: false };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      issueNumber: 12,
+      log: () => undefined,
+    });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+  });
+
+  test("missing file, refused note, no-automerge label runs the cancel path without scheduling", async () => {
+    const api = automergeApi();
+    withRefusedSticky(api, refusedBody());
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: false };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["no-automerge"] as never });
+    };
+    api.cancelAutoMerge = async () => {
+      api.calls.push("cancelAutoMerge");
+      return true;
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.calls).toContain("cancelAutoMerge");
+  });
+
+  test("missing file, no refused sticky, automerge label schedules nothing", async () => {
+    const api = automergeApi();
+    withNoSticky(api);
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: false };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    (api as unknown as Record<string, unknown>)["listIssueTimeline"] = async () => {
+      api.calls.push("listIssueTimeline");
+      return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      issueNumber: 12,
+      log: () => undefined,
+    });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toEqual([]);
+  });
+
+  test("invalid file, refused note schedules nothing without throwing", async () => {
+    const api = automergeApi();
+    withRefusedSticky(api, refusedBody());
+    api.getRepoFile = async () => {
+      api.calls.push("getRepoFile");
+      return { found: true, content: "automerge: yes-please\n" };
+    };
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+  });
 });

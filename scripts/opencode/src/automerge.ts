@@ -1352,8 +1352,8 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       log(`automerge settings unreadable for ${input.owner}/${input.repo}: ${errorMessage(err)}`);
       return;
     }
-    if (settings.state !== "valid") return;
-    const names = { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
+    if (settings.state === "invalid") return;
+    const names = resolveLabelNames(settings);
     const excluded = excludedFilenames(files, settings);
     if (excluded.length > 0) {
       const cancelled = await cancelAutomergeSchedule(
