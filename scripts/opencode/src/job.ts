@@ -15,6 +15,7 @@ import {
   type RoleGateRole,
 } from "./review_jobs.ts";
 import { patchActiveRunUsageTiming } from "./run_usage.ts";
+import { RunnerCooldownStore } from "./runner_cooldown.ts";
 import { orderedRunners } from "./runners.ts";
 import { processEngineTick, type RunReviewJobExtras } from "./server.ts";
 import { installProcessShutdown } from "./shutdown.ts";
@@ -32,6 +33,28 @@ export function parseJobId(value: string | undefined): number {
   const id = Number(raw);
   if (!Number.isInteger(id) || id <= 0) throw new Error(`Invalid ${JOB_ID_ENV}: ${raw}`);
   return id;
+}
+
+async function persistOneShotCooldowns(
+  store: ReviewJobStore,
+  role: RoleGateRole,
+  cooldowns: RunnerCooldownStore
+): Promise<void> {
+  const nowMs = Date.now();
+  let active: ReturnType<RunnerCooldownStore["activeEntries"]>;
+  try {
+    active = cooldowns.activeEntries(nowMs);
+  } catch {
+    return;
+  }
+  for (const e of active) {
+    try {
+      if (typeof store.recordRunnerCooldown !== "function") return;
+      await store.recordRunnerCooldown(role, e.runner, e.untilMs, e.reason, e.source, e.fingerprint ?? null);
+    } catch {
+      // Fail-open: never fail the Job on persistence.
+    }
+  }
 }
 
 function roleForKind(kind: JobKind): RoleGateRole {
@@ -257,6 +280,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
         timing
       );
     };
+    const runnerCooldowns = options.engineExtras?.runnerCooldowns ?? new RunnerCooldownStore();
     try {
       const result = await processEngineTick(
         proxy,
@@ -265,6 +289,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
         leasedBy,
         {
           ...options.engineExtras,
+          runnerCooldowns,
           abortSignal: options.abortSignal ?? options.engineExtras?.abortSignal,
           workspacePreparer: wrappedPreparer,
         },
@@ -274,14 +299,17 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
         log(lastReason.reason ?? "row could not be leased, exiting 0");
         return { exitCode: 0, reason: lastReason.reason ?? "idle" };
       }
+      await persistOneShotCooldowns(proxy, "engine", runnerCooldowns);
       return verifyRowSettled(options.store, options.jobId, leasedBy, log);
     } catch (err) {
+      await persistOneShotCooldowns(proxy, "engine", runnerCooldowns);
       const message = errorMessage(err);
       log(`one-shot review failed: ${message}`);
       return { exitCode: 1, reason: message };
     }
   }
 
+  const workerCooldowns = options.workerExtras?.runnerCooldowns ?? new RunnerCooldownStore();
   try {
     const { standingPodRuntime } = await import("./runtime.ts");
     const realRuntime = options.workerExtras?.runtime ?? standingPodRuntime;
@@ -314,6 +342,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
       leasedBy,
       {
         ...options.workerExtras,
+        runnerCooldowns: workerCooldowns,
         abortSignal: options.abortSignal ?? options.workerExtras?.abortSignal,
         runtime: wrappedRuntime as never,
       },
@@ -323,8 +352,10 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
       log(lastReason.reason ?? "row could not be leased, exiting 0");
       return { exitCode: 0, reason: lastReason.reason ?? "idle" };
     }
+    await persistOneShotCooldowns(proxy, "worker", workerCooldowns);
     return verifyRowSettled(options.store, options.jobId, leasedBy, log);
   } catch (err) {
+    await persistOneShotCooldowns(proxy, "worker", workerCooldowns);
     const message = errorMessage(err);
     log(`one-shot worker failed: ${message}`);
     return { exitCode: 1, reason: message };
