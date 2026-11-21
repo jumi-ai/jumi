@@ -150,6 +150,8 @@ interface WorkerReviewQueue {
 export interface HandleWorkerWebhookDeps {
   queue: WorkerWebhookQueue;
   review?: WorkerReviewQueue;
+  /** Single-slot strict-refresh store; preferred over the cast on `review`. */
+  strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
   api?: WorkerWebhookApi;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
@@ -831,9 +833,17 @@ export async function handleWorkerWebhookEvent(
       }
       // Strict refresh for GitHub up-to-date branches (no-op when strict is
       // off or unknown, e.g. Gitea). Same merge-only worker path, no model.
+      // Single-slot per repo and target branch (see github_webhook).
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
-        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger);
+        const strictSlots =
+          deps.strictSlots ??
+          (
+            deps.review as unknown as
+              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+              | undefined
+          )?.strictSlots;
+        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger, strictSlots);
         for (const partial of strict.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };
           const result: EnqueueResult = await deps.queue.enqueue(job);

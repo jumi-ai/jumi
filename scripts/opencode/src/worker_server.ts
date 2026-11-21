@@ -91,6 +91,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
             logger,
             sits: deps.sits,
             handoffs: deps.handoffs,
+            strictSlots: deps.strictSlots,
           },
           logger,
           deliveryDedupe,
@@ -147,7 +148,15 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           automergeEnabled: config.automergeEnabled,
           forgeKind: config.forge,
         },
-        { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs }
+        {
+          queue: deps.queue,
+          api: deps.api,
+          cancel: deps.cancel,
+          logger,
+          sits: deps.sits,
+          handoffs: deps.handoffs,
+          strictSlots: deps.strictSlots,
+        }
       );
       if (deliveryHeader && (response.status === 200 || response.status === 202)) {
         deliveryDedupe.mark(delivery);
@@ -228,6 +237,7 @@ async function main() {
       api,
       sits: store?.sits,
       handoffs: store?.handoffs,
+      strictSlots: store?.strictSlots,
       cancel: (owner, repo, issueNumber) =>
         handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids, skipLatches),
     }),
