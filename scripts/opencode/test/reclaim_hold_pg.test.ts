@@ -1,14 +1,14 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
 import { resolveExhaustedFollowUpHoldOrThrow } from "../src/exhausted_hold.ts";
 import type { Check } from "../src/ports.ts";
-import { createBunSqlClient, HEARTBEAT_MS, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { HEARTBEAT_MS, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { markSuggestionHoldConsumed, suggestionHoldSkippedDescription } from "../src/suggestion_hold.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeConfig, makeIssueJob } from "./fixtures.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 // The stale-owner fence in `resolveExhaustedFollowUpHoldOrThrow` reads the
 // live `leased_by` through `store.get`, so it must hold against the real
@@ -21,10 +21,14 @@ describePg("router reclaim hold resolution against real postgres", () => {
 
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   beforeEach(async () => {

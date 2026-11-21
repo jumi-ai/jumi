@@ -1,8 +1,7 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { PgProvenanceStore } from "../src/provenance.ts";
-import { createBunSqlClient } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 // Durable path: the same SQL runs against real Postgres, not an in-memory
 // twin. Skipped without JUMI_TEST_DATABASE_URL so `bun test` stays green.
@@ -27,11 +26,15 @@ describePg("PgProvenanceStore against real postgres", () => {
   async function setup(): Promise<void> {
     if ((setup as { done?: boolean }).done) return;
     (setup as { done?: boolean }).done = true;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgProvenanceStore(sql);
     await sql.unsafe(`DROP TABLE IF EXISTS pr_writer_provenance, pr_publication_intents`);
     await store.migrate();
   }
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
+  });
 
   async function reset(): Promise<void> {
     await setup();
