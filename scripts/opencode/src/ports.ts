@@ -320,7 +320,7 @@ export interface Forge extends AttachmentSupport {
   ): Promise<{ id: number } | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
-  listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]>;
+  listPullReviewComments(owner: string, repo: string, index: number, reviews?: PullReview[]): Promise<InlineComment[]>;
   listPullReviews(owner: string, repo: string, index: number): Promise<PullReview[]>;
   createPullReview(owner: string, repo: string, index: number, review: CreatePullReviewOptions): Promise<PullReview>;
   submitPullReview(owner: string, repo: string, index: number, reviewId: number, body?: string): Promise<PullReview>;
