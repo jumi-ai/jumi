@@ -1,11 +1,11 @@
 import {
-  actionJobCheckState,
   baseConclusionForCheckName,
+  checksFromActionJobs,
   isJumiReviewContext,
-  jobMatchesCheck,
   latestStatuses,
+  mergeForgeAndLiveChecks,
 } from "./ci.ts";
-import type { ActionJob, Check, Forge } from "./ports.ts";
+import type { Check, Forge } from "./ports.ts";
 import { errorMessage } from "./util/error.ts";
 
 type BaseCiApi = Pick<Forge, "listCommitStatuses" | "listCheckRuns" | "listActionJobs">;
@@ -62,29 +62,12 @@ export async function inspectBaseCi(opts: {
   let live: Check[] = [];
   try {
     const jobs = await opts.api.listActionJobs(opts.owner, opts.repo, { headSha: sha });
-    live = jobsToChecks(jobs, sha);
+    live = checksFromActionJobs(jobs, sha);
   } catch (err) {
     live = [];
     note(err);
   }
-  const matchedLive = new Set<Check>();
-  const merged = fromForge.map((forge) => {
-    const matches = live.filter((check) =>
-      jobMatchesCheck(
-        { id: check.jobId ?? 0, name: check.context ?? "", head_sha: sha } as ActionJob,
-        forge.context ?? "",
-        sha
-      )
-    );
-    if (matches.length === 0) return forge;
-    for (const check of matches) matchedLive.add(check);
-    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
-    const state = latest.state ?? latest.status;
-    return { ...forge, state, status: state };
-  });
-  const others = latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
-    (status) => !isJumiReviewContext(status.context)
-  );
+  const others = mergeForgeAndLiveChecks(fromForge, live, sha);
   const results: BaseCheckResult[] = [];
   for (const status of others) {
     const name = status.context ?? "";
@@ -92,24 +75,6 @@ export async function inspectBaseCi(opts: {
     results.push({ name, conclusion: status.state ?? status.status ?? "unknown" });
   }
   return { sha, results, ...(lookupFailed ? { lookupFailed: true as const } : {}) };
-}
-
-function jobsToChecks(jobs: ActionJob[], sha: string): Check[] {
-  const checks: Check[] = [];
-  for (const job of jobs) {
-    if ((job.head_sha ?? "").toLowerCase() !== sha.toLowerCase()) continue;
-    const state = actionJobCheckState(job);
-    if (!state) continue;
-    checks.push({
-      id: job.id,
-      context: job.name || `job-${job.id}`,
-      state,
-      status: state,
-      jobId: job.id,
-      target_url: job.html_url,
-    });
-  }
-  return checks;
 }
 
 /** Green on base (`success`) for one check name, with workflow/job alias matching. */

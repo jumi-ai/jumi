@@ -274,7 +274,7 @@ export function actionJobCheckState(job: ActionJob): CheckState | undefined {
   return "success";
 }
 
-function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
+export function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
   const needle = sha.toLowerCase();
   const checks: Check[] = [];
   for (const job of jobs) {
@@ -291,6 +291,25 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
     });
   }
   return checks;
+}
+
+/** Merge forge rows with live jobs; live wins, latest-by-jobId wins, Jumi contexts dropped. */
+export function mergeForgeAndLiveChecks(fromForge: Check[], live: Check[], sha: string): Check[] {
+  const matchedLive = new Set<Check>();
+  const merged = fromForge.map((forge) => {
+    const matches = live.filter((check) => {
+      const job = { id: check.jobId ?? 0, name: check.context ?? "", head_sha: sha };
+      return jobMatchesCheck(job, forge.context ?? "", sha);
+    });
+    if (matches.length === 0) return forge;
+    for (const check of matches) matchedLive.add(check);
+    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
+    const state = commitStatusState(latest);
+    return { ...forge, state, status: state };
+  });
+  return latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
+    (status) => !isJumiReviewContext(status.context)
+  );
 }
 
 export function reviewSkipReasonForCi(ci: CiInspection, wait?: CiGateWait): string | undefined {
@@ -869,13 +888,7 @@ export function baseConclusionForCheckName(
   results: ReadonlyArray<{ name: string; conclusion: string }>,
   checkName: string
 ): string | undefined {
-  const matches = (name: string) =>
-    name === checkName ||
-    name.endsWith(` / ${checkName}`) ||
-    checkName.endsWith(` / ${name}`) ||
-    name.includes(` / ${checkName} (`) ||
-    checkName.includes(` / ${name} (`);
-  return results.find((result) => matches(result.name))?.conclusion;
+  return results.find((result) => requiredMatchesCheck(result.name, checkName))?.conclusion;
 }
 
 export function buildCiMarkdown(opts: {
@@ -1031,21 +1044,7 @@ export async function inspectCi(opts: {
   }
   const sawShaJobs = fromForge.length > 0 || live.length > 0;
   // Live Action jobs are fresher than forge rows (status / check-run lag), so a matching live job's state wins.
-  const matchedLive = new Set<Check>();
-  const merged = fromForge.map((forge) => {
-    const matches = live.filter((check) => {
-      const job = { id: check.jobId ?? 0, name: check.context ?? "", head_sha: opts.sha };
-      return jobMatchesCheck(job, forge.context ?? "", opts.sha);
-    });
-    if (matches.length === 0) return forge;
-    for (const check of matches) matchedLive.add(check);
-    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
-    const state = commitStatusState(latest);
-    return { ...forge, state, status: state };
-  });
-  const others = latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
-    (status) => !isJumiReviewContext(status.context)
-  );
+  const others = mergeForgeAndLiveChecks(fromForge, live, opts.sha);
   const required = requiredCiContextsForPending(opts.requiredContexts);
   let pending: boolean;
   let pendingOptional: string[] = [];
