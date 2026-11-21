@@ -555,20 +555,27 @@ async function submitPendingAndRefreshPosted(
 ): Promise<void> {
   const submitted = await submitPendingBotReviews(opts);
 
-  let leftover: InlineComment[] = [];
-  try {
-    leftover = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
-  } catch (err) {
-    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
-  }
-  let reviews: PullReview[] = [];
+  let reviews: PullReview[] | undefined;
   try {
     reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
   } catch (err) {
     opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
   }
+  let leftover: InlineComment[] = [];
+  try {
+    leftover = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber, reviews);
+  } catch (err) {
+    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
+  }
 
-  for (const key of leftoverAttemptedFingerprints(leftover, attempted, opts.marker, existingIds, reviews, submitted)) {
+  for (const key of leftoverAttemptedFingerprints(
+    leftover,
+    attempted,
+    opts.marker,
+    existingIds,
+    reviews ?? [],
+    submitted
+  )) {
     posted.add(key);
   }
 }
@@ -658,17 +665,17 @@ async function postPullReview(opts: {
 
   await submitPendingBotReviews(opts);
 
-  let existing: InlineComment[] = [];
-  try {
-    existing = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
-  } catch (err) {
-    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
-  }
-  let reviews: PullReview[] = [];
+  let reviews: PullReview[] | undefined;
   try {
     reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
   } catch (err) {
     opts.log(`existing reviews unavailable: ${errorMessage(err)}`);
+  }
+  let existing: InlineComment[] = [];
+  try {
+    existing = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber, reviews);
+  } catch (err) {
+    opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
   }
   const existingIds = new Set(existing.map((comment) => comment.id));
 
@@ -680,7 +687,7 @@ async function postPullReview(opts: {
     marker: opts.marker,
     findings,
     existing,
-    reviews,
+    reviews: reviews ?? [],
     log: opts.log,
   });
 
@@ -755,6 +762,9 @@ async function postPullReview(opts: {
   let urls = inlineUrlsByFingerprint(existing, opts.marker);
   if (comments.length > 0) {
     try {
+      // Re-fetch the review list here instead of reusing the pre-create
+      // `reviews`: the review just created above has a new id whose inline
+      // `html_url`s would otherwise be missing from the published read.
       const published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
       urls = inlineUrlsByFingerprint(published, opts.marker);
     } catch (err) {
@@ -2397,22 +2407,28 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
   };
   try {
     log(`Fetching ${repoFullName}#${pr.number} files`);
-    const [repoInfo, prFiles, prCommentResult, prReviews, prInlines] = await Promise.all([
+    const [repoInfo, prFiles, prCommentResult, prReviews] = await Promise.all([
       earlyRepo ?? forgeApi.getRepo(opts.owner, opts.repo),
       forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
       loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
-      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] => {
+      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] | undefined => {
         log(`previous reviews unavailable: ${errorMessage(err)}`);
-        return [];
-      }),
-      forgeApi.listPullReviewComments(opts.owner, opts.repo, pr.number).catch((err: unknown): InlineComment[] => {
-        log(`previous inlines unavailable: ${errorMessage(err)}`);
-        return [];
+        return undefined;
       }),
     ]);
+    // Reuse the review list fetched above so the review-list pages are
+    // requested exactly once per evaluation. `undefined` on a review-list
+    // failure retries the fetch inside the inline read instead of silently
+    // forcing inlines to `[]`.
+    const prInlines = await forgeApi
+      .listPullReviewComments(opts.owner, opts.repo, pr.number, prReviews)
+      .catch((err: unknown): InlineComment[] => {
+        log(`previous inlines unavailable: ${errorMessage(err)}`);
+        return [];
+      });
     const previousReview = findPreviousReview({
       comments: prCommentResult.comments,
-      reviews: prReviews,
+      reviews: prReviews ?? [],
       inlines: prInlines,
       botUsername: opts.botUsername,
       marker: markerFor(opts.owner, opts.repo, pr.number),
@@ -2478,7 +2494,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // requirement. Dismissed/stale human reviews stay in: dismissal is not a
     // retraction, and a stale review the worker implemented is not withdrawn.
     const botLower = opts.botUsername.trim().toLowerCase();
-    const threadReviews = prReviews.filter((review) => (review.user?.login ?? "").toLowerCase() !== botLower);
+    const threadReviews = (prReviews ?? []).filter((review) => (review.user?.login ?? "").toLowerCase() !== botLower);
     const threadInlines = prInlines.filter((comment) => (comment.user?.login ?? "").toLowerCase() !== botLower);
     const {
       permissions,

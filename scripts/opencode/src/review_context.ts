@@ -5,7 +5,17 @@ export const DEFAULT_MAX_THREAD_BYTES = 200_000;
 const MAX_COMMENT_BODY_BYTES = 32_768;
 const MAX_LINKED_ISSUE_BODY_BYTES = 8_192;
 const OMITTED_BODY = "[omitted; thread budget]";
+const LINK_TRUNCATION_NOTE = "\n[truncated; thread budget]\n";
 const encoder = new TextEncoder();
+
+/** Counts serializeReviewThread calls so tests can bound re-serialization. */
+let serializeReviewThreadCalls = 0;
+export function resetSerializeReviewThreadCalls(): void {
+  serializeReviewThreadCalls = 0;
+}
+export function getSerializeReviewThreadCalls(): number {
+  return serializeReviewThreadCalls;
+}
 
 type ReviewCommentIntent = "product" | "discussion";
 
@@ -78,6 +88,7 @@ export interface FitReviewThreadResult {
   thread: ReviewThread;
   truncated: boolean;
   droppedCommentBodies: number;
+  omittedIds: number[];
   threadBytes: number;
 }
 
@@ -312,6 +323,7 @@ export function formatReviewCommentsXml(comments: ReviewThreadInline[]): string 
 }
 
 export function serializeReviewThread(thread: ReviewThread): string {
+  serializeReviewThreadCalls += 1;
   const parts = [
     formatPrCommentsXml(thread.comments),
     formatPullReviewsXml(thread.pullReviews ?? []),
@@ -405,20 +417,29 @@ const ACCEPTANCE_OMISSION_NOTE = "\n\n[truncated to keep Done-when/Acceptance se
 
 /**
  * Truncate a linked-issue body to `maxBytes` while keeping its Done-when /
- * Acceptance / Tests section. When the section exists, the tail from its
- * heading is kept verbatim and the head is shrunk to fit; when the section
- * alone is over budget, its head is kept. Without such a section this is a
- * plain head truncation.
+ * Acceptance / Tests section. Every truncation path carries an explicit
+ * marker (`[truncated`/`[omitted`); a budget too small for any content floors
+ * at OMITTED_BODY instead of returning a bare or empty cut.
  */
 function truncateLinkedIssueBody(body: string, maxBytes: number): string {
   if (byteLength(body) <= maxBytes) return body;
+  if (maxBytes <= byteLength(OMITTED_BODY)) return OMITTED_BODY;
   const start = acceptanceSectionStart(body);
-  if (start < 0) return truncateUtf8(body, maxBytes);
+  if (start < 0) {
+    if (maxBytes <= byteLength(LINK_TRUNCATION_NOTE)) return OMITTED_BODY;
+    return `${truncateUtf8(body, maxBytes - byteLength(LINK_TRUNCATION_NOTE))}${LINK_TRUNCATION_NOTE}`;
+  }
   const acceptance = body.slice(start);
-  if (byteLength(acceptance) >= maxBytes) return truncateUtf8(acceptance, maxBytes);
+  if (byteLength(acceptance) >= maxBytes) {
+    if (maxBytes <= byteLength(LINK_TRUNCATION_NOTE)) return OMITTED_BODY;
+    return `${truncateUtf8(acceptance, maxBytes - byteLength(LINK_TRUNCATION_NOTE))}${LINK_TRUNCATION_NOTE}`;
+  }
   const noteBytes = byteLength(ACCEPTANCE_OMISSION_NOTE);
   const headBudget = maxBytes - byteLength(acceptance) - noteBytes;
-  if (headBudget <= 0) return truncateUtf8(acceptance, maxBytes);
+  if (headBudget <= 0) {
+    if (maxBytes <= byteLength(LINK_TRUNCATION_NOTE)) return OMITTED_BODY;
+    return `${truncateUtf8(acceptance, maxBytes - byteLength(LINK_TRUNCATION_NOTE))}${LINK_TRUNCATION_NOTE}`;
+  }
   const head = truncateUtf8(body.slice(0, start), headBudget);
   return `${head}${ACCEPTANCE_OMISSION_NOTE}${acceptance}`;
 }
@@ -429,50 +450,125 @@ function threadByteLength(thread: ReviewThread): number {
 
 export function fitReviewThread(thread: ReviewThread, maxBytes: number): FitReviewThreadResult {
   const fitted = cloneThread(thread);
-  const underCap = () => threadByteLength(fitted) <= maxBytes;
-
-  if (underCap()) {
-    return {
-      thread: fitted,
-      truncated: false,
-      droppedCommentBodies: 0,
-      threadBytes: threadByteLength(fitted),
-    };
+  const baseline = threadByteLength(fitted);
+  if (baseline <= maxBytes) {
+    return { thread: fitted, truncated: false, droppedCommentBodies: 0, omittedIds: [], threadBytes: baseline };
   }
 
   let truncated = false;
-  let droppedCommentBodies = 0;
-
   for (const comment of allComments(fitted)) {
     if (byteLength(comment.body) > MAX_COMMENT_BODY_BYTES) {
       comment.body = `${truncateUtf8(comment.body, MAX_COMMENT_BODY_BYTES)}\n[truncated]`;
       truncated = true;
     }
   }
+  // One re-serialization after truncation; omissions below use escaped-size
+  // diffs only, so fitting stays linear in the number of items.
+  let total = threadByteLength(fitted);
 
-  if (!underCap()) {
-    for (const comment of omissionOrder(fitted)) {
-      if (underCap()) break;
-      if (comment.body === OMITTED_BODY) continue;
-      comment.body = OMITTED_BODY;
-      droppedCommentBodies += 1;
-      truncated = true;
-    }
+  const omittedCost = byteLength(OMITTED_BODY);
+  const order = omissionOrder(fitted);
+  const savings = order.map((item) =>
+    item.body === OMITTED_BODY ? 0 : Math.max(0, byteLength(escapeXml(item.body)) - omittedCost)
+  );
+  let saved = 0;
+  const omitIdx: number[] = [];
+  for (let i = 0; i < order.length; i++) {
+    if (total - saved <= maxBytes) break;
+    if (savings[i]! <= 0) continue;
+    saved += savings[i]!;
+    omitIdx.push(i);
   }
+  const omittedIds: number[] = [];
+  for (const i of omitIdx) {
+    order[i]!.body = OMITTED_BODY;
+    const id = (order[i] as unknown as { id?: unknown }).id;
+    if (typeof id === "number") omittedIds.push(id);
+  }
+  total -= saved;
+  if (omitIdx.length > 0) truncated = true;
 
-  if (!underCap()) {
+  if (total > maxBytes) {
     for (const issue of fitted.linkedIssues) {
-      if (byteLength(issue.body) > MAX_LINKED_ISSUE_BODY_BYTES) {
-        issue.body = truncateLinkedIssueBody(issue.body, MAX_LINKED_ISSUE_BODY_BYTES);
+      if (total <= maxBytes) break;
+      if (issue.body === OMITTED_BODY) continue;
+      const raw = byteLength(issue.body);
+      const target = Math.max(0, raw - (total - maxBytes) - 64);
+      const budget = Math.min(MAX_LINKED_ISSUE_BODY_BYTES, target);
+      if (budget >= raw) continue;
+      const next = truncateLinkedIssueBody(issue.body, budget);
+      if (next !== issue.body) {
+        total -= byteLength(escapeXml(issue.body)) - byteLength(escapeXml(next));
+        issue.body = next;
         truncated = true;
+        if (next === OMITTED_BODY && !omittedIds.includes(issue.number)) omittedIds.push(issue.number);
       }
     }
   }
 
-  return {
-    thread: fitted,
-    truncated,
-    droppedCommentBodies,
-    threadBytes: threadByteLength(fitted),
-  };
+  if (total > maxBytes) {
+    const bySize = [...fitted.linkedIssues].sort(
+      (a, b) => byteLength(escapeXml(b.body)) - byteLength(escapeXml(a.body))
+    );
+    for (const issue of bySize) {
+      if (total <= maxBytes) break;
+      if (issue.body === OMITTED_BODY) continue;
+      total -= byteLength(escapeXml(issue.body)) - omittedCost;
+      issue.body = OMITTED_BODY;
+      truncated = true;
+      if (!omittedIds.includes(issue.number)) omittedIds.push(issue.number);
+    }
+  }
+
+  // Last resort: drop whole linked issues (largest first) so output still fits
+  // when bodies alone cannot. Links stay whenever body fitting suffices.
+  if (total > maxBytes && fitted.linkedIssues.length > 0) {
+    const costs = fitted.linkedIssues.map((issue) => ({
+      issue,
+      cost: byteLength(formatLinkedIssuesXml([issue])),
+    }));
+    costs.sort((a, b) => b.cost - a.cost);
+    let estimate = total;
+    const toDrop: ReviewLinkedIssue[] = [];
+    for (const entry of costs) {
+      if (estimate <= maxBytes) break;
+      estimate -= entry.cost;
+      toDrop.push(entry.issue);
+    }
+    for (const issue of toDrop) {
+      const idx = fitted.linkedIssues.indexOf(issue);
+      if (idx >= 0) fitted.linkedIssues.splice(idx, 1);
+      if (!omittedIds.includes(issue.number)) omittedIds.push(issue.number);
+    }
+    if (toDrop.length > 0) truncated = true;
+    total = threadByteLength(fitted);
+    if (total > maxBytes && fitted.linkedIssues.length > 0) {
+      for (const issue of fitted.linkedIssues) {
+        if (!omittedIds.includes(issue.number)) omittedIds.push(issue.number);
+      }
+      fitted.linkedIssues = [];
+      total = threadByteLength(fitted);
+      truncated = true;
+    }
+  }
+
+  // Ultimate fallback: wrappers alone exceed the budget; drop items entirely.
+  // An empty thread serializes to "" and always fits a non-negative budget.
+  if (total > maxBytes) {
+    for (const comment of allComments(fitted)) {
+      const id = (comment as unknown as { id?: unknown }).id;
+      if (typeof id === "number" && !omittedIds.includes(id)) omittedIds.push(id);
+    }
+    for (const issue of fitted.linkedIssues) {
+      if (!omittedIds.includes(issue.number)) omittedIds.push(issue.number);
+    }
+    fitted.comments = [];
+    fitted.pullReviews = [];
+    fitted.reviewComments = [];
+    fitted.linkedIssues = [];
+    total = threadByteLength(fitted);
+    truncated = true;
+  }
+
+  return { thread: fitted, truncated, droppedCommentBodies: omitIdx.length, omittedIds, threadBytes: total };
 }

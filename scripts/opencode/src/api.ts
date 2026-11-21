@@ -835,8 +835,13 @@ export class GiteaAPI {
     return comments.map(toInlineComment);
   }
 
-  async listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]> {
-    const reviews = await this.listPullReviews(owner, repo, index);
+  async listPullReviewComments(
+    owner: string,
+    repo: string,
+    index: number,
+    preFetchedReviews?: PullReview[]
+  ): Promise<InlineComment[]> {
+    const reviews = preFetchedReviews ?? (await this.listPullReviews(owner, repo, index));
     const comments: InlineComment[] = [];
     for (const review of reviews) {
       if (typeof review.id !== "number" || !Number.isFinite(review.id)) continue;

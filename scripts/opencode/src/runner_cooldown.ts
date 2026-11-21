@@ -86,13 +86,20 @@ export class RunnerCooldownStore {
 
   recordQuota(
     name: string,
-    input: { retryAfterMs?: number; nowMs: number; config?: RunnerCooldownConfig }
+    input: { retryAfterMs?: number; quotaResetAtMs?: number; nowMs: number; config?: RunnerCooldownConfig }
   ): RunnerCooldownEntry {
     const config = input.config ?? DEFAULT_RUNNER_COOLDOWN_CONFIG;
     const nowMs = input.nowMs;
     let untilMs: number;
     let source: RunnerCooldownSource;
-    if (input.retryAfterMs != null && Number.isFinite(input.retryAfterMs) && input.retryAfterMs > 0) {
+    if (
+      typeof input.quotaResetAtMs === "number" &&
+      Number.isFinite(input.quotaResetAtMs) &&
+      input.quotaResetAtMs > nowMs
+    ) {
+      untilMs = Math.min(input.quotaResetAtMs, nowMs + config.quotaMaxMs);
+      source = "parsed";
+    } else if (input.retryAfterMs != null && Number.isFinite(input.retryAfterMs) && input.retryAfterMs > 0) {
       untilMs = nowMs + Math.min(input.retryAfterMs, config.quotaMaxMs);
       source = "parsed";
     } else {
@@ -287,7 +294,9 @@ export function recordRunnerCooldownForFailure(
     });
   }
   const retryAfterMs = input.result?.retryAfterMs ?? (input.err as { retryAfterMs?: number } | undefined)?.retryAfterMs;
-  return store.recordQuota(runnerName, { retryAfterMs, nowMs: input.nowMs, config: input.config });
+  const quotaResetAtMs =
+    input.result?.quotaResetAtMs ?? (input.err as { quotaResetAtMs?: number } | undefined)?.quotaResetAtMs;
+  return store.recordQuota(runnerName, { retryAfterMs, quotaResetAtMs, nowMs: input.nowMs, config: input.config });
 }
 
 function healthyRunnerNames(
