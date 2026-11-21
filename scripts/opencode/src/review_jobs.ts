@@ -73,6 +73,19 @@ export const WORKER_MAX_ATTEMPTS_REASON = "Jumi failed: max attempts exceeded";
 export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
+const RECLAIM_PREFIX = `${RECLAIM_LEASED_BY}:`;
+/** A reclaim publication claim owns its row only while `leasedBy` equals its token. */
+export function isReclaimOwner(leasedBy: string | null | undefined): boolean {
+  return leasedBy === RECLAIM_LEASED_BY || (typeof leasedBy === "string" && leasedBy.startsWith(RECLAIM_PREFIX));
+}
+/** Unique owner per reclaim publication claim; the `:suffix` keeps the `reclaim` prefix for old readers. */
+export function makeReclaimOwner(): string {
+  try {
+    return `${RECLAIM_PREFIX}${crypto.randomUUID()}`;
+  } catch {
+    return `${RECLAIM_PREFIX}${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  }
+}
 
 /** Prefix for a terminal implement skipped behind open issue dependencies. */
 const BLOCKED_ON_PREFIX = "blocked on ";
@@ -1521,7 +1534,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         if (row.state !== "leased" || row.leasedUntil == null || row.leasedUntil >= ts) continue;
         if (!allowed.includes(rowKind(row))) continue;
         if (hasPersistedResult(row)) {
-          row.leasedBy = RECLAIM_LEASED_BY;
+          row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
           row.updatedAt = ts;
           publish.push({ ...row });
@@ -1534,7 +1547,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           const reason = maxAttemptsReasonFor(rowKind(row));
           row.error = reason;
           row.resultReason = reason;
-          row.leasedBy = RECLAIM_LEASED_BY;
+          row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
           publish.push({ ...row });
           continue;
@@ -3925,7 +3938,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    updated_at = NOW()
                WHERE id = $1 AND state = 'leased'
                RETURNING *`,
-              [row.id, RECLAIM_LEASED_BY, claimedUntil]
+              [row.id, makeReclaimOwner(), claimedUntil]
             )
           );
           if (updated[0]) publish.push(mapRow(updated[0]));
@@ -3944,7 +3957,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    updated_at = NOW()
                WHERE id = $1
                RETURNING *`,
-              [row.id, reason, RECLAIM_LEASED_BY, claimedUntil]
+              [row.id, reason, makeReclaimOwner(), claimedUntil]
             )
           );
           if (updated[0]) publish.push(mapRow(updated[0]));

@@ -21,7 +21,13 @@ import {
   PR_AUTHOR_CANNOT_PUSH,
   type ReviewApi,
 } from "../src/review.ts";
-import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
+import {
+  HEARTBEAT_MS,
+  isReclaimOwner,
+  MemoryReviewJobStore,
+  makeReclaimOwner,
+  REVIEW_KIND,
+} from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { isQuotaStuck, readStuckState, stuckMarker } from "../src/stuck.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
@@ -265,8 +271,11 @@ describe("processEngineTick", () => {
 
     releaseComment();
     await first;
-    expect(store.rows[0]?.leasedUntil).toBeLessThan(Date.now());
-    expect(store.rows[0]?.leasedBy).toBeNull();
+    // A superseded reclaim token has no effect: the stale publisher's expiry
+    // must not clear the second claim, so the next tick can still publish it.
+    expect(store.rows[0]?.state).toBe("leased");
+    expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
+    expect(store.rows[0]?.leasedBy).toBe(afterHeartbeat.publish[0]?.leasedBy);
     expect(store.rows[0]?.publishedAt).toBeNull();
   });
 
@@ -439,7 +448,7 @@ describe("processEngineTick", () => {
       const expireCallers: string[] = [];
       store.saveResult = async (id, leasedBy, result) => {
         await originalSave(id, leasedBy, result);
-        store.rows[0]!.leasedBy = RECLAIM_LEASED_BY;
+        store.rows[0]!.leasedBy = makeReclaimOwner();
       };
       store.expireLease = async (id, leasedBy, now) => {
         expireCallers.push(leasedBy);
@@ -465,7 +474,7 @@ describe("processEngineTick", () => {
       });
       expect(reviewCalls).toBe(1);
       expect(expireCallers).toEqual([]);
-      expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+      expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
       expect(store.rows[0]?.state).toBe("leased");
       expect(store.rows[0]?.publishedAt).toBeNull();
     });
