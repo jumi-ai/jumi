@@ -3700,6 +3700,49 @@ describe("buildFeedbackMarkdown", () => {
     expect(earlierAt).toBeGreaterThan(inlineAt);
     expect(result.markdown).toContain("### Earlier review 1");
   });
+
+  test("omission note count matches omittedIds and bytes stay within budget", () => {
+    const sizes = [8005, 8008, 8010, 8014, 8016];
+    const comments = sizes.map((size, i) =>
+      makeComment({
+        id: 101 + i,
+        body: "x".repeat(size),
+        created_at: `2026-01-0${i + 1}T00:00:00Z`,
+        user: makeUser({ login: "bob" }),
+      })
+    );
+    const result = buildFeedbackMarkdown({ pr: jumiPr(), comments, inlines: [], reviews: [] });
+    expect(new TextEncoder().encode(result.markdown).byteLength).toBeLessThanOrEqual(FEEDBACK_MAX_BYTES);
+    const match = result.markdown.match(/\[(\d+) further item\(s\) omitted; feedback budget\]/);
+    if (result.omittedIds.length > 0) {
+      expect(match).not.toBeNull();
+      expect(Number(match?.[1])).toBe(result.omittedIds.length);
+    } else {
+      expect(match).toBeNull();
+    }
+    for (const id of result.omittedIds) {
+      expect(result.markdown).not.toContain(`### Comment ${id} by`);
+    }
+  });
+
+  test("multibyte and XML-escaped feedback stays within byte budget", () => {
+    const body = (id: number) => `comment ${id} 🎉 café <tag attr="v">&'" 中文テキスト ${"é–".repeat(600)}`;
+    const comments = [1, 2, 3, 4, 5].map((id) =>
+      makeComment({
+        id: 200 + id,
+        body: body(id),
+        created_at: `2026-02-0${id}T00:00:00Z`,
+        user: makeUser({ login: "bob" }),
+      })
+    );
+    const result = buildFeedbackMarkdown({ pr: jumiPr(), comments, inlines: [], reviews: [] });
+    expect(new TextEncoder().encode(result.markdown).byteLength).toBeLessThanOrEqual(FEEDBACK_MAX_BYTES);
+    const match = result.markdown.match(/\[(\d+) further item\(s\) omitted; feedback budget\]/);
+    if (result.omittedIds.length > 0) {
+      expect(match).not.toBeNull();
+      expect(Number(match?.[1])).toBe(result.omittedIds.length);
+    }
+  });
 });
 
 describe("pickLatestJumiReview", () => {

@@ -23,6 +23,7 @@ import {
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { thrownRunner } from "./engine.ts";
+import { resolveExhaustedFollowUpHoldOrThrow } from "./exhausted_hold.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -720,7 +721,11 @@ export async function reclaimExpiredJobs(
  * Max-attempts worker rows previously got `markPublished` with no forge
  * comment, leaving the sticky at "Jumi is implementing this issue". Publish
  * the failure to the issue so the board and the sticky move on like review
- * rows do.
+ * rows do. A terminally exhausted follow-up also resolves a suggestion-only
+ * hold via the same shared decision the standing worker uses; maintainer and
+ * other holds stay pending. The hold write throws (it is not best-effort):
+ * a failed write expires the lease below so a later reclaim pass retries it
+ * without duplicating the sticky comment above.
  */
 async function publishWorkerReclaimRow(
   store: ReviewJobStore,
@@ -730,13 +735,29 @@ async function publishWorkerReclaimRow(
   logger: (message: string) => void
 ): Promise<void> {
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+  const token = row.leasedBy;
   const reason = row.error ?? row.resultReason ?? "Jumi failed: max attempts exceeded";
   if (row.issueNumber != null) {
     await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, reason);
   } else {
     logger(`reclaim-publish ${row.jobKey} has no issue number; marking failed without a forge comment`);
   }
-  const published = await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+  if (row.kind === "follow-up" && row.issueNumber != null) {
+    // A cancel that lands between reclaim and publish settles to `cancelled`
+    // below; the cancel path owns the hold there, so leave it alone.
+    const cancelled = await store.isCancelRequested(row.id).catch(() => false);
+    if (!cancelled) {
+      await resolveExhaustedFollowUpHoldOrThrow({
+        api,
+        store,
+        row,
+        ownerToken: token,
+        kind: "skipped",
+        reason: "job failed",
+      });
+    }
+  }
+  const published = await store.markPublished(row.id, token, { state: "failed", reason });
   if (published.cancelled && row.issueNumber != null) {
     await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, "stopped");
   }
@@ -1300,7 +1321,7 @@ export function workerMailboxApi(
     updateIssueComment: (owner, repo, id, body) => api.updateIssueComment(owner, repo, id, body),
     listIssueComments: (owner, repo, index) => api.listIssueComments(owner, repo, index),
     listPullReviews: (owner, repo, index) => api.listPullReviews(owner, repo, index),
-    listPullReviewComments: (owner, repo, index) => api.listPullReviewComments(owner, repo, index),
+    listPullReviewComments: (owner, repo, index, reviews) => api.listPullReviewComments(owner, repo, index, reviews),
     createCommitStatus: (owner, repo, sha, status) => api.createCommitStatus(owner, repo, sha, status),
     rememberInstallation: api.rememberInstallation?.bind(api),
   };
