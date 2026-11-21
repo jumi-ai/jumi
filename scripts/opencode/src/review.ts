@@ -102,6 +102,8 @@ import {
   type ReviewSuggestionCounts,
   runnerLabelForStamp,
 } from "./review_suggestions.ts";
+import type { ReviewVerdictContract } from "./review_verdict_contract.ts";
+import { resolveReviewVerdictContract, verdictContractAllowsFileArtifact } from "./review_verdict_contract.ts";
 import { type ReviewRecord, ReviewVerdictStore } from "./review_verdict_store.ts";
 import type { RunnerCooldownConfig, RunnerCooldownStore } from "./runner_cooldown.ts";
 import {
@@ -281,6 +283,14 @@ export interface ReviewOptions {
   maxOutputBytes?: number;
   engine?: Engine;
   openCodeRunner?: Engine;
+  /**
+   * Explicitly selected verdict contract for this job's attempts. `required`
+   * keeps the structured MCP verdict mandatory; `legacy` keeps the
+   * `JUMI_REVIEW.md` file fallback for runners without structured-tool
+   * support. When absent the parent derives it per attempt from that
+   * attempt's runner capability.
+   */
+  verdictContract?: ReviewVerdictContract;
   workspacePreparer?: WorkspacePreparer;
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
@@ -2321,7 +2331,29 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     if (filtered.length !== effectiveChain.length) effectiveChain = filtered;
   }
 
-  const engine = withEngineChain(resolveEngine(opts, registeredEngine), {
+  // Per-attempt verdict contract, selected before each runner spawn from that
+  // spawn's runner and reused when validating its result. An explicit mode
+  // wins; otherwise the runner's structured-tool capability decides. A
+  // failure never reselects: the attempt keeps the contract it started with.
+  let attemptContract = resolveReviewVerdictContract({
+    runnerType: effectiveChain?.[0]?.type,
+    explicit: opts.verdictContract,
+  });
+  const baseEngine = resolveEngine(opts, registeredEngine);
+  const contractEngine: Engine = async (engineOpts) => {
+    attemptContract = resolveReviewVerdictContract({
+      runnerType: engineOpts.type,
+      explicit: opts.verdictContract,
+    });
+    logDiagnostic(log, "verdict_contract", {
+      review: `${repoFullName}#${pr.number}`,
+      head: reviewedHeadSha,
+      runner: engineOpts.runnerName ?? engineOpts.type ?? null,
+      contract: attemptContract,
+    });
+    return baseEngine(engineOpts);
+  };
+  const engine = withEngineChain(contractEngine, {
     chain: effectiveChain,
     fallbackModel: effectiveFallbackModel,
     fallbackVariant: effectiveFallbackVariant,
@@ -2561,6 +2593,8 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       if (setup.ran) {
         repoSetupBlock = setup.promptBlock;
         if (setup.failureReason) {
+          // Repository setup runs once before the first attempt and stays
+          // observable here; it never reselects that attempt's contract.
           await opts.persistResult?.({ kind: "skip", reason: setup.failureReason });
           await postReviewStatus(
             forgeApi,
@@ -2814,8 +2848,25 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         : {}),
     });
     const reviewMcpToken = randomReviewMcpToken();
-    const reviewMcpServer = await startReviewMcpServer({ store: verdictStore, token: reviewMcpToken });
-    const reviewMcpRef = { url: reviewMcpServer.url, token: reviewMcpToken };
+    // Structured-verdict adapter setup. A failure is observable and never
+    // changes this attempt's contract: required mode fails closed here
+    // instead of silently falling back to the file, while legacy mode keeps
+    // the file path without the adapter.
+    let reviewMcpServer: { url: string; close: () => void } | undefined;
+    let reviewMcpRef: { url: string; token: string } | undefined;
+    try {
+      reviewMcpServer = await startReviewMcpServer({ store: verdictStore, token: reviewMcpToken });
+      reviewMcpRef = { url: reviewMcpServer.url, token: reviewMcpToken };
+    } catch (err) {
+      const reason = `Incomplete review: verdict adapter unavailable: ${errorMessage(err)}`;
+      log(reason);
+      if (!verdictContractAllowsFileArtifact(attemptContract)) {
+        verdictStore.close();
+        await opts.persistResult?.({ kind: "skip", reason });
+        await postReviewStatus(forgeApi, opts.owner, opts.repo, reviewedHeadSha, "failure", reason, pr.html_url);
+        return { status: "skipped", reason };
+      }
+    }
     const runOpenCode = async (extra?: { prompt: string; continueSession: boolean }) => {
       throwIfAborted(opts.abortSignal);
       await writeFile(join(opts.workspace, "JUMI_TASK.md"), extra?.prompt ?? prompt);
@@ -3020,7 +3071,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         // Parent-owned MCP verdict wins over the file. When the model recorded
         // anything through the review tools, a JUMI_REVIEW.md in the worktree
         // (e.g. planted by pull code) is ignored.
-        if (verdictStore.hasAnything()) {
+        if (verdictStore.hasAnything() || !verdictContractAllowsFileArtifact(attemptContract)) {
           if (!verdictStore.hasVerdict()) {
             if (extrasUsed >= extraCap) {
               verdictStore.close();
@@ -3031,8 +3082,16 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
               );
             }
             extrasUsed++;
-            log(`Incomplete review: no verdict recorded; tool retry (${extrasUsed}/${extraCap})`);
+            // In required mode the file artifact never counts, so the retry
+            // asks for the structured verdict even when the store is empty.
+            // A stale file is dropped below so it cannot satisfy a later round.
+            await rm(artifactPath, { recursive: true, force: true }).catch(() => undefined);
             const continueMcp = await hasResumableSession(opts.workspace);
+            log(
+              verdictStore.hasFindings()
+                ? `Incomplete review: no verdict recorded; tool retry (${extrasUsed}/${extraCap})`
+                : `Incomplete review: no structured verdict; tool retry (${extrasUsed}/${extraCap})`
+            );
             lastStdout = (
               await runOpenCode({
                 prompt: verdictStore.hasFindings() ? buildMcpNoVerdictPrompt() : buildMcpIncompletePrompt(),
@@ -3162,7 +3221,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     } finally {
       verdictStore.close();
       try {
-        reviewMcpServer.close();
+        reviewMcpServer?.close();
       } catch {
         // Best-effort: never replace the review result.
       }

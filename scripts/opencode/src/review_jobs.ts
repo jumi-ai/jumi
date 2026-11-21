@@ -73,6 +73,19 @@ export const WORKER_MAX_ATTEMPTS_REASON = "Jumi failed: max attempts exceeded";
 export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
+const RECLAIM_PREFIX = `${RECLAIM_LEASED_BY}:`;
+/** A reclaim publication claim owns its row only while `leasedBy` equals its token. */
+export function isReclaimOwner(leasedBy: string | null | undefined): boolean {
+  return leasedBy === RECLAIM_LEASED_BY || (typeof leasedBy === "string" && leasedBy.startsWith(RECLAIM_PREFIX));
+}
+/** Unique owner per reclaim publication claim; the `:suffix` keeps the `reclaim` prefix for old readers. */
+export function makeReclaimOwner(): string {
+  try {
+    return `${RECLAIM_PREFIX}${crypto.randomUUID()}`;
+  } catch {
+    return `${RECLAIM_PREFIX}${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  }
+}
 
 /** Prefix for a terminal implement skipped behind open issue dependencies. */
 const BLOCKED_ON_PREFIX = "blocked on ";
@@ -148,6 +161,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface PeekRunnableExclude {
+  id: number;
+  generation: number;
+  attempt: number;
+}
+
 export interface ReviewJobStore {
   migrate(): Promise<void>;
   /** Job-mode check: fail clearly when the schema is too old. Never migrates. */
@@ -188,8 +207,17 @@ export interface ReviewJobStore {
    * `queued` count, which includes backoff rows and same-issue-held rows):
    * `queued`, not-before passed, and no same-issue worker lease held. Oldest
    * first. No state change: the one-shot Job leases the row itself.
+   * `exclude` holds current Job identities from a valid inventory; matching
+   * rows are skipped before the limit so free slots fill past AlreadyExists
+   * rows. Only a valid inventory may supply exclusions: an unreadable list
+   * skips the tick before this is called.
    */
-  peekRunnable(kinds: readonly JobKind[], limit: number, now?: Date): Promise<ReviewJobRecord[]>;
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now?: Date,
+    exclude?: readonly PeekRunnableExclude[]
+  ): Promise<ReviewJobRecord[]>;
   requeueInfra(
     id: number,
     leasedBy: string,
@@ -1375,18 +1403,42 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
       const allowed = kindsOrReview(kinds);
       const serializeWorkers = leasesWorkerKinds(allowed);
       const ts = now.getTime();
       const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
       if (cap <= 0) return [];
+      const excluded = (exclude ?? []).filter(
+        (entry) =>
+          Number.isInteger(entry.id) &&
+          entry.id > 0 &&
+          Number.isInteger(entry.attempt) &&
+          entry.attempt >= 0 &&
+          Number.isInteger(entry.generation) &&
+          entry.generation >= 0
+      );
       return this.rows
         .filter((item) => {
           if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
           if (item.leasedUntil != null && item.leasedUntil > ts) return false;
           if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
+          if (
+            excluded.length > 0 &&
+            excluded.some(
+              (entry) =>
+                entry.id === item.id &&
+                entry.attempt === item.attempt &&
+                entry.generation === payloadGeneration(item.payload)
+            )
+          )
+            return false;
           return true;
         })
         .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
@@ -1521,7 +1573,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         if (row.state !== "leased" || row.leasedUntil == null || row.leasedUntil >= ts) continue;
         if (!allowed.includes(rowKind(row))) continue;
         if (hasPersistedResult(row)) {
-          row.leasedBy = RECLAIM_LEASED_BY;
+          row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
           row.updatedAt = ts;
           publish.push({ ...row });
@@ -1534,7 +1586,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           const reason = maxAttemptsReasonFor(rowKind(row));
           row.error = reason;
           row.resultReason = reason;
-          row.leasedBy = RECLAIM_LEASED_BY;
+          row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
           publish.push({ ...row });
           continue;
@@ -1751,32 +1803,45 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter(
-          (row) =>
-            rowKind(row) === REVIEW_KIND &&
-            (row.state === "failed" ||
-              row.state === "skipped" ||
-              row.state === "succeeded" ||
-              row.state === "cancelled")
-        )
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== REVIEW_KIND) continue;
+        if (row.state !== "failed" && row.state !== "skipped" && row.state !== "succeeded" && row.state !== "cancelled")
+          continue;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
-  listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter((row) => rowKind(row) === "implement" && (row.state === "succeeded" || row.state === "skipped"))
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== "implement") continue;
+        if (row.state !== "succeeded" && row.state !== "skipped") continue;
+        const n = typeof row.issueNumber === "number" && row.issueNumber > 0 ? row.issueNumber : row.prNumber;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${n}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
@@ -3726,50 +3791,71 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  async peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     const allowed = kindsOrReview(kinds);
     const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
     if (cap <= 0) return [];
     const nowIso = now.toISOString();
     const serializeWorkers = leasesWorkerKinds(allowed);
-    const query = serializeWorkers
-      ? `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-           AND NOT EXISTS (
-             SELECT 1 FROM review_jobs held
-             WHERE held.state = 'leased'
-               AND held.kind = ANY($3::text[])
-               AND held.owner = review_jobs.owner
-               AND held.repo = review_jobs.repo
-               AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
-           )
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`
-      : `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`;
+    const valid = (exclude ?? []).filter(
+      (entry) =>
+        Number.isInteger(entry.id) &&
+        entry.id > 0 &&
+        Number.isInteger(entry.attempt) &&
+        entry.attempt >= 0 &&
+        Number.isInteger(entry.generation) &&
+        entry.generation >= 0
+    );
+    const generationExpr = `COALESCE(CASE WHEN review_jobs.payload->>'generation' ~ '^[0-9]+$' THEN (review_jobs.payload->>'generation')::bigint ELSE 0 END, 0)`;
+    const buildExclusion = (start: number): { clause: string; params: number[] } => {
+      if (valid.length === 0) return { clause: "", params: [] };
+      const parts: string[] = [];
+      const params: number[] = [];
+      valid.forEach((entry, index) => {
+        const a = start + index * 3;
+        parts.push(`(review_jobs.id = $${a} AND review_jobs.attempt = $${a + 1} AND ${generationExpr} = $${a + 2})`);
+        params.push(entry.id, entry.attempt, entry.generation);
+      });
+      return { clause: `AND NOT (${parts.join(" OR ")})`, params };
+    };
     if (serializeWorkers) {
+      const { clause, params } = buildExclusion(5);
       const rows = asRows<ReviewJobRow>(
-        await this.sql.unsafe(query, [
-          pgTextArrayLiteral(allowed),
-          nowIso,
-          pgTextArrayLiteral([...WORKER_JOB_KINDS]),
-          cap,
-        ])
+        await this.sql.unsafe(
+          `SELECT * FROM review_jobs
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            AND NOT EXISTS (
+              SELECT 1 FROM review_jobs held
+              WHERE held.state = 'leased'
+                AND held.kind = ANY($3::text[])
+                AND held.owner = review_jobs.owner
+                AND held.repo = review_jobs.repo
+                AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+            )
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $4`,
+          [pgTextArrayLiteral(allowed), nowIso, pgTextArrayLiteral([...WORKER_JOB_KINDS]), cap, ...params]
+        )
       );
       return rows.map(mapRow);
     }
+    const { clause, params } = buildExclusion(4);
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
         `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $3`,
-        [pgTextArrayLiteral(allowed), nowIso, cap]
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $3`,
+        [pgTextArrayLiteral(allowed), nowIso, cap, ...params]
       )
     );
     return rows.map(mapRow);
@@ -3925,7 +4011,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    updated_at = NOW()
                WHERE id = $1 AND state = 'leased'
                RETURNING *`,
-              [row.id, RECLAIM_LEASED_BY, claimedUntil]
+              [row.id, makeReclaimOwner(), claimedUntil]
             )
           );
           if (updated[0]) publish.push(mapRow(updated[0]));
@@ -3944,7 +4030,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    updated_at = NOW()
                WHERE id = $1
                RETURNING *`,
-              [row.id, reason, RECLAIM_LEASED_BY, claimedUntil]
+              [row.id, reason, makeReclaimOwner(), claimedUntil]
             )
           );
           if (updated[0]) publish.push(mapRow(updated[0]));
@@ -4050,23 +4136,25 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.map(mapRow);
   }
 
-  async listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), pr_number) * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY lower(owner), lower(repo), pr_number, id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);
   }
 
-  async listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), COALESCE(issue_number, pr_number)) * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY lower(owner), lower(repo), COALESCE(issue_number, pr_number), id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);

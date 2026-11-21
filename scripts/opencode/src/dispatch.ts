@@ -4,6 +4,7 @@ import { JOB_ID_ENV } from "./job_env.ts";
 import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import {
   type JobKind,
+  type PeekRunnableExclude,
   REVIEW_KIND,
   type ReviewJobRecord,
   type ReviewJobStore,
@@ -231,7 +232,9 @@ export async function k8sListJobs(opts: {
     throw new Error(`Job list failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ""}`);
   }
   const parsed = (await readJsonBody(response)) as { items?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.items)) return [];
+  if (!parsed || !Array.isArray(parsed.items)) {
+    throw new Error('Job list returned invalid payload: expected {"items": [...]}');
+  }
   return parsed.items as K8sJobObject[];
 }
 
@@ -273,7 +276,9 @@ async function k8sListPodsForJob(opts: {
     throw new Error(`Pod list failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ""}`);
   }
   const parsed = (await readJsonBody(response)) as { items?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.items)) return [];
+  if (!parsed || !Array.isArray(parsed.items)) {
+    throw new Error(`Pod list for ${opts.jobName} returned invalid payload: expected {"items": [...]}`);
+  }
   return parsed.items as K8sPodObject[];
 }
 
@@ -441,6 +446,7 @@ async function dispatchOneRole(opts: {
   }
 
   let active = 0;
+  const liveExcludes: PeekRunnableExclude[] = [];
   for (const job of jobs) {
     const name = job.metadata?.name;
     if (!name) continue;
@@ -453,6 +459,7 @@ async function dispatchOneRole(opts: {
         recordDispatchError(role, "delete");
         logger(`dispatch ${role}: delete of succeeded ${name} failed: ${errorMessage(err)}`);
         active++;
+        liveExcludes.push({ id: parsed.rowId, generation: parsed.generation, attempt: parsed.attempt });
       }
       continue;
     }
@@ -500,6 +507,7 @@ async function dispatchOneRole(opts: {
         recordDispatchError(role, "delete");
         logger(`dispatch ${role}: delete of failed ${name} failed: ${errorMessage(err)}`);
         active++;
+        liveExcludes.push({ id: parsed.rowId, generation: parsed.generation, attempt: parsed.attempt });
       }
       continue;
     }
@@ -512,6 +520,7 @@ async function dispatchOneRole(opts: {
         recordDispatchError(role, "pods");
         logger(`dispatch ${role}: pod list for ${name} failed: ${errorMessage(err)}`);
         active++;
+        liveExcludes.push({ id: parsed.rowId, generation: parsed.generation, attempt: parsed.attempt });
         continue;
       }
       if (!pods.some(podStarted)) {
@@ -525,11 +534,13 @@ async function dispatchOneRole(opts: {
           recordDispatchError(role, "delete");
           logger(`dispatch ${role}: delete of never-started ${name} failed: ${errorMessage(err)}`);
           active++;
+          liveExcludes.push({ id: parsed.rowId, generation: parsed.generation, attempt: parsed.attempt });
         }
         continue;
       }
     }
     active++;
+    liveExcludes.push({ id: parsed.rowId, generation: parsed.generation, attempt: parsed.attempt });
   }
   setActive(role, active);
 
@@ -543,7 +554,7 @@ async function dispatchOneRole(opts: {
 
   let runnable: ReviewJobRecord[];
   try {
-    runnable = await store.peekRunnable(kindsForDispatchRole(role), slots, new Date(nowMs));
+    runnable = await store.peekRunnable(kindsForDispatchRole(role), slots, new Date(nowMs), liveExcludes);
   } catch (err) {
     recordDispatchError(role, "list");
     logger(`dispatch ${role}: runnable peek failed: ${errorMessage(err)}`);

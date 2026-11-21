@@ -21,7 +21,13 @@ import {
   PR_AUTHOR_CANNOT_PUSH,
   type ReviewApi,
 } from "../src/review.ts";
-import { HEARTBEAT_MS, MemoryReviewJobStore, RECLAIM_LEASED_BY, REVIEW_KIND } from "../src/review_jobs.ts";
+import {
+  HEARTBEAT_MS,
+  isReclaimOwner,
+  MemoryReviewJobStore,
+  makeReclaimOwner,
+  REVIEW_KIND,
+} from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs, startReviewer } from "../src/server.ts";
 import { isQuotaStuck, readStuckState, stuckMarker } from "../src/stuck.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
@@ -109,6 +115,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -138,6 +145,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async () => {
           ran++;
           return { status: "ok" };
@@ -265,8 +273,11 @@ describe("processEngineTick", () => {
 
     releaseComment();
     await first;
-    expect(store.rows[0]?.leasedUntil).toBeLessThan(Date.now());
-    expect(store.rows[0]?.leasedBy).toBeNull();
+    // A superseded reclaim token has no effect: the stale publisher's expiry
+    // must not clear the second claim, so the next tick can still publish it.
+    expect(store.rows[0]?.state).toBe("leased");
+    expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
+    expect(store.rows[0]?.leasedBy).toBe(afterHeartbeat.publish[0]?.leasedBy);
     expect(store.rows[0]?.publishedAt).toBeNull();
   });
 
@@ -317,6 +328,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Retry\n<!-- jumi-check: success -->");
@@ -347,6 +359,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -372,6 +385,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -392,6 +406,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -416,6 +431,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async () => ({ status: "ok" }),
       });
       expect(store.rows[0]?.error).toBeNull();
@@ -439,7 +455,7 @@ describe("processEngineTick", () => {
       const expireCallers: string[] = [];
       store.saveResult = async (id, leasedBy, result) => {
         await originalSave(id, leasedBy, result);
-        store.rows[0]!.leasedBy = RECLAIM_LEASED_BY;
+        store.rows[0]!.leasedBy = makeReclaimOwner();
       };
       store.expireLease = async (id, leasedBy, now) => {
         expireCallers.push(leasedBy);
@@ -458,6 +474,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -465,7 +482,7 @@ describe("processEngineTick", () => {
       });
       expect(reviewCalls).toBe(1);
       expect(expireCallers).toEqual([]);
-      expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+      expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
       expect(store.rows[0]?.state).toBe("leased");
       expect(store.rows[0]?.publishedAt).toBeNull();
     });
@@ -548,6 +565,7 @@ describe("processEngineTick", () => {
       const extras = {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts: { workdir: string }) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -586,6 +604,7 @@ describe("processEngineTick", () => {
         now: () => now,
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts: { workdir: string }) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -627,6 +646,7 @@ describe("processEngineTick", () => {
         now: () => now,
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async () => {
           ran++;
           return { status: "ok" as const };
@@ -666,6 +686,7 @@ describe("processEngineTick", () => {
         now: () => now,
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts: { workdir: string }) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -785,6 +806,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async () => {
           ran++;
           return { status: "ok" };
@@ -809,6 +831,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -862,6 +885,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -1003,6 +1027,7 @@ describe("processEngineTick", () => {
             ciRelistDelayMs: 0,
             gitRunner: frozenGit(),
             workspacePreparer: async () => undefined,
+            verdictContract: "legacy" as const,
             openCodeRunner: async (opts) => {
               started();
               return hangUntilAbort(opts.abortSignal);
@@ -1041,6 +1066,7 @@ describe("processEngineTick", () => {
       const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         abortSignal: abort.signal,
         openCodeRunner: async (opts) => {
           started();
@@ -1069,6 +1095,7 @@ describe("processEngineTick", () => {
       const tick2 = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         abortSignal: abort2.signal,
         openCodeRunner: async (opts) => {
           started2();
@@ -1084,6 +1111,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-3", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -1114,6 +1142,7 @@ describe("processEngineTick", () => {
       const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         abortSignal: abort.signal,
         openCodeRunner: async (opts) => {
           started();
@@ -1141,6 +1170,7 @@ describe("processEngineTick", () => {
       const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         heartbeatMs: 15,
         openCodeRunner: async (opts) => {
           started();
@@ -1170,6 +1200,7 @@ describe("processEngineTick", () => {
       const tick = processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         heartbeatMs: 15,
         openCodeRunner: async (opts) => {
           started();
@@ -1189,6 +1220,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-2", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };
@@ -1269,6 +1301,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker,
           openCodeRunner: async () => {
             throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
@@ -1298,6 +1331,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker: new InfraCircuitBreaker(),
           openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "resetting" }),
         },
@@ -1330,6 +1364,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker: new InfraCircuitBreaker(),
           openCodeRunner: async () => ({ status: "exit", exitCode: 1, message }),
         },
@@ -1352,6 +1387,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         breaker: new InfraCircuitBreaker(),
         openCodeRunner: async () => ({ status: "stuck", message: QUOTA_MESSAGE, quota: "hard" }),
       });
@@ -1377,6 +1413,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker: new InfraCircuitBreaker(),
           openCodeRunner: async () => ({
             status: "exit",
@@ -1406,6 +1443,7 @@ describe("processEngineTick", () => {
       const extras = {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         breaker,
         openCodeRunner: async () => {
           throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
@@ -1460,6 +1498,7 @@ describe("processEngineTick", () => {
       const fail = {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         breaker,
         openCodeRunner: async () => {
           throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
@@ -1478,6 +1517,7 @@ describe("processEngineTick", () => {
       await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), engineApi(), "engine-1", {
         gitRunner: frozenGit(),
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         breaker,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -1517,6 +1557,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker: new InfraCircuitBreaker(),
           openCodeRunner: async () => {
             throw new EngineFailedError("opencode exited with code 1:\nbad things", false);
@@ -1554,6 +1595,7 @@ describe("processEngineTick", () => {
         {
           gitRunner: frozenGit(),
           workspacePreparer: async () => undefined,
+          verdictContract: "legacy" as const,
           breaker: new InfraCircuitBreaker(),
           openCodeRunner: async () => {
             throw new EngineFailedError("EACCES: mkdir '/data/.local/state'", true);
