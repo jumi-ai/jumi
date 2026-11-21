@@ -231,7 +231,9 @@ export async function k8sListJobs(opts: {
     throw new Error(`Job list failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ""}`);
   }
   const parsed = (await readJsonBody(response)) as { items?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.items)) return [];
+  if (!parsed || !Array.isArray(parsed.items)) {
+    throw new Error('Job list returned invalid payload: expected {"items": [...]}');
+  }
   return parsed.items as K8sJobObject[];
 }
 
@@ -273,7 +275,9 @@ async function k8sListPodsForJob(opts: {
     throw new Error(`Pod list failed (${response.status})${text ? `: ${text.slice(0, 500)}` : ""}`);
   }
   const parsed = (await readJsonBody(response)) as { items?: unknown } | undefined;
-  if (!parsed || !Array.isArray(parsed.items)) return [];
+  if (!parsed || !Array.isArray(parsed.items)) {
+    throw new Error(`Pod list for ${opts.jobName} returned invalid payload: expected {"items": [...]}`);
+  }
   return parsed.items as K8sPodObject[];
 }
 
