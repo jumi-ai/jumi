@@ -42,6 +42,8 @@ export interface FailedCheck {
   capped: string;
   logHash: string;
   flake?: string;
+  /** True when `capped` cut the full log (diagnostic cap or tail cut). */
+  truncated?: boolean;
   /** `sha256(checkName + normalised failureLines)`, absent when no failure lines. */
   fingerprint?: string;
 }
@@ -65,6 +67,9 @@ export interface CiInspection {
   checks: CiCheckSummary[];
   /** Pending checks that are not required by branch protection. Only set when a required set was applied. */
   pendingOptional: string[];
+  baseSha?: string;
+  baseResults?: import("./ci_base.ts").BaseCheckResult[];
+  baseLookupFailed?: boolean;
 }
 
 export const CI_PENDING_REASON = "CI still pending";
@@ -859,19 +864,48 @@ export async function recordFlakeReruns(opts: {
   });
 }
 
-export function buildCiMarkdown(opts: { sha: string; checks: FailedCheck[] }): string {
+/** Base conclusion for one head check: exact context first, then workflow/job alias shapes. */
+export function baseConclusionForCheckName(
+  results: ReadonlyArray<{ name: string; conclusion: string }>,
+  checkName: string
+): string | undefined {
+  const matches = (name: string) =>
+    name === checkName ||
+    name.endsWith(` / ${checkName}`) ||
+    checkName.endsWith(` / ${name}`) ||
+    name.includes(` / ${checkName} (`) ||
+    checkName.includes(` / ${name} (`);
+  return results.find((result) => matches(result.name))?.conclusion;
+}
+
+export function buildCiMarkdown(opts: {
+  sha: string;
+  checks: FailedCheck[];
+  base?: { sha: string; results: import("./ci_base.ts").BaseCheckResult[]; lookupFailed?: boolean };
+}): string {
   const sections = [
     `# Failed CI`,
     ``,
     `Head SHA: ${opts.sha}`,
-    ``,
+    ...(opts.base ? [`Base SHA: ${opts.base.sha}`, ``] : []),
     `Parent-injected Gitea Actions log tail. Do not call tea, the forge API, or fetch Actions yourself.`,
+    ...(opts.checks.some((check) => check.truncated)
+      ? [
+          `Some logs below were truncated (diagnostic cap or tail cut): reproduce the full failing command locally instead of guessing from the excerpt.`,
+        ]
+      : []),
     ``,
   ];
   const encoder = new TextEncoder();
   let used = encoder.encode(sections.join("\n")).byteLength;
   for (const check of opts.checks) {
-    const header = `## ${check.name}\n\nState: ${check.state}${check.flake ? `\nInfra flake: ${check.flake}` : ""}\n`;
+    const baseConclusion = opts.base ? baseConclusionForCheckName(opts.base.results, check.name) : undefined;
+    const baseLine =
+      baseConclusion !== undefined
+        ? `\nBase (${opts.base?.sha.slice(0, 12)}): ${baseConclusion}${baseConclusion === "success" ? " — green on base, so this failure is attributable to the PR; a no-change disposition is not acceptable" : ""}`
+        : "";
+    const truncatedLine = check.truncated ? `\nLog truncated: true — reproduce the full failing command locally.` : "";
+    const header = `## ${check.name}\n\nState: ${check.state}${check.flake ? `\nInfra flake: ${check.flake}` : ""}${baseLine}${truncatedLine}\n`;
     const remaining = CI_LOG_MAX_BYTES - used - encoder.encode(header).byteLength - 2;
     if (remaining <= 0) break;
     const body = trimToBytes(check.capped, remaining, true);
@@ -1082,6 +1116,10 @@ export async function inspectCi(opts: {
     const capped = capFailedJobLog(text);
     const logHash = hashText(capped);
     const fingerprint = failureFingerprint(name, capped);
+    // `capped` is a window of the de-noised log; a shorter byte length means
+    // the diagnostic cap or the tail cut hid part of the failure output.
+    const truncated =
+      new TextEncoder().encode(dropUnpackNoise(text)).byteLength > new TextEncoder().encode(capped).byteLength;
     failed.push({
       name,
       state,
@@ -1093,6 +1131,7 @@ export async function inspectCi(opts: {
       logHash,
       flake: classifyInfraFlake(capped),
       ...(fingerprint ? { fingerprint } : {}),
+      ...(truncated ? { truncated: true as const } : {}),
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));

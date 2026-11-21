@@ -1,4 +1,5 @@
 import { type CiInspection, inspectCi, resolveRequiredCiContexts as resolveRequiredCiContextsImpl } from "./ci.ts";
+import { inspectBaseCi } from "./ci_base.ts";
 import { type ConflictState, readConflictLatch } from "./conflict.ts";
 import type { FollowUpState } from "./followup.ts";
 import {
@@ -315,6 +316,31 @@ export async function buildFollowUpSnapshot(opts: PrSnapshotOpts, deps: PrSnapsh
       ci = await inspectCi(inspectOpts);
     } catch (err) {
       log?.(`CI inspect failed for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${errorMessage(err)}`);
+    }
+  }
+  // Base-branch evidence for the worker: once the head's CI has settled red,
+  // resolve the same checks on the base commit so JUMI_CI.md shows "green on
+  // base" directly. Fail-open: a missing base SHA or lookup failure leaves `ci`
+  // without base fields and today's handling applies.
+  if (!ci.pending && ci.unhandled.length > 0 && (opts.pr.base.sha ?? "").trim()) {
+    try {
+      const base = await inspectBaseCi({
+        api,
+        owner: opts.owner,
+        repo: opts.repo,
+        baseSha: opts.pr.base.sha,
+        log,
+      });
+      if (base) {
+        ci = {
+          ...ci,
+          baseSha: base.sha,
+          baseResults: base.results,
+          ...(base.lookupFailed ? { baseLookupFailed: true as const } : {}),
+        };
+      }
+    } catch (err) {
+      log?.(`base CI inspect failed for ${opts.owner}/${opts.repo}#${opts.issueNumber}: ${errorMessage(err)}`);
     }
   }
   const ciWake = !ci.pending && ci.unhandled.length > 0;

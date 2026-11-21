@@ -22,6 +22,7 @@ import {
   recordFlakeReruns,
   splitFlakeBudget,
 } from "./ci.ts";
+import { attributableToPr, baseForMarkdown } from "./ci_base.ts";
 import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
@@ -2535,7 +2536,9 @@ export async function implementFollowUp(
               logger: log,
               abortSignal: opts.abortSignal,
               jobId: opts.jobId ?? opts.job.delivery,
-              ciMarkdown: ci.failed.length ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }) : undefined,
+              ciMarkdown: ci.failed.length
+                ? buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed, base: baseForMarkdown(ci) })
+                : undefined,
               handoffStore,
               handoffKey,
               handoffSeed: injectedHandoff ?? null,
@@ -2697,7 +2700,10 @@ export async function implementFollowUp(
           );
         }
         if (ci.failed.length) {
-          await writeFile(join(worktree, CI_LOG_FILE), buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed }));
+          await writeFile(
+            join(worktree, CI_LOG_FILE),
+            buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed, base: baseForMarkdown(ci) })
+          );
         }
         // Let the child edit the description already posted; only a fenced body is jumi-owned.
         // JUMI_PR.md is a read-only seed: an untouched copy counts as no
@@ -2876,6 +2882,25 @@ export async function implementFollowUp(
         const porcelain = await worktreePorcelain(loop);
         if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
           const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+          // A red-CI follow-up must not end with no pushed change by calling
+          // the failure pre-existing: when the same check passed on the base
+          // commit, the failure is attributable to this PR. Block the
+          // no-changes disposition and its CI-handled record so the PR stays
+          // actionable (`stuck:` latches and boards as needs_kick) instead of
+          // sitting silently. Red-on-base keeps today's handling.
+          const prAttributed = attributableToPr(ci.unhandled, baseForMarkdown(ci));
+          if (prAttributed.length > 0) {
+            const baseRef = pr.base.ref || opts.job.defaultBranch;
+            const listed = prAttributed.map((name) => `\`${name}\``).join(", ");
+            const reason =
+              `stuck: CI ${listed} failed on this head but passed on the base ` +
+              `(${baseRef}@${(ci.baseSha ?? pr.base.sha).slice(0, 12)}): the failure is attributable to ` +
+              `this PR, not pre-existing. Fix the failure instead of reporting no changes.`;
+            log(`blocked no-changes: ${listed} green on base`);
+            await sticky(reason, pr.number);
+            await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+            return { status: "skipped", reason };
+          }
           const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
           const noChangesReason = workerStore.getNoChangesReason();

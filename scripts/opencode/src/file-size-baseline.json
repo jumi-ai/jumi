@@ -18,6 +18,7 @@
   "child_env.ts": 108,
   "child_git_proxy.ts": 282,
   "ci.ts": 1234,
+  "ci_base.ts": 145,
   "ci_webhook.ts": 364,
   "claim.ts": 148,
   "claimed_worktree.ts": 748,
