@@ -230,7 +230,7 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       const firstParsed = parseDispatchJobName(first)!;
       const firstLease = await store.leaseJobById(firstParsed.rowId, "pod-1", 60000, new Date());
       expect(firstLease.leased).toBe(true);
-      await store.forceExpireLease(firstParsed.rowId, new Date());
+      await store.forceExpireLease(firstParsed.rowId, { generation: 0, attempt: 0, leasedBy: "pod-1" }, new Date());
       const reclaimed = await store.reclaimExpired(5, new Date(), 1000, WORKER_JOB_KINDS);
       expect(reclaimed.requeued.length).toBe(1);
       await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
@@ -247,6 +247,48 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       expect(row?.state).toBe("leased");
       expect(row?.attempt).toBe(1);
       expect(row?.leasedUntil).toBeGreaterThan(Date.now());
+    });
+  });
+
+  test("guarded expire leaves a replacement lease alone when the row moves mid-reconcile", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
+      const fake = createFakeK8s();
+      const config = testConfig(templateFile);
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      const first = [...fake.jobs.keys()][0];
+      const firstParsed = parseDispatchJobName(first)!;
+      const firstLease = await store.leaseJobById(firstParsed.rowId, "pod-1", 60000, new Date());
+      expect(firstLease.leased).toBe(true);
+      const staleSnapshot = await store.get(firstParsed.rowId);
+      await store.forceExpireLease(firstParsed.rowId, { generation: 0, attempt: 0, leasedBy: "pod-1" }, new Date());
+      const reclaimed = await store.reclaimExpired(5, new Date(), 1000, WORKER_JOB_KINDS);
+      expect(reclaimed.requeued.length).toBe(1);
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      const secondLease = await store.leaseJobById(firstParsed.rowId, "pod-2", 15 * 60 * 1000, new Date());
+      expect(secondLease.leased).toBe(true);
+      (fake.jobs.get(first) as K8sJobObject).status = { failed: 1 };
+      const realGet = store.get.bind(store);
+      store.get = (async () => ({ ...staleSnapshot! })) as typeof store.get;
+      const logs: string[] = [];
+      try {
+        await runDispatchTick(store, config, {
+          fetchImpl: fake.fetchImpl,
+          k8sToken: "t",
+          logger: (message: string) => logs.push(message),
+        });
+      } finally {
+        store.get = realGet;
+      }
+      expect(fake.jobs.has(first)).toBe(false);
+      const row = await store.get(firstParsed.rowId);
+      expect(row?.state).toBe("leased");
+      expect(row?.attempt).toBe(1);
+      expect(row?.leasedBy).toBe("pod-2");
+      expect(row?.leasedUntil).toBeGreaterThan(Date.now());
+      expect(logs.some((message) => message.includes("stale"))).toBe(true);
     });
   });
 
@@ -293,7 +335,7 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       const parsed = parseDispatchJobName(first)!;
       const leased = await store.leaseJobById(parsed.rowId, "pod-1", 60000, new Date());
       expect(leased.leased).toBe(true);
-      await store.forceExpireLease(parsed.rowId, new Date());
+      await store.forceExpireLease(parsed.rowId, { generation: 0, attempt: 0, leasedBy: "pod-1" }, new Date());
       const reclaimed = await store.reclaimExpired(5, new Date(), 1000, WORKER_JOB_KINDS);
       expect(reclaimed.requeued.length).toBe(1);
       const second = await runDispatchTick(store, config, {
