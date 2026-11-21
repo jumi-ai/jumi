@@ -1,7 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { isPublicReleaseTag, isReviewerCandidateTag, reviewerCandidateTag } from "../src/release_binding.ts";
+
+/**
+ * Candidate image tag for a commit SHA. The reviewer workflow builds and
+ * pushes this non-release tag first, probes that exact digest, and only
+ * then moves the version and `latest` tags to the verified digest — so a
+ * failed probe never leaves public tags pointing at an unverified image.
+ * Lives here (not in `src`) because the `sha-<hex>` shape is defined by the
+ * workflow shell (`CANDIDATE_TAG=sha-${GITHUB_SHA}`) and no production
+ * caller uses these helpers.
+ */
+function reviewerCandidateTag(sha: string): string {
+  return `sha-${sha.trim().toLowerCase()}`;
+}
+
+/** Public release tags the candidate must never collide with (`latest` or `vX.Y.Z`). */
+function isPublicReleaseTag(tag: string): boolean {
+  const trimmed = tag.trim();
+  if (trimmed === "latest") return true;
+  return /^v\d+\.\d+\.\d+$/.test(trimmed);
+}
+
+/** Candidate tags derived from a commit SHA (`sha-<hex>`), never a release tag. */
+function isReviewerCandidateTag(tag: string): boolean {
+  return /^sha-[0-9a-f]{4,64}$/.test(tag.trim().toLowerCase());
+}
 
 const repoRoot = join(process.cwd(), "../..");
 const workflowPath = join(repoRoot, ".github/workflows/jumi-reviewer-image.yml");
