@@ -822,4 +822,60 @@ describePg("PgReviewJobStore against real postgres", () => {
     await store.migrate();
     await assertLedgerSchema(sql);
   });
+
+  test("forceExpireLease ignores a row that moved to a new attempt/owner", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const first = await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    expect(first.leased).toBe(true);
+    const observed = await store.get(1);
+    const stale = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    // Replacement attempt acquires the row between observation and write.
+    expect(await store.forceExpireLease(1, stale, new Date(2_000))).toBe(true);
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    const second = await store.leaseJobById(1, "pod-2", 60_000, new Date(3_000));
+    expect(second.leased).toBe(true);
+    // Stale write reports no update; the replacement lease is unchanged.
+    expect(await store.forceExpireLease(1, stale, new Date(4_000))).toBe(false);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.attempt).toBe(1);
+    expect(row?.leasedBy).toBe("pod-2");
+  });
+
+  test("forceExpireLease expires an unchanged leased observation", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    const observed = await store.get(1);
+    const expected = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.leasedBy).toBeNull();
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    expect(reclaimed.requeued[0].attempt).toBe(1);
+  });
+
+  test("forceExpireLease expires a queued row freshly leased by the dispatcher", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.leaseJobById(1, "dispatch-worker", 60_000, new Date(1_000));
+    expect(leased.leased).toBe(true);
+    const observed = leased.leased ? leased.row : (await store.get(1))!;
+    const expected = {
+      generation: observed.payload?.generation ?? 0,
+      attempt: observed.attempt,
+      leasedBy: observed.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    expect((await store.get(1))?.leasedBy).toBeNull();
+  });
 });
