@@ -1043,6 +1043,13 @@ describePg("PgReviewJobStore against real postgres", () => {
     // Restore the column for the next test; beforeEach re-migrates anyway.
     await store.migrate();
     await assertLedgerSchema(sql);
+    // The DROP/ADD COLUMN above changes the row type of `SELECT *`, which
+    // invalidates prepared statements cached on this pooled connection
+    // ("cached plan must not change result type"). Reconnect so later tests
+    // start with fresh plans.
+    await sql.close?.();
+    sql = createBunSqlClient(pgDatabaseUrl);
+    store = new PgReviewJobStore(sql);
   });
 
   test("forceExpireLease ignores a row that moved to a new attempt/owner", async () => {
