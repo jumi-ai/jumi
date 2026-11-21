@@ -1589,6 +1589,43 @@ describe("GithubAPI automerge gate", () => {
     const branch = await api().getBranch("owner", "repo", "main");
     expect(branch.enableStatusCheck).toBe(true);
     expect(branch.requiredContexts).toContain("jumi/opencode-review");
+    expect(branch.strict).toBe(true);
+  });
+
+  test("ruleset strict policy with zero checks stays off", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const target = String(url);
+      if (target.includes("/protection/required_status_checks")) {
+        return new Response("Branch not protected", { status: 404 });
+      }
+      if (target.includes("/rules/branches/")) {
+        return Response.json([
+          {
+            type: "required_status_checks",
+            parameters: {
+              required_status_checks: [],
+              strict_required_status_checks_policy: true,
+            },
+          },
+        ]);
+      }
+      return new Response("unexpected", { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const branch = await api().getBranch("owner", "repo", "main");
+    expect(branch.enableStatusCheck).toBe(false);
+    expect(branch.requiredContexts).toEqual([]);
+    expect(branch.strict).toBe(false);
+  });
+
+  test("classic protection strict flag passes through", async () => {
+    for (const strict of [true, false]) {
+      globalThis.fetch = (async () => Response.json({ strict, contexts: ["ci"] })) as unknown as typeof fetch;
+      const branch = await api().getBranch("owner", "repo", "main");
+      expect(branch.strict).toBe(strict);
+      expect(branch.enableStatusCheck).toBe(true);
+      expect(branch.requiredContexts).toEqual(["ci"]);
+    }
   });
 
   test("reports no required checks when readable rules list none", async () => {
@@ -1635,6 +1672,8 @@ describe("GithubAPI automerge gate", () => {
     const branch = await api().getBranch("owner", "repo", "main");
     expect(branch.enableStatusCheck).toBe(true);
     expect(branch.requiredContexts).toEqual(["jumi/opencode-review", "checks", "image-build", "worker-image-build"]);
+    // No strict policy in the rules payload: strictness stays off, not unknown.
+    expect(branch.strict).toBe(false);
   });
 
   test("throws when classic 403s and branch rules are unreadable", async () => {
