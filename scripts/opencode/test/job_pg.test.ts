@@ -1,10 +1,10 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isPidAlive } from "../src/claim.ts";
 import { runOneShotJob } from "../src/job.ts";
-import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
+import { PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { handleIssueCancel } from "../src/worker.ts";
 import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
@@ -22,7 +22,7 @@ import {
 } from "./fixtures.ts";
 import { frozenGitRunner } from "./harness/git.ts";
 import { withWorkspace } from "./harness/temp.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 function jobPgReviewApi() {
   return makeSharedReviewApi({
@@ -37,9 +37,13 @@ describePg("one-shot jobs against real postgres", () => {
 
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   beforeEach(async () => {
