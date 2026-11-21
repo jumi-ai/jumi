@@ -305,6 +305,28 @@ export class WorkerResultStore {
   }
 }
 
+/**
+ * Give the next spawn its own result scope: close the previous store and
+ * point the server at a fresh one. Handoff is the one result that persists
+ * across attempts, so carry it forward; skip, PR body, no-changes and
+ * blockers start empty for the new attempt.
+ */
+export function rotateResultScope(
+  log: (message: string) => void,
+  prev: WorkerResultStore,
+  server: { setStore: (store: WorkerResultStore) => void }
+): WorkerResultStore {
+  const handoff = prev.getHandoff();
+  prev.close();
+  const fresh = new WorkerResultStore();
+  if (handoff != null) {
+    const carried = fresh.setHandoff({ notes: handoff });
+    if (!carried.ok) log(`worker result: handoff carry failed: ${carried.error}`);
+  }
+  server.setStore(fresh);
+  return fresh;
+}
+
 function toolSchemas(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
   return [
     {

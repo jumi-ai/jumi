@@ -154,7 +154,7 @@ import {
   parseReviewOutput,
   trailerSuggestionCount,
 } from "./verdict.ts";
-import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -2295,7 +2295,7 @@ export async function implementFollowUp(
   // Parent-owned worker MCP server for the follow-up spawns. The model
   // records `no_changes` through the tool; the parent posts from this
   // in-memory state and fails open when the model never calls it.
-  const workerStore = new WorkerResultStore();
+  let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({ store: workerStore });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let followUpResult: FollowUpResult;
@@ -2616,6 +2616,7 @@ export async function implementFollowUp(
           extra?: { continueSession?: boolean }
         ): Promise<{ status: "skipped"; reason: string } | undefined> => {
           throwIfAborted(opts.abortSignal);
+          workerStore = rotateResultScope(log, workerStore, workerServer);
           log(label);
           const runOpts: EngineRunOptions = {
             model: opts.model,
