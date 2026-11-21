@@ -1303,6 +1303,78 @@ describe("required-context pending", () => {
     });
   });
 
+  test("exact match wins over alias regardless of input order", async () => {
+    await withWorkspace(async (home) => {
+      const exactSuccess = { id: 1, context: "build", status: "success" as const };
+      const aliasPending = { id: 2, context: "ci / build (push)", status: "pending" as const };
+      for (const statuses of [
+        [exactSuccess, aliasPending],
+        [aliasPending, exactSuccess],
+      ]) {
+        const inspection = await inspectCi({
+          api: ciApi({ listCommitStatuses: async () => [...statuses] }),
+          owner: "kirmanak",
+          repo: "demo",
+          sha: "headsha",
+          home,
+          issueNumber: 12,
+          requiredContexts: ["build"],
+        });
+        expect(inspection.pending).toBe(false);
+        expect(inspection.pendingOptional).toEqual(["ci / build (push)"]);
+      }
+      const exactPending = { id: 3, context: "build", status: "pending" as const };
+      const aliasSuccess = { id: 4, context: "ci / build (push)", status: "success" as const };
+      for (const statuses of [
+        [exactPending, aliasSuccess],
+        [aliasSuccess, exactPending],
+      ]) {
+        const inspection = await inspectCi({
+          api: ciApi({ listCommitStatuses: async () => [...statuses] }),
+          owner: "kirmanak",
+          repo: "demo",
+          sha: "headsha",
+          home,
+          issueNumber: 12,
+          requiredContexts: ["build"],
+        });
+        expect(inspection.pending).toBe(true);
+        expect(inspection.pendingOptional).toEqual([]);
+      }
+    });
+  });
+
+  test("alias still satisfies the requirement when no exact check exists", async () => {
+    await withWorkspace(async (home) => {
+      const satisfied = await inspectCi({
+        api: ciApi({
+          listCommitStatuses: async () => [{ id: 2, context: "ci / build (push)", status: "success" }],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(satisfied.pending).toBe(false);
+      expect(satisfied.pendingOptional).toEqual([]);
+      const waiting = await inspectCi({
+        api: ciApi({
+          listCommitStatuses: async () => [{ id: 2, context: "ci / build (push)", status: "pending" }],
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+        requiredContexts: ["build"],
+      });
+      expect(waiting.pending).toBe(true);
+      expect(waiting.pendingOptional).toEqual([]);
+    });
+  });
+
   test("no required set keeps today's any-check pending behaviour", async () => {
     await withWorkspace(async (home) => {
       const statuses = [{ id: 1, context: "build", status: "success" as const }];

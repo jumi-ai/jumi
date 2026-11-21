@@ -592,13 +592,14 @@ describe("pr_decision table", () => {
       const kinds = decision.effects.map((effect) => effect.kind);
       if (row.expectWhy === "same-finding") {
         expect(kinds).toEqual(["log", "sticky", "resolveHeld", "forgetClaim"]);
-      } else if (row.expectWhy === "flake" || row.expectWhy === "shared-failure") {
+      } else if (row.expectWhy === "flake") {
         expect(kinds).toEqual(["sticky", "recordCiHandled", "resolveHeld", "forgetClaim"]);
       } else if (
         row.expectWhy === "conflict-cap" ||
         row.expectWhy === "round-cap" ||
         row.expectWhy === "quota" ||
-        row.expectWhy === "stuck"
+        row.expectWhy === "stuck" ||
+        row.expectWhy === "shared-failure"
       ) {
         expect(kinds).toEqual(["sticky", "resolveHeld", "forgetClaim"]);
       } else {
