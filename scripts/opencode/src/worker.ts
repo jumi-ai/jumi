@@ -14,6 +14,7 @@ import { implementConflict } from "./conflict.ts";
 import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
+import { resolveExhaustedFollowUpHold } from "./exhausted_hold.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
@@ -53,7 +54,6 @@ import {
   type HoldStatusPort,
   postSuggestionHoldSuccess,
   readSuggestionHold,
-  suggestionHoldCompletedDescription,
   suggestionHoldSkippedDescription,
 } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
@@ -524,7 +524,9 @@ export async function reclaimExpiredWorkerJobs(
  * Resolve a held suggestion `pending` when the follow-up cannot push from the
  * worker tick (mode gate, cancel, terminal failure). Follow-up's own returns
  * already resolve the common paths; this is the backstop for paths that never
- * reach it. Never throws.
+ * reach it. One shared decision with the router reclaim path
+ * (`resolveExhaustedFollowUpHold`): suggestion-origin holds resolve with the
+ * same disposition, maintainer and other holds stay pending. Never throws.
  */
 async function resolveWorkerHeld(
   api: HoldStatusPort & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
@@ -537,29 +539,13 @@ async function resolveWorkerHeld(
   reason?: string,
   prNumber?: number | null
 ): Promise<void> {
-  try {
-    const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
-    if (!hold.consumed) return;
-    const count = hold.count ?? 0;
-    if (!count) return;
-    const sha = hold.headSha ?? headSha;
-    const description =
-      kind === "completed"
-        ? suggestionHoldCompletedDescription(count)
-        : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
-    let targetUrl: string | undefined;
-    try {
-      // The worked issue number is not the pull number on Jumi PRs, so the
-      // pull lookup must use the job's pull number, not the issue number.
-      const pr = await api.getPR?.(owner, repo, prNumber ?? issueNumber);
-      if (pr?.html_url) targetUrl = pr.html_url;
-    } catch {
-      // Best-effort.
-    }
-    await postSuggestionHoldSuccess(api, owner, repo, sha, description, targetUrl);
-  } catch {
-    // Best-effort.
-  }
+  await resolveExhaustedFollowUpHold({
+    api,
+    store,
+    row: { kind: "follow-up", owner, repo, issueNumber, headSha, prNumber },
+    kind,
+    ...(reason !== undefined ? { reason } : {}),
+  });
 }
 
 export async function processWorkerTick(
