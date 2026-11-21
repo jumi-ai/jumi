@@ -990,6 +990,10 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(final?.cancelRequested).toBe(false);
 
     // Fully concurrent: either order lands cancelled, never runnable.
+    // If cancel holds the row lock first, reclaim's `FOR UPDATE SKIP LOCKED`
+    // scan skips it and the row stays leased with the cancel flag set; the
+    // next reclaim tick settles it to cancelled. Settle here so the test
+    // asserts the converged state instead of the race winner.
     await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
     await store.enqueueIssue(makeIssueJob({ delivery: "d-third" }));
     const raced = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
@@ -998,7 +1002,12 @@ describePg("PgReviewJobStore against real postgres", () => {
       store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS),
       store.cancelQueuedForIssue("kirmanak", "demo", 12),
     ]);
-    const ended = await store.get(raced!.id);
+    let ended = await store.get(raced!.id);
+    expect(ended?.state).not.toBe("queued");
+    if (ended?.state === "leased" && ended?.cancelRequested) {
+      await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+      ended = await store.get(raced!.id);
+    }
     expect(ended?.state).toBe("cancelled");
     expect(ended?.cancelRequested).toBe(false);
   });
