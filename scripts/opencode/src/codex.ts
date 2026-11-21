@@ -42,6 +42,11 @@ import {
   reviewSandboxWrapperPath,
   writeCodexReviewShellHooks,
 } from "./review_sandbox.ts";
+import {
+  REVIEW_VERDICT_CONTRACT_LEGACY,
+  REVIEW_VERDICT_CONTRACT_REQUIRED,
+  verdictContractAllowsFileArtifact,
+} from "./review_verdict_contract.ts";
 import { CODEX_DEFAULT_EFFORT } from "./runners.ts";
 import { codexSearxngArgs, searxngForgeHost, searxngUrlFromEnv } from "./searxng.ts";
 import { recordCodexUsage } from "./token_metrics.ts";
@@ -631,9 +636,22 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
 
     if (exitCode === 0) {
       if (stderr) log(`[codex stderr] ${stderr}`);
+      // The structured-verdict contract is validated parent-side: a review
+      // spawn on that contract must return `ok` here without a checkout
+      // artifact so the parent's MCP verdict path (with its bounded retry and
+      // fail-closed checks) is reached. Only the legacy file contract keeps
+      // the adapter-level artifact gate. Without an explicit contract, a
+      // wired review MCP implies the structured path; otherwise the legacy
+      // gate applies, as before.
+      const contract =
+        opts.verdictContract ?? (opts.reviewMcp ? REVIEW_VERDICT_CONTRACT_REQUIRED : REVIEW_VERDICT_CONTRACT_LEGACY);
       // Fails closed like agy's empty SUCCESS: a non-ok result, so the parent
       // fails the job instead of running its write-only retry turn.
-      if (opts.trace?.kind === "review" && (await reviewArtifactMissing(opts.workdir))) {
+      if (
+        verdictContractAllowsFileArtifact(contract) &&
+        opts.trace?.kind === "review" &&
+        (await reviewArtifactMissing(opts.workdir))
+      ) {
         if (errors && errors !== stderr) log(`[codex errors] ${errors}`);
         return observeEngineRun(opts, {
           status: "exit",

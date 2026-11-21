@@ -829,6 +829,20 @@ export async function handleWorkerWebhookEvent(
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
       }
+      // Strict refresh for GitHub up-to-date branches (no-op when strict is
+      // off or unknown, e.g. Gitea). Same merge-only worker path, no model.
+      try {
+        const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
+        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger);
+        for (const partial of strict.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const result: EnqueueResult = await deps.queue.enqueue(job);
+          keys.push(result.key);
+          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery} strict-refresh`);
+        }
+      } catch (err) {
+        logger(`strict refresh wake failed: ${errorMessage(err)}`);
+      }
       if (keys.length > 0) return json(202, { queued: true, keys });
       if (decision.type === "skip") return skipped(decision.reason, logger);
       return skipped("no managed jumi PRs", logger);

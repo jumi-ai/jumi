@@ -700,6 +700,134 @@ describe("POST /webhooks/github", () => {
     expect(await responseJson(draft)).toEqual({ skipped: "draft or WIP pull request" });
   });
 
+  describe("strict refresh reconcile on PR activity", () => {
+    function strictFullPr(mergeableState?: string) {
+      return {
+        number: 7,
+        title: "Add feature",
+        body: "Fixes #12",
+        state: "open",
+        html_url: "https://github.com/kirmanak/demo/pull/7",
+        user: makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" }),
+        head: { ref: "jumi/issue-12-fix", sha: "headsha", repo: { full_name: "kirmanak/demo" } },
+        base: { ref: "main", sha: "basesha" },
+        merged: false,
+        draft: false,
+        autoMergeEnabled: true,
+        created_at: "2026-05-23T00:00:00Z",
+        updated_at: "2026-05-23T00:00:00Z",
+        ...(mergeableState === undefined ? {} : { mergeableState }),
+      };
+    }
+
+    function strictReconcileDeps(fullPr: unknown) {
+      const store = new MemoryReviewJobStore();
+      const workerJobs: IssueJob[] = [];
+      const deps = {
+        review: store,
+        worker: {
+          queue: {
+            enqueue: (job: IssueJob) => {
+              workerJobs.push(job);
+              return { key: `follow-up:kirmanak/demo#${job.issueNumber}:${job.headSha}`, queued: true };
+            },
+          },
+          api: {
+            getPR: async () => fullPr,
+            getBranch: async () => ({ protected: true, strict: true }),
+          },
+        },
+        logger: () => {},
+      };
+      return { store, workerJobs, deps };
+    }
+
+    function synchronizeRaw() {
+      return encodeJson(
+        makePayload({
+          action: "synchronize",
+          repository: githubRepo,
+          pull_request: makePR({
+            html_url: "https://github.com/kirmanak/demo/pulls/7",
+            head: {
+              label: "kirmanak:jumi/issue-12-fix",
+              ref: "jumi/issue-12-fix",
+              sha: "headsha",
+              repo: githubRepo,
+              repo_id: githubRepo.id,
+            },
+          }),
+        })
+      );
+    }
+
+    function strictPolicy() {
+      return githubWebhookPolicy({
+        webhookSecret: "webhook-secret",
+        maxWebhookBytes: 1_048_576,
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [],
+        botUsername: "kirmanak-jumi[bot]",
+      });
+    }
+
+    test("behind parks the stale-head review without a reviewer slot", async () => {
+      const { store, workerJobs, deps } = strictReconcileDeps(strictFullPr("behind"));
+      const response = await handleGithubWebhookEvent(
+        synchronizeRaw(),
+        "pull_request",
+        "delivery-behind",
+        strictPolicy(),
+        deps as never
+      );
+      expect(response.status).toBe(202);
+      // Optimistic merge-only worker wake for the behind head.
+      expect(workerJobs).toHaveLength(1);
+      expect(workerJobs[0]?.mergeOnly).toBe(true);
+      expect((workerJobs[0] as { strictRefresh?: boolean }).strictRefresh).toBe(true);
+      // The stale-head review is parked with the strict-refresh wait marker,
+      // so it takes no reviewer slot until the new head arrives.
+      expect(store.rows).toHaveLength(1);
+      expect(store.rows[0]?.error?.startsWith("strict-refresh-wait:")).toBe(true);
+      const runnable = await store.peekRunnable(["review"] as never, 10, new Date(Date.now() + 1000));
+      expect(runnable).toHaveLength(0);
+    });
+
+    test.each(["clean", "unknown"] as const)("mergeable_state %s falls through to normal review", async (state) => {
+      const { store, workerJobs, deps } = strictReconcileDeps(strictFullPr(state));
+      const response = await handleGithubWebhookEvent(
+        synchronizeRaw(),
+        "pull_request",
+        `delivery-${state}`,
+        strictPolicy(),
+        deps as never
+      );
+      expect(response.status).toBe(202);
+      // The worker still wakes optimistically, but the review is not parked:
+      // no strict-refresh wait marker, so the normal CI gate owns the head.
+      expect(workerJobs).toHaveLength(1);
+      expect(store.rows).toHaveLength(1);
+      expect(store.rows[0]?.error).toBeNull();
+      const runnable = await store.peekRunnable(["review"] as never, 10, new Date(Date.now() + 1000));
+      expect(runnable).toHaveLength(1);
+    });
+
+    test("absent mergeable_state falls through to normal review", async () => {
+      const { store, workerJobs, deps } = strictReconcileDeps(strictFullPr(undefined));
+      const response = await handleGithubWebhookEvent(
+        synchronizeRaw(),
+        "pull_request",
+        "delivery-absent",
+        strictPolicy(),
+        deps as never
+      );
+      expect(response.status).toBe(202);
+      expect(workerJobs).toHaveLength(1);
+      expect(store.rows).toHaveLength(1);
+      expect(store.rows[0]?.error).toBeNull();
+    });
+  });
+
   test("GitHub issue_comment on a PR fetches the PR and enqueues follow-up", async () => {
     const store = new MemoryReviewJobStore();
     const fetched = makePR({
