@@ -1376,7 +1376,10 @@ export async function runPublishGitHub(opts: {
 async function main(args: string[]): Promise<void> {
   const command = args[0] ?? "next-version";
   const root = repoRoot();
-  const plan = computeRelease(root);
+  // Note: `computeRelease` is the legacy HEAD-based derivation kept for the `release-body` /
+  // `publish` CLI paths and their pinned tests. Production workflows (`next-version`,
+  // `publish-github`) use the per-SHA binding via `computeReleaseForSha`, so the HEAD plan is
+  // computed lazily only where it is used.
   if (command === "next-version") {
     const sha = args[1] ?? process.env.GITHUB_SHA ?? "HEAD";
     const version = advertisedNextVersion(root, sha);
@@ -1384,7 +1387,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (command === "release-body") {
-    process.stdout.write(plan.body);
+    process.stdout.write(computeRelease(root).body);
     return;
   }
   if (command === "skip-build") {
@@ -1394,6 +1397,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (command === "publish") {
+    const plan = computeRelease(root);
     const token = process.env.GITHUB_TOKEN || process.env.GITEA_TOKEN;
     const repository = process.env.GITHUB_REPOSITORY;
     const serverUrl = process.env.GITHUB_SERVER_URL || process.env.GITEA_URL;
