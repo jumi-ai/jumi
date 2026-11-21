@@ -368,7 +368,9 @@ describePg("PgReviewJobStore against real postgres", () => {
     const leased = await store.lease("engine-1", 60_000);
     await store.markPublished(leased!.id, "engine-1", { state: "failed", reason: "boom" });
 
-    expect(await store.enqueue(job)).toEqual({ key, queued: true });
+    // A new delivery stays eligible; the same delivery would dedupe per effect
+    // (see the retried-delivery test below).
+    expect(await store.enqueue(makeJob({ delivery: "delivery-2" }))).toEqual({ key, queued: true });
     expect(await countJobs(`job_key = $1`, [key])).toBe(2);
     expect(await countJobs(`job_key = $1 AND state IN ('queued', 'leased')`, [key])).toBe(1);
   });
