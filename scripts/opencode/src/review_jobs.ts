@@ -157,6 +157,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface ForceExpireLeaseExpected {
+  generation: number;
+  attempt: number;
+  leasedBy: string | null;
+}
+
 export interface PeekRunnableExclude {
   id: number;
   generation: number;
@@ -193,11 +199,13 @@ export interface ReviewJobStore {
   expireLease(id: number, leasedBy: string, now?: Date, failedRunner?: string | null): Promise<boolean>;
   /**
    * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
-   * expired regardless of who holds it, so the next reclaim moves it within
-   * seconds instead of waiting for `LEASE_MS`. State, attempt, and error are
+   * expired when it still matches what the dispatcher observed (generation,
+   * attempt, lease owner), so the next reclaim moves it within seconds
+   * instead of waiting for `LEASE_MS`. State, attempt, and error are
    * untouched; reclaim still counts the attempt and applies `MAX_JOB_ATTEMPTS`.
+   * A row that changed after observation is left untouched (`false`).
    */
-  forceExpireLease(id: number, now?: Date): Promise<boolean>;
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now?: Date): Promise<boolean>;
   /**
    * Dispatch peek with the same runnable conditions as `lease()` (not the
    * `queued` count, which includes backoff rows and same-issue-held rows):
@@ -1421,10 +1429,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased") return false;
+      if (row.attempt !== expected.attempt || row.leasedBy !== expected.leasedBy) return false;
+      if (payloadGeneration(row.payload) !== expected.generation) return false;
       const ts = now.getTime();
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
@@ -3864,14 +3874,16 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  async forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
          SET leased_until = $2::timestamptz, leased_by = NULL, updated_at = NOW()
-         WHERE id = $1 AND state = 'leased'
+         WHERE id = $1 AND state = 'leased' AND attempt = $3
+           AND leased_by IS NOT DISTINCT FROM $4
+           AND (CASE WHEN payload->>'generation' ~ '^-?[0-9]+$' THEN (payload->>'generation')::integer ELSE 0 END) = $5
          RETURNING id`,
-        [id, new Date(now.getTime() - 1).toISOString()]
+        [id, new Date(now.getTime() - 1).toISOString(), expected.attempt, expected.leasedBy, expected.generation]
       )
     );
     return rows.length > 0;
