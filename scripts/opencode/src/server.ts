@@ -526,15 +526,18 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           });
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
           if (payload.action === "opened" && deps.worker?.api) {
+            // The review above already enqueued (or deduped on retry). A
+            // transient takeover failure stays retryable without marking the
+            // delivery; skips stay 202. Shared with the GitHub path.
             try {
-              const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
-              const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
-              if (takeoverOwner && takeoverRepo) {
-                const decision = await shouldEnqueueTakeoverForOpenedPull({
+              const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+              const [o, r] = payload.repository.full_name.split("/");
+              if (o && r) {
+                const outcome = await enqueueTakeoverForOpenedPull({
                   api: deps.worker.api,
                   forgeKind: config.forge,
-                  owner: takeoverOwner,
-                  repo: takeoverRepo,
+                  owner: o,
+                  repo: r,
                   prNumber: payload.pull_request.number,
                   prTitle: payload.pull_request.title,
                   prDraft: payload.pull_request.draft,
@@ -552,24 +555,20 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                   botUsername: config.botUsername,
                   trustedSenderLogins: config.trustedSenderLogins,
                   action: payload.action,
+                  delivery: `takeover-${delivery}`,
+                  queue: deps.worker.queue,
                   log: (message) => logger(message),
                 });
-                if (decision.type === "enqueue") {
-                  const workerJob = {
-                    ...decision.job,
-                    delivery: `takeover-${delivery}`,
-                    receivedAt: new Date().toISOString(),
-                  };
-                  const enqueued = await deps.worker.queue.enqueue(workerJob);
-                  logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} delivery=${workerJob.delivery}`);
-                } else {
-                  logger(
-                    `takeover skipped ${takeoverOwner}/${takeoverRepo}#${payload.pull_request.number}: ${decision.reason}`
-                  );
-                }
+                if (outcome.type === "skipped")
+                  logger(`takeover skipped ${o}/${r}#${payload.pull_request.number}: ${outcome.reason}`);
               }
             } catch (err) {
+              if (isQueueUnavailable(err)) {
+                logger(`takeover queue unavailable: ${errorMessage(err)}`);
+                return json(503, { error: "queue unavailable" });
+              }
               logger(`takeover failed: ${errorMessage(err)}`);
+              return json(500, { error: "takeover failed" });
             }
           }
           return markDurable(json(202, result));
