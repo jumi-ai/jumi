@@ -1272,13 +1272,13 @@ describe("follow-up write gating", () => {
       }
     });
 
-    test("an empty list keeps the forge check", async () => {
-      const empty = { ...policy, trustedSenderLogins: [] };
+    test("an absent list keeps the forge check", async () => {
+      const absent = { ...policy, trustedSenderLogins: undefined };
       expect(
         (
           await shouldEnqueueIssueCommentFollowUpWithTrust(
             makeIssueCommentPayload(),
-            empty,
+            absent,
             "issue_comment",
             undefined,
             writeApi
@@ -1288,12 +1288,25 @@ describe("follow-up write gating", () => {
       expect(
         await shouldEnqueueIssueCommentFollowUpWithTrust(
           makeIssueCommentPayload(),
-          empty,
+          absent,
           "issue_comment",
           undefined,
           readApi
         )
       ).toEqual({ type: "skip", reason: "sender lacks write access" });
+    });
+
+    test("an explicitly empty list denies without asking the forge", async () => {
+      const empty = { ...policy, trustedSenderLogins: [] as string[] };
+      expect(
+        await shouldEnqueueIssueCommentFollowUpWithTrust(
+          makeIssueCommentPayload(),
+          empty,
+          "issue_comment",
+          undefined,
+          writeApi
+        )
+      ).toEqual({ type: "skip", reason: "sender not on trusted list" });
     });
 
     test("the factory bot and ignored logins stay skipped when they are on the list", async () => {

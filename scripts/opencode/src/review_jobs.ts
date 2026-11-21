@@ -244,13 +244,13 @@ export interface ReviewJobStore {
   getRunUsageTokenTotals(): Promise<TokenTotalRow[]>;
   /** Ledger session sums by (agent_instance, source, model). */
   getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
-  /** Ledger run counts by (kind, exit class). */
+  /** Ledger run counts by (kind, exit class), one per spawn attempt. */
   getRunExitCounts(): Promise<ExitCountRow[]>;
-  /** Ledger run counts by (kind, runner, outcome), with provider outages split out. */
+  /** Ledger run counts by (kind, runner, outcome), one per spawn attempt, with provider outages split out. */
   getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]>;
   /** Latest quota reset a runner's provider stated, unix seconds. */
   getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]>;
-  /** Ledger run durations by (kind, exit class), for the duration histogram. */
+  /** Ledger run durations by (kind, exit class), one per spawn attempt, for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
   /**
    * Durable per-review 💡 counts: one row per published review (runner, forge,
@@ -1089,6 +1089,16 @@ function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): 
   };
 }
 
+/**
+ * One runner spawn writes one row per model with a shared `attemptId`; rows
+ * without one predate identities. Exit and duration metrics count each
+ * identity once, with every legacy row counting as its own attempt.
+ */
+function attemptKeyForRow(row: NewRunUsageRow & { id: number }): string {
+  const attempt = row.attemptId?.trim();
+  return attempt ? attempt : `legacy:${row.id}`;
+}
+
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
   readonly skipLatches = new MemorySkipLatchStore();
@@ -1572,6 +1582,15 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       for (const row of this.rows) {
         if (row.state !== "leased" || row.leasedUntil == null || row.leasedUntil >= ts) continue;
         if (!allowed.includes(rowKind(row))) continue;
+        // A recorded cancel wins over reclaim: settle to `cancelled`.
+        if (row.cancelRequested) {
+          row.state = "cancelled";
+          row.leasedBy = null;
+          row.leasedUntil = null;
+          row.cancelRequested = false;
+          row.updatedAt = ts;
+          continue;
+        }
         if (hasPersistedResult(row)) {
           row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
@@ -1650,8 +1669,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   getRunExitCounts(): Promise<ExitCountRow[]> {
     return this.locked(() => {
+      const seen = new Set<string>();
       const counts = new Map<string, ExitCountRow>();
       for (const row of this.runUsage) {
+        const dedup = `${attemptKeyForRow(row)}\0${row.kind}\0${row.exitClass}`;
+        if (seen.has(dedup)) continue;
+        seen.add(dedup);
         const key = `${row.kind}\0${row.exitClass}`;
         const existing = counts.get(key);
         if (existing) existing.count += 1;
@@ -1663,8 +1686,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
     return this.locked(() => {
+      const seen = new Set<string>();
       const counts = new Map<string, RunnerExitCountRow>();
       for (const row of this.runUsage) {
+        const dedup = `${attemptKeyForRow(row)}\0${row.kind}\0${row.runner}\0${row.runnerOutcome}`;
+        if (seen.has(dedup)) continue;
+        seen.add(dedup);
         const key = `${row.kind}\0${row.runner}\0${row.runnerOutcome}`;
         const existing = counts.get(key);
         if (existing) existing.count += 1;
@@ -1688,9 +1715,17 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   getRunDurations(): Promise<DurationRow[]> {
-    return this.locked(() =>
-      this.runUsage.map((row) => ({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds }))
-    );
+    return this.locked(() => {
+      const seen = new Set<string>();
+      const durations: DurationRow[] = [];
+      for (const row of this.runUsage) {
+        const key = attemptKeyForRow(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        durations.push({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds });
+      }
+      return durations;
+    });
   }
 
   recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void> {
@@ -4002,6 +4037,15 @@ export class PgReviewJobStore implements ReviewJobStore {
 
       for (const raw of expired) {
         const row = mapRow(raw);
+        // A recorded cancel wins over reclaim: settle to `cancelled`
+        // instead of requeueing, claiming, or counting an attempt.
+        if (row.cancelRequested) {
+          await tx.unsafe(
+            `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, cancel_requested = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'leased' RETURNING *`,
+            [row.id]
+          );
+          continue;
+        }
         if (hasPersistedResult(row)) {
           const updated = asRows<ReviewJobRow>(
             await tx.unsafe(
@@ -4028,7 +4072,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    leased_by = $3,
                    leased_until = $4::timestamptz,
                    updated_at = NOW()
-               WHERE id = $1
+               WHERE id = $1 AND state = 'leased' AND cancel_requested = FALSE
                RETURNING *`,
               [row.id, reason, makeReclaimOwner(), claimedUntil]
             )
@@ -4045,7 +4089,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                  leased_until = NULL,
                  error = CASE WHEN error LIKE 'infra-retry:%' THEN NULL ELSE error END,
                  updated_at = NOW()
-             WHERE id = $1
+             WHERE id = $1 AND state = 'leased' AND cancel_requested = FALSE
              RETURNING *`,
             [row.id]
           )
@@ -4172,27 +4216,21 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
-    const cancelled = asRows<{ id: unknown }>(
+    // Single state-aware statement: queued rows settle, leased rows flag.
+    const cancelled = asRows<{ id: unknown; state: unknown }>(
       await this.sql.unsafe(
-        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
-           cancel_requested = FALSE, updated_at = NOW()
-         WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'queued'
-         RETURNING id`,
+        `UPDATE review_jobs
+          SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END,
+            leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
+            updated_at = NOW()
+          WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
+          RETURNING id, state`,
         [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
       )
     );
-    // A running one-shot job owns its leased row: leave it leased so its
-    // heartbeat keeps the lease, and mark it so the job stops its own child
-    // and settles itself via markCancelled. The router must not post
-    // `stopped` for these; the job posts it when it settles.
-    await this.sql.unsafe(
-      `UPDATE review_jobs SET cancel_requested = TRUE, updated_at = NOW()
-       WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'leased'`,
-      [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
-    );
     await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
-    return cancelled.length;
+    return cancelled.filter((row) => str(row.state) === "cancelled").length;
   }
 
   async isCancelRequested(id: number): Promise<boolean> {
@@ -4236,10 +4274,10 @@ export class PgReviewJobStore implements ReviewJobStore {
   async recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
     if (rows.length === 0) return;
     const columns =
-      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, runner_outcome, quota_reset_at, started_at, ended_at, duration_seconds, clone_seconds, build_seconds)";
+      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, runner_outcome, quota_reset_at, started_at, ended_at, duration_seconds, clone_seconds, build_seconds, attempt_id)";
     const values: unknown[] = [];
     const tuples = rows.map((row, index) => {
-      const base = index * 20;
+      const base = index * 21;
       values.push(
         row.jobId,
         row.jobKey,
@@ -4260,9 +4298,10 @@ export class PgReviewJobStore implements ReviewJobStore {
         row.endedAt.toISOString(),
         row.durationSeconds,
         row.cloneSeconds ?? null,
-        row.buildSeconds ?? null
+        row.buildSeconds ?? null,
+        row.attemptId?.trim() ? row.attemptId : null
       );
-      const refs = Array.from({ length: 20 }, (_, offset) => {
+      const refs = Array.from({ length: 21 }, (_, offset) => {
         // Timestamps ride as ISO strings with an explicit cast, the same way
         // review_jobs timestamps do.
         if (offset === 14 || offset === 15 || offset === 16) return `$${base + offset + 1}::timestamptz`;
@@ -4338,7 +4377,9 @@ export class PgReviewJobStore implements ReviewJobStore {
   async getRunExitCounts(): Promise<ExitCountRow[]> {
     const rows = asRows<{ kind: unknown; exit_class: unknown; n: unknown }>(
       await this.sql.unsafe(
-        `SELECT kind, exit_class, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, exit_class`
+        `SELECT kind, exit_class,
+            COUNT(DISTINCT COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text))::bigint AS n
+          FROM jumi_run_usage GROUP BY kind, exit_class`
       )
     );
     return rows.map((row) => ({ kind: str(row.kind), exitClass: str(row.exit_class), count: num(row.n) }));
@@ -4347,7 +4388,9 @@ export class PgReviewJobStore implements ReviewJobStore {
   async getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
     const rows = asRows<{ kind: unknown; runner: unknown; outcome: unknown; n: unknown }>(
       await this.sql.unsafe(
-        `SELECT kind, runner, runner_outcome AS outcome, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, runner, runner_outcome`
+        `SELECT kind, runner, runner_outcome AS outcome,
+            COUNT(DISTINCT COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text))::bigint AS n
+          FROM jumi_run_usage GROUP BY kind, runner, runner_outcome`
       )
     );
     return rows.map((row) => ({
@@ -4369,7 +4412,11 @@ export class PgReviewJobStore implements ReviewJobStore {
 
   async getRunDurations(): Promise<DurationRow[]> {
     const rows = asRows<{ kind: unknown; exit_class: unknown; duration_seconds: unknown }>(
-      await this.sql.unsafe(`SELECT kind, exit_class, duration_seconds FROM jumi_run_usage`)
+      await this.sql.unsafe(
+        `SELECT kind, exit_class, MAX(duration_seconds) AS duration_seconds
+          FROM jumi_run_usage
+          GROUP BY COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text), kind, exit_class`
+      )
     );
     return rows.map((row) => ({
       kind: str(row.kind),
