@@ -5,12 +5,14 @@ import {
   fitReviewThread,
   formatPullReviewsXml,
   formatReviewCommentsXml,
+  getSerializeReviewThreadCalls,
   mapPullReview,
   mapReviewComment,
   mapReviewInline,
   mapReviewThread,
   type ReviewComment,
   type ReviewThread,
+  resetSerializeReviewThreadCalls,
   serializeReviewThread,
 } from "../src/review_context.ts";
 
@@ -150,6 +152,114 @@ describe("fitReviewThread", () => {
     expect(fitted.thread.linkedIssues[0]?.body).toContain("## Acceptance");
     expect(fitted.thread.linkedIssues[0]?.body).toContain("behaviour test one");
     expect(byteLength(serializeReviewThread(fitted.thread))).toBeLessThanOrEqual(maxBytes);
+  });
+
+  test("keeps multibyte and XML-escaped text under budget unchanged", () => {
+    const body = `emoji 🎉 café naïve <tag attr="v">&'" 中文テキスト ${"é".repeat(200)}`;
+    const thread: ReviewThread = {
+      comments: [makeReviewComment({ id: 7, body })],
+      linkedIssues: [],
+    };
+    const maxBytes = byteLength(serializeReviewThread(thread)) + 1_000;
+    const result = fitReviewThread(thread, maxBytes);
+    expect(result.truncated).toBe(false);
+    expect(result.omittedIds).toEqual([]);
+    expect(result.thread.comments[0]?.body).toBe(body);
+    expect(byteLength(serializeReviewThread(result.thread))).toBeLessThanOrEqual(maxBytes);
+  });
+
+  test("over-budget multibyte/XML-escaped thread marks omissions and lists omitted ids", () => {
+    const mkBody = (id: number) => `comment ${id} 🎉 <tag>&'" 中文 ${"é–".repeat(400)}`;
+    const thread: ReviewThread = {
+      comments: [1, 2, 3, 4].map((id) =>
+        makeReviewComment({
+          id,
+          created_at: `2026-01-0${id}T00:00:00Z`,
+          body: mkBody(id),
+        })
+      ),
+      linkedIssues: [],
+    };
+    const fullBytes = byteLength(serializeReviewThread(thread));
+    const omittedBytes = byteLength("[omitted; thread budget]");
+    // Force at least two omissions: keep room for two omitted markers plus wrappers.
+    const maxBytes = fullBytes - 2 * byteLength(mkBody(1)) + 2 * omittedBytes - 100;
+    expect(maxBytes).toBeGreaterThan(0);
+    expect(fullBytes).toBeGreaterThan(maxBytes);
+    const result = fitReviewThread(thread, maxBytes);
+    const out = serializeReviewThread(result.thread);
+    expect(byteLength(out)).toBeLessThanOrEqual(maxBytes);
+    expect(result.truncated).toBe(true);
+    expect(out).toContain("[omitted; thread budget]");
+    expect(result.omittedIds.length).toBeGreaterThan(0);
+    // Every reported id corresponds to a body that is now omitted.
+    for (const id of result.omittedIds) {
+      const found = result.thread.comments.find((comment) => comment.id === id);
+      expect(found?.body).toBe("[omitted; thread budget]");
+    }
+    expect(result.droppedCommentBodies).toBe(result.omittedIds.length);
+  });
+
+  test("linked-issue truncation carries a marker and records issue numbers", () => {
+    const thread: ReviewThread = {
+      comments: [],
+      linkedIssues: [1, 2].map((n) => ({
+        number: n,
+        state: "open",
+        author: "alice",
+        html_url: `https://example.test/issues/${n}`,
+        title: `title ${n}`,
+        body: "x".repeat(20_000),
+        comments: [],
+      })),
+    };
+    const maxBytes = 3_000;
+    expect(byteLength(serializeReviewThread(thread))).toBeGreaterThan(maxBytes);
+    const result = fitReviewThread(thread, maxBytes);
+    const out = serializeReviewThread(result.thread);
+    expect(byteLength(out)).toBeLessThanOrEqual(maxBytes);
+    expect(result.truncated).toBe(true);
+    for (const issue of result.thread.linkedIssues) {
+      expect(issue.body).toMatch(/\[omitted|\[truncated/);
+    }
+  });
+
+  test("tiny budget still fits and reports omitted issue numbers", () => {
+    const thread: ReviewThread = {
+      comments: [],
+      linkedIssues: [1, 2].map((n) => ({
+        number: n,
+        state: "open",
+        author: "alice",
+        html_url: `https://example.test/issues/${n}`,
+        title: `title ${n}`,
+        body: "x".repeat(20_000),
+        comments: [],
+      })),
+    };
+    const result = fitReviewThread(thread, 100);
+    expect(byteLength(serializeReviewThread(result.thread))).toBeLessThanOrEqual(100);
+    expect(result.truncated).toBe(true);
+    expect(result.omittedIds.length).toBeGreaterThan(0);
+  });
+
+  test("long synthetic thread fits without re-serializing per item", () => {
+    const comments = Array.from({ length: 300 }, (_, i) =>
+      makeReviewComment({
+        id: 1_000 + i,
+        created_at: "2026-01-01T00:00:00Z",
+        body: `body ${i} ${"z".repeat(500)}`,
+      })
+    );
+    const thread: ReviewThread = { comments, linkedIssues: [] };
+    const fullBytes = byteLength(serializeReviewThread(thread));
+    const maxBytes = Math.floor(fullBytes / 2);
+    resetSerializeReviewThreadCalls();
+    const result = fitReviewThread(thread, maxBytes);
+    const calls = getSerializeReviewThreadCalls();
+    expect(byteLength(serializeReviewThread(result.thread))).toBeLessThanOrEqual(maxBytes);
+    // Linear fit: O(1) serializations, never one per comment.
+    expect(calls).toBeLessThanOrEqual(5);
   });
 });
 
