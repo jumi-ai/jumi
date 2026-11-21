@@ -478,7 +478,14 @@ async function dispatchOneRole(opts: {
           // never expire the replacement run's lease or burn its attempt.
           logger(`dispatch ${role}: ignoring stale failed ${name} for row ${parsed.rowId}`);
         } else if (row && row.state === "leased") {
-          await store.forceExpireLease(parsed.rowId, new Date(nowMs));
+          const expired = await store.forceExpireLease(
+            parsed.rowId,
+            { generation: payloadGeneration(row), attempt: row.attempt, leasedBy: row.leasedBy },
+            new Date(nowMs)
+          );
+          if (!expired) {
+            logger(`dispatch ${role}: ignoring stale failed ${name} for row ${parsed.rowId}`);
+          }
         } else if (row && row.state === "queued") {
           // The pod died before leasing (startup crash, ledger-unreachable
           // exit 1, xAI refusal exit 2): with backoffLimit 0 each becomes a
@@ -488,7 +495,18 @@ async function dispatchOneRole(opts: {
           // the next reclaim counts the attempt.
           const leased = await store.leaseJobById(parsed.rowId, `dispatch-${role}`, 60_000, new Date(nowMs));
           if (leased.leased) {
-            await store.forceExpireLease(parsed.rowId, new Date(nowMs));
+            const expired = await store.forceExpireLease(
+              parsed.rowId,
+              {
+                generation: payloadGeneration(leased.row),
+                attempt: leased.row.attempt,
+                leasedBy: leased.row.leasedBy,
+              },
+              new Date(nowMs)
+            );
+            if (!expired) {
+              logger(`dispatch ${role}: ignoring stale failed ${name} for row ${parsed.rowId}`);
+            }
           } else {
             // Not leasable (backoff or same-issue hold): the row already
             // throttles recreate via peekRunnable, but the failed run used
