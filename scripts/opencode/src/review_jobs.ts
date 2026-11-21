@@ -36,11 +36,7 @@ import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } 
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
-export {
-  createBunSqlClient,
-  isQueueUnavailable,
-  QueueUnavailableError,
-} from "./sql_client.ts";
+export { isQueueUnavailable, QueueUnavailableError } from "./sql_client.ts";
 
 const REVIEW_JOB_STATES = ["queued", "leased", "succeeded", "skipped", "failed", "cancelled"] as const;
 export type ReviewJobState = (typeof REVIEW_JOB_STATES)[number];
@@ -3420,6 +3416,11 @@ export class PgReviewJobStore implements ReviewJobStore {
     }
   }
 
+  /** Test/job-mode teardown: release the underlying pool back to Postgres. */
+  async close(): Promise<void> {
+    await this.sql.close?.();
+  }
+
   private async rememberSitTx(
     tx: SqlClient,
     owner: string,
@@ -5983,20 +5984,30 @@ export class PgReviewJobStore implements ReviewJobStore {
 
 export async function createPgReviewJobStore(
   databaseUrl: string,
-  opts?: { migrate?: boolean }
+  opts?: { migrate?: boolean; max?: number }
 ): Promise<PgReviewJobStore> {
-  const store = new PgReviewJobStore(createBunSqlClient(databaseUrl));
-  if (opts?.migrate === false) {
-    await store.assertSchema();
-  } else {
-    await store.migrate();
+  const store = new PgReviewJobStore(
+    createBunSqlClient(databaseUrl, opts?.max != null ? { max: opts.max } : undefined)
+  );
+  try {
+    if (opts?.migrate === false) {
+      await store.assertSchema();
+    } else {
+      await store.migrate();
+    }
+  } catch (err) {
+    await store.close();
+    throw err;
   }
   return store;
 }
 
 /** Job-mode opener: never migrates, fails clearly when the router has not migrated yet. */
-export async function openPgReviewJobStoreForJob(databaseUrl: string): Promise<PgReviewJobStore> {
-  return createPgReviewJobStore(databaseUrl, { migrate: false });
+export async function openPgReviewJobStoreForJob(
+  databaseUrl: string,
+  opts?: { max?: number }
+): Promise<PgReviewJobStore> {
+  return createPgReviewJobStore(databaseUrl, { migrate: false, ...(opts?.max != null ? { max: opts.max } : {}) });
 }
 
 /** One process per ledger row sets `JUMI_JOB_MODE=1` so pod start never takes a migration table lock. */
