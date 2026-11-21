@@ -1,11 +1,11 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import type { ReviewApi } from "../src/review.ts";
 import { clearPendingHandover, recordPendingHandover, resumePendingHandoffs } from "../src/review_handover_pending.ts";
-import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
+import { PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeConfig, makeJob, makePR, makeUser } from "./fixtures.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 function handoverApi(overrides: Parameters<typeof makeReviewApi>[0] = {}): ReviewApi {
   return makeReviewApi({
@@ -25,9 +25,13 @@ describePg("review handover pending against real postgres", () => {
 
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   beforeEach(async () => {

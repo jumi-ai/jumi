@@ -66,7 +66,7 @@ export function wrapClient(client: SqlClient): SqlClient {
   };
 }
 
-export function createBunSqlClient(databaseUrl: string): SqlClient {
-  const sql = new SQL(databaseUrl) as unknown as SqlClient;
-  return wrapClient(sql);
+export function createBunSqlClient(databaseUrl: string, opts?: { max?: number }): SqlClient {
+  const sql = opts?.max != null ? new SQL(databaseUrl, { max: opts.max }) : new SQL(databaseUrl);
+  return wrapClient(sql as unknown as SqlClient);
 }
