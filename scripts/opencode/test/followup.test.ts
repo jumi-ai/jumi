@@ -22,6 +22,7 @@ import {
   FEEDBACK_MAX_BYTES,
   FOLLOWUP_TIMEOUT_MS,
   type FollowUpItems,
+  hasUnhandledFollowUpItems,
   isBlockingQuestionInline,
   isJumiPullReviewFinding,
   isJumiReviewFinding,
@@ -3741,6 +3742,195 @@ describe("buildFeedbackMarkdown", () => {
     if (result.omittedIds.length > 0) {
       expect(match).not.toBeNull();
       expect(Number(match?.[1])).toBe(result.omittedIds.length);
+    }
+  });
+
+  test("fitted trigger, comment, and both review shapes are recorded as handled", () => {
+    const triggerComment = makeComment({
+      id: 55,
+      body: "please fix the tests",
+      created_at: "2026-01-01T00:00:00Z",
+      user: makeUser({ login: "alice" }),
+    });
+    const otherComment = makeComment({
+      id: 56,
+      body: "also fix the docs",
+      created_at: "2026-01-02T00:00:00Z",
+      user: makeUser({ login: "bob" }),
+    });
+    const githubReview = makeReview({
+      id: 42,
+      body: "please rename this variable",
+      content: undefined,
+      state: "REQUEST_CHANGES",
+      user: makeUser({ login: "carol" }),
+    });
+    const giteaReview = makeReview({
+      id: 43,
+      body: undefined,
+      content: "please add a test for this branch",
+      state: "REQUEST_CHANGES",
+      user: makeUser({ login: "dave" }),
+    });
+    const result = buildFeedbackMarkdown({
+      pr: jumiPr(),
+      trigger: { event: "issue_comment", commentId: 55, sender: "alice" },
+      triggerBody: triggerComment.body,
+      comments: [triggerComment, otherComment],
+      inlines: [],
+      reviews: [githubReview, giteaReview],
+    });
+    expect(result.omittedIds).toEqual([]);
+    expect(result.commentIds).toContain(55);
+    expect(result.commentIds).toContain(56);
+    expect(result.reviewIds).toContain(42);
+    expect(result.reviewIds).toContain(43);
+    expect(result.markdown).toContain("please fix the tests");
+    expect(result.markdown).toContain("please rename this variable");
+    expect(result.markdown).toContain("please add a test for this branch");
+    const items = {
+      comments: [triggerComment, otherComment],
+      inlines: [],
+      reviews: [githubReview, giteaReview],
+    };
+    expect(
+      hasUnhandledFollowUpItems(items, {
+        handledCommentIds: result.commentIds,
+        handledReviewIds: result.reviewIds,
+        handledReviewFindings: [],
+      })
+    ).toBe(false);
+  });
+
+  test("substantive replies omitted for budget stay actionable for comment and both review shapes", () => {
+    const hugeComment = makeComment({
+      id: 101,
+      body: "x".repeat(FEEDBACK_MAX_BYTES),
+      created_at: "2026-01-01T00:00:00Z",
+      user: makeUser({ login: "bob" }),
+    });
+    const hugeGithubReview = makeReview({
+      id: 102,
+      body: "y".repeat(FEEDBACK_MAX_BYTES),
+      content: undefined,
+      state: "REQUEST_CHANGES",
+      created_at: "2026-01-02T00:00:00Z",
+      user: makeUser({ login: "carol" }),
+    });
+    const hugeGiteaReview = makeReview({
+      id: 103,
+      body: undefined,
+      content: "z".repeat(FEEDBACK_MAX_BYTES),
+      state: "REQUEST_CHANGES",
+      created_at: "2026-01-03T00:00:00Z",
+      user: makeUser({ login: "dave" }),
+    });
+    const triggerComment = makeComment({
+      id: 55,
+      body: "please fix the tests",
+      created_at: "2026-01-04T00:00:00Z",
+      user: makeUser({ login: "alice" }),
+    });
+    const result = buildFeedbackMarkdown({
+      pr: jumiPr(),
+      trigger: { event: "issue_comment", commentId: 55, sender: "alice" },
+      triggerBody: triggerComment.body,
+      comments: [hugeComment, triggerComment],
+      inlines: [],
+      reviews: [hugeGithubReview, hugeGiteaReview],
+    });
+    // The small trigger fits and is handled; every huge substantive reply is
+    // omitted explicitly instead of being probed via markers.
+    expect(result.commentIds).toContain(55);
+    expect(result.commentIds).not.toContain(101);
+    expect(result.reviewIds).not.toContain(102);
+    expect(result.reviewIds).not.toContain(103);
+    expect(result.omittedIds).toContain(101);
+    expect(result.omittedIds).toContain(102);
+    expect(result.omittedIds).toContain(103);
+    expect(result.markdown).not.toContain("### Comment 101");
+    expect(result.markdown).not.toContain("### Review 102");
+    expect(result.markdown).not.toContain("### Review 103");
+    const items = {
+      comments: [hugeComment, triggerComment],
+      inlines: [],
+      reviews: [hugeGithubReview, hugeGiteaReview],
+    };
+    // With only the trigger recorded, every huge reply is still eligible.
+    expect(
+      hasUnhandledFollowUpItems(items, {
+        handledCommentIds: result.commentIds,
+        handledReviewIds: result.reviewIds,
+        handledReviewFindings: [],
+      })
+    ).toBe(true);
+  });
+
+  test("trigger omitted by truncation is not recorded and stays eligible", () => {
+    const hugeBody = "t".repeat(FEEDBACK_MAX_BYTES);
+    const triggerComment = makeComment({
+      id: 55,
+      body: hugeBody,
+      created_at: "2026-01-01T00:00:00Z",
+      user: makeUser({ login: "alice" }),
+    });
+    const result = buildFeedbackMarkdown({
+      pr: jumiPr(),
+      trigger: { event: "issue_comment", commentId: 55, sender: "alice" },
+      triggerBody: hugeBody,
+      comments: [triggerComment],
+      inlines: [],
+      reviews: [],
+    });
+    expect(new TextEncoder().encode(result.markdown).byteLength).toBeLessThanOrEqual(FEEDBACK_MAX_BYTES);
+    expect(result.markdown).toContain("[truncated; feedback budget]");
+    expect(result.commentIds).not.toContain(55);
+    expect(
+      hasUnhandledFollowUpItems(
+        { comments: [triggerComment], inlines: [], reviews: [] },
+        { handledCommentIds: result.commentIds, handledReviewIds: result.reviewIds, handledReviewFindings: [] }
+      )
+    ).toBe(true);
+  });
+
+  test("review trigger omitted by truncation is not recorded and stays eligible", () => {
+    const hugeBody = "r".repeat(FEEDBACK_MAX_BYTES);
+    const githubTrigger = makeReview({
+      id: 77,
+      body: hugeBody,
+      content: undefined,
+      state: "REQUEST_CHANGES",
+      created_at: "2026-01-01T00:00:00Z",
+      user: makeUser({ login: "carol" }),
+    });
+    const giteaTrigger = makeReview({
+      id: 78,
+      body: undefined,
+      content: hugeBody,
+      state: "REQUEST_CHANGES",
+      created_at: "2026-01-02T00:00:00Z",
+      user: makeUser({ login: "dave" }),
+    });
+    for (const [id, review] of [
+      [77, githubTrigger],
+      [78, giteaTrigger],
+    ] as const) {
+      const result = buildFeedbackMarkdown({
+        pr: jumiPr(),
+        trigger: { event: "pull_request_review", reviewId: id, sender: review.user?.login ?? "alice" },
+        triggerBody: hugeBody,
+        comments: [],
+        inlines: [],
+        reviews: [review],
+      });
+      expect(new TextEncoder().encode(result.markdown).byteLength).toBeLessThanOrEqual(FEEDBACK_MAX_BYTES);
+      expect(result.reviewIds).not.toContain(id);
+      expect(
+        hasUnhandledFollowUpItems(
+          { comments: [], inlines: [], reviews: [review] },
+          { handledCommentIds: result.commentIds, handledReviewIds: result.reviewIds, handledReviewFindings: [] }
+        )
+      ).toBe(true);
     }
   });
 });

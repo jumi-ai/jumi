@@ -1389,39 +1389,74 @@ export function buildFeedbackMarkdown(opts: {
   let extra = "";
   if (fit.length > 0) extra = otherHeader + omissionNote + fit.map((item) => item.text).join("\n");
   else if (dropped.size > 0) extra = otherHeader + omissionNote;
-  let markdown = prefix + extra;
-  if (encoder.encode(markdown).byteLength > FEEDBACK_MAX_BYTES) {
-    const marker = "\n\n[truncated; feedback budget]\n";
-    const markerBytes = encoder.encode(marker).byteLength;
-    markdown = `${truncateUtf8Bytes(markdown, FEEDBACK_MAX_BYTES - markerBytes)}${marker}`;
+  const markdownPre = prefix + extra;
+  const marker = "\n\n[truncated; feedback budget]\n";
+  const markerBytes = encoder.encode(marker).byteLength;
+  let markdown = markdownPre;
+  let truncated = false;
+  if (encoder.encode(markdownPre).byteLength > FEEDBACK_MAX_BYTES) {
+    truncated = true;
+    markdown = `${truncateUtf8Bytes(markdownPre, FEEDBACK_MAX_BYTES - markerBytes)}${marker}`;
+  }
+
+  // Handled = substantive text reached the worker: explicit drops plus
+  // truncation offsets, not `### ...` marker probing.
+  const keptBytes = truncated ? encoder.encode(markdown).byteLength - markerBytes : Number.POSITIVE_INFINITY;
+  const headerBytes = encoder.encode(header).byteLength;
+  const triggerSectionBytes = encoder.encode(triggerSection).byteLength;
+  const lastReviewSectionBytes = encoder.encode(lastReviewSection).byteLength;
+  const triggerEnd = headerBytes + triggerSectionBytes;
+  const lastReviewEnd = triggerEnd + lastReviewSectionBytes;
+  const currentInlineBytes = currentInlineItems.map((item) => encoder.encode(item.text).byteLength);
+  const currentInlineEnds: number[] = [];
+  {
+    let cursor = lastReviewEnd;
+    for (let i = 0; i < currentInlineItems.length; i++) {
+      if (i > 0) cursor += 1;
+      cursor += currentInlineBytes[i]!;
+      currentInlineEnds.push(cursor);
+    }
+  }
+  const fitBytes = fit.map((item) => encoder.encode(item.text).byteLength);
+  const fitEnds: number[] = [];
+  {
+    const hasExtra = fit.length > 0 || dropped.size > 0;
+    let cursor = prefixBytes + (hasExtra ? otherHeaderBytes + omissionBytes : 0);
+    for (let i = 0; i < fit.length; i++) {
+      if (i > 0) cursor += 1;
+      cursor += fitBytes[i]!;
+      fitEnds.push(cursor);
+    }
   }
 
   const commentIds = new Set<number>();
   const reviewIds = new Set<number>();
-  if (opts.trigger?.commentId !== undefined) commentIds.add(opts.trigger.commentId);
-  if (opts.trigger?.reviewId !== undefined) reviewIds.add(opts.trigger.reviewId);
-  if (opts.lastReview && markdown.includes("## Last review")) commentIds.add(opts.lastReview.id);
-  for (const item of currentInlineItems) {
-    if (markdown.includes(`### Inline ${item.id}`)) commentIds.add(item.id);
+  const truncatedFitIds: number[] = [];
+  if (opts.trigger?.commentId !== undefined && triggerEnd <= keptBytes) {
+    commentIds.add(opts.trigger.commentId);
   }
-  for (const item of fit) {
-    const marker =
-      item.kind === "comment"
-        ? item.text.startsWith("### Earlier review ")
-          ? `### Earlier review ${item.id}`
-          : `### Comment ${item.id}`
-        : item.kind === "inline"
-          ? `### Inline ${item.id}`
-          : `### Review ${item.id}`;
-    if (!markdown.includes(marker)) continue;
+  if (opts.trigger?.reviewId !== undefined && triggerEnd <= keptBytes) {
+    reviewIds.add(opts.trigger.reviewId);
+  }
+  if (opts.lastReview && lastReviewEnd <= keptBytes) commentIds.add(opts.lastReview.id);
+  for (let i = 0; i < currentInlineItems.length; i++) {
+    if (currentInlineEnds[i]! <= keptBytes) commentIds.add(currentInlineItems[i]!.id);
+  }
+  for (let i = 0; i < fit.length; i++) {
+    const item = fit[i]!;
+    if (fitEnds[i]! > keptBytes) {
+      truncatedFitIds.push(item.id);
+      continue;
+    }
     if (item.kind === "review") reviewIds.add(item.id);
     else commentIds.add(item.id);
   }
+  const omittedIds = [...[...dropped].map((i) => extras[i]!.id), ...truncatedFitIds];
   return {
     markdown,
     commentIds: [...commentIds],
     reviewIds: [...reviewIds],
-    omittedIds: [...dropped].map((i) => extras[i]!.id),
+    omittedIds,
   };
 }
 
@@ -2213,6 +2248,8 @@ export async function implementFollowUp(
   let handledCommentIds = [...state.handledCommentIds];
   let handledReviewIds = [...state.handledReviewIds];
   const handledReviewFindings = [...state.handledReviewFindings];
+  // Tentatively mark the trigger for stale/trivial CI-only rounds; an omitted
+  // substantive trigger is pruned after the feedback fit below.
   if (opts.job.trigger?.commentId !== undefined) handledCommentIds.push(opts.job.trigger.commentId);
   if (opts.job.trigger?.reviewId !== undefined) handledReviewIds.push(opts.job.trigger.reviewId);
 
@@ -2603,6 +2640,13 @@ export async function implementFollowUp(
           });
           handledCommentIds = [...handledCommentIds, ...feedback.commentIds];
           handledReviewIds = [...handledReviewIds, ...feedback.reviewIds];
+          // Prune a tentatively marked trigger omitted by the explicit fit.
+          if (opts.job.trigger?.commentId !== undefined && !feedback.commentIds.includes(opts.job.trigger.commentId)) {
+            handledCommentIds = handledCommentIds.filter((id) => id !== opts.job.trigger!.commentId);
+          }
+          if (opts.job.trigger?.reviewId !== undefined && !feedback.reviewIds.includes(opts.job.trigger.reviewId)) {
+            handledReviewIds = handledReviewIds.filter((id) => id !== opts.job.trigger!.reviewId);
+          }
           const findingById = new Map<number, HandledReviewFinding>();
           for (const comment of [...items.comments, ...items.jumiStickies]) {
             const finding = reviewFindingFromComment(comment);
