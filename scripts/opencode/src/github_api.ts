@@ -1,3 +1,4 @@
+import { readBoundedAttachmentBytes, readBoundedErrorText } from "./attachment_transfer.ts";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
 import { forgeRequestError, isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
@@ -1102,7 +1103,7 @@ export class GithubAPI {
   }
 
   /** Parent-side download of a `user-attachments` URL with the parent's token. */
-  async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
+  async downloadAttachmentBytes(url: string, maxBytes?: number): Promise<Uint8Array> {
     // Only attach the parent token when the target lives on the configured
     // forge host. Body-extracted URLs are untrusted input: sending
     // `Authorization` to an arbitrary host would exfiltrate the token.
@@ -1122,7 +1123,7 @@ export class GithubAPI {
       },
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
+      const text = await readBoundedErrorText(res).catch(() => "");
       throw forgeRequestError({
         service: "GitHub attachment",
         method: "GET",
@@ -1132,7 +1133,7 @@ export class GithubAPI {
         secrets: [token, this.staticToken],
       });
     }
-    return new Uint8Array(await res.arrayBuffer());
+    return readBoundedAttachmentBytes(res, maxBytes);
   }
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
