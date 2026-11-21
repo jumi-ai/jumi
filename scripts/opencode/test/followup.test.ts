@@ -3230,7 +3230,8 @@ describe("implementFollowUp", () => {
       });
       expect(result.status).toBe("no-changes");
       expect(openCode).toBe(1);
-      expect(listed).toBe(2);
+      // Two head listings plus the base-commit comparison read.
+      expect(listed).toBe(3);
     });
   });
 

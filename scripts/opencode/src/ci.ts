@@ -42,6 +42,8 @@ export interface FailedCheck {
   capped: string;
   logHash: string;
   flake?: string;
+  /** True when `capped` cut the full log (diagnostic cap or tail cut). */
+  truncated?: boolean;
   /** `sha256(checkName + normalised failureLines)`, absent when no failure lines. */
   fingerprint?: string;
 }
@@ -65,6 +67,9 @@ export interface CiInspection {
   checks: CiCheckSummary[];
   /** Pending checks that are not required by branch protection. Only set when a required set was applied. */
   pendingOptional: string[];
+  baseSha?: string;
+  baseResults?: import("./ci_base.ts").BaseCheckResult[];
+  baseLookupFailed?: boolean;
 }
 
 export const CI_PENDING_REASON = "CI still pending";
@@ -269,7 +274,7 @@ export function actionJobCheckState(job: ActionJob): CheckState | undefined {
   return "success";
 }
 
-function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
+export function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
   const needle = sha.toLowerCase();
   const checks: Check[] = [];
   for (const job of jobs) {
@@ -286,6 +291,25 @@ function checksFromActionJobs(jobs: ActionJob[], sha: string): Check[] {
     });
   }
   return checks;
+}
+
+/** Merge forge rows with live jobs; live wins, latest-by-jobId wins, Jumi contexts dropped. */
+export function mergeForgeAndLiveChecks(fromForge: Check[], live: Check[], sha: string): Check[] {
+  const matchedLive = new Set<Check>();
+  const merged = fromForge.map((forge) => {
+    const matches = live.filter((check) => {
+      const job = { id: check.jobId ?? 0, name: check.context ?? "", head_sha: sha };
+      return jobMatchesCheck(job, forge.context ?? "", sha);
+    });
+    if (matches.length === 0) return forge;
+    for (const check of matches) matchedLive.add(check);
+    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
+    const state = commitStatusState(latest);
+    return { ...forge, state, status: state };
+  });
+  return latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
+    (status) => !isJumiReviewContext(status.context)
+  );
 }
 
 export function reviewSkipReasonForCi(ci: CiInspection, wait?: CiGateWait): string | undefined {
@@ -859,19 +883,42 @@ export async function recordFlakeReruns(opts: {
   });
 }
 
-export function buildCiMarkdown(opts: { sha: string; checks: FailedCheck[] }): string {
+/** Base conclusion for one head check: exact context first, then workflow/job alias shapes. */
+export function baseConclusionForCheckName(
+  results: ReadonlyArray<{ name: string; conclusion: string }>,
+  checkName: string
+): string | undefined {
+  return results.find((result) => requiredMatchesCheck(result.name, checkName))?.conclusion;
+}
+
+export function buildCiMarkdown(opts: {
+  sha: string;
+  checks: FailedCheck[];
+  base?: { sha: string; results: import("./ci_base.ts").BaseCheckResult[]; lookupFailed?: boolean };
+}): string {
   const sections = [
     `# Failed CI`,
     ``,
     `Head SHA: ${opts.sha}`,
-    ``,
+    ...(opts.base ? [`Base SHA: ${opts.base.sha}`, ``] : []),
     `Parent-injected Gitea Actions log tail. Do not call tea, the forge API, or fetch Actions yourself.`,
+    ...(opts.checks.some((check) => check.truncated)
+      ? [
+          `Some logs below were truncated (diagnostic cap or tail cut): reproduce the full failing command locally instead of guessing from the excerpt.`,
+        ]
+      : []),
     ``,
   ];
   const encoder = new TextEncoder();
   let used = encoder.encode(sections.join("\n")).byteLength;
   for (const check of opts.checks) {
-    const header = `## ${check.name}\n\nState: ${check.state}${check.flake ? `\nInfra flake: ${check.flake}` : ""}\n`;
+    const baseConclusion = opts.base ? baseConclusionForCheckName(opts.base.results, check.name) : undefined;
+    const baseLine =
+      baseConclusion !== undefined
+        ? `\nBase (${opts.base?.sha.slice(0, 12)}): ${baseConclusion}${baseConclusion === "success" ? " — green on base, so this failure is attributable to the PR; a no-change disposition is not acceptable" : ""}`
+        : "";
+    const truncatedLine = check.truncated ? `\nLog truncated: true — reproduce the full failing command locally.` : "";
+    const header = `## ${check.name}\n\nState: ${check.state}${check.flake ? `\nInfra flake: ${check.flake}` : ""}${baseLine}${truncatedLine}\n`;
     const remaining = CI_LOG_MAX_BYTES - used - encoder.encode(header).byteLength - 2;
     if (remaining <= 0) break;
     const body = trimToBytes(check.capped, remaining, true);
@@ -997,21 +1044,7 @@ export async function inspectCi(opts: {
   }
   const sawShaJobs = fromForge.length > 0 || live.length > 0;
   // Live Action jobs are fresher than forge rows (status / check-run lag), so a matching live job's state wins.
-  const matchedLive = new Set<Check>();
-  const merged = fromForge.map((forge) => {
-    const matches = live.filter((check) => {
-      const job = { id: check.jobId ?? 0, name: check.context ?? "", head_sha: opts.sha };
-      return jobMatchesCheck(job, forge.context ?? "", opts.sha);
-    });
-    if (matches.length === 0) return forge;
-    for (const check of matches) matchedLive.add(check);
-    const latest = matches.reduce((a, b) => ((b.jobId ?? 0) > (a.jobId ?? 0) ? b : a));
-    const state = commitStatusState(latest);
-    return { ...forge, state, status: state };
-  });
-  const others = latestStatuses([...merged, ...live.filter((check) => !matchedLive.has(check))]).filter(
-    (status) => !isJumiReviewContext(status.context)
-  );
+  const others = mergeForgeAndLiveChecks(fromForge, live, opts.sha);
   const required = requiredCiContextsForPending(opts.requiredContexts);
   let pending: boolean;
   let pendingOptional: string[] = [];
@@ -1082,6 +1115,10 @@ export async function inspectCi(opts: {
     const capped = capFailedJobLog(text);
     const logHash = hashText(capped);
     const fingerprint = failureFingerprint(name, capped);
+    // `capped` is a window of the de-noised log; a shorter byte length means
+    // the diagnostic cap or the tail cut hid part of the failure output.
+    const truncated =
+      new TextEncoder().encode(dropUnpackNoise(text)).byteLength > new TextEncoder().encode(capped).byteLength;
     failed.push({
       name,
       state,
@@ -1093,6 +1130,7 @@ export async function inspectCi(opts: {
       logHash,
       flake: classifyInfraFlake(capped),
       ...(fingerprint ? { fingerprint } : {}),
+      ...(truncated ? { truncated: true as const } : {}),
     });
   }
   const unhandled = failed.filter((check) => !isCheckHandled(ciState, opts.sha, check.name, check.logHash));
