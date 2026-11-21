@@ -915,16 +915,16 @@ export async function collectFollowUpItems(
   findingOpts: ReviewFindingMatchOpts = {},
   trustedSenderLogins?: readonly string[] | null
 ): Promise<FollowUpItems> {
-  const [rawComments, rawReviews, rawInlines] = await Promise.all([
+  const [rawComments, rawReviews] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
-    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): InlineComment[] => {
-      // Forge clients throw `… → 404: …`. Anything else fails the collection.
-      if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
-      logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
-      return [];
-    }),
   ]);
+  const rawInlines = await api.listPullReviewComments(owner, repo, prNumber, rawReviews).catch((err: unknown) => {
+    // Forge clients throw `… → 404: …`. Anything else fails the collection.
+    if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
+    logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
+    return [] as InlineComment[];
+  });
   const jumiInlinesAll = rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername));
   const candidateComments = rawComments.filter((comment) =>
     isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts, jumiInlinesAll)
