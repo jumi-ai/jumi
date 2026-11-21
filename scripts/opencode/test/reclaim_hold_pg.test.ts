@@ -1,10 +1,10 @@
 import { beforeAll, beforeEach, expect, test } from "bun:test";
 import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
+import { resolveExhaustedFollowUpHoldOrThrow } from "../src/exhausted_hold.ts";
 import type { Check } from "../src/ports.ts";
 import { createBunSqlClient, HEARTBEAT_MS, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-import { resolveExhaustedFollowUpHoldOrThrow } from "../src/exhausted_hold.ts";
 import { markSuggestionHoldConsumed, suggestionHoldSkippedDescription } from "../src/suggestion_hold.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeConfig, makeIssueJob } from "./fixtures.ts";

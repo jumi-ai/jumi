@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
-import type { Check } from "../src/ports.ts";
-import { HEARTBEAT_MS, MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
-import { reclaimExpiredJobs } from "../src/server.ts";
 import {
   EXHAUSTED_FOLLOW_UP_HOLD_KIND,
   EXHAUSTED_FOLLOW_UP_HOLD_REASON,
@@ -10,10 +7,10 @@ import {
   isSuggestionHoldPendingDescription,
   resolveExhaustedFollowUpHoldOrThrow,
 } from "../src/exhausted_hold.ts";
-import {
-  markSuggestionHoldConsumed,
-  suggestionHoldSkippedDescription,
-} from "../src/suggestion_hold.ts";
+import type { Check } from "../src/ports.ts";
+import { HEARTBEAT_MS, MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { reclaimExpiredJobs } from "../src/server.ts";
+import { markSuggestionHoldConsumed, suggestionHoldSkippedDescription } from "../src/suggestion_hold.ts";
 import { reclaimExpiredWorkerJobs } from "../src/worker.ts";
 import { makeReviewApi } from "./fakes/forge.ts";
 import { makeComment, makeConfig, makeIssueJob, makePR } from "./fixtures.ts";
