@@ -259,6 +259,7 @@ describe("review failure handover to worker lease", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(
             join(opts.workdir, "JUMI_REVIEW.md"),
@@ -313,6 +314,7 @@ describe("review failure handover to worker lease", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(
             join(opts.workdir, "JUMI_REVIEW.md"),
@@ -343,6 +345,7 @@ describe("review failure handover to worker lease", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
         openCodeRunner: async (opts) => {
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
           return { status: "ok" };

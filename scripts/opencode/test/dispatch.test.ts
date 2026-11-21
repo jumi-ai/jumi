@@ -545,3 +545,180 @@ describe("dispatch idempotency and failure handling", () => {
     expect(fake.jobs.size).toBe(0);
   });
 });
+
+describe("invalid inventories are errors", () => {
+  function listFetch(body: string, status = 200): (input: string) => Promise<Response> {
+    return async () => new Response(body, { status, headers: { "Content-Type": "application/json" } });
+  }
+
+  test("k8sListJobs accepts valid inventories and rejects the rest", async () => {
+    const opts = { apiUrl: "https://k8s.test", namespace: "ns", token: "t" };
+    expect(await k8sListJobs({ ...opts, fetchImpl: listFetch(JSON.stringify({ items: [] })) })).toEqual([]);
+    const nonempty = await k8sListJobs({
+      ...opts,
+      fetchImpl: listFetch(JSON.stringify({ items: [{ metadata: { name: "jumi-worker-1-g0-a0" } }] })),
+    });
+    expect(nonempty.length).toBe(1);
+    await expect(k8sListJobs({ ...opts, fetchImpl: listFetch("not json{{{") })).rejects.toThrow("invalid payload");
+    for (const shape of ["{}", JSON.stringify({ items: {} }), JSON.stringify({ items: "x" }), "null"]) {
+      await expect(k8sListJobs({ ...opts, fetchImpl: listFetch(shape) })).rejects.toThrow("invalid payload");
+    }
+    await expect(k8sListJobs({ ...opts, fetchImpl: listFetch("boom", 500) })).rejects.toThrow("Job list failed");
+  });
+
+  test("invalid Job list creates nothing", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
+      const badFetch = listFetch("not json{{{");
+      const logs: string[] = [];
+      const results = await runDispatchTick(store, testConfig(templateFile), {
+        fetchImpl: badFetch,
+        k8sToken: "t",
+        logger: (message) => logs.push(message),
+      });
+      expect(results[0].created).toBe(0);
+      expect(results[0].skipped).toBe(true);
+      expect(results[0].skipReason).toBe("job list failed");
+      expect(logs.some((line) => line.includes("job list failed"))).toBe(true);
+      expect(renderDispatchMetrics()).toContain('jumi_dispatch_errors_total{role="worker",op="list"} 1');
+    });
+  });
+
+  test("invalid Pod list deletes nothing", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1 }));
+      const fake = createFakeK8s();
+      const config = testConfig(templateFile, {
+        dispatchWorker: { enabled: true, maxJobs: 2, templateFile },
+      });
+      await runDispatchTick(store, config, { fetchImpl: fake.fetchImpl, k8sToken: "t", logger: () => {} });
+      const name = [...fake.jobs.keys()][0];
+      fake.jobs.get(name)!.creationMs = Date.now() - 11 * 60 * 1000;
+      const badPodsFetch = async (input: string, init?: RequestInit): Promise<Response> => {
+        if (String(input).includes("/api/v1/namespaces/") && String(input).includes("/pods")) {
+          return new Response("not json{{{", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return fake.fetchImpl(input, init);
+      };
+      const logs: string[] = [];
+      const results = await runDispatchTick(store, config, {
+        fetchImpl: badPodsFetch,
+        k8sToken: "t",
+        logger: (message) => logs.push(message),
+        startupTimeoutMs: 10 * 60 * 1000,
+      });
+      expect(fake.jobs.has(name)).toBe(true);
+      expect(fake.deletes).not.toContain(name);
+      expect(renderDispatchMetrics()).toContain('jumi_dispatch_errors_total{role="worker",op="pods"} 1');
+      expect(logs.some((line) => line.includes(`pod list for ${name} failed`))).toBe(true);
+      expect(results[0].active).toBe(1);
+    });
+  });
+});
+
+describe("dispatch fills free slots past already-admitted rows", () => {
+  test("cap 2 with the oldest row already admitted starts the next eligible row", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 2, delivery: "d2" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 3, delivery: "d3" }));
+      const queued = await store.peekRunnable(WORKER_JOB_KINDS, 10);
+      expect(queued).toHaveLength(3);
+      const oldestName = dispatchJobName("worker", queued[0]);
+      const nextName = dispatchJobName("worker", queued[1]);
+      const lastName = dispatchJobName("worker", queued[2]);
+      const fake = createFakeK8s();
+      fake.jobs.set(oldestName, {
+        metadata: { name: oldestName },
+        status: {},
+        creationMs: Date.now(),
+      } as unknown as typeof fake.jobs extends Map<string, infer V> ? V : never);
+      const config = testConfig(templateFile, {
+        dispatchWorker: { enabled: true, maxJobs: 2, templateFile },
+      });
+      const results = await runDispatchTick(store, config, {
+        fetchImpl: fake.fetchImpl,
+        k8sToken: "t",
+        logger: () => {},
+      });
+      expect(results[0].created).toBe(1);
+      expect(results[0].active).toBe(2);
+      expect(fake.jobs.size).toBe(2);
+      expect(fake.jobs.has(oldestName)).toBe(true);
+      expect(fake.jobs.has(nextName)).toBe(true);
+      expect(fake.jobs.has(lastName)).toBe(false);
+    });
+  });
+
+  test("cap reached creates nothing", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 2, delivery: "d2" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 3, delivery: "d3" }));
+      const queued = await store.peekRunnable(WORKER_JOB_KINDS, 10);
+      const fake = createFakeK8s();
+      for (const row of queued.slice(0, 2)) {
+        const name = dispatchJobName("worker", row);
+        fake.jobs.set(name, {
+          metadata: { name },
+          status: {},
+          creationMs: Date.now(),
+        } as unknown as typeof fake.jobs extends Map<string, infer V> ? V : never);
+      }
+      const config = testConfig(templateFile, {
+        dispatchWorker: { enabled: true, maxJobs: 2, templateFile },
+      });
+      const results = await runDispatchTick(store, config, {
+        fetchImpl: fake.fetchImpl,
+        k8sToken: "t",
+        logger: () => {},
+      });
+      expect(results[0].created).toBe(0);
+      expect(results[0].skipReason).toBe("cap reached");
+      expect(fake.jobs.size).toBe(2);
+    });
+  });
+
+  test("unavailable inventory with a free slot still creates nothing", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      const store = new MemoryReviewJobStore();
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 2, delivery: "d2" }));
+      const queued = await store.peekRunnable(WORKER_JOB_KINDS, 10);
+      const oldestName = dispatchJobName("worker", queued[0]);
+      const fake = createFakeK8s();
+      fake.jobs.set(oldestName, {
+        metadata: { name: oldestName },
+        status: {},
+        creationMs: Date.now(),
+      } as unknown as typeof fake.jobs extends Map<string, infer V> ? V : never);
+      const unavailable = async () => new Response("boom", { status: 500 });
+      const results = await runDispatchTick(store, testConfig(templateFile), {
+        fetchImpl: unavailable,
+        k8sToken: "t",
+        logger: () => {},
+      });
+      expect(results[0].created).toBe(0);
+      expect(results[0].skipped).toBe(true);
+      expect(results[0].skipReason).toBe("job list failed");
+      expect(fake.jobs.size).toBe(1);
+    });
+  });
+});

@@ -333,6 +333,9 @@ const baseOptions = {
   botUsername: "jumi",
   workspacePreparer: async () => undefined,
   logger: () => undefined,
+  // File-artifact path: these harnesses stub the runner without wiring the
+  // structured adapter, so they pin the legacy contract explicitly.
+  verdictContract: "legacy" as const,
 };
 
 describe("reviewPullRequest independent selection", () => {

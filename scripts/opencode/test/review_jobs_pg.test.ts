@@ -9,11 +9,11 @@ import type { ReviewApi } from "../src/review.ts";
 import {
   assertLedgerSchema,
   createBunSqlClient,
+  isReclaimOwner,
   isUniqueViolation,
   MAX_ATTEMPTS_REASON,
   openPgReviewJobStoreForJob,
   PgReviewJobStore,
-  RECLAIM_LEASED_BY,
   WORKER_JOB_KINDS,
   WORKER_MAX_ATTEMPTS_REASON,
 } from "../src/review_jobs.ts";
@@ -271,14 +271,68 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(second.publish).toHaveLength(1);
     expect(second.publish[0]?.attempt).toBe(2);
     expect(second.publish[0]?.state).toBe("leased");
-    expect(second.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(second.publish[0]?.leasedBy)).toBe(true);
     expect(second.publish[0]?.error).toBe(MAX_ATTEMPTS_REASON);
     expect(second.publish[0]?.resultReason).toBe(MAX_ATTEMPTS_REASON);
 
     const stored = await store.get(leased!.id);
     expect(stored?.state).toBe("leased");
-    expect(stored?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(stored?.leasedBy)).toBe(true);
     expect(stored?.leasedUntil ?? 0).toBeGreaterThan(Date.now());
+  });
+
+  test("sequential reclaims supersede: first holder acknowledge rejected, second succeeds", async () => {
+    await store.enqueue(makeJob());
+    const leased = await store.lease("dead-engine", 1, new Date(1_000));
+    await store.saveResult(leased!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    const first = await store.reclaimExpired(2, new Date(5_000));
+    expect(first.publish).toHaveLength(1);
+    const firstToken = first.publish[0]!.leasedBy!;
+    expect(isReclaimOwner(firstToken)).toBe(true);
+    const second = await store.reclaimExpired(2, new Date(5_000 + 30_000 + 1));
+    expect(second.publish).toHaveLength(1);
+    const secondToken = second.publish[0]!.leasedBy!;
+    expect(isReclaimOwner(secondToken)).toBe(true);
+    expect(secondToken).not.toBe(firstToken);
+    await expect(store.markPublished(leased!.id, firstToken, { state: "succeeded" })).rejects.toThrow(
+      "cannot mark published"
+    );
+    expect(await store.heartbeat(leased!.id, firstToken, 60_000, new Date(5_000 + 30_000 + 2))).toBe(false);
+    expect(await store.expireLease(leased!.id, firstToken, new Date(5_000 + 30_000 + 2))).toBe(false);
+    await store.markPublished(leased!.id, secondToken, { state: "succeeded" });
+    expect((await store.get(leased!.id))?.state).toBe("succeeded");
+  });
+
+  test("concurrent reclaimExpired claims one row once with a single effective token", async () => {
+    await store.enqueue(makeJob());
+    const leased = await store.lease("dead-engine", 1, new Date(1_000));
+    await store.saveResult(leased!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    await store.expireLease(leased!.id, "dead-engine", new Date(2_000));
+    // Force the row back to expired with a persisted result so both racers see it.
+    await sql.unsafe(
+      `UPDATE review_jobs SET leased_by = 'dead-engine', leased_until = NOW() - interval '1 second' WHERE id = $1`,
+      [leased!.id]
+    );
+    const results = await Promise.all([store.reclaimExpired(2), store.reclaimExpired(2)]);
+    const claimed = results.flatMap((result) => result.publish);
+    // Exactly one effective claim per row: either one racer wins or the loser
+    // reclaims the winner's unexpired lease and supersedes it — never two live tokens.
+    expect(claimed.length).toBeGreaterThanOrEqual(1);
+    const stored = await store.get(leased!.id);
+    expect(isReclaimOwner(stored?.leasedBy)).toBe(true);
+    for (const row of claimed.slice(0, -1)) {
+      await expect(store.markPublished(row.id, row.leasedBy!, { state: "succeeded" })).rejects.toThrow();
+    }
+    const live = claimed[claimed.length - 1]!;
+    expect(live.leasedBy).toBe(stored?.leasedBy ?? null);
+    await store.markPublished(live.id, live.leasedBy!, { state: "succeeded" });
+    expect((await store.get(leased!.id))?.state).toBe("succeeded");
   });
 
   test("same-key enqueue clears a queued ci-lookup backoff", async () => {
@@ -488,6 +542,54 @@ describePg("PgReviewJobStore against real postgres", () => {
     const durations = await store.getRunDurations();
     expect(durations).toContainEqual({ kind: "review", exitClass: "ok", durationSeconds: 90 });
     expect(await indexExists("jumi_run_usage_job_key")).toBe(true);
+  });
+
+  test("one multi-model attempt counts exit and duration once in postgres", async () => {
+    await store.enqueue(makeJob());
+    const leased = (await store.lease("engine-1", 60_000))!;
+    const base = {
+      jobId: leased.id,
+      jobKey: leased.jobKey,
+      kind: "review" as const,
+      runner: "opencode",
+      agentInstance: "jumi",
+      tokensInput: 10,
+      tokensCacheRead: 0,
+      tokensOutput: 2,
+      tokensCacheWrite: 0,
+      tokensReasoning: 0,
+      sessions: 1,
+      exitClass: "ok" as const,
+      runnerOutcome: "ok" as const,
+      quotaResetAt: null,
+      startedAt: new Date(1_000_000),
+      endedAt: new Date(1_090_000),
+      durationSeconds: 90,
+    };
+    await store.recordRunUsageRows([
+      { ...base, model: "model-a", attemptId: "attempt-1" },
+      { ...base, model: "model-b", attemptId: "attempt-1" },
+      { ...base, model: "model-c", attemptId: "attempt-1" },
+      // Legacy shape: no attempt identity, counts as its own attempt.
+      { ...base, model: "model-legacy", attemptId: null },
+    ]);
+    expect(await store.getRunExitCounts()).toContainEqual({ kind: "review", exitClass: "ok", count: 2 });
+    expect(await store.getRunRunnerExitCounts()).toContainEqual({
+      kind: "review",
+      runner: "opencode",
+      outcome: "ok",
+      count: 2,
+    });
+    const durations = await store.getRunDurations();
+    expect(durations.filter((row) => row.kind === "review" && row.exitClass === "ok")).toHaveLength(2);
+    const tokens = await store.getRunUsageTokenTotals();
+    const input = tokens
+      .filter((row) => row.tokenType === "input" && row.source === "opencode")
+      .reduce((sum, row) => sum + row.value, 0);
+    // Token sums stay per row: three attempt rows plus the legacy row.
+    expect(input).toBe(40);
+    const sessions = await store.getRunUsageSessionTotals();
+    expect(sessions.filter((row) => row.source === "opencode").reduce((sum, row) => sum + row.value, 0)).toBe(4);
   });
 
   function pgReviewApi(): ReviewApi {

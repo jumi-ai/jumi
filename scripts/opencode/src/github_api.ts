@@ -1,3 +1,4 @@
+import { readBoundedAttachmentBytes, readBoundedErrorText } from "./attachment_transfer.ts";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
 import { forgeRequestError, isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import { GITHUB_API_URL, GITHUB_GIT_USERNAME, type GithubTokenTarget } from "./github_auth.ts";
@@ -1102,7 +1103,7 @@ export class GithubAPI {
   }
 
   /** Parent-side download of a `user-attachments` URL with the parent's token. */
-  async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
+  async downloadAttachmentBytes(url: string, maxBytes?: number): Promise<Uint8Array> {
     // Only attach the parent token when the target lives on the configured
     // forge host. Body-extracted URLs are untrusted input: sending
     // `Authorization` to an arbitrary host would exfiltrate the token.
@@ -1122,7 +1123,7 @@ export class GithubAPI {
       },
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
+      const text = await readBoundedErrorText(res).catch(() => "");
       throw forgeRequestError({
         service: "GitHub attachment",
         method: "GET",
@@ -1132,7 +1133,7 @@ export class GithubAPI {
         secrets: [token, this.staticToken],
       });
     }
-    return new Uint8Array(await res.arrayBuffer());
+    return readBoundedAttachmentBytes(res, maxBytes);
   }
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {
@@ -1439,12 +1440,7 @@ export class GithubAPI {
   }
 
   private async checkRunsFromActionJobs(owner: string, repo: string, sha: string): Promise<Check[]> {
-    const runs = await this.workflowRuns(
-      owner,
-      repo,
-      `head_sha=${encodeURIComponent(sha)}&per_page=${PAGE_SIZE}&page=1`,
-      false
-    );
+    const runs = await this.workflowRuns(owner, repo, `head_sha=${encodeURIComponent(sha)}`, false);
     const checks: Check[] = [];
     for (const run of runs) {
       const batch = await this.jobsForRun(owner, repo, run.id);
@@ -1458,9 +1454,10 @@ export class GithubAPI {
     repo: string,
     opts?: { status?: string; headSha?: string }
   ): Promise<ActionJob[]> {
-    const statusQ = opts?.status ? `&status=${encodeURIComponent(opts.status)}` : "";
-    const shaQ = opts?.headSha ? `&head_sha=${encodeURIComponent(opts.headSha)}` : "";
-    const runs = await this.workflowRuns(owner, repo, `per_page=${PAGE_SIZE}&page=1${statusQ}${shaQ}`, true);
+    const parts: string[] = [];
+    if (opts?.status) parts.push(`status=${encodeURIComponent(opts.status)}`);
+    if (opts?.headSha) parts.push(`head_sha=${encodeURIComponent(opts.headSha)}`);
+    const runs = await this.workflowRuns(owner, repo, parts.join("&"), true);
     const jobs: ActionJob[] = [];
     for (const run of runs) {
       const batch = await this.jobsForRun(owner, repo, run.id);
@@ -1475,31 +1472,60 @@ export class GithubAPI {
   private async workflowRuns(
     owner: string,
     repo: string,
-    search: string,
+    extra: string,
     emptyOnDisabled: boolean
   ): Promise<GithubWorkflowRun[]> {
-    let body: { workflow_runs?: GithubWorkflowRun[]; total_count?: number };
-    try {
-      body = await this.get<{ workflow_runs?: GithubWorkflowRun[]; total_count?: number }>(
-        `/repos/${this.repoPath(owner, repo)}/actions/runs?${search}`
+    // Paginates like check runs (MAX_PAGES x PAGE_SIZE = 2,000 runs) with the same
+    // completeness rules: total_count when present, otherwise a short page ends the list.
+    const suffix = extra.replace(/^&+/, "");
+    const runs: GithubWorkflowRun[] = [];
+    let totalCount: number | undefined;
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const query = `per_page=${PAGE_SIZE}&page=${page}${suffix ? `&${suffix}` : ""}`;
+      let body: { workflow_runs?: GithubWorkflowRun[]; total_count?: number };
+      try {
+        body = await this.get<{ workflow_runs?: GithubWorkflowRun[]; total_count?: number }>(
+          `/repos/${this.repoPath(owner, repo)}/actions/runs?${query}`
+        );
+      } catch (err) {
+        if (emptyOnDisabled && runs.length === 0 && isActionsDisabledError(err)) return [];
+        throw err;
+      }
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
+      const batch = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
+      runs.push(...batch);
+      const outcome = finishForgePage(
+        "GitHub workflow runs",
+        runs.length,
+        totalCount,
+        batch.length === PAGE_SIZE,
+        page === MAX_PAGES
       );
-    } catch (err) {
-      if (emptyOnDisabled && isActionsDisabledError(err)) return [];
-      throw err;
+      if (outcome === "done") break;
     }
-    const totalCount = typeof body?.total_count === "number" ? body.total_count : undefined;
-    const runs = Array.isArray(body?.workflow_runs) ? body.workflow_runs : [];
-    finishForgePage("GitHub workflow runs", runs.length, totalCount, runs.length === PAGE_SIZE, true);
     return runs;
   }
 
   private async jobsForRun(owner: string, repo: string, runId: number): Promise<GithubJob[]> {
-    const body = await this.get<{ jobs?: GithubJob[]; total_count?: number }>(
-      `/repos/${this.repoPath(owner, repo)}/actions/runs/${runId}/jobs?per_page=${JOB_PAGE_SIZE}`
-    );
-    const totalCount = typeof body?.total_count === "number" ? body.total_count : undefined;
-    const jobs = Array.isArray(body?.jobs) ? body.jobs : [];
-    finishForgePage("GitHub workflow jobs", jobs.length, totalCount, jobs.length === JOB_PAGE_SIZE, true);
+    // Same page cap as check runs (MAX_PAGES x JOB_PAGE_SIZE = 4,000 jobs per run).
+    const jobs: GithubJob[] = [];
+    let totalCount: number | undefined;
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const body = await this.get<{ jobs?: GithubJob[]; total_count?: number }>(
+        `/repos/${this.repoPath(owner, repo)}/actions/runs/${runId}/jobs?per_page=${JOB_PAGE_SIZE}&page=${page}`
+      );
+      if (typeof body?.total_count === "number") totalCount = body.total_count;
+      const batch = Array.isArray(body?.jobs) ? body.jobs : [];
+      jobs.push(...batch);
+      const outcome = finishForgePage(
+        "GitHub workflow jobs",
+        jobs.length,
+        totalCount,
+        batch.length === JOB_PAGE_SIZE,
+        page === MAX_PAGES
+      );
+      if (outcome === "done") break;
+    }
     return jobs;
   }
 

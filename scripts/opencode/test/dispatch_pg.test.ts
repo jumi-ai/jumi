@@ -374,4 +374,47 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
       expect(fake.jobs.size).toBe(1);
     });
   });
+
+  test("peekRunnable excludes current Job identities before the limit", async () => {
+    await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
+    await store.enqueueIssue(makeIssueJob({ issueNumber: 2, delivery: "d2" }));
+    const queued = await store.peekRunnable(WORKER_JOB_KINDS, 10);
+    expect(queued).toHaveLength(2);
+    const withoutExclude = await store.peekRunnable(WORKER_JOB_KINDS, 1);
+    expect(withoutExclude.map((row) => row.id)).toEqual([queued[0].id]);
+    const withExclude = await store.peekRunnable(WORKER_JOB_KINDS, 1, new Date(), [
+      { id: queued[0].id, generation: 0, attempt: queued[0].attempt },
+    ]);
+    expect(withExclude.map((row) => row.id)).toEqual([queued[1].id]);
+  });
+
+  test("fills free slots past already-admitted rows", async () => {
+    await withWorkspace(async (dir) => {
+      const templateFile = join(dir, "job.json");
+      await writeFile(templateFile, JSON.stringify(baseTemplate()), "utf8");
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 1, delivery: "d1" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 2, delivery: "d2" }));
+      await store.enqueueIssue(makeIssueJob({ issueNumber: 3, delivery: "d3" }));
+      const queued = await store.peekRunnable(WORKER_JOB_KINDS, 10);
+      expect(queued).toHaveLength(3);
+      const oldestName = `jumi-worker-${queued[0].id}-g0-a${queued[0].attempt}`;
+      expect(parseDispatchJobName(oldestName)).toBeDefined();
+      const fake = createFakeK8s();
+      fake.jobs.set(oldestName, {
+        metadata: { name: oldestName },
+        status: {},
+        creationMs: Date.now(),
+      } as unknown as typeof fake.jobs extends Map<string, infer V> ? V : never);
+      const config = testConfig(templateFile, 2);
+      const results = await runDispatchTick(store, config, {
+        fetchImpl: fake.fetchImpl,
+        k8sToken: "t",
+        logger: () => {},
+      });
+      expect(results[0].created).toBe(1);
+      expect(results[0].active).toBe(2);
+      expect(fake.jobs.size).toBe(2);
+      expect(fake.jobs.has(oldestName)).toBe(true);
+    });
+  });
 });
