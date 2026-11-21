@@ -5,7 +5,8 @@
       "findStickyIssueComment": 1,
       "getPR": 1,
       "getRepo": 1,
-      "getRepoFile": 1
+      "getRepoFile": 1,
+      "listCommitStatuses": 1
     }
   },
   "worker.test.ts::10": {

@@ -23,6 +23,7 @@ import {
 import { formatBytes, logDiagnostic, sampleMemory } from "./diagnostics.ts";
 import type { Engine } from "./engine.ts";
 import { thrownRunner } from "./engine.ts";
+import { resolveExhaustedFollowUpHoldOrThrow } from "./exhausted_hold.ts";
 import { createForge, type Forge, type Tracker } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import type { IssueApi } from "./gitea_issues.ts";
@@ -57,6 +58,7 @@ import {
   skipReasonForPR,
 } from "./review.ts";
 import { enqueueReviewWithCiGate } from "./review_gate.ts";
+import { clearPendingHandover, recordPendingHandover, resumePendingHandoffs } from "./review_handover_pending.ts";
 import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
@@ -667,6 +669,7 @@ export async function reclaimExpiredJobs(
   config: ServiceConfig,
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
+  await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);
@@ -720,7 +723,11 @@ export async function reclaimExpiredJobs(
  * Max-attempts worker rows previously got `markPublished` with no forge
  * comment, leaving the sticky at "Jumi is implementing this issue". Publish
  * the failure to the issue so the board and the sticky move on like review
- * rows do.
+ * rows do. A terminally exhausted follow-up also resolves a suggestion-only
+ * hold via the same shared decision the standing worker uses; maintainer and
+ * other holds stay pending. The hold write throws (it is not best-effort):
+ * a failed write expires the lease below so a later reclaim pass retries it
+ * without duplicating the sticky comment above.
  */
 async function publishWorkerReclaimRow(
   store: ReviewJobStore,
@@ -730,13 +737,29 @@ async function publishWorkerReclaimRow(
   logger: (message: string) => void
 ): Promise<void> {
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+  const token = row.leasedBy;
   const reason = row.error ?? row.resultReason ?? "Jumi failed: max attempts exceeded";
   if (row.issueNumber != null) {
     await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, reason);
   } else {
     logger(`reclaim-publish ${row.jobKey} has no issue number; marking failed without a forge comment`);
   }
-  const published = await store.markPublished(row.id, row.leasedBy, { state: "failed", reason });
+  if (row.kind === "follow-up" && row.issueNumber != null) {
+    // A cancel that lands between reclaim and publish settles to `cancelled`
+    // below; the cancel path owns the hold there, so leave it alone.
+    const cancelled = await store.isCancelRequested(row.id).catch(() => false);
+    if (!cancelled) {
+      await resolveExhaustedFollowUpHoldOrThrow({
+        api,
+        store,
+        row,
+        ownerToken: token,
+        kind: "skipped",
+        reason: "job failed",
+      });
+    }
+  }
+  const published = await store.markPublished(row.id, token, { state: "failed", reason });
   if (published.cancelled && row.issueNumber != null) {
     await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, "stopped");
   }
@@ -769,6 +792,7 @@ async function handoverFollowUp(
       logger,
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);
+    await clearPendingHandover(store, row.id);
   } catch (err) {
     logger(`handover failed ${row.jobKey}: ${errorMessage(err)}`);
   }
@@ -783,11 +807,20 @@ async function publishAndCompleteJob(
 ): Promise<ReviewResult> {
   const result = await publishPersistedJob(api, config, row, logger, store);
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+  try {
+    await recordPendingHandover(store, row.id, result.status);
+  } catch (err) {
+    logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
+  }
   const failed = Boolean(row.error) && !row.resultMarkdown;
-  await store.markPublished(row.id, row.leasedBy, {
+  const outcome = await store.markPublished(row.id, row.leasedBy, {
     state: failed ? "failed" : publishedState(result),
     reason: result.reason,
   });
+  if (outcome.cancelled) {
+    await clearPendingHandover(store, row.id).catch(() => undefined);
+    return result;
+  }
   await handoverFollowUp(store, api, config, row, result, logger);
   return result;
 }
@@ -926,6 +959,7 @@ export async function processEngineTick(
     logger("quota cooldown");
     return "idle";
   }
+  await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -1089,7 +1123,12 @@ export async function processEngineTick(
     }
     stopHeartbeat();
     const state = publishedState(result);
-    await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
+    try {
+      await recordPendingHandover(store, row.id, result.status);
+    } catch (err) {
+      logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
+    }
+    const outcome = await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
     if (result.status === "skipped" && result.reason === CI_PENDING_REASON) {
       // Backstop race: the router gate should have held this row until CI
@@ -1106,7 +1145,13 @@ export async function processEngineTick(
     } else {
       await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
     }
-    await handoverFollowUp(store, api, config, row, result, logger);
+    if (outcome.cancelled) {
+      // A cancel that landed during the run wins over the verdict: drop the
+      // pending handover and skip the follow-up, mirroring publishAndCompleteJob.
+      await clearPendingHandover(store, row.id).catch(() => undefined);
+    } else {
+      await handoverFollowUp(store, api, config, row, result, logger);
+    }
     if (extras.breaker) extras.breaker.recordModelReached();
     else await store.recordRoleSuccess("engine");
     if (current?.resultRunner && extras.runnerCooldowns) {

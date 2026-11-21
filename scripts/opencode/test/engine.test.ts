@@ -21,6 +21,7 @@ import {
   PR_AUTHOR_CANNOT_PUSH,
   type ReviewApi,
 } from "../src/review.ts";
+import { resumePendingHandoffs } from "../src/review_handover_pending.ts";
 import {
   HEARTBEAT_MS,
   isReclaimOwner,
@@ -337,6 +338,45 @@ describe("processEngineTick", () => {
       });
       expect(ran).toBe(1);
       expect(store.rows[0]?.state).toBe("succeeded");
+    });
+  });
+
+  test("cancel landing during the run drops the pending handover and skips the follow-up", async () => {
+    await withWorkspace(async (workspace) => {
+      const store = new MemoryReviewJobStore();
+      await store.enqueue(makeJob());
+      const api = engineApi({
+        getPR: async () =>
+          makePR({
+            body: "Fixes #12",
+            user: makeUser({ login: "jumi" }),
+          }),
+      });
+      await processEngineTick(store, makeConfig({ workdir: workspace, home: workspace }), api, "engine-1", {
+        gitRunner: frozenGit(),
+        workspacePreparer: async () => undefined,
+        verdictContract: "legacy" as const,
+        openCodeRunner: async (opts) => {
+          await writeFile(
+            join(opts.workdir, "JUMI_REVIEW.md"),
+            "src/demo.ts:1: 🔴 blocking\n<!-- jumi-check: failure -->"
+          );
+          // A cancel that lands while the reviewer runs: the verdict still
+          // posts once, but the follow-up handover is no longer owed.
+          store.rows[0]!.cancelRequested = true;
+          return { status: "ok" };
+        },
+      });
+      expect(store.rows[0]?.state).toBe("cancelled");
+      // A blocking verdict would enqueue a follow-up without the cancelled
+      // guard; with it there is nothing to hand over and nothing to resume.
+      expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+      const posted = api.reviews.length;
+      expect(posted).toBeGreaterThan(0);
+      const resumed = await resumePendingHandoffs(store, api, makeConfig(), () => undefined);
+      expect(resumed.completed).toBe(0);
+      expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+      expect(api.reviews.length).toBe(posted);
     });
   });
 

@@ -1078,4 +1078,14 @@ describePg("PgReviewJobStore against real postgres", () => {
     // A new delivery for the same PR stays eligible.
     expect((await store.enqueueIssue({ ...jobA, delivery: "ci-delivery-2" })).queued).toBe(true);
   });
+
+  test("job-mode schema check covers the review handover pending table", async () => {
+    if (!pgDatabaseUrl) return;
+    await sql.unsafe(`DROP TABLE IF EXISTS review_handover_pending`);
+    await expect(assertLedgerSchema(sql)).rejects.toThrow("review_handover_pending");
+
+    // The router migration recreates the table; the job-mode check passes.
+    await store.migrate();
+    await assertLedgerSchema(sql);
+  });
 });

@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { describeShaBinding } from "./release_binding.ts";
 
 export const CONTRACT_PATH = "deploy/contract.md";
 export const REVIEWER_LOADER_PATH = "scripts/opencode/src/config.ts";
@@ -1069,11 +1070,46 @@ export function touchesGitHubWorkflows(repoDir: string, sha = "HEAD"): boolean {
 }
 
 export function advertisedNextVersion(repoDir: string, sha = "HEAD"): string | null {
-  const plan = computeRelease(repoDir);
-  if (plan.bump !== "reuse" && touchesGitHubWorkflows(repoDir, sha)) {
-    return null;
+  return computeReleaseForSha(repoDir, sha)?.version ?? null;
+}
+
+/** Queries binding the SHA walk to this checkout (one version per commit SHA). */
+function shaBindingDeps(repoDir: string) {
+  return {
+    listTags: () => listSemverTags(repoDir),
+    peeledCommit: (tag: string) => peeledCommitForTag(repoDir, tag),
+    isAncestor: (commit: string, sha: string) =>
+      spawnSync("git", ["merge-base", "--is-ancestor", commit, sha], { cwd: repoDir }).status === 0,
+    commitsInRange: (base: string | null, sha: string) =>
+      (gitAllowFail(["log", "--reverse", "--format=%H", base ? `${base}..${sha}` : sha], repoDir) ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean),
+    contractAt: (ref: string) => contractAt(repoDir, ref),
+    touchesWorkflows: (ref: string) => touchesGitHubWorkflows(repoDir, ref),
+    classify: classifyBump,
+    nextVersion: nextVersionFrom,
+    compareMax: (a: string, b: string) => compareSemVer(parseSemVerTag(a)!, parseSemVerTag(b)!),
+  };
+}
+
+/** One version per commit SHA: tagged SHAs reuse their tag, otherwise the ancestor walk allocates in
+ * history order; workflow SHAs bind null, tags never move. */
+export function computeReleaseForSha(repoDir: string, sha: string): ReleasePlan | null {
+  const full = gitAllowFail(["rev-parse", `${sha}^{commit}`], repoDir)?.trim() ?? sha;
+  const binding = describeShaBinding(full, shaBindingDeps(repoDir));
+  if (!binding.version) return null;
+  if (binding.reuse) {
+    return { version: binding.version, bump: "reuse", body: releaseBodyForTag(repoDir, binding.version) };
   }
-  return plan.version;
+  const previous = binding.base ? (contractAt(repoDir, binding.base) ?? "") : null;
+  const current = contractAt(repoDir, full) ?? currentContract(repoDir);
+  const body = buildReleaseBody({
+    previousContract: previous,
+    currentContract: current,
+    changes: changesBetween(repoDir, binding.base, full),
+  });
+  return { version: binding.version, bump: classifyBump(previous, current), body };
 }
 
 export function peeledCommitForTag(repoDir: string, tag: string): string | null {
@@ -1243,9 +1279,9 @@ export async function runPublishGitHub(opts: {
   fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
 }): Promise<void> {
   const { repoDir: root, apiUrl, token, owner, repo, sha, fetchImpl } = opts;
-  const plan = computeRelease(root);
+  const plan = computeReleaseForSha(root, sha);
   const latest = latestSemverTag(root);
-  if (plan.bump === "reuse") {
+  if (plan?.bump === "reuse") {
     const result = await publishGitHubRelease({
       apiUrl,
       token,
@@ -1283,9 +1319,9 @@ export async function runPublishGitHub(opts: {
     }
     return;
   }
-  if (touchesGitHubWorkflows(root, sha)) {
+  if (!plan || touchesGitHubWorkflows(root, sha)) {
     console.log(
-      `Skipping new version ${plan.version} on ${sha} because it touches .github/workflows; backfilling latest tag if needed`
+      `Skipping ${plan ? `new version ${plan.version}` : "workflow-touching SHA"} on ${sha}; backfilling latest tag if needed`
     );
     if (latest) {
       const tagCommit = peeledCommitForTag(root, latest);
@@ -1340,14 +1376,18 @@ export async function runPublishGitHub(opts: {
 async function main(args: string[]): Promise<void> {
   const command = args[0] ?? "next-version";
   const root = repoRoot();
-  const plan = computeRelease(root);
+  // Note: `computeRelease` is the legacy HEAD-based derivation kept for the `release-body` /
+  // `publish` CLI paths and their pinned tests. Production workflows (`next-version`,
+  // `publish-github`) use the per-SHA binding via `computeReleaseForSha`, so the HEAD plan is
+  // computed lazily only where it is used.
   if (command === "next-version") {
-    const version = advertisedNextVersion(root);
+    const sha = args[1] ?? process.env.GITHUB_SHA ?? "HEAD";
+    const version = advertisedNextVersion(root, sha);
     process.stdout.write(`${version ?? ""}\n`);
     return;
   }
   if (command === "release-body") {
-    process.stdout.write(plan.body);
+    process.stdout.write(computeRelease(root).body);
     return;
   }
   if (command === "skip-build") {
@@ -1357,6 +1397,7 @@ async function main(args: string[]): Promise<void> {
     return;
   }
   if (command === "publish") {
+    const plan = computeRelease(root);
     const token = process.env.GITHUB_TOKEN || process.env.GITEA_TOKEN;
     const repository = process.env.GITHUB_REPOSITORY;
     const serverUrl = process.env.GITHUB_SERVER_URL || process.env.GITEA_URL;
