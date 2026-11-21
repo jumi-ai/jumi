@@ -58,7 +58,89 @@ export function isStrictRefreshCandidate(
 
 export type StrictRefreshPolicy = WebhookPolicy & {
   botUsername: string;
+  ignoreConflictsLabel?: string;
 };
+
+export type StrictRefreshApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
+  Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+
+/**
+ * True only when GitHub reports the head out of date under strict checks
+ * (`mergeable_state: behind`). Absent or any other value (including
+ * `unknown` while GitHub computes) means behind-ness is not established:
+ * callers fall through to the normal review path instead of parking.
+ */
+export function isStrictRefreshBehind(pr: Pull): boolean {
+  return typeof pr?.mergeableState === "string" && pr.mergeableState.toLowerCase() === "behind";
+}
+
+async function strictIgnoreLabel(
+  api: Partial<Pick<IssueApi, "getRepoFile">>,
+  owner: string,
+  repo: string,
+  defaultBranch: string,
+  deploymentLabel: string | undefined,
+  log?: (message: string) => void
+): Promise<string> {
+  const { normalizeIgnoreConflictsLabel } = await import("./ignore_conflicts.ts");
+  let label = normalizeIgnoreConflictsLabel(deploymentLabel);
+  try {
+    const { fallbackPolicyDeployment, resolveRepoPolicy } = await import("./repo_policy.ts");
+    if (typeof (api as { getRepoFile?: unknown }).getRepoFile === "function" && defaultBranch.trim()) {
+      const repoPolicy = await resolveRepoPolicy(
+        { api, owner, repo, ref: defaultBranch },
+        fallbackPolicyDeployment({ ignoreConflictsLabel: deploymentLabel }),
+        { onUnreadable: "fallback" }
+      ).catch(() => undefined);
+      if (repoPolicy !== undefined) label = repoPolicy.ignoreConflictsLabel;
+    }
+  } catch {
+    // Fail-open to the deployment value.
+  }
+  return label;
+}
+
+/**
+ * Ignore-conflicts guard for strict refresh. A labeled (or author-listed)
+ * PR that Jumi has not committed to stays left to the author: no
+ * default-branch merge from this path. Mirrors the conflict and
+ * shared-waiter paths. Settings-unreadable fails closed (treated as left).
+ */
+export async function isStrictRefreshLeftToAuthor(
+  api: Partial<Pick<IssueApi, "listPullCommits" | "getRepoFile">> | undefined,
+  owner: string,
+  repo: string,
+  pr: Pull,
+  opts: { botUsername: string; ignoreConflictsLabel?: string; defaultBranch?: string },
+  log?: (message: string) => void
+): Promise<boolean> {
+  const { hasIgnoreConflictsLabel, isIgnoreConflictsAuthor, isLeftToAuthor, loadIgnoreConflictsAuthors } = await import(
+    "./ignore_conflicts.ts"
+  );
+  const defaultBranch = typeof opts.defaultBranch === "string" ? opts.defaultBranch : "";
+  const authors = await loadIgnoreConflictsAuthors(api as never, owner, repo, defaultBranch || undefined, log).catch(
+    () => undefined
+  );
+  if (authors === undefined) return true;
+  const label = await strictIgnoreLabel(api ?? {}, owner, repo, defaultBranch, opts.ignoreConflictsLabel, log);
+  const labeled = hasIgnoreConflictsLabel(pr, label);
+  const viaAuthor = !labeled && isIgnoreConflictsAuthor(pr.user?.login, authors);
+  if (!labeled && !viaAuthor) return false;
+  return isLeftToAuthor(
+    api as never,
+    owner,
+    repo,
+    pr,
+    {
+      botUsername: opts.botUsername,
+      ignoreConflictsLabel: label,
+      ignoreConflictsAuthors: authors,
+      prAuthor: pr.user?.login,
+      defaultBranch: defaultBranch || undefined,
+    },
+    log
+  );
+}
 
 function pushBranchName(ref: string): string | undefined {
   if (!ref.startsWith("refs/heads/")) return undefined;
@@ -97,7 +179,7 @@ async function strictForBranches(
 export async function shouldEnqueueStrictRefreshOnPush(
   payload: GiteaPushPayload,
   policy: StrictRefreshPolicy,
-  api: Pick<IssueApi, "listOpenPulls" | "getIssue"> & Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile">>,
+  api: StrictRefreshApi,
   log?: (message: string) => void
 ): Promise<{
   jobs: Array<Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }>;
@@ -128,6 +210,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
   if (candidates.length === 0) return { jobs: [] };
   const strictByBranch = await strictForBranches(api, owner, repo, [branch], log);
   if (strictByBranch.get(branch) !== "strict") return { jobs: [] };
+  const defaultBranch = payload.repository.default_branch;
   const seen = new Set<number>();
   const targets: Array<{
     prNumber: number;
@@ -141,6 +224,19 @@ export async function shouldEnqueueStrictRefreshOnPush(
   for (const pr of candidates) {
     if (seen.has(pr.number)) continue;
     seen.add(pr.number);
+    if (
+      await isStrictRefreshLeftToAuthor(
+        api,
+        owner,
+        repo,
+        pr,
+        { botUsername: policy.botUsername, ignoreConflictsLabel: policy.ignoreConflictsLabel, defaultBranch },
+        log
+      )
+    ) {
+      log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
+      continue;
+    }
     targets.push({
       prNumber: pr.number,
       headSha: pr.head.sha,
@@ -187,7 +283,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   defaultBranch: string;
   cloneUrl: string;
   policy: StrictRefreshPolicy;
-  api: Partial<StrictBranchApi>;
+  api: Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
   sender?: string;
   log?: (message: string) => void;
 }): Promise<(Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }) | null> {
@@ -197,6 +293,23 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   if (!baseBranch) return null;
   const strict = await resolveStrictPolicy(api, owner, repo, baseBranch, opts.log);
   if (strict !== "strict") return null;
+  if (
+    await isStrictRefreshLeftToAuthor(
+      api,
+      owner,
+      repo,
+      pr,
+      {
+        botUsername: policy.botUsername,
+        ignoreConflictsLabel: policy.ignoreConflictsLabel,
+        defaultBranch: opts.defaultBranch,
+      },
+      opts.log
+    )
+  ) {
+    opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
+    return null;
+  }
   return {
     owner,
     repo,
@@ -231,6 +344,69 @@ export function strictRecheckSkipReason(opts: {
   if (opts.strict !== "strict") return "strict refresh: strictness off or unknown";
   if (opts.fresh.autoMergeEnabled !== true) return "strict refresh: auto-merge no longer armed";
   return null;
+}
+
+export type StrictRecheckApi = {
+  getPR: (owner: string, repo: string, index: number) => Promise<Pull>;
+} & Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+
+/**
+ * Shared worker recheck before any strict-refresh write. Fetches the PR
+ * fresh, then rechecks eligibility, head, strictness, auto-merge and the
+ * ignore-conflicts guard in one place so the pre-merge and pre-push
+ * checkpoints cannot drift (e.g. one side missing the left-to-author
+ * recheck). Returns the fresh PR plus a skip reason (null means proceed).
+ */
+export async function recheckStrictRefreshEligibility(opts: {
+  api: StrictRecheckApi;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  expectedHeadSha: string;
+  botUsername: string;
+  policy?: { botUsername: string; isPickedUp?: (issue: { assignee?: unknown; assignees?: unknown }) => boolean };
+  ignoreConflictsLabel?: string;
+  defaultBranch?: string;
+  log?: (message: string) => void;
+}): Promise<{ fresh?: Pull; skipReason: string | null }> {
+  let fresh: Pull | undefined;
+  try {
+    fresh = await opts.api.getPR(opts.owner, opts.repo, opts.prNumber);
+  } catch (err) {
+    opts.log?.(`strict refresh unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
+    return { skipReason: "strict refresh: pull request unreadable" };
+  }
+  if (!fresh || !isStrictRefreshCandidate(fresh, opts.owner, opts.repo, opts.botUsername, opts.policy as never)) {
+    return { fresh, skipReason: "strict refresh: not eligible" };
+  }
+  const expected = (opts.expectedHeadSha ?? "").toLowerCase();
+  if (!expected || fresh.head.sha.toLowerCase() !== expected) {
+    return { fresh, skipReason: "strict refresh: competing head update" };
+  }
+  const strict = await resolveStrictPolicy(opts.api, opts.owner, opts.repo, fresh.base.ref, opts.log);
+  if (strict !== "strict") {
+    return { fresh, skipReason: "strict refresh: strictness off or unknown" };
+  }
+  if (fresh.autoMergeEnabled !== true) {
+    return { fresh, skipReason: "strict refresh: auto-merge no longer armed" };
+  }
+  if (
+    await isStrictRefreshLeftToAuthor(
+      opts.api,
+      opts.owner,
+      opts.repo,
+      fresh,
+      {
+        botUsername: opts.botUsername,
+        ignoreConflictsLabel: opts.ignoreConflictsLabel,
+        defaultBranch: opts.defaultBranch,
+      },
+      opts.log
+    )
+  ) {
+    return { fresh, skipReason: "strict refresh: left to author (ignore-conflicts)" };
+  }
+  return { fresh, skipReason: null };
 }
 
 /** Review deferral while an authorized refresh is queued or running. */

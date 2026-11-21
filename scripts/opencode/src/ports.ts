@@ -80,6 +80,13 @@ export interface Pull {
   merged: boolean;
   draft?: boolean;
   mergeable?: boolean | null;
+  /**
+   * GitHub `mergeable_state` lowercased (`behind` when the head is out of
+   * date under strict checks, `clean`/`blocked`/`dirty`/`unstable`/etc.).
+   * Absent on forges without an equivalent and while GitHub computes it.
+   * Callers treat absent/`unknown` as unknown, never as permission.
+   */
+  mergeableState?: string;
   assignee?: Actor | null;
   assignees?: Actor[] | null;
   labels?: Array<string | { name?: string }> | null;

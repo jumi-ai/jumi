@@ -3,9 +3,12 @@ import type { Pull } from "../src/ports.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import {
   encodeStrictRefreshWait,
+  isStrictRefreshBehind,
   isStrictRefreshCandidate,
+  isStrictRefreshLeftToAuthor,
   isStrictRefreshWaitMarker,
   parseStrictRefreshWait,
+  recheckStrictRefreshEligibility,
   resolveStrictPolicy,
   STRICT_REFRESH_WAIT_FALLBACK_MS,
   STRICT_REFRESH_WAIT_PREFIX,
@@ -422,5 +425,118 @@ describe("two-PR strict sequence", () => {
     expect(result.queued).toBe(true);
     const runnable = await store.peekRunnable(["review"] as never, 10, new Date(nowMs + 1000));
     expect(runnable.map((row) => row.headSha)).toEqual(["sha-second-new"]);
+  });
+});
+
+describe("strict behind signal", () => {
+  test("only mergeable_state behind parks", () => {
+    expect(isStrictRefreshBehind(jumiPull({ mergeableState: "behind" }))).toBe(true);
+    expect(isStrictRefreshBehind(jumiPull({ mergeableState: "BEHIND" }))).toBe(true);
+    for (const state of ["clean", "blocked", "dirty", "unstable", "unknown", "draft", "has_hooks"] as const) {
+      expect(isStrictRefreshBehind(jumiPull({ mergeableState: state }))).toBe(false);
+    }
+    expect(isStrictRefreshBehind(jumiPull())).toBe(false);
+  });
+});
+
+describe("strict ignore-conflicts guard", () => {
+  const foreignCommit = { author: { login: "alice" }, committer: { login: "alice" } };
+  const jumiCommit = { author: { login: "jumi" }, committer: { login: "jumi" } };
+  function labeledPull(): Pull {
+    return jumiPull({ labels: [{ name: "ignore-conflicts" }] });
+  }
+  test("labeled PR without a Jumi commit is left to the author", async () => {
+    const api = { listPullCommits: async () => [foreignCommit] } as never;
+    expect(await isStrictRefreshLeftToAuthor(api, "o", "r", labeledPull(), { botUsername: "jumi" })).toBe(true);
+  });
+  test("labeled PR with a Jumi commit is not left", async () => {
+    const api = { listPullCommits: async () => [foreignCommit, jumiCommit] } as never;
+    expect(await isStrictRefreshLeftToAuthor(api, "o", "r", labeledPull(), { botUsername: "jumi" })).toBe(false);
+  });
+  test("unlabeled PR is never left", async () => {
+    const api = { listPullCommits: async () => [foreignCommit] } as never;
+    expect(await isStrictRefreshLeftToAuthor(api, "o", "r", jumiPull(), { botUsername: "jumi" })).toBe(false);
+  });
+  test("unreadable settings fail closed (left)", async () => {
+    const api = {
+      listPullCommits: async () => [foreignCommit],
+      getRepoFile: async () => {
+        throw new Error("github GET /repos/o/r/contents/.jumi.yml → 500");
+      },
+    } as never;
+    expect(
+      await isStrictRefreshLeftToAuthor(api, "o", "r", labeledPull(), { botUsername: "jumi", defaultBranch: "main" })
+    ).toBe(true);
+  });
+  test("push enqueue skips left-to-author PRs", async () => {
+    const api = {
+      listOpenPulls: async () => [labeledPull()],
+      getBranch: async () => ({ protected: true, strict: true }) as never,
+      listPullCommits: async () => [foreignCommit],
+    } as never;
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(pushPayload("base2"), policy, api);
+    expect(jobs).toHaveLength(0);
+  });
+  test("PR-activity enqueue skips left-to-author PRs", async () => {
+    const api = {
+      getBranch: async () => ({ protected: true, strict: true }),
+      listPullCommits: async () => [foreignCommit],
+    } as never;
+    const job = await shouldEnqueueStrictRefreshForPR({
+      pr: labeledPull(),
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      cloneUrl: "https://github.com/o/r.git",
+      policy: policy as never,
+      api,
+    });
+    expect(job).toBeNull();
+  });
+  test("worker recheck refuses to write left-to-author PRs", async () => {
+    const pr = labeledPull();
+    const api = {
+      getPR: async () => pr,
+      getBranch: async () => ({ protected: true, strict: true }),
+      listPullCommits: async () => [foreignCommit],
+    } as never;
+    const { skipReason } = await recheckStrictRefreshEligibility({
+      api,
+      owner: "o",
+      repo: "r",
+      prNumber: 127,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      defaultBranch: "main",
+    });
+    expect(skipReason).toBe("strict refresh: left to author (ignore-conflicts)");
+  });
+  test("worker recheck proceeds for eligible PRs and still blocks competing heads", async () => {
+    const pr = jumiPull();
+    const baseApi = {
+      getPR: async () => pr,
+      getBranch: async () => ({ protected: true, strict: true }),
+    };
+    const ok = await recheckStrictRefreshEligibility({
+      api: baseApi as never,
+      owner: "o",
+      repo: "r",
+      prNumber: 127,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      defaultBranch: "main",
+    });
+    expect(ok.skipReason).toBeNull();
+    expect(ok.fresh?.number).toBe(127);
+    const moved = await recheckStrictRefreshEligibility({
+      api: { ...baseApi, getPR: async () => ({ ...pr, head: { ...pr.head, sha: "newsha" } }) } as never,
+      owner: "o",
+      repo: "r",
+      prNumber: 127,
+      expectedHeadSha: "headsha",
+      botUsername: "jumi",
+      defaultBranch: "main",
+    });
+    expect(moved.skipReason).toBe("strict refresh: competing head update");
   });
 });

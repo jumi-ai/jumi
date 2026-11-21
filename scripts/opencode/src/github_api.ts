@@ -105,6 +105,7 @@ type GithubPR = {
   merged_at?: string | null;
   draft?: boolean;
   mergeable?: boolean | null;
+  mergeable_state?: string | null;
   assignee?: GithubUser;
   assignees?: GithubUser[] | null;
   labels?: Array<{ name?: string } | string> | null;
@@ -337,6 +338,7 @@ function toPull(pr: GithubPR): Pull {
     merged: pr.merged === true || Boolean(pr.merged_at),
     draft: pr.draft,
     mergeable: pr.mergeable,
+    ...(typeof pr.mergeable_state === "string" && pr.mergeable_state ? { mergeableState: pr.mergeable_state } : {}),
     assignee: pr.assignee ? actor(pr.assignee) : (pr.assignee ?? null),
     assignees: pr.assignees == null ? pr.assignees : pr.assignees.map(actor),
     labels: pr.labels,
