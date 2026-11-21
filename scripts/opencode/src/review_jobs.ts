@@ -33,6 +33,12 @@ import {
   type SkipLatchStore,
 } from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import {
+  MemoryStrictRefreshSlotStore,
+  PgStrictRefreshSlotStore,
+  STRICT_REFRESH_SLOTS_SCHEMA_SQL,
+  type StrictRefreshSlotStore,
+} from "./strict_refresh_queue.ts";
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
@@ -157,6 +163,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface ForceExpireLeaseExpected {
+  generation: number;
+  attempt: number;
+  leasedBy: string | null;
+}
+
 export interface PeekRunnableExclude {
   id: number;
   generation: number;
@@ -193,11 +205,13 @@ export interface ReviewJobStore {
   expireLease(id: number, leasedBy: string, now?: Date, failedRunner?: string | null): Promise<boolean>;
   /**
    * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
-   * expired regardless of who holds it, so the next reclaim moves it within
-   * seconds instead of waiting for `LEASE_MS`. State, attempt, and error are
+   * expired when it still matches what the dispatcher observed (generation,
+   * attempt, lease owner), so the next reclaim moves it within seconds
+   * instead of waiting for `LEASE_MS`. State, attempt, and error are
    * untouched; reclaim still counts the attempt and applies `MAX_JOB_ATTEMPTS`.
+   * A row that changed after observation is left untouched (`false`).
    */
-  forceExpireLease(id: number, now?: Date): Promise<boolean>;
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now?: Date): Promise<boolean>;
   /**
    * Dispatch peek with the same runnable conditions as `lease()` (not the
    * `queued` count, which includes backoff rows and same-issue-held rows):
@@ -355,6 +369,8 @@ export interface ReviewJobStore {
   readonly provenance: ProvenanceStore;
   /** Previous-round worker notes, keyed by forge/owner/repo/issue. Sibling of the issue latch rows. */
   readonly handoffs: HandoffStore;
+  /** Single-slot strict-refresh queue (one active refresh per repo and target branch). */
+  readonly strictSlots: StrictRefreshSlotStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -855,10 +871,21 @@ function roleGateStatusFromMs(input: {
 }
 
 const BACKOFF_ERROR_PREDICATE =
-  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')";
+  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')";
 
 function isBackoffMarker(error: string | null | undefined): boolean {
-  return isInfraRetryMarker(error) || isQuotaWaitMarker(error) || isCiLookupRetryMarker(error) || isCiWaitMarker(error);
+  return (
+    isInfraRetryMarker(error) ||
+    isQuotaWaitMarker(error) ||
+    isCiLookupRetryMarker(error) ||
+    isCiWaitMarker(error) ||
+    isStrictRefreshWaitMarker(error)
+  );
+}
+
+/** Waiting for an authorized strict refresh; shares the CI-wait slot semantics. */
+function isStrictRefreshWaitMarker(error: string | null | undefined): boolean {
+  return typeof error === "string" && error.startsWith("strict-refresh-wait:");
 }
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
@@ -1112,6 +1139,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly sits = new MemoryRouterSitStore();
   readonly provenance = new MemoryProvenanceStore();
   readonly handoffs = new MemoryHandoffStore();
+  readonly strictSlots = new MemoryStrictRefreshSlotStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly sharedLocks = new Map<string, Promise<void>>();
@@ -1175,15 +1203,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         for (const row of sameKey) {
           if (row.state === "leased") row.rewakeRequested = true;
           if (row.state !== "queued") continue;
-          if (isCiWaitMarker(row.error)) {
+          if (isCiWaitMarker(row.error) || isStrictRefreshWaitMarker(row.error)) {
             if (wantsWait) {
-              // Still waiting (e.g. duplicate PR webhook while CI pending):
-              // refresh the wait instead of promoting.
+              // Still waiting (e.g. duplicate PR webhook while CI pending or a
+              // strict refresh still queued): refresh the wait instead of
+              // promoting.
               row.leasedUntil = waitUntil;
               row.error = waitMarker;
               row.updatedAt = now;
             } else {
-              // CI-completion wake for the same head: make it dispatchable.
+              // Wake for the same head: make it dispatchable. A strict-refresh
+              // failure/cancel promotes the parked head so the review does not
+              // stay stuck waiting for an update that will not land.
               row.leasedUntil = null;
               row.error = null;
               row.updatedAt = now;
@@ -1421,10 +1452,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased") return false;
+      if (row.attempt !== expected.attempt || row.leasedBy !== expected.leasedBy) return false;
+      if (payloadGeneration(row.payload) !== expected.generation) return false;
       const ts = now.getTime();
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
@@ -3338,6 +3371,7 @@ const REQUIRED_LEDGER_TABLES = [
   "issue_handoffs",
   "jumi_review_suggestions",
   "review_handover_pending",
+  "strict_refresh_slots",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -3390,12 +3424,14 @@ export class PgReviewJobStore implements ReviewJobStore {
   readonly sits: PgRouterSitStore;
   readonly provenance: PgProvenanceStore;
   readonly handoffs: PgHandoffStore;
+  readonly strictSlots: PgStrictRefreshSlotStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
     this.sits = new PgRouterSitStore(sql);
     this.provenance = new PgProvenanceStore(sql);
     this.handoffs = new PgHandoffStore(sql);
+    this.strictSlots = new PgStrictRefreshSlotStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -3417,6 +3453,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS fingerprint TEXT`);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
+        await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);
@@ -3521,20 +3558,20 @@ export class PgReviewJobStore implements ReviewJobStore {
              SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
                  leased_until = CASE
                    WHEN state = 'queued' AND leased_until > NOW()
-                     AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                     AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')
                    THEN NULL
                    ELSE leased_until
                  END,
                  error = CASE
                    WHEN state = 'queued' AND leased_until > NOW()
-                     AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                     AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')
                    THEN NULL
                    ELSE error
                  END,
                  updated_at = NOW()
              WHERE job_key = $1
                AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW()
-                 AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')))`,
+                 AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')))`,
             [key]
           );
         }
@@ -3864,14 +3901,16 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  async forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
          SET leased_until = $2::timestamptz, leased_by = NULL, updated_at = NOW()
-         WHERE id = $1 AND state = 'leased'
+         WHERE id = $1 AND state = 'leased' AND attempt = $3
+           AND leased_by IS NOT DISTINCT FROM $4
+           AND (CASE WHEN payload->>'generation' ~ '^-?[0-9]+$' THEN (payload->>'generation')::integer ELSE 0 END) = $5
          RETURNING id`,
-        [id, new Date(now.getTime() - 1).toISOString()]
+        [id, new Date(now.getTime() - 1).toISOString(), expected.attempt, expected.leasedBy, expected.generation]
       )
     );
     return rows.length > 0;

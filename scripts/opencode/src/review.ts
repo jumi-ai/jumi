@@ -2361,7 +2361,10 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       runner: engineOpts.runnerName ?? engineOpts.type ?? null,
       contract: attemptContract,
     });
-    return baseEngine(engineOpts);
+    // The adapter's exit-zero artifact gate must match this attempt's
+    // selected contract, so structured-verdict spawns reach the parent's MCP
+    // validation without a checkout file.
+    return baseEngine({ ...engineOpts, verdictContract: attemptContract });
   };
   const engine = withEngineChain(contractEngine, {
     chain: effectiveChain,
@@ -2912,6 +2915,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           jobId: opts.jobId,
         },
         reviewMcp: reviewMcpRef,
+        verdictContract: attemptContract,
       };
       const engineResult = await engine(runOpts);
       runner = formatRunnerStamp(resultRunner(engineResult, runOpts));

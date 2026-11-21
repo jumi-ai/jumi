@@ -239,6 +239,16 @@ export interface IssueJob {
    * stops. Never calls the engine unless the merge conflicts.
    */
   mergeOnly?: boolean;
+  /**
+   * Strict-refresh merge-only: the PR target branch requires branches to be
+   * up to date before merging (GitHub strict). Same merge-only path as the
+   * shared waiter, plus strict rechecks before writing. `strictBaseSha` is
+   * the base tip seen at enqueue time; the worker always merges the latest
+   * tip it fetches, so repeated pushes coalesce.
+   */
+  strictRefresh?: boolean;
+  /** Base tip seen when a strict-refresh job was enqueued (dedupe/debug). */
+  strictBaseSha?: string;
   /** Login that authored the issue text, when the forge payload carried it. */
   issueAuthor?: string;
   /** Raw forge permission of the issue author at pickup time, lowercased. */

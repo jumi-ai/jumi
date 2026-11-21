@@ -1363,6 +1363,42 @@
       "status": "skipped"
     }
   },
+  "followup.test.ts::119": {
+    "claimExists": true,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "strict refresh: branch writer busy; retry after writer finishes (claim is live)",
+      "status": "skipped"
+    }
+  },
   "followup.test.ts::12": {
     "claimExists": false,
     "effects": [
@@ -1482,6 +1518,42 @@
       "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
       "prNumber": 127,
       "status": "pushed"
+    }
+  },
+  "followup.test.ts::120": {
+    "claimExists": true,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "strict refresh: competing head update",
+      "status": "skipped"
     }
   },
   "followup.test.ts::13": {

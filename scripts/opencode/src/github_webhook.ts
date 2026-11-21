@@ -165,6 +165,54 @@ function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
 
+/**
+ * Shared `opened` takeover for the GitHub PR-review path. Both the
+ * strict-refresh branch and the normal path use it so the two copies cannot
+ * drift. Throws on failure; callers decide whether to swallow (strict
+ * branch) or return 503/500 (normal path).
+ */
+async function enqueueGithubTakeoverForOpened(opts: {
+  payload: ReturnType<typeof parsePullRequestPayload>;
+  jobHeadSha: string;
+  action: string;
+  policy: GithubWebhookPolicy;
+  deps: GithubWebhookDeps;
+  delivery: string;
+  logger: (message: string) => void;
+}): Promise<void> {
+  const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+  const [o, r] = opts.payload.repository.full_name.split("/");
+  if (!o || !r || !opts.deps.worker) return;
+  const outcome = await enqueueTakeoverForOpenedPull({
+    api: opts.deps.worker.api ?? {},
+    forgeKind: "github",
+    owner: o,
+    repo: r,
+    prNumber: opts.payload.pull_request.number,
+    prTitle: opts.payload.pull_request.title,
+    prDraft: opts.payload.pull_request.draft,
+    prState: opts.payload.pull_request.state,
+    prMerged: opts.payload.pull_request.merged,
+    prAuthorLogin: opts.payload.pull_request.user?.login,
+    prHeadRef: opts.payload.pull_request.head?.ref ?? "",
+    prHeadSha: opts.payload.pull_request.head?.sha ?? opts.jobHeadSha,
+    prHeadRepoFullName: opts.payload.pull_request.head?.repo?.full_name,
+    defaultBranch: opts.payload.repository.default_branch,
+    cloneUrl: opts.payload.repository.clone_url,
+    htmlUrl: opts.payload.pull_request.html_url,
+    updatedAt: opts.payload.pull_request.updated_at,
+    prBody: opts.payload.pull_request.body,
+    botUsername: opts.policy.botUsername,
+    trustedSenderLogins: opts.policy.trustedSenderLogins,
+    action: opts.action,
+    delivery: `takeover-${opts.delivery}`,
+    queue: opts.deps.worker.queue,
+    log: (message) => opts.logger(message),
+  });
+  if (outcome.type === "skipped")
+    opts.logger(`takeover skipped ${o}/${r}#${opts.payload.pull_request.number}: ${outcome.reason}`);
+}
+
 function githubMailboxSecret(config: GithubMailboxConfig): string {
   if (config.githubWebhookSecret) return config.githubWebhookSecret;
   if (config.forge === "github") return config.webhookSecret;
@@ -605,6 +653,114 @@ export async function handleGithubWebhookEvent(
             logger(`pr head lookup failed: ${errorMessage(err)}`);
           }
         }
+        // Strict refresh reconcile on PR activity: a PR already behind when
+        // strict checks and auto-merge are armed need not wait for another
+        // base push. When GitHub reports the head behind, enqueue the
+        // merge-only refresh and park this stale-head review without taking
+        // a reviewer slot; the new head re-enters through the normal CI and
+        // review flow. When behind-ness is not established (already current,
+        // unknown while GitHub computes, or a conflict), enqueue the worker
+        // wake optimistically but fall through to the normal CI-gated review
+        // so the review is neither delayed to the fallback nor bypasses CI.
+        if (deps.worker?.api && deps.worker?.queue) {
+          try {
+            const {
+              shouldEnqueueStrictRefreshForPR,
+              isStrictRefreshBehind,
+              encodeStrictRefreshWait,
+              STRICT_REFRESH_WAIT_FALLBACK_MS,
+            } = await import("./strict_refresh.ts");
+            const [strictOwner, strictRepo] = payload.repository.full_name.split("/");
+            if (strictOwner && strictRepo) {
+              let fullPr: import("./ports.ts").Pull | undefined;
+              try {
+                const getPR = deps.worker.api.getPR;
+                if (typeof getPR === "function") {
+                  fullPr = await getPR.call(deps.worker.api, strictOwner, strictRepo, payload.pull_request.number);
+                }
+              } catch (err) {
+                logger(`strict refresh pr lookup failed: ${errorMessage(err)}`);
+              }
+              if (fullPr) {
+                const strictSlots =
+                  deps.worker?.strictSlots ??
+                  (
+                    deps.worker?.review as unknown as
+                      | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+                      | undefined
+                  )?.strictSlots ??
+                  (
+                    deps.review as unknown as
+                      | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+                      | undefined
+                  )?.strictSlots;
+                const strictJob = await shouldEnqueueStrictRefreshForPR({
+                  pr: fullPr,
+                  owner: strictOwner,
+                  repo: strictRepo,
+                  defaultBranch: payload.repository.default_branch,
+                  cloneUrl: payload.repository.clone_url,
+                  policy,
+                  api: deps.worker.api,
+                  sender: payload.sender?.login ?? "pull_request",
+                  log: logger,
+                  ...(strictSlots ? { slots: strictSlots } : {}),
+                });
+                if (strictJob) {
+                  const receivedAt = new Date().toISOString();
+                  const workerJob: import("./types.ts").IssueJob = { ...strictJob, delivery, receivedAt };
+                  const workerResult = await deps.worker.queue.enqueue(workerJob);
+                  logger(
+                    `${workerResult.queued ? "queued" : "deduped"} ${workerResult.key} delivery=${delivery} strict-refresh`
+                  );
+                  if (!isStrictRefreshBehind(fullPr)) {
+                    logger(
+                      `strict refresh not behind ${strictOwner}/${strictRepo}#${payload.pull_request.number}: falling through to normal review`
+                    );
+                  } else {
+                    const nowMs = Date.now();
+                    const parked = await deps.review.enqueue(job, {
+                      waitUntilMs: nowMs + STRICT_REFRESH_WAIT_FALLBACK_MS,
+                      waitMarker: encodeStrictRefreshWait(nowMs),
+                      nowMs,
+                    });
+                    logger(
+                      `${parked.queued ? "queued" : "deduped"} ${parked.key} delivery=${delivery} strict-refresh-wait`
+                    );
+                    if (parked.queued) {
+                      const cleared = await clearGithubSit(
+                        reviewSitsFor(deps),
+                        job.owner,
+                        job.repo,
+                        job.prNumber,
+                        logger
+                      );
+                      if (cleared) return cleared;
+                    }
+                    if (action === "opened" && deps.worker) {
+                      try {
+                        await enqueueGithubTakeoverForOpened({
+                          payload,
+                          jobHeadSha: job.headSha,
+                          action,
+                          policy,
+                          deps,
+                          delivery,
+                          logger,
+                        });
+                      } catch (err) {
+                        logger(`takeover failed: ${errorMessage(err)}`);
+                      }
+                    }
+                    return json(202, parked);
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            logger(`strict refresh reconcile failed: ${errorMessage(err)}`);
+          }
+        }
         const result = await enqueueReviewWithCiGate(deps.review, job, {
           ciApi: deps.ciApi ?? deps.worker?.ciApi,
           home: deps.ciHome ?? deps.worker?.ciHome ?? "/data",
@@ -625,38 +781,15 @@ export async function handleGithubWebhookEvent(
           // Same contract as the Gitea PR-open path: the review above already
           // enqueued (or deduped on retry). Shared helper keeps both forges identical.
           try {
-            const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
-            const [o, r] = payload.repository.full_name.split("/");
-            if (o && r) {
-              const outcome = await enqueueTakeoverForOpenedPull({
-                api: deps.worker.api ?? {},
-                forgeKind: "github",
-                owner: o,
-                repo: r,
-                prNumber: payload.pull_request.number,
-                prTitle: payload.pull_request.title,
-                prDraft: payload.pull_request.draft,
-                prState: payload.pull_request.state,
-                prMerged: payload.pull_request.merged,
-                prAuthorLogin: payload.pull_request.user?.login,
-                prHeadRef: payload.pull_request.head?.ref ?? "",
-                prHeadSha: payload.pull_request.head?.sha ?? job.headSha,
-                prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
-                defaultBranch: payload.repository.default_branch,
-                cloneUrl: payload.repository.clone_url,
-                htmlUrl: payload.pull_request.html_url,
-                updatedAt: payload.pull_request.updated_at,
-                prBody: payload.pull_request.body,
-                botUsername: policy.botUsername,
-                trustedSenderLogins: policy.trustedSenderLogins,
-                action,
-                delivery: `takeover-${delivery}`,
-                queue: deps.worker.queue,
-                log: (message) => logger(message),
-              });
-              if (outcome.type === "skipped")
-                logger(`takeover skipped ${o}/${r}#${payload.pull_request.number}: ${outcome.reason}`);
-            }
+            await enqueueGithubTakeoverForOpened({
+              payload,
+              jobHeadSha: job.headSha,
+              action,
+              policy,
+              deps,
+              delivery,
+              logger,
+            });
           } catch (err) {
             if (isQueueUnavailable(err)) {
               logger(`takeover queue unavailable: ${(err as Error).message}`);
@@ -1000,6 +1133,34 @@ export async function handleGithubWebhookEvent(
         }
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
+      }
+      // Strict refresh: GitHub branches that require up-to-date heads. Clean
+      // merges land via the merge-only worker path without a model call;
+      // conflicts stay for the conflict workflow. Unknown/off stays silent.
+      // Single-slot per repo and target branch: the oldest ready PR holds the
+      // slot across CI/review/merge; waiting PRs get no speculative push.
+      try {
+        const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
+        const strictSlots =
+          deps.worker?.strictSlots ??
+          (
+            deps.worker?.review as unknown as
+              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+              | undefined
+          )?.strictSlots ??
+          (
+            deps.review as unknown as
+              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+              | undefined
+          )?.strictSlots;
+        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger, strictSlots);
+        for (const partial of strict.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          jobs.push(job);
+          logger(`strict refresh merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${delivery}`);
+        }
+      } catch (err) {
+        logger(`strict refresh wake failed: ${errorMessage(err)}`);
       }
       if (jobs.length === 0) {
         if (decision.type === "skip") return skipped(decision.reason, logger);

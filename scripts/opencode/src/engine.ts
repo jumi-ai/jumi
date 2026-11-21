@@ -1,3 +1,4 @@
+import type { ReviewVerdictContract } from "./review_verdict_contract.ts";
 import { type RunnerStamp, type RunnerType, runnerStamp } from "./runners.ts";
 import { redactGitSecrets } from "./workspace.ts";
 
@@ -61,6 +62,14 @@ export interface EngineRunOptions {
    * root. Undefined for non-review spawns.
    */
   reviewMcp?: { url: string; token: string };
+  /**
+   * Attempt's selected verdict contract (`required` keeps the structured MCP
+   * verdict mandatory; `legacy` keeps the `JUMI_REVIEW.md` file fallback).
+   * Review-kind spawns carry the contract the parent selected for this
+   * attempt so the adapter's exit-zero file gate matches the parent's
+   * validation path. Absent preserves the legacy file gate.
+   */
+  verdictContract?: ReviewVerdictContract;
   /**
    * Parent-owned per-spawn worker MCP server. The harness registers it for
    * worker-kind spawns (implement, follow-up, conflict) so the model reports
