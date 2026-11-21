@@ -371,7 +371,7 @@ export class PgStrictRefreshSlotStore implements StrictRefreshSlotStore {
       await this.withSlotLock(owner, repo, baseBranch, async (tx) => {
         await tx.unsafe(
           `UPDATE ${STRICT_REFRESH_SLOT_TABLE}
-           SET head_sha = $4, base_sha = $5, updated_at = $6::timestamptz
+           SET head_sha = $5, base_sha = $6, updated_at = $7::timestamptz
            WHERE owner = $1 AND repo = $2 AND base_branch = $3 AND pr_number = $4`,
           [owner, repo, baseBranch, prNumber, headSha, baseSha, new Date(nowMs ?? Date.now()).toISOString()]
         );

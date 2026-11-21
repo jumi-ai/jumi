@@ -683,6 +683,7 @@ export async function handleGithubWebhookEvent(
               }
               if (fullPr) {
                 const strictSlots =
+                  deps.worker?.strictSlots ??
                   (
                     deps.worker?.review as unknown as
                       | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
@@ -1141,6 +1142,7 @@ export async function handleGithubWebhookEvent(
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
         const strictSlots =
+          deps.worker?.strictSlots ??
           (
             deps.worker?.review as unknown as
               | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }

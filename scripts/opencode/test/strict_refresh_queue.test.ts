@@ -358,4 +358,107 @@ describe("strict single-slot admission across events and branches", () => {
     expect(developAdmitted.jobs).toHaveLength(1);
     expect(developAdmitted.jobs[0]?.prNumber).toBe(200);
   });
+
+  test("unknown strictness keeps the slot; explicit off releases it", async () => {
+    const slots = new MemoryStrictRefreshSlotStore();
+    await slots.tryAdmit({
+      owner: "o",
+      repo: "r",
+      baseBranch: "main",
+      prNumber: 100,
+      headSha: "head-100",
+      baseSha: "base-1",
+      admittedAtMs: 1_000,
+      updatedAtMs: 1_000,
+    });
+    const pulls = [jumiPull(100)];
+    // Transient lookup failure reads as unknown: fail-closed, slot stays.
+    const unknownApi = {
+      listOpenPulls: async () => pulls,
+      getBranch: async () => {
+        throw new Error("boom");
+      },
+    } as never;
+    const unknownResult = await shouldEnqueueStrictRefreshOnPush(
+      pushPayload("base-2"),
+      policy,
+      unknownApi,
+      undefined,
+      slots,
+      2_000
+    );
+    expect(unknownResult.jobs).toHaveLength(0);
+    expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(100);
+
+    // Explicitly unprotected branch releases the slot.
+    const offApi = strictApi(pulls, false);
+    const offResult = await shouldEnqueueStrictRefreshOnPush(
+      pushPayload("base-2"),
+      policy,
+      offApi,
+      undefined,
+      slots,
+      3_000
+    );
+    expect(offResult.jobs).toHaveLength(0);
+    expect(await slots.getSlot("o", "r", "main")).toBeUndefined();
+
+    // Same fail-closed rule on the PR-activity path: unknown keeps the slot.
+    await slots.tryAdmit({
+      owner: "o",
+      repo: "r",
+      baseBranch: "main",
+      prNumber: 100,
+      headSha: "head-100",
+      baseSha: "base-2",
+      admittedAtMs: 4_000,
+      updatedAtMs: 4_000,
+    });
+    const prUnknownApi = {
+      listOpenPulls: async () => pulls,
+      getBranch: async () => {
+        throw new Error("boom");
+      },
+    } as never;
+    const prUnknown = await shouldEnqueueStrictRefreshForPR({
+      pr: pulls[0] as never,
+      owner: "o",
+      repo: "r",
+      defaultBranch: "main",
+      cloneUrl: "https://github.com/o/r.git",
+      policy: policy as never,
+      api: prUnknownApi,
+      slots,
+      nowMs: 5_000,
+    });
+    expect(prUnknown).toBeNull();
+    expect((await slots.getSlot("o", "r", "main"))?.prNumber).toBe(100);
+  });
+
+  test("Pg touch binds the held pr to $4 and the new tip to $5/$6/$7", async () => {
+    const { PgStrictRefreshSlotStore } = await import("../src/strict_refresh_queue.ts");
+    const seen: Array<{ sql: string; params: unknown[] }> = [];
+    const tx = {
+      unsafe: async (sql: string, params: unknown[]) => {
+        seen.push({ sql, params });
+        return [];
+      },
+    };
+    const sql = {
+      unsafe: async (query: string, params?: unknown[]) => {
+        seen.push({ sql: query, params: params ?? [] });
+        return [];
+      },
+      begin: async (fn: (tx: unknown) => Promise<unknown>) => fn(tx),
+    };
+    const store = new PgStrictRefreshSlotStore(sql as never);
+    await store.touch("o", "r", "main", 100, "head-100", "base-2", 1_000);
+    const touch = seen.find((call) => call.sql.includes("SET head_sha"));
+    expect(touch).toBeDefined();
+    expect(touch?.sql).toContain("head_sha = $5");
+    expect(touch?.sql).toContain("base_sha = $6");
+    expect(touch?.sql).toContain("updated_at = $7::timestamptz");
+    expect(touch?.sql).toContain("pr_number = $4");
+    expect(touch?.params).toEqual(["o", "r", "main", 100, "head-100", "base-2", expect.any(String)]);
+  });
 });

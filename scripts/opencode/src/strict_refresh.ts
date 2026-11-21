@@ -300,7 +300,9 @@ export async function shouldEnqueueStrictRefreshOnPush(
   const strictByBranch = await strictForBranches(api, owner, repo, [branch], log);
   const strict = strictByBranch.get(branch);
   if (strict !== "strict") {
-    if (slots && (strict === "off" || strict === "unknown")) {
+    // Fail-closed: only an explicit off clears a held slot. An unreadable
+    // branch (unknown, e.g. transient fetch error) leaves the slot alone.
+    if (slots && strict === "off") {
       try {
         const held = await slots.getSlot(owner, repo, branch);
         if (held) {
@@ -582,7 +584,9 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   if (!baseBranch) return null;
   const strict = await resolveStrictPolicy(api, owner, repo, baseBranch, opts.log);
   if (strict !== "strict") {
-    if (opts.slots) {
+    // Fail-closed: only an explicit off clears a held slot; unknown (e.g.
+    // transient getBranch failure) leaves the slot alone.
+    if (opts.slots && strict === "off") {
       try {
         const held = await opts.slots.getSlot(owner, repo, baseBranch);
         if (held) await opts.slots.release(owner, repo, baseBranch, { nowMs: opts.nowMs });
