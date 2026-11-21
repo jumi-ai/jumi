@@ -9,6 +9,7 @@ import {
   buildReleaseBody,
   classifyBump,
   computeRelease,
+  computeReleaseForSha,
   contractEnvIssues,
   formatContractEnvIssue,
   gitOpsLoaderEnv,
@@ -23,6 +24,8 @@ import {
   touchesGitHubWorkflows,
   workflowRebuildsOnTag,
 } from "../src/release.ts";
+import type { BindingStep, ShaBindingDeps } from "../src/release_binding.ts";
+import { allocateShaVersion, assertSingleOwner, describeShaBinding } from "../src/release_binding.ts";
 import { ANTIGRAVITY_HOMELAB_CONSTRAINT } from "../src/runners.ts";
 
 const repoRoot = join(process.cwd(), "../..");
@@ -1008,6 +1011,174 @@ describe("computeRelease git adapter", () => {
       async (dir) => {
         expect(touchesGitHubWorkflows(dir)).toBe(false);
         expect(advertisedNextVersion(dir)).toBe("v1.0.1");
+      }
+    );
+  });
+});
+
+describe("sha-pinned version binding", () => {
+  const stepsFor = (shas: string[], touches = false): BindingStep[] =>
+    shas.map((sha) => ({ sha, bump: "patch" as const, touchesWorkflows: touches }));
+
+  test("mocked tags/refs: overlapping runs and a retry agree; another SHA never reuses", () => {
+    const firstView = { baseVersion: "v1.2.3", taken: ["v1.2.3"] as string[] };
+    const runA = (): string | null =>
+      allocateShaVersion({
+        reuseVersion: null,
+        ...firstView,
+        steps: stepsFor(["aaa"]),
+        targetSha: "aaa",
+        nextVersion: nextVersionFrom,
+      });
+    expect(runA()).toBe("v1.2.4");
+    expect(runA()).toBe("v1.2.4");
+    const childView = allocateShaVersion({
+      reuseVersion: null,
+      ...firstView,
+      steps: stepsFor(["aaa", "bbb"]),
+      targetSha: "bbb",
+      nextVersion: nextVersionFrom,
+    });
+    expect(childView).toBe("v1.2.5");
+    expect(childView).not.toBe(runA());
+    const retryA = allocateShaVersion({
+      reuseVersion: "v1.2.4",
+      ...firstView,
+      taken: ["v1.2.3", "v1.2.4"],
+      steps: [],
+      targetSha: "aaa",
+      nextVersion: nextVersionFrom,
+    });
+    expect(retryA).toBe("v1.2.4");
+    const childAfterTag = allocateShaVersion({
+      reuseVersion: null,
+      baseVersion: "v1.2.4",
+      taken: ["v1.2.3", "v1.2.4"],
+      steps: stepsFor(["bbb"]),
+      targetSha: "bbb",
+      nextVersion: nextVersionFrom,
+    });
+    expect(childAfterTag).toBe(childView);
+    assertSingleOwner([
+      ["v1.2.4", "aaa"],
+      [childView!, "bbb"],
+    ]);
+    expect(() =>
+      assertSingleOwner([
+        ["v1.2.4", "aaa"],
+        ["v1.2.4", "bbb"],
+      ])
+    ).toThrow("two SHAs");
+  });
+
+  test("mocked tags/refs: taken candidates bump patch; workflow SHAs bind null", () => {
+    expect(
+      allocateShaVersion({
+        reuseVersion: null,
+        baseVersion: "v1.0.0",
+        taken: ["v1.0.0", "v1.0.1"],
+        steps: stepsFor(["aaa"]),
+        targetSha: "aaa",
+        nextVersion: nextVersionFrom,
+      })
+    ).toBe("v1.0.2");
+    expect(
+      allocateShaVersion({
+        reuseVersion: null,
+        baseVersion: "v1.0.0",
+        taken: ["v1.0.0"],
+        steps: stepsFor(["aaa"], true),
+        targetSha: "aaa",
+        nextVersion: nextVersionFrom,
+      })
+    ).toBeNull();
+    expect(
+      allocateShaVersion({
+        reuseVersion: null,
+        baseVersion: "v1.0.0",
+        taken: ["v1.0.0"],
+        steps: [{ sha: "wf", bump: "patch", touchesWorkflows: true }, ...stepsFor(["aaa"])],
+        targetSha: "aaa",
+        nextVersion: nextVersionFrom,
+      })
+    ).toBe("v1.0.1");
+  });
+
+  test("mocked deps: reuse wins, otherwise the walk allocates, workflow binds null", () => {
+    const deps: ShaBindingDeps = {
+      listTags: () => ["v1.0.0"],
+      peeledCommit: (tag) => (tag === "v1.0.0" ? "base-sha" : null),
+      isAncestor: () => true,
+      commitsInRange: () => ["new-sha"],
+      contractAt: () => BASE_CONTRACT,
+      touchesWorkflows: () => false,
+      classify: () => "patch",
+      nextVersion: nextVersionFrom,
+      compareMax: () => 1,
+    };
+    expect(describeShaBinding("new-sha", deps).version).toBe("v1.0.1");
+    expect(describeShaBinding("new-sha", { ...deps, touchesWorkflows: () => true }).version).toBeNull();
+    const reuse = describeShaBinding("new-sha", {
+      ...deps,
+      listTags: () => ["v1.0.0", "v1.0.1"],
+      peeledCommit: (tag) => (tag === "v1.0.1" ? "new-sha" : "base-sha"),
+    });
+    expect(reuse).toEqual({ version: "v1.0.1", reuse: "v1.0.1", base: null });
+  });
+
+  test("git walk binds each commit to one version; retries reuse; no publish calls", async () => {
+    let shaA = "";
+    let shaB = "";
+    const revParse = (dir: string, ref: string): string => {
+      const result = spawnSync("git", ["rev-parse", ref], { cwd: dir, encoding: "utf8" });
+      if (result.status !== 0) throw new Error(`git rev-parse ${ref} failed`);
+      return String(result.stdout).trim();
+    };
+    await withRepo(
+      async (dir) => {
+        await mkdir(join(dir, "deploy"));
+        await writeFile(join(dir, "deploy/contract.md"), BASE_CONTRACT);
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "baseline"], dir);
+        git(["tag", "-a", "v1.0.0", "-m", "v1.0.0"], dir);
+        await writeFile(join(dir, "a.txt"), "a\n");
+        git(["add", "a.txt"], dir);
+        git(["commit", "-m", "A"], dir);
+        shaA = revParse(dir, "HEAD");
+        await writeFile(join(dir, "b.txt"), "b\n");
+        git(["add", "b.txt"], dir);
+        git(["commit", "-m", "B"], dir);
+        shaB = revParse(dir, "HEAD");
+      },
+      async (dir) => {
+        expect(advertisedNextVersion(dir, shaA)).toBe("v1.0.1");
+        expect(advertisedNextVersion(dir, shaA)).toBe("v1.0.1");
+        expect(advertisedNextVersion(dir, shaB)).toBe("v1.0.2");
+        expect(computeReleaseForSha(dir, shaB)?.bump).toBe("patch");
+        git(["tag", "-a", "v1.0.1", "-m", "v1.0.1", shaA], dir);
+        expect(advertisedNextVersion(dir, shaA)).toBe("v1.0.1");
+        expect(advertisedNextVersion(dir, shaB)).toBe("v1.0.2");
+        expect(peeledCommitForTag(dir, "v1.0.1")).toBe(shaA);
+      }
+    );
+  });
+
+  test("git walk: workflow-only commits bind null without publishing", async () => {
+    await withRepo(
+      async (dir) => {
+        await mkdir(join(dir, "deploy"));
+        await writeFile(join(dir, "deploy/contract.md"), BASE_CONTRACT);
+        git(["add", "deploy/contract.md"], dir);
+        git(["commit", "-m", "baseline"], dir);
+        git(["tag", "-a", "v1.0.0", "-m", "v1.0.0"], dir);
+        await mkdir(join(dir, ".github/workflows"), { recursive: true });
+        await writeFile(join(dir, ".github/workflows/ci.yml"), "name: ci\non: push\n");
+        git(["add", ".github/workflows/ci.yml"], dir);
+        git(["commit", "-m", "workflow only"], dir);
+      },
+      async (dir) => {
+        expect(advertisedNextVersion(dir, "HEAD")).toBeNull();
+        expect(computeReleaseForSha(dir, "HEAD")).toBeNull();
       }
     );
   });
