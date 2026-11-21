@@ -297,4 +297,94 @@ describe("runner cooldown", () => {
     expect(store.isCooled("codex", 1_000, first.codex)).toBe(true);
     expect(store.isCooled("codex", 1_000, second.codex)).toBe(false);
   });
+
+  test("quota with an absolute-only reset uses that time, marked parsed", () => {
+    const store = new RunnerCooldownStore();
+    const nowMs = 1_000_000;
+    const resetAtMs = nowMs + 45 * 60 * 1000;
+    const entry = store.recordQuota("codex", { quotaResetAtMs: resetAtMs, nowMs });
+    expect(entry.untilMs).toBe(resetAtMs);
+    expect(entry.source).toBe("parsed");
+    expect(entry.reason).toBe("quota");
+    expect(store.isCooled("codex", resetAtMs - 1)).toBe(true);
+    expect(store.isCooled("codex", resetAtMs)).toBe(false);
+  });
+
+  test("quota absolute reset is capped by the configured maximum", () => {
+    const store = new RunnerCooldownStore();
+    const nowMs = 1_000_000;
+    const config = { ...DEFAULT_RUNNER_COOLDOWN_CONFIG, quotaMaxMs: 60 * 60 * 1000 };
+    const entry = store.recordQuota("codex", { quotaResetAtMs: nowMs + 5 * 60 * 60 * 1000, nowMs, config });
+    expect(entry.untilMs).toBe(nowMs + 60 * 60 * 1000);
+    expect(entry.source).toBe("parsed");
+  });
+
+  test("quota prefers the absolute reset when both hints exist", () => {
+    const store = new RunnerCooldownStore();
+    const nowMs = 1_000_000;
+    const entry = recordRunnerCooldownForFailure(store, "codex", {
+      result: {
+        status: "stuck",
+        message: QUOTA_MESSAGE,
+        quota: "resetting",
+        retryAfterMs: 5 * 60 * 1000,
+        quotaResetAtMs: nowMs + 45 * 60 * 1000,
+      },
+      nowMs,
+    });
+    expect(entry?.untilMs).toBe(nowMs + 45 * 60 * 1000);
+    expect(entry?.source).toBe("parsed");
+  });
+
+  test("quota past or invalid absolute reset falls back safely", () => {
+    const nowMs = 1_000_000;
+    // Past absolute with a relative hint falls back to the relative hint.
+    const relative = new RunnerCooldownStore().recordQuota("codex", {
+      quotaResetAtMs: nowMs - 1_000,
+      retryAfterMs: 5 * 60 * 1000,
+      nowMs,
+    });
+    expect(relative.untilMs).toBe(nowMs + 5 * 60 * 1000);
+    expect(relative.source).toBe("parsed");
+    // Past absolute alone falls back to the configured default.
+    const config = { ...DEFAULT_RUNNER_COOLDOWN_CONFIG, quotaMs: 42 * 60 * 1000 };
+    const pastDefault = new RunnerCooldownStore().recordQuota("codex", {
+      quotaResetAtMs: nowMs - 1_000,
+      nowMs,
+      config,
+    });
+    expect(pastDefault.untilMs).toBe(nowMs + 42 * 60 * 1000);
+    expect(pastDefault.source).toBe("default");
+    // Invalid absolute values fall back the same way.
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, nowMs]) {
+      const fallback = new RunnerCooldownStore().recordQuota("codex", {
+        quotaResetAtMs: bad,
+        retryAfterMs: 5 * 60 * 1000,
+        nowMs,
+      });
+      expect(fallback.untilMs).toBe(nowMs + 5 * 60 * 1000);
+      expect(fallback.source).toBe("parsed");
+    }
+  });
+
+  test("absolute-reset entry round-trips through persistence to a later Job", () => {
+    const store = new RunnerCooldownStore();
+    const nowMs = 1_000_000;
+    const resetAtMs = nowMs + 45 * 60 * 1000;
+    const entry = recordRunnerCooldownForFailure(store, "codex", {
+      result: { status: "stuck", message: QUOTA_MESSAGE, quota: "resetting", quotaResetAtMs: resetAtMs },
+      nowMs,
+    });
+    expect(entry?.source).toBe("parsed");
+    // What the one-shot Job persists.
+    const active = store.activeEntries(nowMs + 1_000);
+    expect(active).toHaveLength(1);
+    expect(active[0]?.untilMs).toBe(resetAtMs);
+    expect(active[0]?.source).toBe("parsed");
+    // A later Job hydrates it verbatim and skips the runner until reset.
+    const next = new RunnerCooldownStore();
+    for (const e of active) next.restore(e.runner, e);
+    expect(next.isCooled("codex", resetAtMs - 1)).toBe(true);
+    expect(next.isCooled("codex", resetAtMs)).toBe(false);
+  });
 });

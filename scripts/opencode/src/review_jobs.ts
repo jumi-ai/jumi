@@ -1592,6 +1592,15 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       for (const row of this.rows) {
         if (row.state !== "leased" || row.leasedUntil == null || row.leasedUntil >= ts) continue;
         if (!allowed.includes(rowKind(row))) continue;
+        // A recorded cancel wins over reclaim: settle to `cancelled`.
+        if (row.cancelRequested) {
+          row.state = "cancelled";
+          row.leasedBy = null;
+          row.leasedUntil = null;
+          row.cancelRequested = false;
+          row.updatedAt = ts;
+          continue;
+        }
         if (hasPersistedResult(row)) {
           row.leasedBy = makeReclaimOwner();
           row.leasedUntil = claimedUntil;
@@ -4040,6 +4049,15 @@ export class PgReviewJobStore implements ReviewJobStore {
 
       for (const raw of expired) {
         const row = mapRow(raw);
+        // A recorded cancel wins over reclaim: settle to `cancelled`
+        // instead of requeueing, claiming, or counting an attempt.
+        if (row.cancelRequested) {
+          await tx.unsafe(
+            `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, cancel_requested = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'leased' RETURNING *`,
+            [row.id]
+          );
+          continue;
+        }
         if (hasPersistedResult(row)) {
           const updated = asRows<ReviewJobRow>(
             await tx.unsafe(
@@ -4066,7 +4084,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                    leased_by = $3,
                    leased_until = $4::timestamptz,
                    updated_at = NOW()
-               WHERE id = $1
+               WHERE id = $1 AND state = 'leased' AND cancel_requested = FALSE
                RETURNING *`,
               [row.id, reason, makeReclaimOwner(), claimedUntil]
             )
@@ -4083,7 +4101,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                  leased_until = NULL,
                  error = CASE WHEN error LIKE 'infra-retry:%' THEN NULL ELSE error END,
                  updated_at = NOW()
-             WHERE id = $1
+             WHERE id = $1 AND state = 'leased' AND cancel_requested = FALSE
              RETURNING *`,
             [row.id]
           )
@@ -4210,27 +4228,21 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
-    const cancelled = asRows<{ id: unknown }>(
+    // Single state-aware statement: queued rows settle, leased rows flag.
+    const cancelled = asRows<{ id: unknown; state: unknown }>(
       await this.sql.unsafe(
-        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
-           cancel_requested = FALSE, updated_at = NOW()
-         WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'queued'
-         RETURNING id`,
+        `UPDATE review_jobs
+          SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END,
+            leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
+            updated_at = NOW()
+          WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
+          RETURNING id, state`,
         [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
       )
     );
-    // A running one-shot job owns its leased row: leave it leased so its
-    // heartbeat keeps the lease, and mark it so the job stops its own child
-    // and settles itself via markCancelled. The router must not post
-    // `stopped` for these; the job posts it when it settles.
-    await this.sql.unsafe(
-      `UPDATE review_jobs SET cancel_requested = TRUE, updated_at = NOW()
-       WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state = 'leased'`,
-      [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
-    );
     await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
-    return cancelled.length;
+    return cancelled.filter((row) => str(row.state) === "cancelled").length;
   }
 
   async isCancelRequested(id: number): Promise<boolean> {

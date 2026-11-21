@@ -238,26 +238,50 @@ export function isListedLogin(login: string | undefined | null, logins: readonly
   return (logins ?? []).some((item) => loginKey(item) === key);
 }
 
-/** The operator's trusted sender list is in force once it names at least one login. */
-export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undefined): boolean {
-  return (trustedSenderLogins ?? []).some((item) => loginKey(item) !== undefined);
+/**
+ * Whether an effective trusted-sender policy is configured. An explicitly
+ * configured empty list (`[]`, from narrowing a set deployment list to no
+ * eligible senders) counts as configured and denies by default. Only a truly
+ * unconfigured policy (`undefined`, or only blank tokens) falls back to the
+ * collaborator permission check.
+ */
+export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undefined | null): boolean {
+  if (trustedSenderLogins == null) return false;
+  if (trustedSenderLogins.length === 0) return true;
+  return trustedSenderLogins.some((item) => loginKey(item) !== undefined);
 }
 
 /**
- * Who may steer Jumi. When the operator set `TRUSTED_SENDER_LOGINS`, the list
- * is the whole answer: a listed login is admitted and nobody else is, with no
- * forge lookup either way. With the list unset, empty, or only blank tokens,
- * only a sender the collaborator lookup obviously calls a writer (`canPush`)
- * is admitted, so a new image does not lock out an owner before GitOps sets
- * the list, and an App manifest is never trusted by default.
+ * Map a raw deployment sender list to its fallback value: a list naming at
+ * least one login and `undefined` pass through untouched, while an empty or
+ * blank-only list (unset deployment input) maps to absent (`undefined`) so a
+ * raw `[]` never reads as an explicitly configured empty policy downstream.
+ */
+export function normalizeBlankTrustedSenders(
+  trustedSenderLogins: readonly string[] | undefined
+): readonly string[] | undefined {
+  if ((trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return trustedSenderLogins;
+  return undefined;
+}
+
+/**
+ * Who may steer Jumi. A configured effective policy is the whole answer: a
+ * listed login is admitted and nobody else is, with no forge lookup either
+ * way. An explicitly empty effective policy (`[]`) therefore denies everyone
+ * without a lookup. Only a truly unconfigured policy (`undefined`, or only
+ * blank tokens) admits whoever the collaborator lookup obviously calls a
+ * writer (`canPush`), so a new image does not lock out an owner before GitOps
+ * sets the list, and an App manifest is never trusted by default.
  */
 export async function senderCanSteer(
   api: Partial<PermissionApi> | undefined,
   owner: string,
   repo: string,
   login: string | undefined,
-  trustedSenderLogins?: readonly string[]
+  trustedSenderLogins?: readonly string[] | null
 ): Promise<boolean> {
+  if (trustedSenderLogins == null) return canPush(api, owner, repo, login);
+  if (trustedSenderLogins.length === 0) return false;
   if (hasTrustedSenders(trustedSenderLogins)) return isListedLogin(login, trustedSenderLogins);
   return canPush(api, owner, repo, login);
 }
@@ -290,7 +314,7 @@ export async function trustedPushLogins(
   owner: string,
   repo: string,
   logins: readonly (string | undefined)[],
-  trustedSenderLogins?: readonly string[]
+  trustedSenderLogins?: readonly string[] | null
 ): Promise<Set<string>> {
   const trusted = new Set<string>();
   const seen = new Set<string>();

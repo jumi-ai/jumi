@@ -29,6 +29,7 @@ import {
 } from "../src/implement.ts";
 import { isQuotaWaitError, QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { isQuotaStuck, readStuckState } from "../src/stuck.ts";
+import { probeWorkerMcpServer } from "../src/worker_mcp.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makeLinkedIssue, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -2325,6 +2326,209 @@ describe("implementIssue", () => {
       expect(result).toEqual({ status: "no-changes" });
       expect(api.comments.at(-1)).toContain("rewritten issue needs nothing");
       expect(api.comments.at(-1)).not.toContain("no changes");
+    });
+  });
+
+  test("tool skip from before a continue round is isolated to its own attempt", async () => {
+    await withDirs(async (home, workdir) => {
+      const api = implementApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const models: string[] = [];
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "claude-opus-5",
+        chain: [
+          { name: "claude", type: "claude", model: "claude-opus-5", effort: "high" },
+          { name: "grok", type: "opencode", model: "xai/grok-4.6", variant: "high" },
+        ],
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          models.push(opts.model);
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          // Only the first attempt records a tool skip; the continuation
+          // records nothing, so no skip may be applied.
+          if (models.length === 1) {
+            const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "skip", { reason: "stale tool skip" });
+            expect(out.ok).toBe(true);
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: INCOMPLETE_IMPLEMENT });
+      expect(models).toEqual(["claude-opus-5", "claude-opus-5", "xai/grok-4.6"]);
+      expect(api.comments.some((body) => body.includes("stale tool skip"))).toBe(false);
+      expect(api.comments.some((body) => body.includes("no changes"))).toBe(false);
+    });
+  });
+
+  test("continuation tool blocker is handled before publish", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = implementApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dep) => {
+          deps.push(dep);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          if (opts.continueSession) {
+            const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "blocked_on", {
+              ref: "#196",
+              reason: "Need sibling first.",
+            });
+            expect(out.ok).toBe(true);
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(deps).toEqual([{ owner: "kirmanak", repo: "demo", number: 196 }]);
+      expect(result.status).toBe("skipped");
+      if (result.status === "skipped") {
+        expect(result.reason).toContain("blocked on #196");
+        expect(result.reason).toContain("Need sibling first");
+      }
+      expect(api.pulls).toHaveLength(0);
+    });
+  });
+
+  test("continuation invalid tool blocker is rejected like the first attempt", async () => {
+    await withDirs(async (home, workdir) => {
+      const deps: Array<{ owner: string; repo: string; number: number }> = [];
+      const api = implementApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+        listRepoIssues: async () => [makeLinkedIssue({ number: 196, title: "Sibling" })],
+        createIssueDependency: async (_owner, _repo, _index, dep) => {
+          deps.push(dep);
+        },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        if (gitArgs[0] === "show-ref") {
+          const ref = gitArgs.at(-1) ?? "";
+          if (ref === "refs/remotes/origin/jumi/issue-12-fix-the-thing") throw new Error("missing");
+          return "";
+        }
+        return "";
+      };
+      let calls = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        engine: async (opts) => {
+          calls++;
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          // First attempt records nothing; the continuation and its
+          // rejected retry both record an invalid blocker.
+          if (!opts.continueSession && calls === 1) return { status: "ok" };
+          const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "blocked_on", {
+            ref: "#999",
+            reason: "Not a candidate.",
+          });
+          expect(out.ok).toBe(true);
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(deps).toEqual([]);
+      expect(result).toEqual({ status: "skipped", reason: BLOCKED_BY_REJECTED_STUCK });
+      expect(api.pulls).toHaveLength(0);
+      expect(calls).toBeGreaterThanOrEqual(3);
+    });
+  });
+
+  test("tool handoff from the first attempt persists across a continue round", async () => {
+    await withDirs(async (home, workdir) => {
+      const { MemoryHandoffStore, handoffKeyForJob } = await import("../src/handoff.ts");
+      const handoffs = new MemoryHandoffStore();
+      const api = implementApi({
+        getIssue: async () => makeIssue({ title: "Rewritten title", body: "Do this instead." }),
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return " M src/demo.ts";
+        return "";
+      };
+      let calls = 0;
+      const result = await implementIssue({
+        api,
+        job: makeIssueJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        handoffs,
+        engine: async (opts) => {
+          calls++;
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          if (calls === 1) {
+            const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "set_handoff", {
+              notes: "first attempt notes",
+            });
+            expect(out.ok).toBe(true);
+          }
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pr");
+      const key = handoffKeyForJob({ owner: "kirmanak", repo: "demo", issueNumber: 12 });
+      expect(await handoffs.get(key)).toContain("first attempt notes");
     });
   });
 
