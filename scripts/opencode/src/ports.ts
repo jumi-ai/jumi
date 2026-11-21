@@ -245,7 +245,7 @@ export interface AttachmentMeta {
 interface AttachmentSupport {
   listIssueAttachments?(owner: string, repo: string, index: number): Promise<AttachmentMeta[]>;
   listIssueCommentAttachments?(owner: string, repo: string, commentId: number): Promise<AttachmentMeta[]>;
-  downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
+  downloadAttachmentBytes?(url: string, maxBytes?: number): Promise<Uint8Array>;
 }
 
 /** One label history entry from the forge timeline/events API (Gitea or GitHub shape). */ export interface IssueTimelineEvent {

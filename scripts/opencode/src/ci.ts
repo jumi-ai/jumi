@@ -346,6 +346,17 @@ function requiredMatchesCheck(checkContext: string | undefined, required: string
   return false;
 }
 
+/**
+ * Reported check covering a required context, preferring an exact context
+ * match over alias matches regardless of input order. Alias matching stays
+ * as a fallback where no exact check exists.
+ */
+function findRequiredCheck(checks: readonly Check[], required: string): Check | undefined {
+  const exact = checks.find((status) => status.context === required);
+  if (exact) return exact;
+  return checks.find((status) => requiredMatchesCheck(status.context, required));
+}
+
 export interface RequiredCiResolver {
   getBranch?: (owner: string, repo: string, branch: string) => Promise<BranchProtection>;
   getPR?: (owner: string, repo: string, index: number) => Promise<Pull>;
@@ -1017,19 +1028,18 @@ export async function inspectCi(opts: {
   } else if (opts.wait === "all" || required.length === 0) {
     pending = others.some((status) => commitStatusState(status) === "pending");
   } else {
+    const selected = new Set(
+      required.map((context) => findRequiredCheck(others, context)).filter((check) => check !== undefined)
+    );
     pending = required.some((context) => {
-      const match = others.find((status) => requiredMatchesCheck(status.context, context));
+      const match = findRequiredCheck(others, context);
       if (!match) return true;
       return commitStatusState(match) === "pending";
     });
     pendingOptional = [
       ...new Set(
         others
-          .filter(
-            (status) =>
-              commitStatusState(status) === "pending" &&
-              !required.some((context) => requiredMatchesCheck(status.context, context))
-          )
+          .filter((status) => commitStatusState(status) === "pending" && !selected.has(status))
           .map((status) => status.context ?? "")
           .filter((name) => name.length > 0)
       ),

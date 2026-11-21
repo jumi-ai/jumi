@@ -913,7 +913,7 @@ export async function collectFollowUpItems(
   headSha: string,
   ignoreLogins: readonly string[] = [],
   findingOpts: ReviewFindingMatchOpts = {},
-  trustedSenderLogins: readonly string[] = []
+  trustedSenderLogins?: readonly string[] | null
 ): Promise<FollowUpItems> {
   const [rawComments, rawReviews, rawInlines] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
@@ -1502,12 +1502,9 @@ async function runMergeOnlyFollowUp(
           prNumber: pr.number,
           automergeRepos: (opts as { automergeRepos?: readonly string[] }).automergeRepos,
           automergeEnabled: (opts as { automergeEnabled?: boolean }).automergeEnabled,
-          // Same effective list the normal follow-up push restores with;
-          // an empty list would drop a scheduled automerge on this path.
+          // Same effective list the normal follow-up push restores with.
           trustedSenderLogins:
-            ctx.effectiveTrustedUpFront ??
-            (opts as { trustedSenderLogins?: readonly string[] }).trustedSenderLogins ??
-            [],
+            ctx.effectiveTrustedUpFront ?? (opts as { trustedSenderLogins?: readonly string[] }).trustedSenderLogins,
           issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,

@@ -11,7 +11,7 @@ import {
 } from "./child_git_proxy.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
 import { ensureCodexPublishedAuth } from "./codex_auth.ts";
-import { exportCodexTrace } from "./codex_tracing.ts";
+import { exportCodexTrace, shouldCollectCodexTrace } from "./codex_tracing.ts";
 import { CodexStreamParser, type CodexTokens, codexTokensFrom } from "./codex_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
 import {
@@ -558,7 +558,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
           }, opts.timeoutMs)
         : undefined;
 
-    const parser = new CodexStreamParser(threadId ? await readThreadTotal(opts.workdir, threadId) : undefined);
+    const parser = new CodexStreamParser(threadId ? await readThreadTotal(opts.workdir, threadId) : undefined, {
+      collectTrace: shouldCollectCodexTrace(opts.trace),
+    });
     let stderrResult: { text: string; totalBytes: number } = { text: "", totalBytes: 0 };
     let exitCode: number | null = null;
     let runError: unknown;

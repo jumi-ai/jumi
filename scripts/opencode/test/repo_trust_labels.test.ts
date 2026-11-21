@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { shouldEnqueuePullLabel } from "../src/followup_webhook.ts";
 import { shouldEnqueueGithubIssue } from "../src/github_webhook.ts";
-import { senderCanSteer } from "../src/permissions.ts";
+import { hasTrustedSenders, senderCanSteer } from "../src/permissions.ts";
 import {
   effectiveFollowupIgnoreLogins,
   effectiveIgnoreConflictsLabel,
@@ -203,6 +203,92 @@ describe("effectiveTrustedSenderLogins", () => {
   test("unreadable file falls back to the deployment list", async () => {
     const api = repoFileApi(undefined, { throw: new Error("GitHub API → 500") });
     expect(await loadEffectiveTrustedSenderLogins(api, "o", "r", "main", ["alice"])).toEqual(["alice"]);
+  });
+
+  test("absent, empty, and nonempty effective policies steer distinctly", async () => {
+    function validLoad(trustedSenders?: string[]) {
+      return {
+        state: "valid" as const,
+        automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
+        timeouts: {},
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        autoRerunFlakes: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        ...(trustedSenders === undefined ? {} : { trustedSenders }),
+        mode: "full" as const,
+        reviewDrafts: false,
+        reviewBudget: {},
+      };
+    }
+    // Absent: neither deployment nor repository configures senders.
+    const absent = effectiveTrustedSenderLogins(undefined, validLoad());
+    expect(absent).toBeUndefined();
+    expect(hasTrustedSenders(absent)).toBe(false);
+    // Write-access fallback still decides.
+    const writeApi = { getCollaboratorPermission: async () => ({ permission: "write" }) };
+    const readApi = { getCollaboratorPermission: async () => ({ permission: "read" }) };
+    expect(await senderCanSteer(writeApi, "o", "r", "alice", absent)).toBe(true);
+    expect(await senderCanSteer(readApi, "o", "r", "alice", absent)).toBe(false);
+
+    // Configured but empty: deployment ceiling leaves no eligible senders.
+    const empty = effectiveTrustedSenderLogins(["alice"], validLoad(["bob"]));
+    expect(empty).toEqual([]);
+    expect(hasTrustedSenders(empty)).toBe(true);
+    // Denies even a writer without a forge lookup.
+    let lookups = 0;
+    const countingWrite = {
+      getCollaboratorPermission: async () => {
+        lookups += 1;
+        return { permission: "write" };
+      },
+    };
+    expect(await senderCanSteer(countingWrite, "o", "r", "alice", empty)).toBe(false);
+    expect(await senderCanSteer(countingWrite, "o", "r", "bob", empty)).toBe(false);
+    expect(lookups).toBe(0);
+
+    // Nonempty: a listed login is admitted and nobody else, without a lookup.
+    const nonempty = effectiveTrustedSenderLogins(["alice", "bob"], validLoad(["alice"]));
+    expect(nonempty).toEqual(["alice"]);
+    expect(hasTrustedSenders(nonempty)).toBe(true);
+    expect(await senderCanSteer(countingWrite, "o", "r", "alice", nonempty)).toBe(true);
+    expect(await senderCanSteer(countingWrite, "o", "r", "bob", nonempty)).toBe(false);
+    expect(lookups).toBe(0);
+  });
+
+  test("blank deployment input stays unconfigured and invalid repository lists fall back", async () => {
+    function validLoad(trustedSenders?: string[]) {
+      return {
+        state: "valid" as const,
+        automerge: false,
+        automergeLabel: "automerge",
+        noAutomergeLabel: "no-automerge",
+        timeouts: {},
+        reviewExclude: [],
+        followupOnSuggestions: true,
+        autoRerunFlakes: true,
+        takeoverAuthors: [],
+        ignoreConflictsAuthors: [],
+        blockingQuestionAuthors: [],
+        ...(trustedSenders === undefined ? {} : { trustedSenders }),
+        mode: "full" as const,
+        reviewDrafts: false,
+        reviewBudget: {},
+      };
+    }
+    // Blank deployment entries are ignored: blank-only plus a valid repo list admits the repo list.
+    expect(effectiveTrustedSenderLogins([" ", ""], validLoad(["carol"]))).toEqual(["carol"]);
+    // Blank-only plus no repo list stays absent (write-access fallback).
+    expect(effectiveTrustedSenderLogins([" ", ""], validLoad())).toBeUndefined();
+    // An explicitly empty repository list is invalid and falls back to the deployment list.
+    expect(parseRepoSettingsText("trusted_senders: []\n").ok).toBe(false);
+    const invalid = repoFileApi("trusted_senders: nope\n");
+    expect(await loadEffectiveTrustedSenderLogins(invalid, "o", "r", "main", ["alice"])).toEqual(["alice"]);
+    expect(await loadEffectiveTrustedSenderLogins(invalid, "o", "r", "main", [])).toBeUndefined();
   });
 });
 

@@ -16,9 +16,12 @@ import {
 export const PHOENIX_OTLP_TIMEOUT_MS = 15_000;
 const PHOENIX_OTLP_MAX_BYTES = 4 * 1024 * 1024;
 const PHOENIX_ATTR_CEILING_CHARS = 64 * 1024;
+const COLLECTION_HEADROOM_BYTES = 4 * 1024;
 const KIND_ATTR = "openinference.span.kind";
+const TRUNCATED_ATTR = "jumi.trace.truncated";
 const PROTECTED_ATTRS = new Set([
   KIND_ATTR,
+  TRUNCATED_ATTR,
   "openinference.project.name",
   "kind",
   "owner",
@@ -295,7 +298,7 @@ function inlineParts(rowType: string, data: Record<string, unknown> | undefined)
 
 function readTrace(
   db: Database
-): { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[] } | undefined {
+): { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[]; truncated: boolean } | undefined {
   // Outside the try: a file that is not SQLite is an export error, not a schema mismatch.
   const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>;
   const names = new Set(tables.map((row) => row.name));
@@ -304,20 +307,51 @@ function readTrace(
     return undefined;
   }
   let sessions: SessionRow[];
-  let rows: SessionMessageRow[];
+  let sizes: Array<{ n: number | null }>;
   try {
     sessions = db
       .query("SELECT id, time_created, time_updated FROM session_v2 ORDER BY time_created, id")
       .all() as SessionRow[];
-    rows = db
+    // Lightweight pass: byte accounting before materializing any message body,
+    // so a huge tail is never read into memory. Reuses the OTLP cap as the budget.
+    sizes = db
       .query(
-        `SELECT id, session_id, type, time_created, time_updated, data FROM session_message
+        `SELECT length(data) AS n FROM session_message
          WHERE type IN ('user', 'assistant') ORDER BY seq`
       )
-      .all() as SessionMessageRow[];
+      .all() as Array<{ n: number | null }>;
   } catch {
     console.warn("OpenCode trace export: unrecognized schema (session_v2/session_message shape)");
     return undefined;
+  }
+  const budget = maxOtlpBytes + COLLECTION_HEADROOM_BYTES;
+  let limit = sizes.length;
+  let truncated = false;
+  let used = 0;
+  for (let i = 0; i < sizes.length; i++) {
+    const n = typeof sizes[i].n === "number" && sizes[i].n !== null ? (sizes[i].n as number) : 0;
+    if (used + n > budget) {
+      limit = i;
+      truncated = true;
+      break;
+    }
+    used += n;
+  }
+  let rows: SessionMessageRow[] = [];
+  if (limit > 0) {
+    try {
+      rows = db
+        .query(
+          `SELECT id, session_id, type, time_created, time_updated, data FROM session_message
+           WHERE type IN ('user', 'assistant') ORDER BY seq LIMIT ${limit}`
+        )
+        .all() as SessionMessageRow[];
+    } catch {
+      console.warn("OpenCode trace export: unrecognized schema (session_v2/session_message shape)");
+      return undefined;
+    }
+  } else if (sizes.length > 0) {
+    truncated = true;
   }
 
   const messages: RawMessageRow[] = [];
@@ -341,7 +375,7 @@ function readTrace(
       });
     });
   }
-  return { sessions, messages, parts };
+  return { sessions, messages, parts, truncated };
 }
 
 function parsePart(row: RawPartRow): ParsedPart {
@@ -495,7 +529,7 @@ function encodeWithinLimit(resource: OtlpResource, spans: OtlpSpan[], scopeName?
 
 function buildSpans(
   trace: TraceContext | undefined,
-  rows: { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[] }
+  rows: { sessions: SessionRow[]; messages: RawMessageRow[]; parts: RawPartRow[]; truncated?: boolean }
 ): OtlpSpan[] {
   const shared = filterAttrs(trace, agentInstance());
   const now = Date.now();
@@ -521,6 +555,7 @@ function buildSpans(
   const messages = rows.messages.map((row) => parseMessage(row, partsByMessage.get(row.id) ?? []));
 
   const rootAttrs: Record<string, OtlpValue> = { ...shared, [KIND_ATTR]: "AGENT" };
+  if (rows.truncated) rootAttrs[TRUNCATED_ATTR] = true;
   setIo(rootAttrs, initialUserPrompt(messages), undefined, false);
   const spans: OtlpSpan[] = [
     {
