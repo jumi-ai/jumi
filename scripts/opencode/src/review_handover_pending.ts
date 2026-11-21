@@ -6,14 +6,6 @@ import type { ReviewJobStore } from "./review_jobs.ts";
 import type { SqlClient } from "./sql_client.ts";
 import { errorMessage } from "./util/error.ts";
 
-const PENDING_HANDOVER_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS review_handover_pending (
-  review_job_id BIGINT PRIMARY KEY,
-  published_status TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-`;
-
 interface PendingHandoverRow {
   reviewJobId: number;
   publishedStatus: string;
@@ -38,10 +30,6 @@ function memoryPendings(store: ReviewJobStore): Map<number, PendingHandoverRow> 
   return holder.__reviewHandoverPending;
 }
 
-async function ensurePgTable(sql: SqlClient): Promise<void> {
-  await sql.unsafe(PENDING_HANDOVER_SCHEMA_SQL);
-}
-
 function asRows<T>(result: unknown): T[] {
   if (Array.isArray(result)) return result as T[];
   if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown }).rows)) {
@@ -56,6 +44,10 @@ function asRows<T>(result: unknown): T[] {
  * obligation. Keyed idempotently by review job id: repeats keep the first
  * published status. Only `posted`/`updated` verdicts can hand over; anything
  * else is a no-op.
+ *
+ * No DDL here: the router migration (`PgReviewJobStore.migrate` under the
+ * ledger lock) owns the `review_handover_pending` table, and the job-mode
+ * schema check fails clearly when the router has not migrated yet.
  */
 export async function recordPendingHandover(
   store: ReviewJobStore,
@@ -65,7 +57,6 @@ export async function recordPendingHandover(
   if (!pendingStatuses().has(publishedStatus)) return;
   const sql = getSql(store);
   if (sql) {
-    await ensurePgTable(sql);
     await sql.unsafe(
       `INSERT INTO review_handover_pending (review_job_id, published_status)
        VALUES ($1, $2)
@@ -84,7 +75,6 @@ export async function recordPendingHandover(
 export async function clearPendingHandover(store: ReviewJobStore, reviewJobId: number): Promise<void> {
   const sql = getSql(store);
   if (sql) {
-    await ensurePgTable(sql);
     await sql.unsafe(`DELETE FROM review_handover_pending WHERE review_job_id = $1`, [reviewJobId]);
     return;
   }
@@ -95,7 +85,6 @@ async function listPendingHandovers(store: ReviewJobStore, limit = 100): Promise
   const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 100;
   const sql = getSql(store);
   if (sql) {
-    await ensurePgTable(sql);
     const rows = asRows<{ review_job_id: unknown; published_status: unknown; created_at: unknown }>(
       await sql.unsafe(
         `SELECT review_job_id, published_status, created_at FROM review_handover_pending ORDER BY review_job_id ASC LIMIT $1`,
@@ -113,11 +102,13 @@ async function listPendingHandovers(store: ReviewJobStore, limit = 100): Promise
 
 /**
  * Finish owed handovers without spawning the reviewer or posting another
- * review. Only terminal review rows are drained; leased/queued rows wait for
- * the normal reclaim path to settle them first. Every outcome that does not
- * throw (a queued follow-up or a settled hold/skip) clears the pending row,
- * so repeated resumption stays idempotent and no-follow-up cases produce
- * none. Failures keep the pending row for the next resumption.
+ * review. Only terminal review rows that can still hand over are drained:
+ * queued/leased rows wait for the normal reclaim path to settle them first,
+ * and cancelled rows can never hand over, so an orphan pending there is
+ * dropped instead of drained. Every outcome that does not throw (a queued
+ * follow-up or a settled hold/skip) clears the pending row, so repeated
+ * resumption stays idempotent and no-follow-up cases produce none. Failures
+ * keep the pending row for the next resumption.
  */
 export async function resumePendingHandoffs(
   store: ReviewJobStore,
@@ -144,6 +135,14 @@ export async function resumePendingHandoffs(
         continue;
       }
       if (row.state === "queued" || row.state === "leased") continue;
+      if (row.state === "cancelled") {
+        // A cancel that landed after the verdict posted can leave an orphan
+        // pending behind. The review will never hand over, so drop the
+        // obligation instead of draining it.
+        await clearPendingHandover(store, pending.reviewJobId).catch(() => undefined);
+        completed += 1;
+        continue;
+      }
       if (row.kind !== "review") {
         await clearPendingHandover(store, pending.reviewJobId).catch(() => undefined);
         completed += 1;

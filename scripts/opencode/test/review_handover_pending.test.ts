@@ -183,4 +183,34 @@ describe("review handover pending (memory)", () => {
     expect(resumed.completed).toBe(0);
     expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
   });
+
+  test("cancelled rows drop the orphan pending without a follow-up", async () => {
+    const store = new MemoryReviewJobStore();
+    const api = handoverApi();
+    const config = makeConfig();
+    const logger = () => undefined;
+
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    if (!leased) throw new Error("lease failed");
+    await store.saveResult(leased.id, "engine-1", {
+      kind: "markdown",
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    await store.markCancelled(leased.id, "engine-1");
+    expect(store.rows.find((row) => row.id === leased.id)?.state).toBe("cancelled");
+    // A cancel that landed after the verdict posted but before the terminal
+    // transition left this obligation behind.
+    await recordPendingHandover(store, leased.id, "posted");
+
+    const beforeReviews = api.reviews;
+    const resumed = await resumePendingHandoffs(store, api, config, logger);
+    expect(resumed.completed).toBe(1);
+    expect(resumed.failed).toBe(0);
+    expect(store.rows.some((row) => row.kind === "follow-up")).toBe(false);
+    expect(api.reviews).toBe(beforeReviews);
+
+    const again = await resumePendingHandoffs(store, api, config, logger);
+    expect(again.completed).toBe(0);
+  });
 });

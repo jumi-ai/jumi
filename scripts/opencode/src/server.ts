@@ -1107,7 +1107,7 @@ export async function processEngineTick(
     } catch (err) {
       logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
     }
-    await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
+    const outcome = await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
     if (result.status === "skipped" && result.reason === CI_PENDING_REASON) {
       // Backstop race: the router gate should have held this row until CI
@@ -1124,7 +1124,13 @@ export async function processEngineTick(
     } else {
       await clearSitBestEffort(store.sits, row.owner, row.repo, row.prNumber, logger);
     }
-    await handoverFollowUp(store, api, config, row, result, logger);
+    if (outcome.cancelled) {
+      // A cancel that landed during the run wins over the verdict: drop the
+      // pending handover and skip the follow-up, mirroring publishAndCompleteJob.
+      await clearPendingHandover(store, row.id).catch(() => undefined);
+    } else {
+      await handoverFollowUp(store, api, config, row, result, logger);
+    }
     if (extras.breaker) extras.breaker.recordModelReached();
     else await store.recordRoleSuccess("engine");
     if (current?.resultRunner && extras.runnerCooldowns) {
