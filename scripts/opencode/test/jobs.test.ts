@@ -77,7 +77,12 @@ describe("job envelope kinds", () => {
     expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
     const leased = await store.lease("engine-1", 60_000, undefined, [REVIEW_KIND]);
     await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "CI still pending" });
-    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    // A new delivery (CI completion) stays eligible; the same delivery would
+    // dedupe as an already-settled per-effect retry.
+    expect(await store.enqueue({ ...job, delivery: "d-retry" })).toEqual({
+      key: "kirmanak/demo#7:headsha",
+      queued: true,
+    });
   });
 
   test("same-SHA wake during a leased CI-pending review requeues it instead of dropping it", async () => {
@@ -194,7 +199,10 @@ describe("job envelope kinds", () => {
     const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
     expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: false });
     await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "CI still pending" });
-    expect(await store.enqueueIssue(job)).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(await store.enqueueIssue({ ...job, delivery: "delivery-2" })).toEqual({
+      key: "follow-up:kirmanak/demo#7:headsha",
+      queued: true,
+    });
   });
 
   test("later sibling workflow_job follow-up is not same-SHA deduped while leased", async () => {

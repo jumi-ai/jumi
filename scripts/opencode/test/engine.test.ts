@@ -549,7 +549,10 @@ describe("processEngineTick", () => {
       expect(await store.lease("engine-2", 60_000, new Date(now), [REVIEW_KIND])).toBeUndefined();
       expect(await processEngineTick(store, config, api, "engine-1", extras)).toBe("idle");
       expect(lists).toBe(18);
-      expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+      expect(await store.enqueue(makeJob({ delivery: "d-retry" }))).toEqual({
+        key: "kirmanak/demo#7:headsha",
+        queued: true,
+      });
     });
   });
 
@@ -578,7 +581,10 @@ describe("processEngineTick", () => {
       expect(store.rows[0]?.state).toBe("skipped");
       expect(store.rows[0]?.resultReason).toBe(CI_PENDING_REASON);
       state = "success";
-      expect(await store.enqueue(makeJob())).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+      expect(await store.enqueue(makeJob({ delivery: "d-ci-success" }))).toEqual({
+        key: "kirmanak/demo#7:headsha",
+        queued: true,
+      });
       await processEngineTick(store, config, api, "engine-1", extras);
       expect(ran).toBe(1);
       expect(store.rows.some((row) => row.state === "succeeded")).toBe(true);

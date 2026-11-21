@@ -7,7 +7,7 @@ import {
   shouldEnqueueGithubIssue,
   verifyGithubSignature,
 } from "../src/github_webhook.ts";
-import { MemoryReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { MemoryReviewJobStore, QueueUnavailableError, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import { MemoryRouterSitStore } from "../src/router_sits.ts";
 import { createFetchHandler } from "../src/server.ts";
 import type { IssueJob, ReviewJob } from "../src/types.ts";
@@ -1200,6 +1200,96 @@ describe("POST /webhooks/github", () => {
     });
     await store.markPublished(leased!.id, "worker-1", { state: "skipped", reason: "CI still pending" });
     expect(store.rows.find((row) => row.jobKey === "follow-up:kirmanak/demo#102:headsha:12")?.state).toBe("queued");
+  });
+
+  test("retried CI delivery repeats only unsettled follow-up effects", async () => {
+    const store = new MemoryReviewJobStore();
+    const bot = makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" });
+    const pr102 = makePR({
+      number: 102,
+      title: "Fix biome",
+      body: "Fixes #81",
+      user: bot,
+      html_url: "https://github.com/kirmanak/demo/pull/102",
+      head: {
+        label: "kirmanak:jumi/issue-81-fix-biome",
+        ref: "jumi/issue-81-fix-biome",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    const pr103 = makePR({
+      number: 103,
+      title: "Fix biome",
+      body: "Fixes #82",
+      user: bot,
+      html_url: "https://github.com/kirmanak/demo/pull/103",
+      head: {
+        label: "kirmanak:jumi/issue-81-fix-biome",
+        ref: "jumi/issue-81-fix-biome",
+        sha: "headsha",
+        repo: githubRepo,
+        repo_id: githubRepo.id,
+      },
+    });
+    let failBOnce = true;
+    const workerQueue = {
+      enqueue: (job: IssueJob) => {
+        if (job.prNumber === 103 && failBOnce) {
+          failBOnce = false;
+          throw new QueueUnavailableError("boom");
+        }
+        return store.enqueueIssue(job);
+      },
+    };
+    const api = {
+      listOpenPulls: async () => [pr102, pr103],
+      getIssue: async () => githubIssue({ number: 81 }),
+    };
+    const payload = makeWorkflowJobPayload({
+      repository: githubRepo,
+      workflow_job: {
+        id: 11,
+        name: "checks",
+        status: "completed",
+        conclusion: "failure",
+        head_sha: "headsha",
+        head_branch: "jumi/issue-81-fix-biome",
+      },
+    });
+    const raw = encodeJson(payload);
+    const delivery = "ci-delivery-retried-1";
+    const testPolicy = { ...policy, isPickedUp: () => true };
+    const deps = { worker: { queue: workerQueue, api }, logger: () => {} };
+    // The second effect fails once: `enqueueJobs` propagates the queue failure
+    // (the `return` without `await` skips the 503 mapping), so the delivery
+    // stays retryable. The first effect already settled in the ledger.
+    let failedOnce = false;
+    try {
+      await handleGithubWebhookEvent(raw, "workflow_job", delivery, testPolicy as never, deps as never);
+    } catch (err) {
+      failedOnce = err instanceof QueueUnavailableError;
+    }
+    expect(failedOnce).toBe(true);
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leased?.prNumber).toBe(102);
+    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    const second = await handleGithubWebhookEvent(raw, "workflow_job", delivery, testPolicy as never, deps as never);
+    expect(second.status).toBe(202);
+    const aKey = "follow-up:kirmanak/demo#102:headsha:11";
+    const bKey = "follow-up:kirmanak/demo#103:headsha:11";
+    expect(store.rows.filter((row) => row.jobKey === aKey && row.delivery === delivery)).toHaveLength(1);
+    expect(store.rows.some((row) => row.jobKey === bKey && row.delivery === delivery)).toBe(true);
+    const third = await handleGithubWebhookEvent(
+      raw,
+      "workflow_job",
+      "ci-delivery-2",
+      testPolicy as never,
+      deps as never
+    );
+    expect(third.status).toBe(202);
+    expect(store.rows.some((row) => row.jobKey === aKey && row.delivery === "ci-delivery-2")).toBe(true);
   });
 
   test("workflow_job enqueues review when the PR is not in-scope for follow-up", async () => {
