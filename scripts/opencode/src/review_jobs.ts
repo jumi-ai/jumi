@@ -811,6 +811,14 @@ CREATE INDEX IF NOT EXISTS jumi_review_suggestions_runner_forge
   ON jumi_review_suggestions (runner, forge);
 `;
 
+const REVIEW_HANDOVER_PENDING_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS review_handover_pending (
+  review_job_id BIGINT PRIMARY KEY,
+  published_status TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`;
+
 export type RoleGateRole = "engine" | "worker";
 
 export interface RoleGateStatus {
@@ -3327,6 +3335,7 @@ const REQUIRED_LEDGER_TABLES = [
   "role_gates",
   "issue_handoffs",
   "jumi_review_suggestions",
+  "review_handover_pending",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -3405,6 +3414,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS source TEXT`);
         await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS fingerprint TEXT`);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
+        await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);
