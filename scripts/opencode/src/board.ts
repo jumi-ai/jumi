@@ -200,10 +200,13 @@ export interface BoardItem {
   kick?: BoardKick;
 }
 
+export const BOARD_NEEDS_KICK_PAGE_SIZE = 200;
+
 export interface BoardGroups {
   in_progress: BoardItem[];
   needs_kick: BoardItem[];
   sitting: BoardItem[];
+  needs_kick_overflow?: number;
 }
 
 export interface BoardPeerStatus {
@@ -215,6 +218,8 @@ export interface BoardPeerStatus {
   inProgress?: BoardItem[];
   needs_kick?: BoardItem[];
   needsKick?: BoardItem[];
+  needs_kick_overflow?: number;
+  needsKickOverflow?: number;
   sitting?: BoardItem[];
   sitting_on_purpose?: BoardItem[];
   /** Stable unavailable marker. Never a token, URL, or forge secret. */
@@ -476,8 +481,8 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
   const [inflight, sits, terminals, terminalImplements, closedPulls] = await Promise.all([
     store.listInflight(200),
     store.sits.list(),
-    store.listTerminalReviews ? store.listTerminalReviews(200) : Promise.resolve([]),
-    store.listTerminalImplements ? store.listTerminalImplements(200) : Promise.resolve([]),
+    store.listTerminalReviews ? store.listTerminalReviews() : Promise.resolve([]),
+    store.listTerminalImplements ? store.listTerminalImplements() : Promise.resolve([]),
     store.sits.listClosedPulls ? store.sits.listClosedPulls() : Promise.resolve([]),
   ]);
   const closedKeys = new Set(
@@ -575,6 +580,15 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
     const { item, kickable } = sitItem(sit, forge, stuckReasons.get(key) ?? null);
     if (kickable) needs_kick.push(item);
     else sitting.push(item);
+  }
+  if (needs_kick.length > BOARD_NEEDS_KICK_PAGE_SIZE) {
+    const overflow = needs_kick.length - BOARD_NEEDS_KICK_PAGE_SIZE;
+    return {
+      in_progress,
+      needs_kick: needs_kick.slice(0, BOARD_NEEDS_KICK_PAGE_SIZE),
+      sitting,
+      needs_kick_overflow: overflow,
+    };
   }
   return { in_progress, needs_kick, sitting };
 }
@@ -690,6 +704,9 @@ async function fetchPeerBoard(
     const in_progress = pinForge(sanitizeBoardList(body.in_progress ?? body.inProgress, PEER_FORGE));
     const needs_kick = pinForge(sanitizeBoardList(body.needs_kick ?? body.needsKick, PEER_FORGE));
     const sitting = pinForge(sanitizeBoardList(body.sitting ?? body.sitting_on_purpose, PEER_FORGE));
+    const overflowRaw = body.needs_kick_overflow ?? body.needsKickOverflow;
+    const overflow =
+      typeof overflowRaw === "number" && Number.isInteger(overflowRaw) && overflowRaw > 0 ? overflowRaw : undefined;
     const peerForgeUrl =
       typeof body.forgeUrl === "string" && /^https?:\/\/[^/\s]/i.test(body.forgeUrl.trim())
         ? body.forgeUrl.trim()
@@ -702,6 +719,7 @@ async function fetchPeerBoard(
       inProgress: [...in_progress],
       needs_kick,
       needsKick: [...needs_kick],
+      ...(overflow ? { needs_kick_overflow: overflow, needsKickOverflow: overflow } : {}),
       sitting,
       sitting_on_purpose: [...sitting],
     };
@@ -1003,6 +1021,7 @@ function withForgeGroups(groups: BoardGroups, forge: string): BoardGroups {
     in_progress: groups.in_progress.map(tag),
     needs_kick: groups.needs_kick.map(tag),
     sitting: groups.sitting.map(tag),
+    ...(groups.needs_kick_overflow ? { needs_kick_overflow: groups.needs_kick_overflow } : {}),
   };
 }
 
@@ -1879,6 +1898,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           inProgress: [...groups.in_progress],
           needs_kick: groups.needs_kick,
           needsKick: [...groups.needs_kick],
+          ...(groups.needs_kick_overflow
+            ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
+            : {}),
           sitting: groups.sitting,
           sitting_on_purpose: [...groups.sitting],
           forge: localForge,
@@ -1909,6 +1931,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         inProgress: [...groups.in_progress],
         needs_kick: groups.needs_kick,
         needsKick: [...groups.needs_kick],
+        ...(groups.needs_kick_overflow
+          ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
+          : {}),
         sitting: groups.sitting,
         sitting_on_purpose: [...groups.sitting],
         forge: localForge,
@@ -1956,6 +1981,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           inProgress: [...groups.in_progress],
           needs_kick: groups.needs_kick,
           needsKick: [...groups.needs_kick],
+          ...(groups.needs_kick_overflow
+            ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
+            : {}),
           sitting: groups.sitting,
           sitting_on_purpose: [...groups.sitting],
           peers: {},

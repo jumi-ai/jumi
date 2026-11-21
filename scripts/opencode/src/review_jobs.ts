@@ -1764,32 +1764,45 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter(
-          (row) =>
-            rowKind(row) === REVIEW_KIND &&
-            (row.state === "failed" ||
-              row.state === "skipped" ||
-              row.state === "succeeded" ||
-              row.state === "cancelled")
-        )
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== REVIEW_KIND) continue;
+        if (row.state !== "failed" && row.state !== "skipped" && row.state !== "succeeded" && row.state !== "cancelled")
+          continue;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
-  listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter((row) => rowKind(row) === "implement" && (row.state === "succeeded" || row.state === "skipped"))
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== "implement") continue;
+        if (row.state !== "succeeded" && row.state !== "skipped") continue;
+        const n = typeof row.issueNumber === "number" && row.issueNumber > 0 ? row.issueNumber : row.prNumber;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${n}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
@@ -4063,23 +4076,25 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.map(mapRow);
   }
 
-  async listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), pr_number) * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY lower(owner), lower(repo), pr_number, id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);
   }
 
-  async listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), COALESCE(issue_number, pr_number)) * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY lower(owner), lower(repo), COALESCE(issue_number, pr_number), id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);

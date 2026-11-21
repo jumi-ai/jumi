@@ -166,7 +166,20 @@ function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
         const sitting = groups.sitting.filter(keep).map((item) => redactBoardItem(item, secrets));
         const rows = in_progress.length + needs_kick.length + sitting.length;
         logger(`[board-mcp] tool=board ${coords} rows=${rows} ms=${Date.now() - started}`);
-        return mcpResult(redact(JSON.stringify({ forge, in_progress, needs_kick, sitting }), secrets));
+        const unfiltered = owner === "" && repo === "";
+        const overflow = unfiltered ? groups.needs_kick_overflow : undefined;
+        return mcpResult(
+          redact(
+            JSON.stringify({
+              forge,
+              in_progress,
+              needs_kick,
+              ...(overflow ? { needs_kick_overflow: overflow, needsKickOverflow: overflow } : {}),
+              sitting,
+            }),
+            secrets
+          )
+        );
       } catch (err) {
         logger(`[board-mcp] tool=board ${coords} rows=0 ms=${Date.now() - started}`);
         return mcpError(redact(`board unavailable: ${errorMessage(err)}`, secrets));
