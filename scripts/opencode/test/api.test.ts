@@ -498,6 +498,106 @@ describe("GiteaAPI", () => {
     expect(comments.map((comment) => comment.body)).toEqual(["kept"]);
   });
 
+  test("listPullReviewComments reuses a pre-fetched multi-page review list exactly once", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/pulls/7/reviews?")) {
+        if (href.includes("page=1")) {
+          return Response.json(Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })));
+        }
+        if (href.includes("page=2")) {
+          return Response.json([{ id: 51 }, { id: "oops" }, { id: 52 }]);
+        }
+        return Response.json([]);
+      }
+      const nested = href.match(/\/pulls\/7\/reviews\/(\d+)\/comments/);
+      if (nested) {
+        const reviewId = Number(nested[1]);
+        return Response.json([{ id: reviewId * 10, body: `c${reviewId}` }]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const reviews = await api.listPullReviews("owner", "repo", 7);
+    expect(reviews).toHaveLength(53);
+    const reviewListUrls = () => urls.filter((url) => url.includes("/pulls/7/reviews?"));
+    expect(reviewListUrls()).toHaveLength(2);
+
+    const reused = await api.listPullReviewComments("owner", "repo", 7, reviews);
+    // No additional review-list pages for the reused read.
+    expect(reviewListUrls()).toHaveLength(2);
+    // Numeric ids in order; the non-numeric id is skipped without a nested GET.
+    expect(reused.map((comment) => comment.id)).toEqual([
+      ...Array.from({ length: 50 }, (_, i) => (i + 1) * 10),
+      510,
+      520,
+    ]);
+    expect(reused.map((comment) => comment.pull_request_review_id)).toEqual([
+      ...Array.from({ length: 50 }, (_, i) => i + 1),
+      51,
+      52,
+    ]);
+    expect(urls.some((url) => url.includes("/reviews/oops/"))).toBe(false);
+
+    // The reused result equals a fresh read in order.
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/pulls/7/reviews?")) {
+        if (href.includes("page=1")) {
+          return Response.json(Array.from({ length: 50 }, (_, i) => ({ id: i + 1 })));
+        }
+        if (href.includes("page=2")) {
+          return Response.json([{ id: 51 }, { id: "oops" }, { id: 52 }]);
+        }
+        return Response.json([]);
+      }
+      const nested = href.match(/\/pulls\/7\/reviews\/(\d+)\/comments/);
+      if (nested) {
+        const reviewId = Number(nested[1]);
+        return Response.json([{ id: reviewId * 10, body: `c${reviewId}` }]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+    const fresh = await api.listPullReviewComments("owner", "repo", 7);
+    expect(fresh).toEqual(reused);
+  });
+
+  test("listPullReviewComments with pre-fetched reviews skips a nested 404", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      urls.push(href);
+      if (href.includes("/pulls/7/reviews/9/comments")) {
+        return new Response("not found", { status: 404 });
+      }
+      if (href.includes("/pulls/7/reviews/10/comments")) {
+        return Response.json([{ id: 102, body: "kept" }]);
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    const comments = await api.listPullReviewComments("owner", "repo", 7, [{ id: 9 }, { id: 10 }]);
+    expect(comments.map((comment) => comment.id)).toEqual([102]);
+    expect(urls.some((url) => url.includes("/pulls/7/reviews?"))).toBe(false);
+  });
+
+  test("listPullReviewComments with pre-fetched reviews propagates a non-404 error", async () => {
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/pulls/7/reviews/9/comments")) {
+        return new Response("boom", { status: 500 });
+      }
+      return Response.json([]);
+    }) as unknown as typeof fetch;
+
+    const api = new GiteaAPI("https://gitea.example.test", "token-1");
+    await expect(api.listPullReviewComments("owner", "repo", 7, [{ id: 9 }])).rejects.toThrow("→ 500");
+  });
+
   test("lists commit statuses and action job logs", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {

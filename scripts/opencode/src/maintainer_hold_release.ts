@@ -134,7 +134,7 @@ export async function tryReleaseMaintainerHold(opts: {
   try {
     rawInlines =
       typeof api.listPullReviewComments === "function"
-        ? await api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber)
+        ? await api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber, rawReviews)
         : [];
   } catch (err) {
     if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) {

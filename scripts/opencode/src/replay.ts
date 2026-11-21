@@ -717,13 +717,14 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
     let prInlines: InlineComment[] = [];
     const linkedIssues: Array<{ issue: Task; comments: Comment[] }> = [];
     if (pr) {
-      const [comments, reviews, inlines] = await Promise.all([
+      const [comments, reviews] = await Promise.all([
         opts.api.listIssueComments(reviewCase.owner, reviewCase.repo, pr.number).catch(() => [] as Comment[]),
         opts.api.listPullReviews(reviewCase.owner, reviewCase.repo, pr.number).catch(() => [] as PullReview[]),
-        opts.api
-          .listPullReviewComments(reviewCase.owner, reviewCase.repo, pr.number)
-          .catch(() => [] as InlineComment[]),
       ]);
+      // Reuse the review list so review-list pages are requested once.
+      const inlines = await opts.api
+        .listPullReviewComments(reviewCase.owner, reviewCase.repo, pr.number, reviews)
+        .catch(() => [] as InlineComment[]);
       prComments = comments;
       prReviews = reviews;
       prInlines = inlines;
