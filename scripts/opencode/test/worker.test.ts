@@ -250,7 +250,10 @@ describe("reclaimExpiredWorkerJobs", () => {
     expect(await reclaimExpiredWorkerJobs(store, 2, () => undefined)).toEqual({ requeued: 0, published: 1 });
     expect(store.rows[0]?.state).toBe("failed");
     expect(store.rows[0]?.leasedBy).toBeNull();
-    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(await store.enqueueIssue({ ...job, delivery: "d-retry" })).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
   });
 });
 
@@ -797,7 +800,9 @@ describe("processWorkerTick", () => {
     });
     expect(store.rows[0]?.state).toBe("skipped");
     expect(store.rows[0]?.leasedBy).toBeNull();
-    expect(await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z" }))).toEqual({
+    expect(
+      await store.enqueueIssue(makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z", delivery: "d-reopen" }))
+    ).toEqual({
       key: "implement:kirmanak/demo#12",
       queued: true,
     });
@@ -812,7 +817,10 @@ describe("processWorkerTick", () => {
     });
     expect(store.rows[0]?.state).toBe("skipped");
     expect(store.rows[0]?.resultReason).toBe("blocked on #196");
-    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(await store.enqueueIssue({ ...job, delivery: "d-retry" })).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
   });
 
   test("assigned-PR wait skip is not a terminal implement outcome", async () => {
@@ -824,7 +832,10 @@ describe("processWorkerTick", () => {
     });
     expect(store.rows[0]?.state).toBe("skipped");
     expect(store.rows[0]?.resultReason).toBe("assigned PR is the job for this repo");
-    expect(await store.enqueueIssue(job)).toEqual({ key: "implement:kirmanak/demo#12", queued: true });
+    expect(await store.enqueueIssue({ ...job, delivery: "d-retry" })).toEqual({
+      key: "implement:kirmanak/demo#12",
+      queued: true,
+    });
   });
 
   test("maps implement no-changes to skipped so an issue edit can re-enqueue", async () => {
@@ -842,10 +853,10 @@ describe("processWorkerTick", () => {
       key: "implement:kirmanak/demo#12",
       queued: false,
     });
-    // A body edit wakes again.
+    // A body edit wakes again (new delivery, as a new webhook would carry).
     expect(
       await store.enqueueIssue(
-        makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z", body: "Please implement this now." })
+        makeIssueJob({ issueUpdatedAt: "2026-05-23T01:00:00Z", body: "Please implement this now.", delivery: "d-edit" })
       )
     ).toEqual({
       key: "implement:kirmanak/demo#12",
