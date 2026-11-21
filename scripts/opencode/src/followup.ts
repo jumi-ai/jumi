@@ -1665,11 +1665,9 @@ async function resolveSharedFailureForWake(opts: {
     firstPr,
     check,
     defaultBranch: opts.defaultBranch,
-    // Pass through the full checks (name + logHash + fingerprint) so
-    // `recordCiHandled` writes a latch `isCheckHandled` can match. A stripped
-    // `{name}` copy would never match a future wake (logHash `undefined`)
-    // and would re-elect forever; passing every unhandled check is safe here
-    // because we only return when all of them elected waiter.
+    // Pass through the full checks (name + logHash + fingerprint) so the
+    // decision carries the shared subset it waited on. Waiting never records
+    // CI handled, so the same failure stays unhandled for a later wake.
     checks: opts.ciUnhandled.map((item) => ({
       name: item.name,
       ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
@@ -1914,8 +1912,10 @@ export async function implementFollowUp(
     unresolvedJumiInlines(pendingItems)
   );
   // Wait instead of fixing again: on a CI wake, elect exactly one first PR
-  // per (repo, fingerprint). A waiter posts the sticky, records CI handled,
-  // and returns `shared-failure` without engine work or round-cap cost.
+  // per (repo, fingerprint). A waiter posts the sticky and returns
+  // `shared-failure` without engine work or round-cap cost. Waiting is
+  // deferred, not handled: the CI latch is untouched so a later qualifying
+  // wake re-evaluates once the owner is gone.
   let sharedForDecision:
     | { firstPr: number; check: string; defaultBranch: string; checks: import("./pr_decision.ts").CiCheckRef[] }
     | undefined;
