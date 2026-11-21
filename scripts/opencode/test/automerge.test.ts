@@ -775,7 +775,7 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile", "scheduleAutoMerge"]);
+    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile", "getBranch", "scheduleAutoMerge"]);
   });
 
   test("merged pull request ends quietly", async () => {
