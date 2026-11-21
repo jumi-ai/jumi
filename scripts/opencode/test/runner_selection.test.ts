@@ -496,6 +496,8 @@ describe("integrated reviewer and worker paths", () => {
         logger: (message) => {
           logs.push(message);
         },
+        // File-artifact path: the stubbed engine never wires the structured adapter.
+        verdictContract: "legacy",
         engine: async (opts) => {
           seenModels.push(opts.model);
           await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");
@@ -536,6 +538,8 @@ describe("integrated reviewer and worker paths", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         logger: () => undefined,
+        // File-artifact path: the stubbed engine never wires the structured adapter.
+        verdictContract: "legacy",
         engine: async (opts) => {
           seenModels.push(opts.model);
           await writeFile(join(workspace, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");

@@ -158,6 +158,11 @@ export interface RunReviewJobExtras {
   previousError?: string | null;
   /** Runner name that failed the previous attempt; retry starts on the next runner under random-start. */
   failedRunner?: string | null;
+  /**
+   * Explicitly selected verdict contract for this job's attempts. When absent
+   * the parent derives it per attempt from that attempt's runner capability.
+   */
+  verdictContract?: import("./review_verdict_contract.ts").ReviewVerdictContract;
   /** Durable writer provenance. ProcessEngineTick wires `store.provenance`; unset fails closed only when the policy is enabled. */
   provenance?: import("./provenance.ts").ProvenanceStore;
   /** Postgres ledger for review stuck state. ProcessEngineTick wires `store.skipLatches`; without it review falls back to the HOME file. */
@@ -323,6 +328,7 @@ export async function runReviewJob(
       noCiNote,
       previousError: extras.previousError,
       failedRunner: extras.failedRunner,
+      ...(extras.verdictContract ? { verdictContract: extras.verdictContract } : {}),
       ...(extras.runnerCooldowns ? { runnerCooldowns: extras.runnerCooldowns } : {}),
       ...((extras.runnerCooldownConfig ?? (config as { runnerCooldown?: unknown }).runnerCooldown)
         ? {
