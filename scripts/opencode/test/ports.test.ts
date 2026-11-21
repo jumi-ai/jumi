@@ -346,6 +346,8 @@ describe("Engine, Tracker, and Forge ports", () => {
         workspacePreparer: async () => undefined,
         gitRunner,
         logger: () => undefined,
+        // File-artifact path: the stubbed engine never wires the structured adapter.
+        verdictContract: "legacy",
       });
 
       expect(result.status).toBe("posted");

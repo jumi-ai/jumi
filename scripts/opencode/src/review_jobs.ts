@@ -161,6 +161,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface PeekRunnableExclude {
+  id: number;
+  generation: number;
+  attempt: number;
+}
+
 export interface ReviewJobStore {
   migrate(): Promise<void>;
   /** Job-mode check: fail clearly when the schema is too old. Never migrates. */
@@ -201,8 +207,17 @@ export interface ReviewJobStore {
    * `queued` count, which includes backoff rows and same-issue-held rows):
    * `queued`, not-before passed, and no same-issue worker lease held. Oldest
    * first. No state change: the one-shot Job leases the row itself.
+   * `exclude` holds current Job identities from a valid inventory; matching
+   * rows are skipped before the limit so free slots fill past AlreadyExists
+   * rows. Only a valid inventory may supply exclusions: an unreadable list
+   * skips the tick before this is called.
    */
-  peekRunnable(kinds: readonly JobKind[], limit: number, now?: Date): Promise<ReviewJobRecord[]>;
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now?: Date,
+    exclude?: readonly PeekRunnableExclude[]
+  ): Promise<ReviewJobRecord[]>;
   requeueInfra(
     id: number,
     leasedBy: string,
@@ -229,13 +244,13 @@ export interface ReviewJobStore {
   getRunUsageTokenTotals(): Promise<TokenTotalRow[]>;
   /** Ledger session sums by (agent_instance, source, model). */
   getRunUsageSessionTotals(): Promise<SessionTotalRow[]>;
-  /** Ledger run counts by (kind, exit class). */
+  /** Ledger run counts by (kind, exit class), one per spawn attempt. */
   getRunExitCounts(): Promise<ExitCountRow[]>;
-  /** Ledger run counts by (kind, runner, outcome), with provider outages split out. */
+  /** Ledger run counts by (kind, runner, outcome), one per spawn attempt, with provider outages split out. */
   getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]>;
   /** Latest quota reset a runner's provider stated, unix seconds. */
   getRunnerQuotaResets(): Promise<RunnerQuotaResetRow[]>;
-  /** Ledger run durations by (kind, exit class), for the duration histogram. */
+  /** Ledger run durations by (kind, exit class), one per spawn attempt, for the duration histogram. */
   getRunDurations(): Promise<DurationRow[]>;
   /**
    * Durable per-review 💡 counts: one row per published review (runner, forge,
@@ -1077,6 +1092,16 @@ function mapIssueSkipLatch(row: { generation: unknown; skip_reason: unknown }): 
   };
 }
 
+/**
+ * One runner spawn writes one row per model with a shared `attemptId`; rows
+ * without one predate identities. Exit and duration metrics count each
+ * identity once, with every legacy row counting as its own attempt.
+ */
+function attemptKeyForRow(row: NewRunUsageRow & { id: number }): string {
+  const attempt = row.attemptId?.trim();
+  return attempt ? attempt : `legacy:${row.id}`;
+}
+
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
   readonly skipLatches = new MemorySkipLatchStore();
@@ -1404,18 +1429,42 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
       const allowed = kindsOrReview(kinds);
       const serializeWorkers = leasesWorkerKinds(allowed);
       const ts = now.getTime();
       const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
       if (cap <= 0) return [];
+      const excluded = (exclude ?? []).filter(
+        (entry) =>
+          Number.isInteger(entry.id) &&
+          entry.id > 0 &&
+          Number.isInteger(entry.attempt) &&
+          entry.attempt >= 0 &&
+          Number.isInteger(entry.generation) &&
+          entry.generation >= 0
+      );
       return this.rows
         .filter((item) => {
           if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
           if (item.leasedUntil != null && item.leasedUntil > ts) return false;
           if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
+          if (
+            excluded.length > 0 &&
+            excluded.some(
+              (entry) =>
+                entry.id === item.id &&
+                entry.attempt === item.attempt &&
+                entry.generation === payloadGeneration(item.payload)
+            )
+          )
+            return false;
           return true;
         })
         .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
@@ -1627,8 +1676,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   getRunExitCounts(): Promise<ExitCountRow[]> {
     return this.locked(() => {
+      const seen = new Set<string>();
       const counts = new Map<string, ExitCountRow>();
       for (const row of this.runUsage) {
+        const dedup = `${attemptKeyForRow(row)}\0${row.kind}\0${row.exitClass}`;
+        if (seen.has(dedup)) continue;
+        seen.add(dedup);
         const key = `${row.kind}\0${row.exitClass}`;
         const existing = counts.get(key);
         if (existing) existing.count += 1;
@@ -1640,8 +1693,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
     return this.locked(() => {
+      const seen = new Set<string>();
       const counts = new Map<string, RunnerExitCountRow>();
       for (const row of this.runUsage) {
+        const dedup = `${attemptKeyForRow(row)}\0${row.kind}\0${row.runner}\0${row.runnerOutcome}`;
+        if (seen.has(dedup)) continue;
+        seen.add(dedup);
         const key = `${row.kind}\0${row.runner}\0${row.runnerOutcome}`;
         const existing = counts.get(key);
         if (existing) existing.count += 1;
@@ -1665,9 +1722,17 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   getRunDurations(): Promise<DurationRow[]> {
-    return this.locked(() =>
-      this.runUsage.map((row) => ({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds }))
-    );
+    return this.locked(() => {
+      const seen = new Set<string>();
+      const durations: DurationRow[] = [];
+      for (const row of this.runUsage) {
+        const key = attemptKeyForRow(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        durations.push({ kind: row.kind, exitClass: row.exitClass, durationSeconds: row.durationSeconds });
+      }
+      return durations;
+    });
   }
 
   recordReviewSuggestions(counts: ReviewSuggestionCounts): Promise<void> {
@@ -1780,32 +1845,45 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter(
-          (row) =>
-            rowKind(row) === REVIEW_KIND &&
-            (row.state === "failed" ||
-              row.state === "skipped" ||
-              row.state === "succeeded" ||
-              row.state === "cancelled")
-        )
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== REVIEW_KIND) continue;
+        if (row.state !== "failed" && row.state !== "skipped" && row.state !== "succeeded" && row.state !== "cancelled")
+          continue;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${row.prNumber}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
-  listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
+  listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
-      const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
-      return this.rows
-        .filter((row) => rowKind(row) === "implement" && (row.state === "succeeded" || row.state === "skipped"))
-        .sort((a, b) => b.id - a.id)
-        .slice(0, cap)
-        .map((row) => ({ ...row }));
+      const latest = new Map<string, ReviewJobRecord>();
+      for (const row of this.rows) {
+        if (rowKind(row) !== "implement") continue;
+        if (row.state !== "succeeded" && row.state !== "skipped") continue;
+        const n = typeof row.issueNumber === "number" && row.issueNumber > 0 ? row.issueNumber : row.prNumber;
+        const key = `${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${n}`;
+        if ((latest.get(key)?.id ?? 0) < row.id) latest.set(key, row);
+      }
+      const sorted = [...latest.values()].sort((a, b) => b.id - a.id);
+      const cap =
+        limit === undefined
+          ? sorted.length
+          : Number.isFinite(limit) && limit > 0
+            ? Math.min(Math.floor(limit), 500)
+            : 200;
+      return sorted.slice(0, cap).map((row) => ({ ...row }));
     });
   }
 
@@ -3779,50 +3857,71 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  async peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     const allowed = kindsOrReview(kinds);
     const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
     if (cap <= 0) return [];
     const nowIso = now.toISOString();
     const serializeWorkers = leasesWorkerKinds(allowed);
-    const query = serializeWorkers
-      ? `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-           AND NOT EXISTS (
-             SELECT 1 FROM review_jobs held
-             WHERE held.state = 'leased'
-               AND held.kind = ANY($3::text[])
-               AND held.owner = review_jobs.owner
-               AND held.repo = review_jobs.repo
-               AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
-           )
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`
-      : `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`;
+    const valid = (exclude ?? []).filter(
+      (entry) =>
+        Number.isInteger(entry.id) &&
+        entry.id > 0 &&
+        Number.isInteger(entry.attempt) &&
+        entry.attempt >= 0 &&
+        Number.isInteger(entry.generation) &&
+        entry.generation >= 0
+    );
+    const generationExpr = `COALESCE(CASE WHEN review_jobs.payload->>'generation' ~ '^[0-9]+$' THEN (review_jobs.payload->>'generation')::bigint ELSE 0 END, 0)`;
+    const buildExclusion = (start: number): { clause: string; params: number[] } => {
+      if (valid.length === 0) return { clause: "", params: [] };
+      const parts: string[] = [];
+      const params: number[] = [];
+      valid.forEach((entry, index) => {
+        const a = start + index * 3;
+        parts.push(`(review_jobs.id = $${a} AND review_jobs.attempt = $${a + 1} AND ${generationExpr} = $${a + 2})`);
+        params.push(entry.id, entry.attempt, entry.generation);
+      });
+      return { clause: `AND NOT (${parts.join(" OR ")})`, params };
+    };
     if (serializeWorkers) {
+      const { clause, params } = buildExclusion(5);
       const rows = asRows<ReviewJobRow>(
-        await this.sql.unsafe(query, [
-          pgTextArrayLiteral(allowed),
-          nowIso,
-          pgTextArrayLiteral([...WORKER_JOB_KINDS]),
-          cap,
-        ])
+        await this.sql.unsafe(
+          `SELECT * FROM review_jobs
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            AND NOT EXISTS (
+              SELECT 1 FROM review_jobs held
+              WHERE held.state = 'leased'
+                AND held.kind = ANY($3::text[])
+                AND held.owner = review_jobs.owner
+                AND held.repo = review_jobs.repo
+                AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+            )
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $4`,
+          [pgTextArrayLiteral(allowed), nowIso, pgTextArrayLiteral([...WORKER_JOB_KINDS]), cap, ...params]
+        )
       );
       return rows.map(mapRow);
     }
+    const { clause, params } = buildExclusion(4);
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
         `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $3`,
-        [pgTextArrayLiteral(allowed), nowIso, cap]
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $3`,
+        [pgTextArrayLiteral(allowed), nowIso, cap, ...params]
       )
     );
     return rows.map(mapRow);
@@ -4103,23 +4202,25 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.map(mapRow);
   }
 
-  async listTerminalReviews(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalReviews(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), pr_number) * FROM review_jobs WHERE kind = 'review' AND state IN ('failed', 'skipped', 'succeeded', 'cancelled') ORDER BY lower(owner), lower(repo), pr_number, id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);
   }
 
-  async listTerminalImplements(limit = 200): Promise<ReviewJobRecord[]> {
-    const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
+  async listTerminalImplements(limit?: number): Promise<ReviewJobRecord[]> {
+    const cap =
+      limit === undefined ? undefined : Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 200;
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
-        `SELECT * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY id DESC LIMIT $1`,
-        [cap]
+        `SELECT * FROM (SELECT DISTINCT ON (lower(owner), lower(repo), COALESCE(issue_number, pr_number)) * FROM review_jobs WHERE kind = 'implement' AND state IN ('succeeded', 'skipped') ORDER BY lower(owner), lower(repo), COALESCE(issue_number, pr_number), id DESC) t ORDER BY id DESC${cap === undefined ? "" : " LIMIT $1"}`,
+        cap === undefined ? [] : [cap]
       )
     );
     return rows.map(mapRow);
@@ -4201,10 +4302,10 @@ export class PgReviewJobStore implements ReviewJobStore {
   async recordRunUsageRows(rows: NewRunUsageRow[]): Promise<void> {
     if (rows.length === 0) return;
     const columns =
-      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, runner_outcome, quota_reset_at, started_at, ended_at, duration_seconds, clone_seconds, build_seconds)";
+      "(job_id, job_key, kind, runner, model, agent_instance, tokens_input, tokens_cache_read, tokens_output, tokens_cache_write, tokens_reasoning, sessions, exit_class, runner_outcome, quota_reset_at, started_at, ended_at, duration_seconds, clone_seconds, build_seconds, attempt_id)";
     const values: unknown[] = [];
     const tuples = rows.map((row, index) => {
-      const base = index * 20;
+      const base = index * 21;
       values.push(
         row.jobId,
         row.jobKey,
@@ -4225,9 +4326,10 @@ export class PgReviewJobStore implements ReviewJobStore {
         row.endedAt.toISOString(),
         row.durationSeconds,
         row.cloneSeconds ?? null,
-        row.buildSeconds ?? null
+        row.buildSeconds ?? null,
+        row.attemptId?.trim() ? row.attemptId : null
       );
-      const refs = Array.from({ length: 20 }, (_, offset) => {
+      const refs = Array.from({ length: 21 }, (_, offset) => {
         // Timestamps ride as ISO strings with an explicit cast, the same way
         // review_jobs timestamps do.
         if (offset === 14 || offset === 15 || offset === 16) return `$${base + offset + 1}::timestamptz`;
@@ -4303,7 +4405,9 @@ export class PgReviewJobStore implements ReviewJobStore {
   async getRunExitCounts(): Promise<ExitCountRow[]> {
     const rows = asRows<{ kind: unknown; exit_class: unknown; n: unknown }>(
       await this.sql.unsafe(
-        `SELECT kind, exit_class, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, exit_class`
+        `SELECT kind, exit_class,
+            COUNT(DISTINCT COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text))::bigint AS n
+          FROM jumi_run_usage GROUP BY kind, exit_class`
       )
     );
     return rows.map((row) => ({ kind: str(row.kind), exitClass: str(row.exit_class), count: num(row.n) }));
@@ -4312,7 +4416,9 @@ export class PgReviewJobStore implements ReviewJobStore {
   async getRunRunnerExitCounts(): Promise<RunnerExitCountRow[]> {
     const rows = asRows<{ kind: unknown; runner: unknown; outcome: unknown; n: unknown }>(
       await this.sql.unsafe(
-        `SELECT kind, runner, runner_outcome AS outcome, COUNT(*)::bigint AS n FROM jumi_run_usage GROUP BY kind, runner, runner_outcome`
+        `SELECT kind, runner, runner_outcome AS outcome,
+            COUNT(DISTINCT COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text))::bigint AS n
+          FROM jumi_run_usage GROUP BY kind, runner, runner_outcome`
       )
     );
     return rows.map((row) => ({
@@ -4334,7 +4440,11 @@ export class PgReviewJobStore implements ReviewJobStore {
 
   async getRunDurations(): Promise<DurationRow[]> {
     const rows = asRows<{ kind: unknown; exit_class: unknown; duration_seconds: unknown }>(
-      await this.sql.unsafe(`SELECT kind, exit_class, duration_seconds FROM jumi_run_usage`)
+      await this.sql.unsafe(
+        `SELECT kind, exit_class, MAX(duration_seconds) AS duration_seconds
+          FROM jumi_run_usage
+          GROUP BY COALESCE(NULLIF(attempt_id, ''), 'legacy:' || id::text), kind, exit_class`
+      )
     );
     return rows.map((row) => ({
       kind: str(row.kind),

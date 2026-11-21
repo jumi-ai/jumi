@@ -127,9 +127,10 @@ async function loadTakeoverRepoPolicy(
   log: (message: string) => void,
   preloadedAuthors?: readonly string[]
 ): Promise<{ authors: readonly string[]; effectiveTrusted: readonly string[] | undefined; pickupLabel: string }> {
+  const normalizedFallback = effectiveTrustedSenderLogins(trustedSenderLogins, { state: "missing" });
   const fallback = {
     authors: preloadedAuthors ?? ([] as readonly string[]),
-    effectiveTrusted: trustedSenderLogins,
+    effectiveTrusted: normalizedFallback,
     pickupLabel: "jumi",
   };
   try {
@@ -226,6 +227,40 @@ export interface TakeoverOpenedInput {
 export type TakeoverOpenedDecision =
   | { type: "enqueue"; job: Omit<import("./types.ts").IssueJob, "delivery" | "receivedAt"> }
   | { type: "skip"; reason: string };
+
+export type TakeoverEnqueueOutcome =
+  | { type: "enqueued"; key: string; queued: boolean }
+  | { type: "skipped"; reason: string };
+
+/**
+ * Decide a takeover for an opened pull and enqueue it. Skips stay skips;
+ * any throw (decision or queue write) propagates so the webhook can answer
+ * retryable and leave the delivery unmarked. The review enqueue already
+ * dedupes by key, so a redelivery never duplicates it.
+ */
+export async function enqueueTakeoverForOpenedPull(
+  input: TakeoverOpenedInput & {
+    action: string;
+    delivery: string;
+    receivedAt?: string;
+    queue: {
+      enqueue(
+        job: import("./types.ts").IssueJob
+      ): import("./queue.ts").EnqueueResult | Promise<import("./queue.ts").EnqueueResult>;
+    };
+  }
+): Promise<TakeoverEnqueueOutcome> {
+  const decision = await shouldEnqueueTakeoverForOpenedPull(input);
+  if (decision.type === "skip") return { type: "skipped", reason: decision.reason };
+  const job: import("./types.ts").IssueJob = {
+    ...decision.job,
+    delivery: input.delivery,
+    receivedAt: input.receivedAt ?? new Date().toISOString(),
+  };
+  const enqueued = await input.queue.enqueue(job);
+  input.log?.(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} delivery=${job.delivery}`);
+  return { type: "enqueued", key: enqueued.key, queued: enqueued.queued };
+}
 
 /**
  * Decide a takeover for a freshly opened pull request. Only `opened`

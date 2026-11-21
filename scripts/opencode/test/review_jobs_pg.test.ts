@@ -544,6 +544,54 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(await indexExists("jumi_run_usage_job_key")).toBe(true);
   });
 
+  test("one multi-model attempt counts exit and duration once in postgres", async () => {
+    await store.enqueue(makeJob());
+    const leased = (await store.lease("engine-1", 60_000))!;
+    const base = {
+      jobId: leased.id,
+      jobKey: leased.jobKey,
+      kind: "review" as const,
+      runner: "opencode",
+      agentInstance: "jumi",
+      tokensInput: 10,
+      tokensCacheRead: 0,
+      tokensOutput: 2,
+      tokensCacheWrite: 0,
+      tokensReasoning: 0,
+      sessions: 1,
+      exitClass: "ok" as const,
+      runnerOutcome: "ok" as const,
+      quotaResetAt: null,
+      startedAt: new Date(1_000_000),
+      endedAt: new Date(1_090_000),
+      durationSeconds: 90,
+    };
+    await store.recordRunUsageRows([
+      { ...base, model: "model-a", attemptId: "attempt-1" },
+      { ...base, model: "model-b", attemptId: "attempt-1" },
+      { ...base, model: "model-c", attemptId: "attempt-1" },
+      // Legacy shape: no attempt identity, counts as its own attempt.
+      { ...base, model: "model-legacy", attemptId: null },
+    ]);
+    expect(await store.getRunExitCounts()).toContainEqual({ kind: "review", exitClass: "ok", count: 2 });
+    expect(await store.getRunRunnerExitCounts()).toContainEqual({
+      kind: "review",
+      runner: "opencode",
+      outcome: "ok",
+      count: 2,
+    });
+    const durations = await store.getRunDurations();
+    expect(durations.filter((row) => row.kind === "review" && row.exitClass === "ok")).toHaveLength(2);
+    const tokens = await store.getRunUsageTokenTotals();
+    const input = tokens
+      .filter((row) => row.tokenType === "input" && row.source === "opencode")
+      .reduce((sum, row) => sum + row.value, 0);
+    // Token sums stay per row: three attempt rows plus the legacy row.
+    expect(input).toBe(40);
+    const sessions = await store.getRunUsageSessionTotals();
+    expect(sessions.filter((row) => row.source === "opencode").reduce((sum, row) => sum + row.value, 0)).toBe(4);
+  });
+
   function pgReviewApi(): ReviewApi {
     return makeSharedReviewApi({
       getPRFiles: async () => [makeFile()],

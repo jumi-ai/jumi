@@ -1,3 +1,4 @@
+import { readBoundedAttachmentBytes, readBoundedErrorText } from "./attachment_transfer.ts";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
 import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
 import type {
@@ -654,7 +655,7 @@ export class GiteaAPI {
     }
   }
 
-  async downloadAttachmentBytes(url: string): Promise<Uint8Array> {
+  async downloadAttachmentBytes(url: string, maxBytes?: number): Promise<Uint8Array> {
     // Only attach the parent token when the target lives on the configured
     // forge host. Body-extracted URLs are untrusted input: sending
     // `Authorization` to an arbitrary host would exfiltrate the token.
@@ -666,7 +667,7 @@ export class GiteaAPI {
     }
     const res = await fetch(url, sameHost ? { headers: { Authorization: `token ${this.token}` } } : undefined);
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
+      const text = await readBoundedErrorText(res).catch(() => "");
       throw forgeRequestError({
         service: "Gitea attachment",
         method: "GET",
@@ -677,7 +678,7 @@ export class GiteaAPI {
         secrets: [this.token],
       });
     }
-    return new Uint8Array(await res.arrayBuffer());
+    return readBoundedAttachmentBytes(res, maxBytes);
   }
 
   async addIssueLabel(owner: string, repo: string, index: number, label: string): Promise<unknown> {

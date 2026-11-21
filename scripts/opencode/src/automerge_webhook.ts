@@ -198,12 +198,9 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   ) {
     return { handled: false };
   }
-  // Resolve base branch for the settings read: payload default branch wins,
-  // else the PR base ref, else the repo default branch.
+  // Resolve the settings ref (default branch). Required-check validation
+  // always uses the PR's actual base branch downstream, never this ref.
   let baseBranch = parsed.baseBranch?.trim() ? parsed.baseBranch : "";
-  if (!baseBranch && pr.base && typeof pr.base.ref === "string" && pr.base.ref.trim()) {
-    baseBranch = pr.base.ref.trim();
-  }
   if (!baseBranch) {
     try {
       const info = await api.getRepo(parsed.owner, parsed.repo);

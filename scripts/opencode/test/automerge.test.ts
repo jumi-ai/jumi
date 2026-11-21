@@ -775,7 +775,7 @@ describe("automerge after push", () => {
       botUsername: "jumi",
       log: () => undefined,
     });
-    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile", "scheduleAutoMerge"]);
+    expect(api.calls).toEqual(["getPRFiles", "getPR", "getRepo", "getRepoFile", "getBranch", "scheduleAutoMerge"]);
   });
 
   test("merged pull request ends quietly", async () => {
@@ -1972,5 +1972,347 @@ describe("gitea refused schedule retry after push", () => {
       log: () => undefined,
     });
     expect(api.calls).not.toContain("scheduleAutoMerge");
+  });
+});
+
+describe("PR base branch required checks diverge from default", () => {
+  function branchState(requiresReview: boolean) {
+    return requiresReview
+      ? { protected: true, enableStatusCheck: true, requiredContexts: [JUMI_REVIEW_CONTEXT] }
+      : { protected: true, enableStatusCheck: true, requiredContexts: ["ci/build"] };
+  }
+
+  function keyBranchByName(
+    api: ReturnType<typeof automergeApi>,
+    mainRequires: boolean,
+    releaseRequires: boolean,
+    seen: string[]
+  ) {
+    api.getBranch = async (_o: string, _r: string, branch: string) => {
+      api.calls.push("getBranch");
+      seen.push(branch);
+      if (branch === "release-1") return branchState(releaseRequires);
+      return branchState(mainRequires);
+    };
+  }
+
+  function prOnBase(api: ReturnType<typeof automergeApi>, baseRef: string | undefined) {
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      const pr = makePR({ number: index });
+      if (baseRef === undefined) return { ...pr, base: undefined as never };
+      return { ...pr, base: makeBranch({ label: `kirmanak:${baseRef}`, ref: baseRef, sha: "basesha" }) };
+    };
+  }
+
+  function captureSettingsRef(api: ReturnType<typeof automergeApi>, seenRefs: string[]) {
+    api.getRepoFile = async (_o: string, _r: string, _p: string, ref: string) => {
+      api.calls.push("getRepoFile");
+      seenRefs.push(ref);
+      return { found: true, content: "automerge: true\n" };
+    };
+  }
+
+  test("schedule: PR into main schedules while release-1 stays closed", async () => {
+    const closedApi = automergeApi();
+    const closedBranches: string[] = [];
+    const closedRefs: string[] = [];
+    keyBranchByName(closedApi, true, false, closedBranches);
+    prOnBase(closedApi, "release-1");
+    captureSettingsRef(closedApi, closedRefs);
+    const closed = await scheduleAutomergeForPr({
+      api: closedApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(closed).toEqual({ scheduled: false });
+    expect(closedApi.calls).not.toContain("scheduleAutoMerge");
+    expect(closedBranches).toEqual(["release-1"]);
+    expect(closedRefs).toEqual(["main"]);
+    expect(closedApi.notes).toHaveLength(1);
+    expect(closedApi.notes[0]).toContain("`release-1`");
+    expect(closedApi.notes[0]).toContain(JUMI_REVIEW_CONTEXT);
+
+    const openApi = automergeApi();
+    const openBranches: string[] = [];
+    const openRefs: string[] = [];
+    keyBranchByName(openApi, true, false, openBranches);
+    prOnBase(openApi, "main");
+    captureSettingsRef(openApi, openRefs);
+    openApi.scheduleAutoMerge = async () => {
+      openApi.calls.push("scheduleAutoMerge");
+    };
+    const open = await scheduleAutomergeForPr({
+      api: openApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(open).toEqual({ scheduled: true });
+    expect(openBranches).toEqual(["main"]);
+    expect(openRefs).toEqual(["main"]);
+  });
+
+  test("schedule: PR into release-1 schedules while main stays closed", async () => {
+    const openApi = automergeApi();
+    const openBranches: string[] = [];
+    const openRefs: string[] = [];
+    keyBranchByName(openApi, false, true, openBranches);
+    prOnBase(openApi, "release-1");
+    captureSettingsRef(openApi, openRefs);
+    openApi.scheduleAutoMerge = async () => {
+      openApi.calls.push("scheduleAutoMerge");
+    };
+    const open = await scheduleAutomergeForPr({
+      api: openApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(open).toEqual({ scheduled: true });
+    expect(openBranches).toEqual(["release-1"]);
+    expect(openRefs).toEqual(["main"]);
+
+    const closedApi = automergeApi();
+    const closedBranches: string[] = [];
+    keyBranchByName(closedApi, false, true, closedBranches);
+    prOnBase(closedApi, "main");
+    const closed = await scheduleAutomergeForPr({
+      api: closedApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(closed).toEqual({ scheduled: false });
+    expect(closedApi.calls).not.toContain("scheduleAutoMerge");
+    expect(closedBranches).toEqual(["main"]);
+    expect(closedApi.notes).toHaveLength(1);
+    expect(closedApi.notes[0]).toContain("`main`");
+  });
+
+  test("schedule: explicit prBaseBranch wins over the PR base ref", async () => {
+    const api = automergeApi();
+    const seen: string[] = [];
+    keyBranchByName(api, true, false, seen);
+    api.getPR = async (_o: string, _r: string, index: number) => {
+      api.calls.push("getPR");
+      const pr = makePR({ number: index });
+      return { ...pr, base: makeBranch({ label: "kirmanak:main", ref: "main", sha: "basesha" }) };
+    };
+    const result = await scheduleAutomergeForPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      prBaseBranch: "release-1",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(seen).toEqual(["release-1"]);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("`release-1`");
+  });
+
+  test("schedule fails closed when the PR base is missing", async () => {
+    const api = automergeApi();
+    prOnBase(api, undefined);
+    const result = await scheduleAutomergeForPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.calls).not.toContain("getBranch");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("base branch requirements could not be read");
+  });
+
+  test("schedule fails closed when the PR base branch is unreadable", async () => {
+    const api = automergeApi();
+    prOnBase(api, "release-1");
+    api.getBranch = async () => {
+      api.calls.push("getBranch");
+      throw new Error("Gitea API → 500");
+    };
+    const result = await scheduleAutomergeForPr({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("base branch requirements could not be read");
+  });
+
+  test("label change validates against the PR base, not the settings ref", async () => {
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const api = automergeApi();
+    const seen: string[] = [];
+    keyBranchByName(api, true, false, seen);
+    prOnBase(api, "release-1");
+    const result = await handleAutomergeLabelChange({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(result.action).toBe("none");
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(seen).toEqual(["release-1"]);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("`release-1`");
+  });
+
+  test("gitea refused retry validates against the PR base", async () => {
+    const api = automergeApi();
+    const seen: string[] = [];
+    keyBranchByName(api, true, false, seen);
+    prOnBase(api, "release-1");
+    (api as unknown as Record<string, unknown>)["listIssueComments"] = async () => {
+      api.calls.push("listIssueComments");
+      return [
+        {
+          id: 1,
+          body: `${AUTOMERGE_NOTE_MARKER}\nJumi tried to schedule auto-merge but the forge refused (405: retry). Jumi will try again after its next push.\n${AUTOMERGE_REFUSED_MARKER}`,
+          user: { login: "jumi" },
+        },
+      ];
+    };
+    await ensureAutomergeAfterPush({
+      api,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: false,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+    expect(seen).toEqual(["release-1"]);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("`release-1`");
+  });
+
+  test("github restore validates against the PR base and fails closed when unreadable", async () => {
+    const closedApi = automergeApi();
+    const closedBranches: string[] = [];
+    keyBranchByName(closedApi, true, false, closedBranches);
+    closedApi.getPR = async (_o: string, _r: string, index: number) => {
+      closedApi.calls.push("getPR");
+      const pr = makePR({ number: index });
+      return { ...pr, base: makeBranch({ label: "kirmanak:release-1", ref: "release-1", sha: "basesha" }) };
+    };
+    closedApi.getRepo = async () => {
+      closedApi.calls.push("getRepo");
+      return {
+        name: "demo",
+        full_name: "acme/demo",
+        html_url: "https://github.com/acme/demo",
+        clone_url: "https://github.com/acme/demo.git",
+        default_branch: "main",
+        owner: { login: "acme" },
+        allowAutoMerge: true,
+        allowSquashMerge: true,
+      };
+    };
+    await ensureAutomergeAfterPush({
+      api: closedApi,
+      forgeKind: "github",
+      owner: "acme",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: true,
+      automergeRepos: ["acme/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(closedApi.calls).not.toContain("scheduleAutoMerge");
+    expect(closedBranches).toEqual(["release-1"]);
+    expect(closedApi.notes).toHaveLength(1);
+    expect(closedApi.notes[0]).toContain("did not restore");
+    expect(closedApi.notes[0]).toContain("`release-1`");
+
+    const unreadableApi = automergeApi();
+    unreadableApi.getPR = async (_o: string, _r: string, index: number) => {
+      unreadableApi.calls.push("getPR");
+      const pr = makePR({ number: index });
+      return { ...pr, base: undefined as never };
+    };
+    unreadableApi.getRepo = async () => {
+      unreadableApi.calls.push("getRepo");
+      return {
+        name: "demo",
+        full_name: "acme/demo",
+        html_url: "https://github.com/acme/demo",
+        clone_url: "https://github.com/acme/demo.git",
+        default_branch: "main",
+        owner: { login: "acme" },
+        allowAutoMerge: true,
+        allowSquashMerge: true,
+      };
+    };
+    await ensureAutomergeAfterPush({
+      api: unreadableApi,
+      forgeKind: "github",
+      owner: "acme",
+      repo: "demo",
+      prNumber: 3,
+      wasScheduled: true,
+      automergeRepos: ["acme/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(unreadableApi.calls).not.toContain("scheduleAutoMerge");
+    expect(unreadableApi.calls).not.toContain("getBranch");
+    expect(unreadableApi.notes).toHaveLength(1);
+    expect(unreadableApi.notes[0]).toContain("did not restore");
+    expect(unreadableApi.notes[0]).toContain("base branch requirements could not be read");
   });
 });

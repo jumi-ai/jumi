@@ -117,6 +117,8 @@ describe("repository mode", () => {
           throw new Error(`unexpected git ${args.join(" ")}`);
         },
         workspacePreparer: async () => undefined,
+        // File-artifact path: the stubbed runner never wires the structured adapter.
+        verdictContract: "legacy",
         openCodeRunner: async (opts) => {
           ran++;
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "Looks good\n<!-- jumi-check: success -->");

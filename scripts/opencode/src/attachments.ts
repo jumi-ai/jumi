@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { isAttachmentByteBudgetError } from "./attachment_transfer.ts";
 import { ATTACHMENTS_DIR } from "./engine_scratch.ts";
 import { errorMessage, isEnoent } from "./util/error.ts";
 
@@ -34,7 +35,7 @@ export interface AttachmentRecord {
 export interface AttachmentApi {
   listIssueAttachments?(owner: string, repo: string, index: number): Promise<ForgeAttachment[]>;
   listIssueCommentAttachments?(owner: string, repo: string, commentId: number): Promise<ForgeAttachment[]>;
-  downloadAttachmentBytes?(url: string): Promise<Uint8Array>;
+  downloadAttachmentBytes?(url: string, maxBytes?: number): Promise<Uint8Array>;
   listIssueComments?(owner: string, repo: string, index: number): Promise<Array<{ id: number; body: string }>>;
 }
 
@@ -294,6 +295,14 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
   };
 
   const canDownload = typeof opts.api.downloadAttachmentBytes === "function";
+  const remainingBudget = (): number => Math.max(0, Math.min(maxPerFile, maxTotal - totalBytes));
+  const budgetExceededNote = (): { size: number; reason: string } => {
+    const budget = remainingBudget();
+    if (maxTotal - totalBytes < maxPerFile) {
+      return { size: budget + 1, reason: `exceeds total cap (max ${maxTotal} bytes)` };
+    }
+    return { size: budget + 1, reason: `exceeds per-file cap (over ${maxPerFile} bytes)` };
+  };
   let counted = 0;
   for (const attachment of forgeAttachments) {
     counted += 1;
@@ -322,7 +331,8 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       continue;
     }
     try {
-      const bytes = await opts.api.downloadAttachmentBytes!(attachment.browser_download_url);
+      const budget = remainingBudget();
+      const bytes = await opts.api.downloadAttachmentBytes!(attachment.browser_download_url, budget);
       if (bytes.byteLength > maxPerFile) {
         noteUnstaged(
           nameHint,
@@ -345,6 +355,11 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       stagedFiles += 1;
       records.push({ name, size: bytes.byteLength, sha256, url, staged: true, source: sources[0] });
     } catch (err) {
+      if (isAttachmentByteBudgetError(err)) {
+        const note = budgetExceededNote();
+        noteUnstaged(nameHint, note.size, url, note.reason, sources[0]);
+        continue;
+      }
       noteUnstaged(nameHint, attachment.size, url, `download failed: ${errorMessage(err)}`, sources[0]);
     }
   }
@@ -362,7 +377,8 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       continue;
     }
     try {
-      const bytes = await opts.api.downloadAttachmentBytes!(url);
+      const budget = remainingBudget();
+      const bytes = await opts.api.downloadAttachmentBytes!(url, budget);
       if (bytes.byteLength > maxPerFile) {
         noteUnstaged(
           fallback,
@@ -385,6 +401,11 @@ export async function stageIssueAttachments(opts: StageAttachmentsOptions): Prom
       stagedFiles += 1;
       records.push({ name, size: bytes.byteLength, sha256, url, staged: true, source: sources[0] });
     } catch (err) {
+      if (isAttachmentByteBudgetError(err)) {
+        const note = budgetExceededNote();
+        noteUnstaged(fallback, note.size, url, note.reason, sources[0]);
+        continue;
+      }
       noteUnstaged(fallback, 0, url, `download failed: ${errorMessage(err)}`, sources[0]);
     }
   }

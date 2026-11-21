@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ReviewRecord } from "../src/review_verdict_store.ts";
 import {
   blockingOpenQuestionCount,
   buildCheckTrailer,
@@ -27,6 +28,7 @@ import {
   parseReviewFindings,
   parseReviewOutput,
   reviewFindingLines,
+  reviewVerdictView,
   sanitizeCheckReason,
   stripFindingLines,
   trailerSuggestionCount,
@@ -603,5 +605,50 @@ describe("findings list", () => {
     expect(stripFindingLines(body)).not.toContain("src/foo.ts:12");
     expect(countQuestionFindings(body)).toBe(0);
     expect(hasPublishedFindings(body)).toBe(false);
+  });
+});
+
+describe("reviewVerdictView suggestion counts", () => {
+  function recordWithSuggestion(count: number, reason = "1 suggestion"): ReviewRecord {
+    return {
+      version: 1,
+      state: "success",
+      reason,
+      findings: [],
+      counts: { bug: 0, risk: 0, question: 0, suggestion: count },
+    };
+  }
+
+  test("usable record with 0 suggestions ignores a trailer claiming one", () => {
+    const markdown = "note\n<!-- jumi-check: success; 1 suggestion -->";
+    const view = reviewVerdictView({ markdown, record: recordWithSuggestion(0) });
+    expect(view.incomplete).toBe(false);
+    expect(view.state).toBe("success");
+    expect(view.suggestionCount).toBe(0);
+  });
+
+  test("usable record with suggestions ignores a trailer claiming none", () => {
+    const markdown = "note\n<!-- jumi-check: success -->";
+    const view = reviewVerdictView({ markdown, record: recordWithSuggestion(2, "2 suggestions") });
+    expect(view.suggestionCount).toBe(2);
+  });
+
+  test("legacy row with only a trailer digit still yields that count", () => {
+    const markdown = "note\n<!-- jumi-check: success; 1 suggestion -->";
+    const view = reviewVerdictView({ markdown });
+    expect(view.suggestionCount).toBe(1);
+  });
+
+  test("a corrupt record falls back to the text path", () => {
+    const markdown = "note\n<!-- jumi-check: success; 1 suggestion -->";
+    const corrupt = {
+      version: 2,
+      state: "success",
+      reason: "1 suggestion",
+      findings: [],
+      counts: { bug: 0, risk: 0, question: 0, suggestion: 0 },
+    } as unknown as ReviewRecord;
+    const view = reviewVerdictView({ markdown, record: corrupt });
+    expect(view.suggestionCount).toBe(1);
   });
 });

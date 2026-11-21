@@ -13,6 +13,7 @@ import { hasTrustedSenders, type PermissionApi, senderCanSteer } from "./permiss
 import type { Comment, InlineComment, Pull, PullReview } from "./ports.ts";
 import {
   effectiveBlockingQuestionAuthors,
+  effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
   isMaintainerQuestionsHoldEnabled,
   loadSettingsSnapshot,
@@ -81,11 +82,16 @@ export async function tryReleaseMaintainerHold(opts: {
   const api = opts.api;
   if (!api || typeof api.getPR !== "function") return { outcome: "skip", reason: "not a jumi pull request" };
 
-  const trusted = await senderCanSteer(api, opts.owner, opts.repo, opts.senderLogin, opts.trustedSenderLogins);
+  const trustSnapshot = await loadSettingsSnapshot(api, opts.owner, opts.repo, opts.defaultBranch ?? null).catch(
+    (): { state: "no-branch" } => ({ state: "no-branch" })
+  );
+  const trustLoad = failOpenLoadFromSnapshot(trustSnapshot);
+  const effectiveTrusted = effectiveTrustedSenderLogins(opts.trustedSenderLogins, trustLoad);
+  const trusted = await senderCanSteer(api, opts.owner, opts.repo, opts.senderLogin, effectiveTrusted);
   if (!trusted) {
     return {
       outcome: "skip",
-      reason: hasTrustedSenders(opts.trustedSenderLogins) ? "sender not on trusted list" : "sender lacks write access",
+      reason: hasTrustedSenders(effectiveTrusted) ? "sender not on trusted list" : "sender lacks write access",
     };
   }
 
@@ -103,10 +109,8 @@ export async function tryReleaseMaintainerHold(opts: {
     return { outcome: "skip", reason: "fork pull request" };
   }
 
-  const snapshot = await loadSettingsSnapshot(api, opts.owner, opts.repo, opts.defaultBranch ?? null).catch(
-    (): { state: "no-branch" } => ({ state: "no-branch" })
-  );
-  const load = failOpenLoadFromSnapshot(snapshot);
+  const snapshot = trustSnapshot;
+  const load = trustLoad;
   const holdEnabled = isMaintainerQuestionsHoldEnabled(load);
   if (!holdEnabled) {
     log(`maintainer hold skipped for ${opts.owner}/${opts.repo}#${opts.prNumber}: hold disabled`);

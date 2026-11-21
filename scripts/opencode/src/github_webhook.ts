@@ -29,7 +29,7 @@ import {
   parseIssuesPayload,
 } from "./issue_webhook.ts";
 import { isReleaseCandidateSkipReason, tryReleaseMaintainerHold } from "./maintainer_hold_release.ts";
-import { withIssueAuthorPermission } from "./permissions.ts";
+import { normalizeBlankTrustedSenders, withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
@@ -255,7 +255,12 @@ export async function effectiveGithubPolicyForRepo(
   log?: (message: string) => void
 ): Promise<GithubWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
-  if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
+  const fallbackTrusted = normalizeBlankTrustedSenders(basePolicy.trustedSenderLogins);
+  const fallback =
+    fallbackTrusted === basePolicy.trustedSenderLogins
+      ? basePolicy
+      : { ...basePolicy, trustedSenderLogins: fallbackTrusted };
+  if (!api || typeof api.getRepoFile !== "function" || !branch) return fallback;
   const policy = await resolveRepoPolicy(
     { api, owner, repo, ref: branch },
     {
@@ -270,11 +275,11 @@ export async function effectiveGithubPolicyForRepo(
   );
   if (policy.status === "invalid") {
     log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    return fallback;
   }
   if (policy.status === "unreadable") {
     log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    return fallback;
   }
   // Missing still sets the pickup label (`jumi`) and `isPickedUp`, unlike
   // the worker webhook which returns `basePolicy` unchanged.
@@ -617,15 +622,17 @@ export async function handleGithubWebhookEvent(
           if (cleared) return cleared;
         }
         if (action === "opened" && deps.worker) {
+          // Same contract as the Gitea PR-open path: the review above already
+          // enqueued (or deduped on retry). Shared helper keeps both forges identical.
           try {
-            const { shouldEnqueueTakeoverForOpenedPull } = await import("./takeover.ts");
-            const [takeoverOwner, takeoverRepo] = payload.repository.full_name.split("/");
-            if (takeoverOwner && takeoverRepo) {
-              const decision = await shouldEnqueueTakeoverForOpenedPull({
+            const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+            const [o, r] = payload.repository.full_name.split("/");
+            if (o && r) {
+              const outcome = await enqueueTakeoverForOpenedPull({
                 api: deps.worker.api ?? {},
                 forgeKind: "github",
-                owner: takeoverOwner,
-                repo: takeoverRepo,
+                owner: o,
+                repo: r,
                 prNumber: payload.pull_request.number,
                 prTitle: payload.pull_request.title,
                 prDraft: payload.pull_request.draft,
@@ -643,24 +650,20 @@ export async function handleGithubWebhookEvent(
                 botUsername: policy.botUsername,
                 trustedSenderLogins: policy.trustedSenderLogins,
                 action,
+                delivery: `takeover-${delivery}`,
+                queue: deps.worker.queue,
                 log: (message) => logger(message),
               });
-              if (decision.type === "enqueue") {
-                const workerJob = {
-                  ...decision.job,
-                  delivery: `takeover-${delivery}`,
-                  receivedAt: new Date().toISOString(),
-                };
-                const enqueued = await deps.worker.queue.enqueue(workerJob);
-                logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} delivery=${workerJob.delivery}`);
-              } else {
-                logger(
-                  `takeover skipped ${takeoverOwner}/${takeoverRepo}#${payload.pull_request.number}: ${decision.reason}`
-                );
-              }
+              if (outcome.type === "skipped")
+                logger(`takeover skipped ${o}/${r}#${payload.pull_request.number}: ${outcome.reason}`);
             }
           } catch (err) {
+            if (isQueueUnavailable(err)) {
+              logger(`takeover queue unavailable: ${(err as Error).message}`);
+              return json(503, { error: "queue unavailable" });
+            }
             logger(`takeover failed: ${errorMessage(err)}`);
+            return json(500, { error: "takeover failed" });
           }
         }
         return json(202, result);
