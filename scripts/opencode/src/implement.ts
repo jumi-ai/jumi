@@ -1438,9 +1438,26 @@ export async function implementIssue(
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
   const checkpoint = checkpointTickerForRun(opts, branch, opts.job.defaultBranch, log);
-  const workerStore = new WorkerResultStore();
+  let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({ store: workerStore });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
+  /**
+   * Each spawn gets its own result scope: close the previous store and
+   * point the MCP server at a fresh one. Handoff is the one result that
+   * persists across attempts, so carry it forward; skip, PR body,
+   * no-changes and blockers start empty for the new attempt.
+   */
+  const rotateWorkerStore = () => {
+    const carriedHandoff = workerStore.getHandoff();
+    workerStore.close();
+    const fresh = new WorkerResultStore();
+    if (carriedHandoff != null) {
+      const carried = fresh.setHandoff({ notes: carriedHandoff });
+      if (!carried.ok) log(`worker result: handoff carry failed: ${carried.error}`);
+    }
+    workerStore = fresh;
+    workerServer.setStore(fresh);
+  };
   let implementResult: ImplementResult | FollowUpResult | ConflictResult;
   try {
     implementResult = await runClaimedLoop(
@@ -1582,6 +1599,7 @@ export async function implementIssue(
           extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
         ): Promise<ImplementResult | undefined> => {
           throwIfAborted(opts.abortSignal);
+          rotateWorkerStore();
           if (!extra?.continueSession) await restoreHandoffForFreshRun();
           log(label);
           const runOpts: EngineRunOptions = {
@@ -1896,6 +1914,28 @@ export async function implementIssue(
           snapshot = gate.snapshot;
 
           throwIfAborted(opts.abortSignal);
+          // The continuation runs in its own result scope. A valid blocker
+          // from that attempt is validated and handled with the same logic
+          // as a first-attempt blocker before any publication; an invalid
+          // one is rejected the same way. When no continuation ran this
+          // re-reads the already-handled scope and is a no-op.
+          const continuedYield = await handleYield(false);
+          if (continuedYield === "retry") {
+            log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
+            await resetAfterRejectedYield();
+            const quotaContinuedRetry = await runEngine(
+              `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+              "implement",
+              rejectedBasePrompt()
+            );
+            if (quotaContinuedRetry) return quotaContinuedRetry;
+            const secondContinuedYield = await handleYield(true);
+            if (secondContinuedYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+            if (secondContinuedYield !== "continue") return secondContinuedYield;
+          } else if (continuedYield !== "continue") {
+            return continuedYield;
+          }
+
           prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
           const validatedSkip = await resolveWorkerSkip(workerStore, worktree, log);
           await saveWorkerHandoff(
