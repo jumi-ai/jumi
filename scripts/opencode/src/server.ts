@@ -57,6 +57,7 @@ import {
   skipReasonForPR,
 } from "./review.ts";
 import { enqueueReviewWithCiGate } from "./review_gate.ts";
+import { clearPendingHandover, recordPendingHandover, resumePendingHandoffs } from "./review_handover_pending.ts";
 import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
@@ -667,6 +668,7 @@ export async function reclaimExpiredJobs(
   config: ServiceConfig,
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
+  await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);
@@ -769,6 +771,7 @@ async function handoverFollowUp(
       logger,
     });
     if (result?.queued) logger(`handover follow-up ${result.key}`);
+    await clearPendingHandover(store, row.id);
   } catch (err) {
     logger(`handover failed ${row.jobKey}: ${errorMessage(err)}`);
   }
@@ -783,11 +786,20 @@ async function publishAndCompleteJob(
 ): Promise<ReviewResult> {
   const result = await publishPersistedJob(api, config, row, logger, store);
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
+  try {
+    await recordPendingHandover(store, row.id, result.status);
+  } catch (err) {
+    logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
+  }
   const failed = Boolean(row.error) && !row.resultMarkdown;
-  await store.markPublished(row.id, row.leasedBy, {
+  const outcome = await store.markPublished(row.id, row.leasedBy, {
     state: failed ? "failed" : publishedState(result),
     reason: result.reason,
   });
+  if (outcome.cancelled) {
+    await clearPendingHandover(store, row.id).catch(() => undefined);
+    return result;
+  }
   await handoverFollowUp(store, api, config, row, result, logger);
   return result;
 }
@@ -926,6 +938,7 @@ export async function processEngineTick(
     logger("quota cooldown");
     return "idle";
   }
+  await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   const row = await store.lease(leasedBy, config.leaseMs, new Date(nowMs), [REVIEW_KIND]);
   if (!row) return "idle";
   if (extras.abortSignal?.aborted) {
@@ -1089,6 +1102,11 @@ export async function processEngineTick(
     }
     stopHeartbeat();
     const state = publishedState(result);
+    try {
+      await recordPendingHandover(store, row.id, result.status);
+    } catch (err) {
+      logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
+    }
     await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
     recordJobCompleted(row.kind, state);
     if (result.status === "skipped" && result.reason === CI_PENDING_REASON) {
