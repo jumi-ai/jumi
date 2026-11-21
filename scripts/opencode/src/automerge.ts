@@ -424,6 +424,39 @@ function unrestoredGateUnreadableNote(): string {
   );
 }
 
+/**
+ * Shared required-check gate: whether a branch requires Jumi's review check.
+ * Returns `"open"` when the branch requires the check, `"closed"` when it
+ * does not, and `"unreadable"` when the branch cannot be read. Both the
+ * schedule gate and the restore re-arm read through here so the predicate
+ * has one edit site; callers map the outcome onto their own note wording
+ * ("did not schedule" vs "did not restore").
+ */
+type ReviewGateState = "open" | "closed" | "unreadable";
+
+async function readReviewGate(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  branch: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<ReviewGateState> {
+  try {
+    const getBranch = api.getBranch;
+    if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
+    const fetched = await getBranch.call(api, owner, repo, branch);
+    if (!branchRequiresReviewCheck(fetched)) {
+      log(`automerge gate closed for ${owner}/${repo}#${prNumber}: review check not required`);
+      return "closed";
+    }
+    return "open";
+  } catch (err) {
+    log(`automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return "unreadable";
+  }
+}
+
 function labelNameOf(label: string | { name?: string }): string {
   return typeof label === "string" ? label : (label.name ?? "");
 }
@@ -1171,23 +1204,16 @@ async function checkAutomergeGates(
   settings: RepoSettingsLoad
 ): Promise<{ ok: true; mergeMethod: string } | { ok: false; note: string }> {
   void botUsername;
-  let gateOk = false;
-  try {
-    const getBranch = api.getBranch;
-    if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
-    const branch = await getBranch.call(api, owner, repo, baseBranch);
-    gateOk = branchRequiresReviewCheck(branch);
-    if (!gateOk) {
-      log(`automerge gate closed for ${owner}/${repo}#${prNumber}: review check not required`);
-      return {
-        ok: false,
-        note:
-          `Jumi did not schedule auto-merge on this pull request: the base branch \`${baseBranch}\` does not require the ` +
-          `\`${JUMI_REVIEW_CONTEXT}\` check. A person needs to merge once reviews and CI are green.`,
-      };
-    }
-  } catch (err) {
-    log(`automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+  const gateState = await readReviewGate(api, owner, repo, baseBranch, prNumber, log);
+  if (gateState === "closed") {
+    return {
+      ok: false,
+      note:
+        `Jumi did not schedule auto-merge on this pull request: the base branch \`${baseBranch}\` does not require the ` +
+        `\`${JUMI_REVIEW_CONTEXT}\` check. A person needs to merge once reviews and CI are green.`,
+    };
+  }
+  if (gateState === "unreadable") {
     return {
       ok: false,
       note: `Jumi did not schedule auto-merge on this pull request: the base branch requirements could not be read. A person needs to merge once reviews and CI are green.`,
@@ -1689,24 +1715,19 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
       );
       return;
     }
-    try {
-      const getBranch = noteApi.getBranch;
-      if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
-      const branch = await getBranch.call(noteApi, input.owner, input.repo, gateBranch);
-      if (!branchRequiresReviewCheck(branch)) {
-        log(`automerge gate closed for ${input.owner}/${input.repo}#${input.prNumber}: review check not required`);
-        await postAutomergeNote(
-          noteApi,
-          input.owner,
-          input.repo,
-          input.prNumber,
-          input.botUsername,
-          unrestoredGateClosedNote(gateBranch)
-        );
-        return;
-      }
-    } catch (err) {
-      log(`automerge gate unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
+    const gateState = await readReviewGate(noteApi, input.owner, input.repo, gateBranch, input.prNumber, log);
+    if (gateState === "closed") {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        unrestoredGateClosedNote(gateBranch)
+      );
+      return;
+    }
+    if (gateState === "unreadable") {
       await postAutomergeNote(
         noteApi,
         input.owner,
