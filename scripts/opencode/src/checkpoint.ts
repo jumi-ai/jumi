@@ -306,6 +306,7 @@ export async function restoreCheckpoint(
     } catch {
       haveLocalSha = false;
     }
+    if (!haveLocalSha) return { restored: false, reason: "unknown local branch" };
   }
   if (localExists && haveLocalSha) {
     if (localSha === checkpointSha) return { restored: false, reason: "already current" };

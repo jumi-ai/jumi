@@ -233,7 +233,7 @@ describe("restoreCheckpoint", () => {
   test("diverged checkpoint is ignored with a log line", async () => {
     const logs: string[] = [];
     const loop = makeLoop({
-      refExists: async () => true,
+      refExists: async (ref) => ref !== "refs/heads/jumi/issue-12-x",
       git: async (args) => {
         if (args[0] === "fetch") return "";
         if (args[0] === "rev-parse") {
@@ -266,7 +266,7 @@ describe("restoreCheckpoint", () => {
   test("origin ahead of the checkpoint is ignored", async () => {
     const logs: string[] = [];
     const loop = makeLoop({
-      refExists: async () => true,
+      refExists: async (ref) => ref !== "refs/heads/jumi/issue-12-x",
       git: async (args) => {
         if (args[0] === "fetch") return "";
         if (args[0] === "rev-parse") {
@@ -293,6 +293,36 @@ describe("restoreCheckpoint", () => {
     });
     expect(result.restored).toBe(false);
     expect(result.reason).toMatch(/ahead/);
+  });
+
+  test("unreadable local tip fails closed without staging", async () => {
+    const staged: string[][] = [];
+    const loop = makeLoop({
+      refExists: async () => true,
+      git: async (args) => {
+        if (args[0] === "fetch") return "";
+        if (args[0] === "rev-parse") {
+          const ref = args[1] as string;
+          if (ref === "refs/heads/jumi/issue-12-x") throw new Error("cannot read local ref");
+          if (ref === "refs/jumi/wip/12") return "ccc";
+          if (ref === "origin/main") return "bbb";
+          return "";
+        }
+        if (args[0] === "merge-base") {
+          if (args[2] === "bbb" && args[3] === "ccc") return "";
+          throw new Error("not ancestor");
+        }
+        if (args[0] === "update-ref") staged.push(args);
+        return "";
+      },
+    });
+    const result = await restoreCheckpoint(loop, "refs/jumi/wip/12", {
+      branch: "jumi/issue-12-x",
+      defaultBranch: "main",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ restored: false, reason: "unknown local branch" });
+    expect(staged).toHaveLength(0);
   });
 });
 
