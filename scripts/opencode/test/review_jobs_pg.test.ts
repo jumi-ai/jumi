@@ -1064,7 +1064,7 @@ describePg("PgReviewJobStore against real postgres", () => {
     // ("cached plan must not change result type"). Reconnect so later tests
     // start with fresh plans.
     await sql.close?.();
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
   });
 
