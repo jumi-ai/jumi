@@ -1666,9 +1666,14 @@ export async function loadEffectiveBlockingQuestionAuthors(
  * set, the effective list is the intersection: a repository can narrow it,
  * never widen it. When the deployment leaves it unset, the repository list
  * is the list (listing is the admit, same as the env list today). Neither
- * set means no list (write-access fallback). Invalid, missing, or unreadable
- * files fall back to the deployment list, so an invalid file never widens
- * access. Matching stays case-insensitive whole-login at the check site.
+ * set means no list (`undefined`, write-access fallback). Combining two
+ * otherwise valid policies can yield an explicitly empty effective list
+ * (`[]`, no eligible senders): the deployment ceiling stays authoritative
+ * and the empty list denies everyone without a forge lookup. Invalid,
+ * missing, or unreadable files fall back to the deployment list, so an
+ * invalid file never widens access. Blank deployment entries are ignored
+ * (blank-only counts as unset). Matching stays case-insensitive whole-login
+ * at the check site.
  */
 export function effectiveTrustedSenderLogins(
   deployerLogins: readonly string[] | undefined | null,

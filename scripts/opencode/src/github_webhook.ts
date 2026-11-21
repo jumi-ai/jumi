@@ -255,7 +255,11 @@ export async function effectiveGithubPolicyForRepo(
   log?: (message: string) => void
 ): Promise<GithubWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
-  if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
+  if (!api || typeof api.getRepoFile !== "function" || !branch) {
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
+  }
   const policy = await resolveRepoPolicy(
     { api, owner, repo, ref: branch },
     {
@@ -270,11 +274,15 @@ export async function effectiveGithubPolicyForRepo(
   );
   if (policy.status === "invalid") {
     log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
   }
   if (policy.status === "unreadable") {
     log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
   }
   // Missing still sets the pickup label (`jumi`) and `isPickedUp`, unlike
   // the worker webhook which returns `basePolicy` unchanged.
