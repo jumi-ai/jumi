@@ -154,7 +154,7 @@ import {
   parseReviewOutput,
   trailerSuggestionCount,
 } from "./verdict.ts";
-import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -915,16 +915,16 @@ export async function collectFollowUpItems(
   findingOpts: ReviewFindingMatchOpts = {},
   trustedSenderLogins?: readonly string[] | null
 ): Promise<FollowUpItems> {
-  const [rawComments, rawReviews, rawInlines] = await Promise.all([
+  const [rawComments, rawReviews] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
-    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): InlineComment[] => {
-      // Forge clients throw `… → 404: …`. Anything else fails the collection.
-      if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
-      logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
-      return [];
-    }),
   ]);
+  const rawInlines = await api.listPullReviewComments(owner, repo, prNumber, rawReviews).catch((err: unknown) => {
+    // Forge clients throw `… → 404: …`. Anything else fails the collection.
+    if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
+    logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
+    return [] as InlineComment[];
+  });
   const jumiInlinesAll = rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername));
   const candidateComments = rawComments.filter((comment) =>
     isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts, jumiInlinesAll)
@@ -2295,7 +2295,7 @@ export async function implementFollowUp(
   // Parent-owned worker MCP server for the follow-up spawns. The model
   // records `no_changes` through the tool; the parent posts from this
   // in-memory state and fails open when the model never calls it.
-  const workerStore = new WorkerResultStore();
+  let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({ store: workerStore });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let followUpResult: FollowUpResult;
@@ -2616,6 +2616,7 @@ export async function implementFollowUp(
           extra?: { continueSession?: boolean }
         ): Promise<{ status: "skipped"; reason: string } | undefined> => {
           throwIfAborted(opts.abortSignal);
+          workerStore = rotateResultScope(log, workerStore, workerServer);
           log(label);
           const runOpts: EngineRunOptions = {
             model: opts.model,

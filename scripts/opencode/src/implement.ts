@@ -113,7 +113,7 @@ import {
 } from "./tracker.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
-import { preferWorkerTool, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { preferWorkerTool, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import {
   type GitAuthResolver,
   type GitRunner,
@@ -1438,7 +1438,7 @@ export async function implementIssue(
     upsertWorkerComment(opts.api, owner, repo, issueNumber, opts.botUsername, appendRunnerStamp(body, runner));
 
   const checkpoint = checkpointTickerForRun(opts, branch, opts.job.defaultBranch, log);
-  const workerStore = new WorkerResultStore();
+  let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({ store: workerStore });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let implementResult: ImplementResult | FollowUpResult | ConflictResult;
@@ -1582,6 +1582,7 @@ export async function implementIssue(
           extra?: { continueSession?: boolean; hopFromIncomplete?: boolean }
         ): Promise<ImplementResult | undefined> => {
           throwIfAborted(opts.abortSignal);
+          workerStore = rotateResultScope(log, workerStore, workerServer);
           if (!extra?.continueSession) await restoreHandoffForFreshRun();
           log(label);
           const runOpts: EngineRunOptions = {
@@ -1806,6 +1807,29 @@ export async function implementIssue(
           customConventions
             ? withPrConventions(buildBlockedByRejectedPrompt(firstRunnerType), conventions, issueNumber)
             : buildBlockedByRejectedPrompt(firstRunnerType);
+        // Shared by the first attempt and the post-gate continuation: a valid
+        // blocker is handled before publication, an invalid one gets one
+        // rejected-prompt retry, then the stuck outcome. Returns the terminal
+        // result, or undefined to continue toward publication.
+        const drainYieldWithRetry = async (): Promise<ImplementResult | undefined> => {
+          const first = await handleYield(false);
+          if (first === "retry") {
+            log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
+            await resetAfterRejectedYield();
+            const quotaRetry = await runEngine(
+              `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
+              "implement",
+              rejectedBasePrompt()
+            );
+            if (quotaRetry) return quotaRetry;
+            const second = await handleYield(true);
+            if (second === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
+            if (second !== "continue") return second;
+            return undefined;
+          }
+          if (first !== "continue") return first;
+          return undefined;
+        };
         for (;;) {
           const quotaSkip = await runEngine(
             incompleteHopped
@@ -1821,22 +1845,8 @@ export async function implementIssue(
           // issue edit and continue a session this worktree no longer has.
           if (hopDeclined) return skipIncomplete();
 
-          const firstYield = await handleYield(false);
-          if (firstYield === "retry") {
-            log(`blocked-by rejected, implement ${owner}/${repo}#${issueNumber}`);
-            await resetAfterRejectedYield();
-            const quotaRetry = await runEngine(
-              `Re-running OpenCode after blocked-by rejected for ${owner}/${repo}#${issueNumber}`,
-              "implement",
-              rejectedBasePrompt()
-            );
-            if (quotaRetry) return quotaRetry;
-            const secondYield = await handleYield(true);
-            if (secondYield === "retry") return skipBlocked(BLOCKED_BY_REJECTED_STUCK);
-            if (secondYield !== "continue") return secondYield;
-          } else if (firstYield !== "continue") {
-            return firstYield;
-          }
+          const firstYieldResult = await drainYieldWithRetry();
+          if (firstYieldResult) return firstYieldResult;
 
           let gate: ShipGate;
           try {
@@ -1896,6 +1906,14 @@ export async function implementIssue(
           snapshot = gate.snapshot;
 
           throwIfAborted(opts.abortSignal);
+          // The continuation runs in its own result scope. A valid blocker
+          // from that attempt is validated and handled with the same logic
+          // as a first-attempt blocker before any publication; an invalid
+          // one is rejected the same way. When no continuation ran this
+          // re-reads the already-handled scope and is a no-op.
+          const continuedYieldResult = await drainYieldWithRetry();
+          if (continuedYieldResult) return continuedYieldResult;
+
           prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
           const validatedSkip = await resolveWorkerSkip(workerStore, worktree, log);
           await saveWorkerHandoff(

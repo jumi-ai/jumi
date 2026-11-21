@@ -145,6 +145,7 @@ export class EngineFailedError extends Error {
   readonly auth: boolean;
   readonly quota?: QuotaClass;
   readonly retryAfterMs?: number;
+  readonly quotaResetAtMs?: number;
   /** The runner whose spawn failed; set by the engine chain or `throwIfEngineFailed`. */
   runner?: RunnerStamp;
   /** Position of `runner` in the engine chain. Model text is not unique. */
@@ -157,13 +158,18 @@ export class EngineFailedError extends Error {
    */
   contributors?: RunnerStamp[];
 
-  constructor(message: string, infra = false, extras?: { quota?: QuotaClass; retryAfterMs?: number; auth?: boolean }) {
+  constructor(
+    message: string,
+    infra = false,
+    extras?: { quota?: QuotaClass; retryAfterMs?: number; quotaResetAtMs?: number; auth?: boolean }
+  ) {
     super(message);
     this.name = "EngineFailedError";
     this.auth = extras?.auth === true;
     this.infra = this.auth ? false : infra;
     if (extras?.quota) this.quota = extras.quota;
     if (extras?.retryAfterMs != null) this.retryAfterMs = extras.retryAfterMs;
+    if (extras?.quotaResetAtMs != null) this.quotaResetAtMs = extras.quotaResetAtMs;
   }
 }
 
@@ -180,6 +186,7 @@ export function throwIfEngineFailed(result: EngineResult): void {
   const err = new EngineFailedError(result.message ?? `engine ${result.status}`, result.infra === true, {
     quota: result.quota,
     retryAfterMs: result.retryAfterMs,
+    quotaResetAtMs: result.quotaResetAtMs,
     auth: result.auth === true,
   });
   if (result.runner) err.runner = result.runner;
