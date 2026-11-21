@@ -147,7 +147,12 @@ describe("MemoryReviewJobStore", () => {
     await store.enqueue(job);
     const leased = await store.lease("engine-1", 60_000);
     await store.markPublished(leased!.id, "engine-1", { state: "skipped", reason: "PR is closed" });
-    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    // A new delivery (reopen webhook) stays eligible; the same delivery would
+    // dedupe as an already-settled per-effect retry.
+    expect(await store.enqueue({ ...job, delivery: "d-reopen" })).toEqual({
+      key: "kirmanak/demo#7:headsha",
+      queued: true,
+    });
     expect(store.rows.filter((row) => row.jobKey === "kirmanak/demo#7:headsha" && row.state === "queued")).toHaveLength(
       1
     );
@@ -156,7 +161,10 @@ describe("MemoryReviewJobStore", () => {
     await store.enqueue(merged);
     const leasedMerged = await store.lease("engine-1", 60_000);
     await store.markPublished(leasedMerged!.id, "engine-1", { state: "skipped", reason: "PR is already merged" });
-    expect(await store.enqueue(merged)).toEqual({ key: "kirmanak/demo#7:mergedsha", queued: true });
+    expect(await store.enqueue({ ...merged, delivery: "d-reopen-merged" })).toEqual({
+      key: "kirmanak/demo#7:mergedsha",
+      queued: true,
+    });
   });
 
   test("failed SHA may be retried", async () => {
@@ -165,7 +173,11 @@ describe("MemoryReviewJobStore", () => {
     await store.enqueue(job);
     const leased = await store.lease("engine-1", 60_000);
     await store.markPublished(leased!.id, "engine-1", { state: "failed", reason: "boom" });
-    expect(await store.enqueue(job)).toEqual({ key: "kirmanak/demo#7:headsha", queued: true });
+    // A new delivery stays eligible; same-delivery retries dedupe per effect.
+    expect(await store.enqueue({ ...job, delivery: "d-retry" })).toEqual({
+      key: "kirmanak/demo#7:headsha",
+      queued: true,
+    });
   });
 
   test("new SHA cancels queued predecessor for the same PR, not a leased one", async () => {
@@ -656,6 +668,121 @@ describe("MemoryReviewJobStore", () => {
     expect(second?.payload?.generation).toBe(1);
     await store.markPublished(second!.id, second!.leasedBy!, { state: "succeeded" });
     expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(1);
+  });
+
+  test("retried delivery repeats only effects that did not settle", async () => {
+    const store = new MemoryReviewJobStore();
+    const delivery = "ci-delivery-1";
+    const jobA = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 81,
+      prNumber: 102,
+      headSha: "sha-a",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 11 },
+    });
+    const jobB = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 82,
+      prNumber: 103,
+      headSha: "sha-b",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 12 },
+    });
+    // First delivery attempt: A settles, B fails before it enqueues.
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: expect.any(String), queued: true });
+    const leasedA = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leasedA?.prNumber).toBe(102);
+    await store.markPublished(leasedA!.id, leasedA!.leasedBy!, { state: "succeeded" });
+    expect(leasedA?.state).toBe("leased");
+    // Retry of the same delivery: A is already settled for this delivery so it
+    // dedupes even though its queue key is no longer in flight; B runs.
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: expect.any(String), queued: false });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: expect.any(String), queued: true });
+    expect(store.rows.filter((row) => row.delivery === delivery)).toHaveLength(2);
+  });
+
+  test("a new delivery for the same PR stays eligible after the prior settled", async () => {
+    const store = new MemoryReviewJobStore();
+    const jobA = makeIssueJob({
+      delivery: "ci-delivery-1",
+      mode: "follow-up",
+      issueNumber: 81,
+      prNumber: 102,
+      headSha: "sha-a",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 11 },
+    });
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: expect.any(String), queued: true });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    // Same effect key but a different delivery is not suppressed.
+    expect(await store.enqueueIssue({ ...jobA, delivery: "ci-delivery-2" })).toEqual({
+      key: expect.any(String),
+      queued: true,
+    });
+  });
+});
+
+describe("MemoryReviewJobStore.forceExpireLease guard", () => {
+  test("stale observation leaves the replacement lease untouched", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const first = await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    expect(first.leased).toBe(true);
+    const observed = await store.get(1);
+    const stale = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    // Replacement attempt acquires the row between observation and write.
+    expect(await store.forceExpireLease(1, stale, new Date(2_000))).toBe(true);
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    const second = await store.leaseJobById(1, "pod-2", 60_000, new Date(3_000));
+    expect(second.leased).toBe(true);
+    // Stale write reports no update; the replacement lease is unchanged.
+    expect(await store.forceExpireLease(1, stale, new Date(4_000))).toBe(false);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.attempt).toBe(1);
+    expect(row?.leasedBy).toBe("pod-2");
+    expect(row?.leasedUntil).toBe(3_000 + 60_000);
+  });
+
+  test("unchanged leased observation expires immediately", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    const observed = await store.get(1);
+    const expected = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.leasedBy).toBeNull();
+    expect(row?.leasedUntil).toBeLessThan(2_000);
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    expect(reclaimed.requeued[0].attempt).toBe(1);
+  });
+
+  test("queued row leased by the dispatcher expires with the fresh observation", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.leaseJobById(1, "dispatch-worker", 60_000, new Date(1_000));
+    expect(leased.leased).toBe(true);
+    const observed = leased.leased ? leased.row : await store.get(1).then((r) => r!);
+    const expected = {
+      generation: observed.payload?.generation ?? 0,
+      attempt: observed.attempt,
+      leasedBy: observed.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    expect((await store.get(1))?.leasedBy).toBeNull();
   });
 });
 

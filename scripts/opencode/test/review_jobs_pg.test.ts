@@ -371,7 +371,9 @@ describePg("PgReviewJobStore against real postgres", () => {
     const leased = await store.lease("engine-1", 60_000);
     await store.markPublished(leased!.id, "engine-1", { state: "failed", reason: "boom" });
 
-    expect(await store.enqueue(job)).toEqual({ key, queued: true });
+    // A new delivery stays eligible; the same delivery would dedupe per effect
+    // (see the retried-delivery test below).
+    expect(await store.enqueue(makeJob({ delivery: "delivery-2" }))).toEqual({ key, queued: true });
     expect(await countJobs(`job_key = $1`, [key])).toBe(2);
     expect(await countJobs(`job_key = $1 AND state IN ('queued', 'leased')`, [key])).toBe(1);
   });
@@ -1038,6 +1040,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   test("concurrent migrators do not conflict and job-mode checks instead of migrating", async () => {
     await Promise.all([store.migrate(), store.migrate(), store.migrate(), store.migrate(), store.migrate()]);
     expect(await indexExists("review_jobs_leased_worker_issue")).toBe(true);
+    expect(await indexExists("review_jobs_delivery_job_key")).toBe(true);
 
     // A migrated schema passes the job-mode check and opens without migrating.
     await assertLedgerSchema(sql);
@@ -1059,6 +1062,100 @@ describePg("PgReviewJobStore against real postgres", () => {
     // Restore the column for the next test; beforeEach re-migrates anyway.
     await store.migrate();
     await assertLedgerSchema(sql);
+    // The DROP/ADD COLUMN above changes the row type of `SELECT *`, which
+    // invalidates prepared statements cached on this pooled connection
+    // ("cached plan must not change result type"). Reconnect so later tests
+    // start with fresh plans.
+    await sql.close?.();
+    sql = openTestSqlClient(pgDatabaseUrl);
+    store = new PgReviewJobStore(sql);
+  });
+
+  test("forceExpireLease ignores a row that moved to a new attempt/owner", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const first = await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    expect(first.leased).toBe(true);
+    const observed = await store.get(1);
+    const stale = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    // Replacement attempt acquires the row between observation and write.
+    expect(await store.forceExpireLease(1, stale, new Date(2_000))).toBe(true);
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    const second = await store.leaseJobById(1, "pod-2", 60_000, new Date(3_000));
+    expect(second.leased).toBe(true);
+    // Stale write reports no update; the replacement lease is unchanged.
+    expect(await store.forceExpireLease(1, stale, new Date(4_000))).toBe(false);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.attempt).toBe(1);
+    expect(row?.leasedBy).toBe("pod-2");
+  });
+
+  test("forceExpireLease expires an unchanged leased observation", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    await store.leaseJobById(1, "pod-1", 60_000, new Date(1_000));
+    const observed = await store.get(1);
+    const expected = {
+      generation: observed!.payload?.generation ?? 0,
+      attempt: observed!.attempt,
+      leasedBy: observed!.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    const row = await store.get(1);
+    expect(row?.state).toBe("leased");
+    expect(row?.leasedBy).toBeNull();
+    const reclaimed = await store.reclaimExpired(5, new Date(2_001), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    expect(reclaimed.requeued[0].attempt).toBe(1);
+  });
+
+  test("forceExpireLease expires a queued row freshly leased by the dispatcher", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.leaseJobById(1, "dispatch-worker", 60_000, new Date(1_000));
+    expect(leased.leased).toBe(true);
+    const observed = leased.leased ? leased.row : (await store.get(1))!;
+    const expected = {
+      generation: observed.payload?.generation ?? 0,
+      attempt: observed.attempt,
+      leasedBy: observed.leasedBy,
+    };
+    expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
+    expect((await store.get(1))?.leasedBy).toBeNull();
+  });
+
+  test("retried delivery repeats only effects that did not settle", async () => {
+    const delivery = "ci-delivery-1";
+    const jobA = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 81,
+      prNumber: 102,
+      headSha: "sha-a",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 11 },
+    });
+    const jobB = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 82,
+      prNumber: 103,
+      headSha: "sha-b",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 12 },
+    });
+    expect((await store.enqueueIssue(jobA)).queued).toBe(true);
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.prNumber).toBe(102);
+    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    // Same delivery + same effect is settled even though the key is no longer
+    // in flight; the sibling with the same delivery still enqueues.
+    expect((await store.enqueueIssue(jobA)).queued).toBe(false);
+    expect((await store.enqueueIssue(jobB)).queued).toBe(true);
+    expect(await countJobs(`delivery = 'ci-delivery-1'`)).toBe(2);
+    // A new delivery for the same PR stays eligible.
+    expect((await store.enqueueIssue({ ...jobA, delivery: "ci-delivery-2" })).queued).toBe(true);
   });
 
   test("job-mode schema check covers the review handover pending table", async () => {

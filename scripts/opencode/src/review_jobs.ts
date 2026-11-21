@@ -157,6 +157,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface ForceExpireLeaseExpected {
+  generation: number;
+  attempt: number;
+  leasedBy: string | null;
+}
+
 export interface PeekRunnableExclude {
   id: number;
   generation: number;
@@ -193,11 +199,13 @@ export interface ReviewJobStore {
   expireLease(id: number, leasedBy: string, now?: Date, failedRunner?: string | null): Promise<boolean>;
   /**
    * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
-   * expired regardless of who holds it, so the next reclaim moves it within
-   * seconds instead of waiting for `LEASE_MS`. State, attempt, and error are
+   * expired when it still matches what the dispatcher observed (generation,
+   * attempt, lease owner), so the next reclaim moves it within seconds
+   * instead of waiting for `LEASE_MS`. State, attempt, and error are
    * untouched; reclaim still counts the attempt and applies `MAX_JOB_ATTEMPTS`.
+   * A row that changed after observation is left untouched (`false`).
    */
-  forceExpireLease(id: number, now?: Date): Promise<boolean>;
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now?: Date): Promise<boolean>;
   /**
    * Dispatch peek with the same runnable conditions as `lease()` (not the
    * `queued` count, which includes backoff rows and same-issue-held rows):
@@ -738,6 +746,9 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   ON review_jobs (owner, repo, issue_number)
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS review_jobs_delivery_job_key
+  ON review_jobs (delivery, job_key);
 `;
 
 const REVIEW_KICKS_SCHEMA_SQL = `
@@ -1221,6 +1232,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         await this.sits.remember(job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
+      // Per-effect retry guard: a retried delivery repeats only effects that
+      // did not settle. A row with the same delivery and job key (any state)
+      // means this effect already enqueued. Checked after the in-flight path
+      // so wait-marker refreshes still run. A different delivery stays eligible.
+      if (job.delivery && this.rows.some((row) => row.jobKey === key && row.delivery === job.delivery)) {
+        return { key, queued: false };
+      }
       if (hasNewerInflight(this.rows, job, key)) {
         return { key, queued: false };
       }
@@ -1276,6 +1294,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
         await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
+        return { key, queued: false };
+      }
+      // Per-effect retry guard (see `enqueue`): same delivery + same job key
+      // in any state means this effect already settled; a new delivery stays
+      // eligible. Checked after the in-flight path.
+      if (job.delivery && sameKey.some((row) => row.delivery === job.delivery)) {
         return { key, queued: false };
       }
       if (kind === "implement" && sameKey.some((row) => isImplementTerminal(row, job))) {
@@ -1419,10 +1443,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased") return false;
+      if (row.attempt !== expected.attempt || row.leasedBy !== expected.leasedBy) return false;
+      if (payloadGeneration(row.payload) !== expected.generation) return false;
       const ts = now.getTime();
       row.leasedUntil = ts - 1;
       row.leasedBy = null;
@@ -3539,6 +3565,18 @@ export class PgReviewJobStore implements ReviewJobStore {
         await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
+      // Per-effect retry guard: same delivery + same job key in any state
+      // means this effect already settled. After the in-flight path so wait
+      // refreshes still run. A different delivery stays eligible.
+      if (job.delivery) {
+        const settled = asRows<{ one: unknown }>(
+          await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE delivery = $1 AND job_key = $2 LIMIT 1`, [
+            job.delivery,
+            key,
+          ])
+        );
+        if (settled.length > 0) return { key, queued: false };
+      }
       const incomingTs = jobPrUpdatedAtMs(job);
       if (
         incomingTs != null &&
@@ -3599,6 +3637,18 @@ export class PgReviewJobStore implements ReviewJobStore {
       if (inflight.length > 0) {
         await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
         return { key, queued: false };
+      }
+      // Per-effect retry guard: same delivery + same job key in any state
+      // means this effect already settled. After in-flight so queued rows
+      // still dedupe first. A different delivery stays eligible.
+      if (job.delivery) {
+        const settled = asRows<{ one: unknown }>(
+          await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE delivery = $1 AND job_key = $2 LIMIT 1`, [
+            job.delivery,
+            key,
+          ])
+        );
+        if (settled.length > 0) return { key, queued: false };
       }
 
       if (kind === "implement") {
@@ -3838,14 +3888,16 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async forceExpireLease(id: number, now = new Date()): Promise<boolean> {
+  async forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     const rows = asRows<{ id: unknown }>(
       await this.sql.unsafe(
         `UPDATE review_jobs
          SET leased_until = $2::timestamptz, leased_by = NULL, updated_at = NOW()
-         WHERE id = $1 AND state = 'leased'
+         WHERE id = $1 AND state = 'leased' AND attempt = $3
+           AND leased_by IS NOT DISTINCT FROM $4
+           AND (CASE WHEN payload->>'generation' ~ '^-?[0-9]+$' THEN (payload->>'generation')::integer ELSE 0 END) = $5
          RETURNING id`,
-        [id, new Date(now.getTime() - 1).toISOString()]
+        [id, new Date(now.getTime() - 1).toISOString(), expected.attempt, expected.leasedBy, expected.generation]
       )
     );
     return rows.length > 0;
