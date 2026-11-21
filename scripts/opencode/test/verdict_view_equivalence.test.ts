@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { ReviewVerdictStore } from "../src/review_verdict_store.ts";
-import { reviewVerdictView } from "../src/verdict.ts";
+import {
+  countSuggestionFindings,
+  parseReviewOutput,
+  reviewVerdictView,
+  trailerSuggestionCount,
+} from "../src/verdict.ts";
 
 // Fixed seed: deterministic, no clock/network/fs.
 const SEED = 0x594002;
@@ -108,7 +113,7 @@ const BLOCKING_LISTS: readonly (readonly string[] | null | undefined)[] = [
 ];
 
 describe("verdict view equivalence (seeded property)", () => {
-  test("record-backed view equals text-backed view on every field", () => {
+  test("record-backed view matches text except validated suggestion count wins", () => {
     const rng = mulberry32(SEED);
     let casesRun = 0;
     let maintainerPositive = 0;
@@ -172,12 +177,32 @@ describe("verdict view equivalence (seeded property)", () => {
       if (textView.state !== recordView.state) fail("state", textView.state, recordView.state);
       if (textView.description !== recordView.description)
         fail("description", textView.description, recordView.description);
-      if (textView.suggestionCount !== recordView.suggestionCount)
-        fail("suggestionCount", textView.suggestionCount, recordView.suggestionCount);
+      // With a usable record the validated count is authoritative: the
+      // trailer prose never inflates it. The text view keeps the legacy
+      // max-with-trailer behavior, so the two agree only when the trailer
+      // does not claim more than the record.
+      if (recordView.suggestionCount !== record.counts.suggestion)
+        fail("suggestionCount(record)", record.counts.suggestion, recordView.suggestionCount);
+      {
+        const parsed = parseReviewOutput(markdown);
+        const expectedText = Math.max(
+          countSuggestionFindings(parsed.comment),
+          trailerSuggestionCount(parsed.verdict.description)
+        );
+        if (textView.suggestionCount !== expectedText)
+          fail("suggestionCount(text)", expectedText, textView.suggestionCount);
+      }
       if (textView.maintainerQuestionCount !== recordView.maintainerQuestionCount)
         fail("maintainerQuestionCount", textView.maintainerQuestionCount, recordView.maintainerQuestionCount);
-      if (textView.isMaintainerOnly !== recordView.isMaintainerOnly)
-        fail("isMaintainerOnly", textView.isMaintainerOnly, recordView.isMaintainerOnly);
+      // isMaintainerOnly follows the view's own suggestion count, so it
+      // diverges exactly when the trailer lies. Only require agreement when
+      // the counts agree.
+      if (textView.suggestionCount === recordView.suggestionCount) {
+        if (textView.isMaintainerOnly !== recordView.isMaintainerOnly)
+          fail("isMaintainerOnly", textView.isMaintainerOnly, recordView.isMaintainerOnly);
+      } else if (record.counts.suggestion !== 0 && recordView.isMaintainerOnly) {
+        fail("isMaintainerOnly(record-positive)", false, true);
+      }
       const textBlocking = textView.blockingQuestionCount(prAuthor, blockingAuthors);
       const recordBlocking = recordView.blockingQuestionCount(prAuthor, blockingAuthors);
       if (textBlocking !== recordBlocking) fail("blockingQuestionCount", textBlocking, recordBlocking);

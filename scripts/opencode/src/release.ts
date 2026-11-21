@@ -33,7 +33,7 @@ const REGEX_PREFIX_RE = /^[(,=:[!&|?{};+\-*%^~<>]?$/;
 
 export type BumpKind = "major" | "minor" | "patch" | "initial";
 export type VersionDecision = BumpKind | "reuse";
-export type ImageName = "reviewer" | "worker" | "control";
+export type ImageName = "reviewer" | "worker" | "control" | "job";
 
 export interface SemVer {
   major: number;
@@ -77,6 +77,7 @@ export interface DeployContract {
   reviewer: ImageContract;
   worker: ImageContract;
   control: ImageContract;
+  job: ImageContract;
 }
 
 export interface ReleasePlan {
@@ -609,7 +610,7 @@ export function contractEnvIssues(
 
 export function parseContract(markdown: string): DeployContract {
   if (!markdown.trim()) {
-    return { reviewer: emptyImage(), worker: emptyImage(), control: emptyImage() };
+    return { reviewer: emptyImage(), worker: emptyImage(), control: emptyImage(), job: emptyImage() };
   }
   const reviewer = headingSection(markdown, 3, "reviewer");
   const worker = headingSection(markdown, 3, "worker");
@@ -617,10 +618,12 @@ export function parseContract(markdown: string): DeployContract {
     throw new Error("deploy/contract.md must contain ### reviewer and ### worker");
   }
   const controlSection = headingSection(markdown, 3, "control");
+  const jobSection = headingSection(markdown, 3, "job");
   return {
     reviewer: parseImage(reviewer),
     worker: parseImage(worker),
     control: controlSection ? parseImage(controlSection) : emptyImage(),
+    job: jobSection ? parseImage(jobSection) : emptyImage(),
   };
 }
 
@@ -706,14 +709,16 @@ export function classifyBump(previousMarkdown: string | null, currentMarkdown: s
   if (
     hasRequiredGitOpsChange(previous.reviewer, current.reviewer) ||
     hasRequiredGitOpsChange(previous.worker, current.worker) ||
-    hasRequiredGitOpsChange(previous.control, current.control)
+    hasRequiredGitOpsChange(previous.control, current.control) ||
+    hasRequiredGitOpsChange(previous.job, current.job)
   ) {
     return "major";
   }
   if (
     hasOptionalGitOpsChange(previous.reviewer, current.reviewer) ||
     hasOptionalGitOpsChange(previous.worker, current.worker) ||
-    hasOptionalGitOpsChange(previous.control, current.control)
+    hasOptionalGitOpsChange(previous.control, current.control) ||
+    hasOptionalGitOpsChange(previous.job, current.job)
   ) {
     return "minor";
   }
@@ -805,11 +810,13 @@ function formatGitOpsSection(previousMarkdown: string | null, currentMarkdown: s
   const reviewer = gitOpsBullets(previous.reviewer, current.reviewer);
   const worker = gitOpsBullets(previous.worker, current.worker);
   const control = gitOpsBullets(previous.control, current.control);
-  if (reviewer.length === 0 && worker.length === 0 && control.length === 0) return "none";
+  const job = gitOpsBullets(previous.job, current.job);
+  if (reviewer.length === 0 && worker.length === 0 && control.length === 0 && job.length === 0) return "none";
   const reviewerBlock = reviewer.length > 0 ? reviewer.join("\n") : "- none";
   const workerBlock = worker.length > 0 ? worker.join("\n") : "- none";
   const controlBlock = control.length > 0 ? control.join("\n") : "- none";
-  return `### reviewer\n${reviewerBlock}\n### worker\n${workerBlock}\n### control\n${controlBlock}`;
+  const jobBlock = job.length > 0 ? job.join("\n") : "- none";
+  return `### reviewer\n${reviewerBlock}\n### worker\n${workerBlock}\n### control\n${controlBlock}\n### job\n${jobBlock}`;
 }
 
 function formatBreakingSection(previousMarkdown: string | null, currentMarkdown: string): string {
@@ -820,7 +827,7 @@ function formatBreakingSection(previousMarkdown: string | null, currentMarkdown:
   }
   const previous = parseContract(previousMarkdown);
   const current = parseContract(currentMarkdown);
-  for (const image of ["reviewer", "worker", "control"] as const) {
+  for (const image of ["reviewer", "worker", "control", "job"] as const) {
     for (const field of removedRequiredFields(previous[image], current[image])) {
       bullets.push(`- ${image}: removed required ${field}`);
     }

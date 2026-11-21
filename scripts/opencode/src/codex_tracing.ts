@@ -79,6 +79,17 @@ function toolOutput(item: NonNullable<CodexTraceEvent["item"]>): string | undefi
   return jsonAttr(item.output);
 }
 
+/**
+ * Whether the parent should retain Codex trace events for this spawn. Trace
+ * export is off when there is no trace context or no OTLP endpoint: the
+ * parser then keeps result data only (verdict text, errors, thread id, usage)
+ * and retains no per-event records or item payloads.
+ */
+export function shouldCollectCodexTrace(trace: TraceContext | undefined): boolean {
+  if (!trace) return false;
+  return Boolean(process.env.PHOENIX_OTLP_ENDPOINT?.trim());
+}
+
 export function buildCodexSpans(
   events: readonly CodexTraceEvent[],
   trace: TraceContext | undefined,

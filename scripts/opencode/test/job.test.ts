@@ -12,6 +12,7 @@ import {
   refuseAgyJobMode,
   refuseXaiOAuth,
 } from "../src/job_requirements.ts";
+import { QUOTA_MESSAGE } from "../src/quota.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import { makeConfig, makeFile, makeIssue, makeIssueJob, makeJob, makeRepo, makeWorkerConfig } from "./fixtures.ts";
@@ -538,5 +539,124 @@ describe("one-shot job secrets file", () => {
     expect(output).not.toContain("bad config");
     expect(output).not.toContain("ENOENT");
     expect(result.status).toBe(1);
+  });
+});
+
+describe("one-shot runner cooldown persistence", () => {
+  test("quota on A persists after fallback success; next job skips A, expiry restores A, other runner/role isolated", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob({ prNumber: 201, delivery: "cool-1", headSha: "headsha" }));
+    await store.enqueue(makeJob({ prNumber: 202, delivery: "cool-2", headSha: "headsha" }));
+    await store.enqueue(makeJob({ prNumber: 203, delivery: "cool-3", headSha: "headsha" }));
+    const rows = await store.listInflight();
+    const idFor = (pr: number) => rows.find((r) => r.prNumber === pr)!.id;
+    await withWorkspace(async (workspace) => {
+      const engineConfig = makeConfig({
+        workdir: workspace,
+        home: workspace,
+        opencodeWellKnownUrl: "disabled",
+        runners: {
+          a: { type: "opencode", model: "openai/model-a" },
+          b: { type: "opencode", model: "anthropic/model-b" },
+        },
+        chain: ["a", "b"],
+        runnerSelection: "ordered",
+        runnerCooldown: { quotaMs: 60_000, quotaMaxMs: 60_000, creditMs: 60_000, authMs: 60_000 },
+      });
+      const workerConfig = makeWorkerConfig({ opencodeWellKnownUrl: "disabled" });
+      let failA = true;
+      let calls: string[] = [];
+      const openCodeRunner = async (opts: { model?: string }) => {
+        calls.push(opts.model ?? "");
+        if (failA && opts.model === "openai/model-a") {
+          return { status: "stuck" as const, message: QUOTA_MESSAGE, quota: "resetting" as const };
+        }
+        return { status: "ok" as const, exitCode: 0, stdout: "done" };
+      };
+      const extrasFor = () => ({
+        gitRunner: frozenGitRunner() as never,
+        workspacePreparer: async () => undefined,
+        openCodeRunner: openCodeRunner as never,
+      });
+      // Job 1 records a quota cooldown for A and succeeds via B.
+      calls = [];
+      const first = await runOneShotJob({
+        store,
+        jobId: idFor(201),
+        engineConfig,
+        workerConfig,
+        api: jobReviewApi() as never,
+        engineExtras: extrasFor(),
+      });
+      expect(first.exitCode).toBe(0);
+      expect(calls[0]).toBe("openai/model-a");
+      expect(calls).toContain("anthropic/model-b");
+      const persisted = await store.listRunnerCooldowns("engine");
+      expect(persisted.some((r) => r.runner === "a" && r.untilMs > Date.now())).toBe(true);
+      expect(persisted.some((r) => r.runner === "b")).toBe(false);
+      expect(await store.listRunnerCooldowns("worker")).toEqual([]);
+      // Job 2 skips cooled A and uses B only.
+      calls = [];
+      const second = await runOneShotJob({
+        store,
+        jobId: idFor(202),
+        engineConfig,
+        workerConfig,
+        api: jobReviewApi() as never,
+        engineExtras: extrasFor(),
+      });
+      expect(second.exitCode).toBe(0);
+      expect(calls.length).toBeGreaterThan(0);
+      expect(calls.every((m) => m === "anthropic/model-b")).toBe(true);
+      // Expire A's entry (ledger prune on next hydrate clears it).
+      await store.clearRunnerCooldown("engine", "a");
+      await store.recordRunnerCooldown("engine", "a", Date.now() - 1_000, "quota", "default", null);
+      // Job 3 uses A again after expiry.
+      failA = false;
+      calls = [];
+      const third = await runOneShotJob({
+        store,
+        jobId: idFor(203),
+        engineConfig,
+        workerConfig,
+        api: jobReviewApi() as never,
+        engineExtras: extrasFor(),
+      });
+      expect(third.exitCode).toBe(0);
+      expect(calls).toContain("openai/model-a");
+    });
+  });
+
+  test("a persistence error does not fail the Job", async () => {
+    const base = new MemoryReviewJobStore();
+    await base.enqueue(makeJob({ prNumber: 204, delivery: "cool-err", headSha: "headsha" }));
+    const rows = await base.listInflight();
+    const jobId = rows.find((r) => r.prNumber === 204)!.id;
+    const failing = new Proxy(base, {
+      get(target, prop, receiver) {
+        if (prop === "recordRunnerCooldown" || prop === "clearRunnerCooldown") {
+          return async () => {
+            throw new Error("ledger write down");
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as unknown as MemoryReviewJobStore;
+    await withWorkspace(async (workspace) => {
+      const result = await runOneShotJob({
+        store: failing,
+        jobId,
+        engineConfig: makeConfig({ workdir: workspace, home: workspace, opencodeWellKnownUrl: "disabled" }),
+        workerConfig: makeWorkerConfig({ opencodeWellKnownUrl: "disabled" }),
+        api: jobReviewApi() as never,
+        engineExtras: {
+          gitRunner: frozenGitRunner() as never,
+          workspacePreparer: async () => undefined,
+          openCodeRunner: (async () => ({ status: "ok" as const, exitCode: 0, stdout: "done" })) as never,
+        },
+      });
+      expect(result.exitCode).toBe(0);
+    });
   });
 });
