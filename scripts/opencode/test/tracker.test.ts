@@ -695,6 +695,8 @@ describe("implement and review take tracker and forge separately", () => {
           return { status: "ok" };
         },
         inspectOtherChecks: false,
+        // File-artifact path: the stubbed runner never wires the structured adapter.
+        verdictContract: "legacy",
         logger: () => undefined,
       });
       expect(result.status).toBe("posted");

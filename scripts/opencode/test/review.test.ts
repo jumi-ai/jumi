@@ -63,6 +63,9 @@ const skipOptions = {
   botUsername: "jumi",
   workspacePreparer: async () => undefined,
   logger: () => undefined,
+  // File-artifact path: these harnesses stub the runner without wiring the
+  // structured adapter, so they pin the legacy contract explicitly.
+  verdictContract: "legacy" as const,
 };
 
 async function writeReview(workspace: string, contents: string) {
