@@ -46,6 +46,65 @@ describe("MemoryReviewJobStore", () => {
     expect(await store.isCancelRequested(store.rows[0]?.id ?? 0)).toBe(false);
   });
 
+  test("reclaim settles a cancel-requested lease as cancelled instead of requeueing", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(
+      makeIssueJob({
+        issueNumber: 13,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13",
+        delivery: "d13",
+      })
+    );
+    const flagged = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
+    const plain = await store.lease("worker-2", 1, new Date(1_000), WORKER_JOB_KINDS);
+    expect(flagged?.issueNumber).toBe(12);
+    expect(plain?.issueNumber).toBe(13);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    expect(await store.isCancelRequested(flagged!.id)).toBe(true);
+    expect(await store.isCancelRequested(plain!.id)).toBe(false);
+
+    const result = await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+    expect(result.requeued.map((row) => row.id)).toEqual([plain!.id]);
+    expect(result.publish).toHaveLength(0);
+
+    const settled = await store.get(flagged!.id);
+    expect(settled?.state).toBe("cancelled");
+    expect(settled?.cancelRequested).toBe(false);
+    expect(settled?.leasedBy).toBeNull();
+    expect(settled?.attempt).toBe(0);
+
+    const requeued = await store.get(plain!.id);
+    expect(requeued?.state).toBe("queued");
+    expect(requeued?.attempt).toBe(1);
+
+    // Cancelled work is never requeued.
+    const again = await store.reclaimExpired(5, new Date(6_000), 1_000, WORKER_JOB_KINDS);
+    expect(again.requeued).toHaveLength(0);
+    expect(again.publish).toHaveLength(0);
+    expect((await store.get(flagged!.id))?.state).toBe("cancelled");
+  });
+
+  test("cancel leaves another issue's rows alone", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(
+      makeIssueJob({
+        issueNumber: 13,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13",
+        delivery: "d13",
+      })
+    );
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.issueNumber).toBe(12);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    const other = store.rows.find((row) => row.issueNumber === 13);
+    expect(other?.state).toBe("queued");
+    expect(other?.cancelRequested).toBe(false);
+    const second = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(second?.issueNumber).toBe(13);
+  });
+
   test("dedupes in-flight job_key", async () => {
     const store = new MemoryReviewJobStore();
     const job = makeJob();
@@ -1184,6 +1243,52 @@ describe("PgReviewJobStore kind ANY() bind", () => {
     expect(count?.query).toContain("payload->>'generation'");
     expect(count?.query).toContain("issue_skip_latches");
     expect(count?.params).toEqual(["follow-up", "kirmanak", "demo", 12]);
+  });
+});
+
+describe("PgReviewJobStore.cancelQueuedForIssue", () => {
+  test("cancels queued rows and flags leased rows in one state-aware statement", async () => {
+    const captured: { query: string; params?: unknown[] }[] = [];
+    const sql: FakeSql = {
+      async unsafe(query: string, params?: unknown[]) {
+        captured.push({ query, params });
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    // One ledger statement: a concurrent reclaim (leased -> queued) or lease
+    // (queued -> leased) cannot slip a row between two writes into a
+    // runnable state without the flag.
+    const ledger = captured.filter((row) => row.query.includes("UPDATE review_jobs"));
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.query).toContain("CASE WHEN state = 'queued' THEN 'cancelled'");
+    expect(ledger[0]?.query).toContain("cancel_requested = CASE WHEN state = 'leased' THEN TRUE");
+    expect(ledger[0]?.query).toContain("state IN ('queued', 'leased')");
+    expect(ledger[0]?.query).toContain("kind = ANY($4::text[])");
+    expect(ledger[0]?.params).toEqual(["kirmanak", "demo", 12, "{implement,follow-up,conflict}"]);
+  });
+
+  test("counts only rows that settled to cancelled", async () => {
+    const sql: FakeSql = {
+      async unsafe(query: string) {
+        if (query.includes("UPDATE review_jobs")) {
+          return [
+            { id: 1, state: "cancelled" },
+            { id: 2, state: "leased" },
+          ];
+        }
+        return [];
+      },
+      async begin<T>(fn: (tx: FakeSql) => Promise<T>) {
+        return fn(sql);
+      },
+    };
+    const store = new PgReviewJobStore(sql);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(1);
   });
 });
 

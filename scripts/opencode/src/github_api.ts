@@ -1275,7 +1275,12 @@ export class GithubAPI {
     return comments.map(toComment);
   }
 
-  async listPullReviewComments(owner: string, repo: string, index: number): Promise<InlineComment[]> {
+  async listPullReviewComments(
+    owner: string,
+    repo: string,
+    index: number,
+    _preFetchedReviews?: PullReview[]
+  ): Promise<InlineComment[]> {
     const comments = await this.getPages<GithubReviewComment>(
       `/repos/${this.repoPath(owner, repo)}/pulls/${index}/comments`
     );

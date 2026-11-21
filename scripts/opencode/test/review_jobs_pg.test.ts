@@ -903,6 +903,126 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(comments.some((body) => body.includes("max attempts exceeded"))).toBe(true);
   });
 
+  test("reclaim resolves a cancel-requested lease as cancelled instead of requeueing", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(
+      makeIssueJob({
+        issueNumber: 13,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13",
+        delivery: "d13",
+      })
+    );
+    const flagged = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
+    const plain = await store.lease("worker-2", 1, new Date(1_000), WORKER_JOB_KINDS);
+    expect(flagged?.issueNumber).toBe(12);
+    expect(plain?.issueNumber).toBe(13);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    expect(await store.isCancelRequested(flagged!.id)).toBe(true);
+    expect(await store.isCancelRequested(plain!.id)).toBe(false);
+
+    const result = await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+    expect(result.requeued.map((row) => row.id)).toEqual([plain!.id]);
+    expect(result.publish).toHaveLength(0);
+
+    const settled = await store.get(flagged!.id);
+    expect(settled?.state).toBe("cancelled");
+    expect(settled?.cancelRequested).toBe(false);
+    expect(settled?.leasedBy).toBeNull();
+    expect(settled?.attempt).toBe(0);
+
+    const requeued = await store.get(plain!.id);
+    expect(requeued?.state).toBe("queued");
+    expect(requeued?.attempt).toBe(1);
+
+    // Cancelled work is never requeued.
+    const again = await store.reclaimExpired(5, new Date(6_000), 1_000, WORKER_JOB_KINDS);
+    expect(again.requeued).toHaveLength(0);
+    expect(again.publish).toHaveLength(0);
+    expect((await store.get(flagged!.id))?.state).toBe("cancelled");
+  });
+
+  test("cancel racing lease acquisition ends cancelled or flagged, never runnable", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const [leased, cancelled] = await Promise.all([
+      store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS),
+      store.cancelQueuedForIssue("kirmanak", "demo", 12),
+    ]);
+    const ids = asRows<{ id: unknown }>(await sql.unsafe(`SELECT id FROM review_jobs ORDER BY id`));
+    expect(ids).toHaveLength(1);
+    const final = await store.get(Number(ids[0]?.id));
+    if (leased) {
+      expect(cancelled).toBe(0);
+      expect(final?.state).toBe("leased");
+      expect(final?.cancelRequested).toBe(true);
+    } else {
+      expect(cancelled).toBe(1);
+      expect(final?.state).toBe("cancelled");
+      expect(final?.cancelRequested).toBe(false);
+    }
+    expect(final?.state).not.toBe("queued");
+  });
+
+  test("cancel racing reclaim back to queued ends cancelled", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    const leased = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
+    expect(await store.expireLease(leased!.id, "worker-1", new Date(2_000))).toBe(true);
+
+    // Cancel first, then reclaim: the flagged row settles to cancelled.
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    const first = await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+    expect(first.requeued).toHaveLength(0);
+    expect(first.publish).toHaveLength(0);
+    expect((await store.get(leased!.id))?.state).toBe("cancelled");
+
+    // Reclaim first, then cancel: the requeued row is cancelled by the late cancel.
+    await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-second" }));
+    const relased = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
+    expect(await store.expireLease(relased!.id, "worker-1", new Date(2_000))).toBe(true);
+    const reclaimed = await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+    expect(reclaimed.requeued).toHaveLength(1);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(1);
+    const final = await store.get(relased!.id);
+    expect(final?.state).toBe("cancelled");
+    expect(final?.cancelRequested).toBe(false);
+
+    // Fully concurrent: either order lands cancelled, never runnable.
+    await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+    await store.enqueueIssue(makeIssueJob({ delivery: "d-third" }));
+    const raced = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
+    expect(await store.expireLease(raced!.id, "worker-1", new Date(2_000))).toBe(true);
+    await Promise.all([
+      store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS),
+      store.cancelQueuedForIssue("kirmanak", "demo", 12),
+    ]);
+    const ended = await store.get(raced!.id);
+    expect(ended?.state).toBe("cancelled");
+    expect(ended?.cancelRequested).toBe(false);
+  });
+
+  test("cancel for one issue leaves another issue's rows alone", async () => {
+    await store.enqueueIssue(makeIssueJob());
+    await store.enqueueIssue(
+      makeIssueJob({
+        issueNumber: 13,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/13",
+        delivery: "d13",
+      })
+    );
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.issueNumber).toBe(12);
+    expect(await store.cancelQueuedForIssue("kirmanak", "demo", 12)).toBe(0);
+    expect((await store.get(leased!.id))?.cancelRequested).toBe(true);
+    const other = asRows<{ state: unknown; cancel_requested: unknown }>(
+      await sql.unsafe(`SELECT state, cancel_requested FROM review_jobs WHERE issue_number = 13`)
+    );
+    expect(other).toHaveLength(1);
+    expect(String(other[0]?.state)).toBe("queued");
+    expect(other[0]?.cancel_requested).toBe(false);
+    const second = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(second?.issueNumber).toBe(13);
+  });
+
   test("concurrent migrators do not conflict and job-mode checks instead of migrating", async () => {
     await Promise.all([store.migrate(), store.migrate(), store.migrate(), store.migrate(), store.migrate()]);
     expect(await indexExists("review_jobs_leased_worker_issue")).toBe(true);

@@ -154,7 +154,7 @@ import {
   parseReviewOutput,
   trailerSuggestionCount,
 } from "./verdict.ts";
-import { buildNoChangesSticky, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
 import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -915,16 +915,16 @@ export async function collectFollowUpItems(
   findingOpts: ReviewFindingMatchOpts = {},
   trustedSenderLogins?: readonly string[] | null
 ): Promise<FollowUpItems> {
-  const [rawComments, rawReviews, rawInlines] = await Promise.all([
+  const [rawComments, rawReviews] = await Promise.all([
     api.listIssueComments(owner, repo, prNumber),
     api.listPullReviews(owner, repo, prNumber),
-    api.listPullReviewComments(owner, repo, prNumber).catch((err: unknown): InlineComment[] => {
-      // Forge clients throw `… → 404: …`. Anything else fails the collection.
-      if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
-      logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
-      return [];
-    }),
   ]);
+  const rawInlines = await api.listPullReviewComments(owner, repo, prNumber, rawReviews).catch((err: unknown) => {
+    // Forge clients throw `… → 404: …`. Anything else fails the collection.
+    if (!(err instanceof Error) || !/→ 404\b/.test(err.message)) throw err;
+    logDefault(`inline review comments unavailable for ${owner}/${repo}#${prNumber}: ${err.message}`);
+    return [] as InlineComment[];
+  });
   const jumiInlinesAll = rawInlines.filter((comment) => isJumiReviewInline(comment, botUsername));
   const candidateComments = rawComments.filter((comment) =>
     isInScopeFollowUpComment(comment, botUsername, headSha, ignoreLogins, findingOpts, jumiInlinesAll)
@@ -1224,6 +1224,21 @@ function framedFeedbackBody(author: string | undefined, body: string): string {
   return `<untrusted_data author="${escapeFeedbackXmlAttr(who)}">${escapeFeedbackXmlText(body)}</untrusted_data>`;
 }
 
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.byteLength <= maxBytes || maxBytes <= 0) return maxBytes <= 0 ? "" : text;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let end = maxBytes;
+  while (end > 0) {
+    try {
+      return decoder.decode(bytes.slice(0, end));
+    } catch {
+      end -= 1;
+    }
+  }
+  return "";
+}
+
 export function buildFeedbackMarkdown(opts: {
   pr: Pull;
   trigger?: IssueJob["trigger"];
@@ -1234,7 +1249,7 @@ export function buildFeedbackMarkdown(opts: {
   lastReview?: Comment;
   currentInlines?: InlineComment[];
   earlierReviews?: Comment[];
-}): { markdown: string; commentIds: number[]; reviewIds: number[] } {
+}): { markdown: string; commentIds: number[]; reviewIds: number[]; omittedIds: number[] } {
   const header = [
     `# Review feedback (instruction source: Jumi parent)`,
     ``,
@@ -1333,21 +1348,52 @@ export function buildFeedbackMarkdown(opts: {
   const encoder = new TextEncoder();
   const otherHeader = "## Other comments\n\n";
   const prefix = header + triggerSection + lastReviewSection + currentInlineSection;
-  const fit: FeedbackItem[] = [...extras];
-  const sizeOf = (items: FeedbackItem[]) => {
-    const extra = items.length ? otherHeader + items.map((item) => item.text).join("\n") : "";
-    return encoder.encode(prefix + extra).byteLength;
-  };
   const isJumiReviewText = (item: FeedbackItem) => item.text.includes(REVIEW_MARKER);
-  while (fit.length > 0 && sizeOf(fit) > FEEDBACK_MAX_BYTES) {
-    const dropIdx = fit.findIndex((item) => !isJumiReviewText(item));
-    if (dropIdx >= 0) fit.splice(dropIdx, 1);
-    else fit.shift();
+  // Budget each escaped item once; dropping is index arithmetic, no re-encoding.
+  const prefixBytes = encoder.encode(prefix).byteLength;
+  const otherHeaderBytes = encoder.encode(otherHeader).byteLength;
+  const itemBytes = extras.map((item) => encoder.encode(item.text).byteLength);
+  const totalFor = (count: number, sum: number) =>
+    count === 0 ? prefixBytes : prefixBytes + otherHeaderBytes + sum + (count - 1);
+  let keptSum = 0;
+  for (const b of itemBytes) keptSum += b;
+  let keptCount = extras.length;
+  const dropOrder: number[] = [];
+  for (let i = 0; i < extras.length; i++) if (!isJumiReviewText(extras[i]!)) dropOrder.push(i);
+  for (let i = 0; i < extras.length; i++) if (isJumiReviewText(extras[i]!)) dropOrder.push(i);
+  const dropped = new Set<number>();
+  for (const idx of dropOrder) {
+    if (totalFor(keptCount, keptSum) <= FEEDBACK_MAX_BYTES) break;
+    keptSum -= itemBytes[idx]!;
+    keptCount -= 1;
+    dropped.add(idx);
   }
-
-  let markdown = prefix + (fit.length ? otherHeader + fit.map((item) => item.text).join("\n") : "");
+  const fit = extras.filter((_, i) => !dropped.has(i));
+  let omissionNote = dropped.size > 0 ? `> [${dropped.size} further item(s) omitted; feedback budget]\n\n` : "";
+  let omissionBytes = dropped.size > 0 ? encoder.encode(omissionNote).byteLength : 0;
+  while (fit.length > 0 && totalFor(fit.length, keptSum) + omissionBytes > FEEDBACK_MAX_BYTES) {
+    const pos = fit.findIndex((item) => !isJumiReviewText(item));
+    const at = pos >= 0 ? pos : 0;
+    const removed = fit[at]!;
+    const orig = extras.indexOf(removed);
+    if (orig >= 0) {
+      keptSum -= itemBytes[orig]!;
+      dropped.add(orig);
+    } else {
+      keptSum -= encoder.encode(removed.text).byteLength;
+    }
+    fit.splice(at, 1);
+    omissionNote = `> [${dropped.size} further item(s) omitted; feedback budget]\n\n`;
+    omissionBytes = encoder.encode(omissionNote).byteLength;
+  }
+  let extra = "";
+  if (fit.length > 0) extra = otherHeader + omissionNote + fit.map((item) => item.text).join("\n");
+  else if (dropped.size > 0) extra = otherHeader + omissionNote;
+  let markdown = prefix + extra;
   if (encoder.encode(markdown).byteLength > FEEDBACK_MAX_BYTES) {
-    markdown = markdown.slice(0, FEEDBACK_MAX_BYTES);
+    const marker = "\n\n[truncated; feedback budget]\n";
+    const markerBytes = encoder.encode(marker).byteLength;
+    markdown = `${truncateUtf8Bytes(markdown, FEEDBACK_MAX_BYTES - markerBytes)}${marker}`;
   }
 
   const commentIds = new Set<number>();
@@ -1371,7 +1417,12 @@ export function buildFeedbackMarkdown(opts: {
     if (item.kind === "review") reviewIds.add(item.id);
     else commentIds.add(item.id);
   }
-  return { markdown, commentIds: [...commentIds], reviewIds: [...reviewIds] };
+  return {
+    markdown,
+    commentIds: [...commentIds],
+    reviewIds: [...reviewIds],
+    omittedIds: [...dropped].map((i) => extras[i]!.id),
+  };
 }
 
 export function triggerBodyFromItems(
@@ -2295,7 +2346,7 @@ export async function implementFollowUp(
   // Parent-owned worker MCP server for the follow-up spawns. The model
   // records `no_changes` through the tool; the parent posts from this
   // in-memory state and fails open when the model never calls it.
-  const workerStore = new WorkerResultStore();
+  let workerStore = new WorkerResultStore();
   const workerServer = await startWorkerMcpServer({ store: workerStore });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let followUpResult: FollowUpResult;
@@ -2616,6 +2667,7 @@ export async function implementFollowUp(
           extra?: { continueSession?: boolean }
         ): Promise<{ status: "skipped"; reason: string } | undefined> => {
           throwIfAborted(opts.abortSignal);
+          workerStore = rotateResultScope(log, workerStore, workerServer);
           log(label);
           const runOpts: EngineRunOptions = {
             model: opts.model,
