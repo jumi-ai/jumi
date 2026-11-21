@@ -1224,6 +1224,21 @@ function framedFeedbackBody(author: string | undefined, body: string): string {
   return `<untrusted_data author="${escapeFeedbackXmlAttr(who)}">${escapeFeedbackXmlText(body)}</untrusted_data>`;
 }
 
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.byteLength <= maxBytes || maxBytes <= 0) return maxBytes <= 0 ? "" : text;
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let end = maxBytes;
+  while (end > 0) {
+    try {
+      return decoder.decode(bytes.slice(0, end));
+    } catch {
+      end -= 1;
+    }
+  }
+  return "";
+}
+
 export function buildFeedbackMarkdown(opts: {
   pr: Pull;
   trigger?: IssueJob["trigger"];
@@ -1234,7 +1249,7 @@ export function buildFeedbackMarkdown(opts: {
   lastReview?: Comment;
   currentInlines?: InlineComment[];
   earlierReviews?: Comment[];
-}): { markdown: string; commentIds: number[]; reviewIds: number[] } {
+}): { markdown: string; commentIds: number[]; reviewIds: number[]; omittedIds: number[] } {
   const header = [
     `# Review feedback (instruction source: Jumi parent)`,
     ``,
@@ -1333,21 +1348,45 @@ export function buildFeedbackMarkdown(opts: {
   const encoder = new TextEncoder();
   const otherHeader = "## Other comments\n\n";
   const prefix = header + triggerSection + lastReviewSection + currentInlineSection;
-  const fit: FeedbackItem[] = [...extras];
-  const sizeOf = (items: FeedbackItem[]) => {
-    const extra = items.length ? otherHeader + items.map((item) => item.text).join("\n") : "";
-    return encoder.encode(prefix + extra).byteLength;
-  };
   const isJumiReviewText = (item: FeedbackItem) => item.text.includes(REVIEW_MARKER);
-  while (fit.length > 0 && sizeOf(fit) > FEEDBACK_MAX_BYTES) {
-    const dropIdx = fit.findIndex((item) => !isJumiReviewText(item));
-    if (dropIdx >= 0) fit.splice(dropIdx, 1);
-    else fit.shift();
+  // Budget each escaped item once; dropping is index arithmetic, no re-encoding.
+  const prefixBytes = encoder.encode(prefix).byteLength;
+  const otherHeaderBytes = encoder.encode(otherHeader).byteLength;
+  const itemBytes = extras.map((item) => encoder.encode(item.text).byteLength);
+  const totalFor = (count: number, sum: number) =>
+    count === 0 ? prefixBytes : prefixBytes + otherHeaderBytes + sum + (count - 1);
+  let keptSum = 0;
+  for (const b of itemBytes) keptSum += b;
+  let keptCount = extras.length;
+  const dropOrder: number[] = [];
+  for (let i = 0; i < extras.length; i++) if (!isJumiReviewText(extras[i]!)) dropOrder.push(i);
+  for (let i = 0; i < extras.length; i++) if (isJumiReviewText(extras[i]!)) dropOrder.push(i);
+  const dropped = new Set<number>();
+  for (const idx of dropOrder) {
+    if (totalFor(keptCount, keptSum) <= FEEDBACK_MAX_BYTES) break;
+    keptSum -= itemBytes[idx]!;
+    keptCount -= 1;
+    dropped.add(idx);
   }
-
-  let markdown = prefix + (fit.length ? otherHeader + fit.map((item) => item.text).join("\n") : "");
+  const fit = extras.filter((_, i) => !dropped.has(i));
+  const omissionNote = dropped.size > 0 ? `> [${dropped.size} further item(s) omitted; feedback budget]\n\n` : "";
+  const omissionBytes = dropped.size > 0 ? encoder.encode(omissionNote).byteLength : 0;
+  while (fit.length > 0 && totalFor(fit.length, keptSum) + omissionBytes > FEEDBACK_MAX_BYTES) {
+    const pos = fit.findIndex((item) => !isJumiReviewText(item));
+    const at = pos >= 0 ? pos : 0;
+    keptSum -= encoder.encode(fit[at]!.text).byteLength;
+    const orig = extras.indexOf(fit[at]!);
+    if (orig >= 0) dropped.add(orig);
+    fit.splice(at, 1);
+  }
+  let extra = "";
+  if (fit.length > 0) extra = otherHeader + omissionNote + fit.map((item) => item.text).join("\n");
+  else if (dropped.size > 0) extra = otherHeader + omissionNote;
+  let markdown = prefix + extra;
   if (encoder.encode(markdown).byteLength > FEEDBACK_MAX_BYTES) {
-    markdown = markdown.slice(0, FEEDBACK_MAX_BYTES);
+    const marker = "\n\n[truncated; feedback budget]\n";
+    const markerBytes = encoder.encode(marker).byteLength;
+    markdown = `${truncateUtf8Bytes(markdown, FEEDBACK_MAX_BYTES - markerBytes)}${marker}`;
   }
 
   const commentIds = new Set<number>();
@@ -1371,7 +1410,12 @@ export function buildFeedbackMarkdown(opts: {
     if (item.kind === "review") reviewIds.add(item.id);
     else commentIds.add(item.id);
   }
-  return { markdown, commentIds: [...commentIds], reviewIds: [...reviewIds] };
+  return {
+    markdown,
+    commentIds: [...commentIds],
+    reviewIds: [...reviewIds],
+    omittedIds: [...dropped].map((i) => extras[i]!.id),
+  };
 }
 
 export function triggerBodyFromItems(
