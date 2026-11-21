@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,12 +11,12 @@ import {
   resetDispatchMetricsForTests,
   runDispatchTick,
 } from "../src/dispatch.ts";
-import { createBunSqlClient, PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
+import { PgReviewJobStore, WORKER_JOB_KINDS } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
 import { makeIssueJob } from "./fixtures.ts";
 import { createFakeK8s } from "./harness/k8s.ts";
 import { withWorkspace } from "./harness/temp.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 function baseTemplate(): Record<string, unknown> {
   return {
@@ -64,9 +64,13 @@ describePg("dispatch against real postgres with a fake Kubernetes API", () => {
 
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   beforeEach(async () => {

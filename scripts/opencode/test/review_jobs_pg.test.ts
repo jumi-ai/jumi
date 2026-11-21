@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,6 @@ import { decideQuotaRetry, QUOTA_MESSAGE, QuotaWaitError } from "../src/quota.ts
 import type { ReviewApi } from "../src/review.ts";
 import {
   assertLedgerSchema,
-  createBunSqlClient,
   isReclaimOwner,
   isUniqueViolation,
   MAX_ATTEMPTS_REASON,
@@ -40,7 +39,7 @@ import { frozenGitRunner } from "./harness/git.ts";
 // that matches substrings cannot fail when one of those clauses is deleted, so this file
 // runs the real `PgReviewJobStore` against a real database. It is skipped when
 // JUMI_TEST_DATABASE_URL is unset so `bun test` stays green without Docker.
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 function failingLookupApi(pr = makePR()): {
   api: ReviewApi;
@@ -92,7 +91,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   }
 
   async function waitForBlockedReviewJobsLock(timeoutMs = 5_000): Promise<void> {
-    const probe = createBunSqlClient(pgDatabaseUrl);
+    const probe = openTestSqlClient(pgDatabaseUrl);
     const deadline = Date.now() + timeoutMs;
     try {
       while (Date.now() < deadline) {
@@ -113,12 +112,16 @@ describePg("PgReviewJobStore against real postgres", () => {
 
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     // Start from an empty database so `migrate()` is exercised from scratch, not against
     // whatever a previous run left behind.
     await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   beforeEach(async () => {
@@ -600,7 +603,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   }
 
   function secondStore(): { sql2: SqlClient; store2: PgReviewJobStore; close: () => Promise<void> } {
-    const sql2 = createBunSqlClient(pgDatabaseUrl);
+    const sql2 = openTestSqlClient(pgDatabaseUrl);
     const store2 = new PgReviewJobStore(sql2);
     return {
       sql2,
@@ -987,6 +990,10 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(final?.cancelRequested).toBe(false);
 
     // Fully concurrent: either order lands cancelled, never runnable.
+    // If cancel holds the row lock first, reclaim's `FOR UPDATE SKIP LOCKED`
+    // scan skips it and the row stays leased with the cancel flag set; the
+    // next reclaim tick settles it to cancelled. Settle here so the test
+    // asserts the converged state instead of the race winner.
     await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
     await store.enqueueIssue(makeIssueJob({ delivery: "d-third" }));
     const raced = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
@@ -995,7 +1002,12 @@ describePg("PgReviewJobStore against real postgres", () => {
       store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS),
       store.cancelQueuedForIssue("kirmanak", "demo", 12),
     ]);
-    const ended = await store.get(raced!.id);
+    let ended = await store.get(raced!.id);
+    expect(ended?.state).not.toBe("queued");
+    if (ended?.state === "leased" && ended?.cancelRequested) {
+      await store.reclaimExpired(5, new Date(5_000), 1_000, WORKER_JOB_KINDS);
+      ended = await store.get(raced!.id);
+    }
     expect(ended?.state).toBe("cancelled");
     expect(ended?.cancelRequested).toBe(false);
   });
@@ -1029,16 +1041,20 @@ describePg("PgReviewJobStore against real postgres", () => {
 
     // A migrated schema passes the job-mode check and opens without migrating.
     await assertLedgerSchema(sql);
-    const jobStore = await openPgReviewJobStoreForJob(pgDatabaseUrl);
-    expect(await jobStore.enqueueIssue(makeIssueJob({ delivery: "d-job-open" }))).toEqual({
-      key: "implement:kirmanak/demo#12",
-      queued: true,
-    });
+    const jobStore = await openPgReviewJobStoreForJob(pgDatabaseUrl, { max: 2 });
+    try {
+      expect(await jobStore.enqueueIssue(makeIssueJob({ delivery: "d-job-open" }))).toEqual({
+        key: "implement:kirmanak/demo#12",
+        queued: true,
+      });
+    } finally {
+      await jobStore.close();
+    }
 
     // A schema older than the router fails clearly instead of migrating.
     await sql.unsafe(`ALTER TABLE review_jobs DROP COLUMN IF EXISTS rewake_requested`);
     await expect(assertLedgerSchema(sql)).rejects.toThrow("router must migrate");
-    await expect(openPgReviewJobStoreForJob(pgDatabaseUrl)).rejects.toThrow("router must migrate");
+    await expect(openPgReviewJobStoreForJob(pgDatabaseUrl, { max: 2 })).rejects.toThrow("router must migrate");
 
     // Restore the column for the next test; beforeEach re-migrates anyway.
     await store.migrate();
