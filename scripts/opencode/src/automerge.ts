@@ -628,7 +628,7 @@ export async function scheduleAutomergeForNewPr(
   const log = input.log ?? (() => undefined);
   const api = input.api as AutomergeApi;
   let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
-  let effectiveTrusted = input.trustedSenderLogins;
+  let effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, { state: "missing" });
   try {
     const policy = await resolveRepoPolicy(
       { api, owner: input.owner, repo: input.repo, ref: input.baseBranch },
@@ -637,8 +637,8 @@ export async function scheduleAutomergeForNewPr(
     );
     if (policy.status === "ok") {
       names = { automergeLabel: policy.automergeLabel, noAutomergeLabel: policy.noAutomergeLabel };
-      effectiveTrusted = policy.trustedSenderLogins;
     }
+    effectiveTrusted = policy.trustedSenderLogins;
   } catch (err) {
     log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
   }
@@ -785,7 +785,10 @@ async function maybeNoteDeploymentBlocked(opts: {
     return { posted: true };
   }
   if (!hasLabelCaseInsensitive(labels, names.automergeLabel)) return { posted: false };
-  const effectiveTrusted = policy?.trustedSenderLogins ?? opts.trustedSenderLogins;
+  const effectiveTrusted =
+    policy !== undefined
+      ? policy.trustedSenderLogins
+      : effectiveTrustedSenderLogins(opts.trustedSenderLogins, { state: "missing" });
   const verdict = await isAutomergeLabelAdmitted({
     api,
     owner,

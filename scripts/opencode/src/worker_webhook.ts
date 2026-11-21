@@ -74,7 +74,11 @@ export async function effectiveWorkerPolicyForRepo(
   log?: (message: string) => void
 ): Promise<WorkerWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
-  if (!api || typeof api.getRepoFile !== "function" || !branch) return basePolicy;
+  if (!api || typeof api.getRepoFile !== "function" || !branch) {
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
+  }
   const policy = await resolveRepoPolicy(
     { api, owner, repo, ref: branch },
     {
@@ -89,13 +93,21 @@ export async function effectiveWorkerPolicyForRepo(
   );
   if (policy.status === "invalid") {
     log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
   }
   if (policy.status === "unreadable") {
     log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
-    return basePolicy;
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
   }
-  if (policy.status !== "ok") return basePolicy;
+  if (policy.status !== "ok") {
+    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
+    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
+    return { ...basePolicy, trustedSenderLogins: undefined };
+  }
   return {
     ...basePolicy,
     trustedSenderLogins: policy.trustedSenderLogins,

@@ -127,9 +127,10 @@ async function loadTakeoverRepoPolicy(
   log: (message: string) => void,
   preloadedAuthors?: readonly string[]
 ): Promise<{ authors: readonly string[]; effectiveTrusted: readonly string[] | undefined; pickupLabel: string }> {
+  const normalizedFallback = effectiveTrustedSenderLogins(trustedSenderLogins, { state: "missing" });
   const fallback = {
     authors: preloadedAuthors ?? ([] as readonly string[]),
-    effectiveTrusted: trustedSenderLogins,
+    effectiveTrusted: normalizedFallback,
     pickupLabel: "jumi",
   };
   try {
