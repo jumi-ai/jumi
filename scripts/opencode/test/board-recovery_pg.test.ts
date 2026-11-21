@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { BOARD_NEEDS_KICK_PAGE_SIZE, buildBoardGroups } from "../src/board.ts";
-import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { PgReviewJobStore } from "../src/review_jobs.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 const HEAD_SHA = "0123456789abcdef0123456789abcdef01234567";
 
 describePg("recovery board latest-per-item on postgres (#708)", () => {
   test("older eligible failure survives a window of unrelated completions", async () => {
-    const sql = createBunSqlClient(pgDatabaseUrl);
+    const sql = openTestSqlClient(pgDatabaseUrl);
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
@@ -33,7 +33,7 @@ describePg("recovery board latest-per-item on postgres (#708)", () => {
   });
 
   test("newer success on the same item clears the older failure", async () => {
-    const sql = createBunSqlClient(pgDatabaseUrl);
+    const sql = openTestSqlClient(pgDatabaseUrl);
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
@@ -57,7 +57,7 @@ describePg("recovery board latest-per-item on postgres (#708)", () => {
   });
 
   test("overflow counts only eligible rows and caps the visible list", async () => {
-    const sql = createBunSqlClient(pgDatabaseUrl);
+    const sql = openTestSqlClient(pgDatabaseUrl);
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();

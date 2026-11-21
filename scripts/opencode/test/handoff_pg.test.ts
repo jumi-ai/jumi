@@ -1,8 +1,8 @@
-import { beforeAll, beforeEach, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { handoffKey } from "../src/handoff.ts";
-import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
+import { PgReviewJobStore } from "../src/review_jobs.ts";
 import type { SqlClient } from "../src/sql_client.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 describePg("PgHandoffStore against real postgres", () => {
   let sql!: SqlClient;
@@ -15,10 +15,14 @@ describePg("PgHandoffStore against real postgres", () => {
   // bun runs beforeAll at module scope
   beforeAll(async () => {
     if (!pgDatabaseUrl) return;
-    sql = createBunSqlClient(pgDatabaseUrl);
+    sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
     await sql.unsafe(`DROP TABLE IF EXISTS issue_handoffs`);
     await store.migrate();
+  });
+
+  afterAll(async () => {
+    await (sql as SqlClient | undefined)?.close?.();
   });
 
   // bun runs beforeEach at module scope
