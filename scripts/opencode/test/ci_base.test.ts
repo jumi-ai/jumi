@@ -5,8 +5,8 @@ import { buildCiMarkdown, readCiState } from "../src/ci.ts";
 import { attributableToPr, baseForMarkdown, inspectBaseCi, isBaseGreen } from "../src/ci_base.ts";
 import { ciStatePath } from "../src/claim.ts";
 import { implementFollowUp } from "../src/followup.ts";
-import { makeIssueApi } from "./fakes/forge.ts";
 import type { Check, CheckState } from "../src/ports.ts";
+import { makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 import { withDirs, withWorkspace } from "./harness/temp.ts";
 
