@@ -89,6 +89,7 @@
   "quota_probe.ts": 172,
   "quota_wait.ts": 172,
   "release.ts": 1393,
+  "release_binding.ts": 112,
   "replay.ts": 1435,
   "repo_lint.ts": 155,
   "repo_policy.ts": 180,
