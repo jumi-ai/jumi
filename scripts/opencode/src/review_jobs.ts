@@ -161,6 +161,12 @@ export interface ReclaimResult {
   publish: ReviewJobRecord[];
 }
 
+export interface PeekRunnableExclude {
+  id: number;
+  generation: number;
+  attempt: number;
+}
+
 export interface ReviewJobStore {
   migrate(): Promise<void>;
   /** Job-mode check: fail clearly when the schema is too old. Never migrates. */
@@ -201,8 +207,17 @@ export interface ReviewJobStore {
    * `queued` count, which includes backoff rows and same-issue-held rows):
    * `queued`, not-before passed, and no same-issue worker lease held. Oldest
    * first. No state change: the one-shot Job leases the row itself.
+   * `exclude` holds current Job identities from a valid inventory; matching
+   * rows are skipped before the limit so free slots fill past AlreadyExists
+   * rows. Only a valid inventory may supply exclusions: an unreadable list
+   * skips the tick before this is called.
    */
-  peekRunnable(kinds: readonly JobKind[], limit: number, now?: Date): Promise<ReviewJobRecord[]>;
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now?: Date,
+    exclude?: readonly PeekRunnableExclude[]
+  ): Promise<ReviewJobRecord[]>;
   requeueInfra(
     id: number,
     leasedBy: string,
@@ -1388,18 +1403,42 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
-  peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     return this.locked(() => {
       const allowed = kindsOrReview(kinds);
       const serializeWorkers = leasesWorkerKinds(allowed);
       const ts = now.getTime();
       const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
       if (cap <= 0) return [];
+      const excluded = (exclude ?? []).filter(
+        (entry) =>
+          Number.isInteger(entry.id) &&
+          entry.id > 0 &&
+          Number.isInteger(entry.attempt) &&
+          entry.attempt >= 0 &&
+          Number.isInteger(entry.generation) &&
+          entry.generation >= 0
+      );
       return this.rows
         .filter((item) => {
           if (item.state !== "queued" || !allowed.includes(rowKind(item))) return false;
           if (item.leasedUntil != null && item.leasedUntil > ts) return false;
           if (serializeWorkers && isWorkerKind(rowKind(item)) && workerIssueIsLeased(this.rows, item)) return false;
+          if (
+            excluded.length > 0 &&
+            excluded.some(
+              (entry) =>
+                entry.id === item.id &&
+                entry.attempt === item.attempt &&
+                entry.generation === payloadGeneration(item.payload)
+            )
+          )
+            return false;
           return true;
         })
         .sort((a, b) => a.createdAt - b.createdAt || a.id - b.id)
@@ -3752,50 +3791,71 @@ export class PgReviewJobStore implements ReviewJobStore {
     return rows.length > 0;
   }
 
-  async peekRunnable(kinds: readonly JobKind[], limit: number, now = new Date()): Promise<ReviewJobRecord[]> {
+  async peekRunnable(
+    kinds: readonly JobKind[],
+    limit: number,
+    now = new Date(),
+    exclude: readonly PeekRunnableExclude[] = []
+  ): Promise<ReviewJobRecord[]> {
     const allowed = kindsOrReview(kinds);
     const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), 500) : 0;
     if (cap <= 0) return [];
     const nowIso = now.toISOString();
     const serializeWorkers = leasesWorkerKinds(allowed);
-    const query = serializeWorkers
-      ? `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-           AND NOT EXISTS (
-             SELECT 1 FROM review_jobs held
-             WHERE held.state = 'leased'
-               AND held.kind = ANY($3::text[])
-               AND held.owner = review_jobs.owner
-               AND held.repo = review_jobs.repo
-               AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
-           )
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`
-      : `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $4`;
+    const valid = (exclude ?? []).filter(
+      (entry) =>
+        Number.isInteger(entry.id) &&
+        entry.id > 0 &&
+        Number.isInteger(entry.attempt) &&
+        entry.attempt >= 0 &&
+        Number.isInteger(entry.generation) &&
+        entry.generation >= 0
+    );
+    const generationExpr = `COALESCE(CASE WHEN review_jobs.payload->>'generation' ~ '^[0-9]+$' THEN (review_jobs.payload->>'generation')::bigint ELSE 0 END, 0)`;
+    const buildExclusion = (start: number): { clause: string; params: number[] } => {
+      if (valid.length === 0) return { clause: "", params: [] };
+      const parts: string[] = [];
+      const params: number[] = [];
+      valid.forEach((entry, index) => {
+        const a = start + index * 3;
+        parts.push(`(review_jobs.id = $${a} AND review_jobs.attempt = $${a + 1} AND ${generationExpr} = $${a + 2})`);
+        params.push(entry.id, entry.attempt, entry.generation);
+      });
+      return { clause: `AND NOT (${parts.join(" OR ")})`, params };
+    };
     if (serializeWorkers) {
+      const { clause, params } = buildExclusion(5);
       const rows = asRows<ReviewJobRow>(
-        await this.sql.unsafe(query, [
-          pgTextArrayLiteral(allowed),
-          nowIso,
-          pgTextArrayLiteral([...WORKER_JOB_KINDS]),
-          cap,
-        ])
+        await this.sql.unsafe(
+          `SELECT * FROM review_jobs
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            AND NOT EXISTS (
+              SELECT 1 FROM review_jobs held
+              WHERE held.state = 'leased'
+                AND held.kind = ANY($3::text[])
+                AND held.owner = review_jobs.owner
+                AND held.repo = review_jobs.repo
+                AND held.issue_number IS NOT DISTINCT FROM review_jobs.issue_number
+            )
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $4`,
+          [pgTextArrayLiteral(allowed), nowIso, pgTextArrayLiteral([...WORKER_JOB_KINDS]), cap, ...params]
+        )
       );
       return rows.map(mapRow);
     }
+    const { clause, params } = buildExclusion(4);
     const rows = asRows<ReviewJobRow>(
       await this.sql.unsafe(
         `SELECT * FROM review_jobs
-         WHERE state = 'queued' AND kind = ANY($1::text[])
-           AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
-         ORDER BY created_at ASC, id ASC
-         LIMIT $3`,
-        [pgTextArrayLiteral(allowed), nowIso, cap]
+          WHERE state = 'queued' AND kind = ANY($1::text[])
+            AND (leased_until IS NULL OR leased_until <= $2::timestamptz)
+            ${clause}
+          ORDER BY created_at ASC, id ASC
+          LIMIT $3`,
+        [pgTextArrayLiteral(allowed), nowIso, cap, ...params]
       )
     );
     return rows.map(mapRow);
