@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   appSlugFromLogin,
   canPush,
+  hasTrustedSenders,
   hasWriteAccessFromPermission,
   hasWritePermission,
   pullAuthorCanPush,
@@ -250,8 +251,8 @@ describe("senderCanSteer", () => {
     expect(await senderCanSteer(undefined, "o", "r", "filer-two[bot]", list)).toBe(false);
   });
 
-  test("an unset, empty, or blank list admits only what the collaborator lookup calls a writer", async () => {
-    for (const list of [undefined, [], [" ", ""]]) {
+  test("an unset or blank list admits only what the collaborator lookup calls a writer", async () => {
+    for (const list of [undefined, [" ", ""]]) {
       expect(await senderCanSteer(countingApi("write"), "o", "r", "alice", list)).toBe(true);
       expect(await senderCanSteer(countingApi("owner"), "o", "r", "alice", list)).toBe(true);
       expect(await senderCanSteer(countingApi("read"), "o", "r", "alice", list)).toBe(false);
@@ -270,9 +271,24 @@ describe("senderCanSteer", () => {
     }
   });
 
+  test("an explicitly empty list denies without asking the forge", async () => {
+    for (const login of ["alice", "mallory", undefined, " "]) {
+      const api = countingApi("write");
+      expect(await senderCanSteer(api, "o", "r", login, [])).toBe(false);
+      expect(api.calls).toEqual([]);
+    }
+  });
+
   test("a non-empty list ignores the collaborator result either way", async () => {
     expect(await senderCanSteer(countingApi("none"), "o", "r", "alice", ["alice"])).toBe(true);
     expect(await senderCanSteer(countingApi("write"), "o", "r", "mallory", ["alice"])).toBe(false);
+  });
+
+  test("hasTrustedSenders distinguishes absent from explicitly empty", () => {
+    expect(hasTrustedSenders(undefined)).toBe(false);
+    expect(hasTrustedSenders([" ", ""])).toBe(false);
+    expect(hasTrustedSenders([])).toBe(true);
+    expect(hasTrustedSenders(["alice"])).toBe(true);
   });
 });
 
