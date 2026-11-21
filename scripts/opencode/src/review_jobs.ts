@@ -738,6 +738,9 @@ WHERE id IN (
 CREATE UNIQUE INDEX IF NOT EXISTS review_jobs_leased_worker_issue
   ON review_jobs (owner, repo, issue_number)
   WHERE state = 'leased' AND kind IN ('implement', 'follow-up', 'conflict') AND issue_number IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS review_jobs_delivery_job_key
+  ON review_jobs (delivery, job_key);
 `;
 
 const REVIEW_KICKS_SCHEMA_SQL = `
@@ -1207,6 +1210,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         await this.sits.remember(job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
+      // Per-effect retry guard: a retried delivery repeats only effects that
+      // did not settle. A row with the same delivery and job key (any state)
+      // means this effect already enqueued. Checked after the in-flight path
+      // so wait-marker refreshes still run. A different delivery stays eligible.
+      if (job.delivery && this.rows.some((row) => row.jobKey === key && row.delivery === job.delivery)) {
+        return { key, queued: false };
+      }
       if (hasNewerInflight(this.rows, job, key)) {
         return { key, queued: false };
       }
@@ -1262,6 +1272,12 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
         await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
+        return { key, queued: false };
+      }
+      // Per-effect retry guard (see `enqueue`): same delivery + same job key
+      // in any state means this effect already settled; a new delivery stays
+      // eligible. Checked after the in-flight path.
+      if (job.delivery && sameKey.some((row) => row.delivery === job.delivery)) {
         return { key, queued: false };
       }
       if (kind === "implement" && sameKey.some((row) => isImplementTerminal(row, job))) {
@@ -3525,6 +3541,18 @@ export class PgReviewJobStore implements ReviewJobStore {
         await this.rememberSitTx(tx, job.owner, job.repo, job.prNumber, "repo-mutex");
         return { key, queued: false };
       }
+      // Per-effect retry guard: same delivery + same job key in any state
+      // means this effect already settled. After the in-flight path so wait
+      // refreshes still run. A different delivery stays eligible.
+      if (job.delivery) {
+        const settled = asRows<{ one: unknown }>(
+          await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE delivery = $1 AND job_key = $2 LIMIT 1`, [
+            job.delivery,
+            key,
+          ])
+        );
+        if (settled.length > 0) return { key, queued: false };
+      }
       const incomingTs = jobPrUpdatedAtMs(job);
       if (
         incomingTs != null &&
@@ -3585,6 +3613,18 @@ export class PgReviewJobStore implements ReviewJobStore {
       if (inflight.length > 0) {
         await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
         return { key, queued: false };
+      }
+      // Per-effect retry guard: same delivery + same job key in any state
+      // means this effect already settled. After in-flight so queued rows
+      // still dedupe first. A different delivery stays eligible.
+      if (job.delivery) {
+        const settled = asRows<{ one: unknown }>(
+          await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE delivery = $1 AND job_key = $2 LIMIT 1`, [
+            job.delivery,
+            key,
+          ])
+        );
+        if (settled.length > 0) return { key, queued: false };
       }
 
       if (kind === "implement") {
