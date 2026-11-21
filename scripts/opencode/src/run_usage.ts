@@ -5,9 +5,11 @@
  * `jumi_job_duration_seconds_*`, `jumi_opencode_exits_total`,
  * `jumi_opencode_runner_exits_total`, `jumi_opencode_runner_quota_reset_seconds`)
  * die with the pod that recorded them, so a one-Job-per-ledger-row world cannot rely on them.
- * This module stores one row per runner spawn in Postgres (`jumi_run_usage`):
- * runner, model, token counts, exit class, start time, end time. One job row
- * can own many run rows because a job can hop runners.
+ * This module stores one row per (runner spawn, model) in Postgres (`jumi_run_usage`):
+ * runner, model, token counts, exit class, start time, end time. A multi-model
+ * spawn writes one row per model; the rows share an `attempt_id` so exit and
+ * duration metrics count the attempt once while token sums stay per row. One job
+ * row can own many run rows because a job can hop runners.
  *
  * Recording happens at exactly one choke point: `withLedgerRunUsage` wraps the
  * base engine inside `withEngineChain`, so every `opencode` / `claude` / `agy` /
@@ -78,6 +80,11 @@ ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS build_seconds DOUBLE PRECISI
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS runner_outcome TEXT NOT NULL DEFAULT 'incomplete';
 ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS quota_reset_at TIMESTAMPTZ NULL;
 
+ALTER TABLE jumi_run_usage ADD COLUMN IF NOT EXISTS attempt_id TEXT NULL;
+
+CREATE INDEX IF NOT EXISTS jumi_run_usage_attempt
+  ON jumi_run_usage (attempt_id);
+
 -- Pre-upgrade rows were written before runner_outcome existed and defaulted to
 -- 'incomplete'. Backfill from the exit class they already carry, which holds
 -- exactly the outcome set minus provider_down (both writers use
@@ -91,6 +98,13 @@ UPDATE jumi_run_usage
 
 /** One per-(run, model) ledger row. Multi-model runs write one row per model. */
 export interface NewRunUsageRow {
+  /**
+   * Shared identity for every row one runner spawn writes. Exit and duration
+   * metrics count each attempt once; token and session sums stay per row.
+   * Null/undefined means a legacy row written before identities existed:
+   * each such row counts as its own attempt.
+   */
+  attemptId?: string | null;
   jobId: number | null;
   jobKey: string;
   kind: JobKind;
@@ -197,7 +211,8 @@ function toRow(
   quotaResetAt: Date | null,
   startedAt: Date,
   endedAt: Date,
-  durationSeconds: number
+  durationSeconds: number,
+  attemptId: string | null
 ): NewRunUsageRow {
   const tokens: Record<TokenType, number> = {
     input: 0,
@@ -211,6 +226,7 @@ function toRow(
     for (const tokenType of TOKEN_TYPES) tokens[tokenType] = Math.max(0, Math.floor(modelUsage[tokenType] || 0));
   }
   return {
+    attemptId,
     jobId: context.jobId,
     jobKey: context.jobKey,
     kind: context.kind,
@@ -289,6 +305,7 @@ export function withLedgerRunUsage(engine: Engine): Engine {
             ? classifyRunnerOutcome(result)
             : classifyThrownRunnerOutcome(thrown);
         const quotaResetAt = !aborted && result?.quota != null ? toResetDate(resolveQuotaResetAtMs(result)) : null;
+        const attemptId = newAttemptId();
         const rows =
           deltas.length > 0
             ? deltas.map((delta) =>
@@ -300,7 +317,8 @@ export function withLedgerRunUsage(engine: Engine): Engine {
                   quotaResetAt,
                   startedAt,
                   endedAt,
-                  durationSeconds
+                  durationSeconds,
+                  attemptId
                 )
               )
             : [
@@ -312,7 +330,8 @@ export function withLedgerRunUsage(engine: Engine): Engine {
                   quotaResetAt,
                   startedAt,
                   endedAt,
-                  durationSeconds
+                  durationSeconds,
+                  attemptId
                 ),
               ];
         await recording.recordRunUsageRows(rows);
@@ -329,6 +348,13 @@ function mergeUsage(deltas: Array<{ model: string; tokens: Record<TokenType, num
   const usage: ModelTokenUsage = new Map();
   for (const delta of deltas) usage.set(delta.model, delta.tokens);
   return usage;
+}
+
+/** One identity per runner spawn, shared by every row the spawn writes. */
+function newAttemptId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (typeof uuid === "string" && uuid.length > 0) return uuid;
+  return `${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(36)}`;
 }
 
 export interface TokenTotalRow {
