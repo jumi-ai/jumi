@@ -1369,15 +1369,22 @@ export function buildFeedbackMarkdown(opts: {
     dropped.add(idx);
   }
   const fit = extras.filter((_, i) => !dropped.has(i));
-  const omissionNote = dropped.size > 0 ? `> [${dropped.size} further item(s) omitted; feedback budget]\n\n` : "";
-  const omissionBytes = dropped.size > 0 ? encoder.encode(omissionNote).byteLength : 0;
+  let omissionNote = dropped.size > 0 ? `> [${dropped.size} further item(s) omitted; feedback budget]\n\n` : "";
+  let omissionBytes = dropped.size > 0 ? encoder.encode(omissionNote).byteLength : 0;
   while (fit.length > 0 && totalFor(fit.length, keptSum) + omissionBytes > FEEDBACK_MAX_BYTES) {
     const pos = fit.findIndex((item) => !isJumiReviewText(item));
     const at = pos >= 0 ? pos : 0;
-    keptSum -= encoder.encode(fit[at]!.text).byteLength;
-    const orig = extras.indexOf(fit[at]!);
-    if (orig >= 0) dropped.add(orig);
+    const removed = fit[at]!;
+    const orig = extras.indexOf(removed);
+    if (orig >= 0) {
+      keptSum -= itemBytes[orig]!;
+      dropped.add(orig);
+    } else {
+      keptSum -= encoder.encode(removed.text).byteLength;
+    }
     fit.splice(at, 1);
+    omissionNote = `> [${dropped.size} further item(s) omitted; feedback budget]\n\n`;
+    omissionBytes = encoder.encode(omissionNote).byteLength;
   }
   let extra = "";
   if (fit.length > 0) extra = otherHeader + omissionNote + fit.map((item) => item.text).join("\n");
