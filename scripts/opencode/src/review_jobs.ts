@@ -863,10 +863,21 @@ function roleGateStatusFromMs(input: {
 }
 
 const BACKOFF_ERROR_PREDICATE =
-  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')";
+  "(error IS NULL OR error LIKE 'infra-retry:%' OR error LIKE 'quota-wait:%' OR error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')";
 
 function isBackoffMarker(error: string | null | undefined): boolean {
-  return isInfraRetryMarker(error) || isQuotaWaitMarker(error) || isCiLookupRetryMarker(error) || isCiWaitMarker(error);
+  return (
+    isInfraRetryMarker(error) ||
+    isQuotaWaitMarker(error) ||
+    isCiLookupRetryMarker(error) ||
+    isCiWaitMarker(error) ||
+    isStrictRefreshWaitMarker(error)
+  );
+}
+
+/** Waiting for an authorized strict refresh; shares the CI-wait slot semantics. */
+function isStrictRefreshWaitMarker(error: string | null | undefined): boolean {
+  return typeof error === "string" && error.startsWith("strict-refresh-wait:");
 }
 
 export function hasPersistedResult(row: ReviewJobRecord): boolean {
@@ -1183,15 +1194,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         for (const row of sameKey) {
           if (row.state === "leased") row.rewakeRequested = true;
           if (row.state !== "queued") continue;
-          if (isCiWaitMarker(row.error)) {
+          if (isCiWaitMarker(row.error) || isStrictRefreshWaitMarker(row.error)) {
             if (wantsWait) {
-              // Still waiting (e.g. duplicate PR webhook while CI pending):
-              // refresh the wait instead of promoting.
+              // Still waiting (e.g. duplicate PR webhook while CI pending or a
+              // strict refresh still queued): refresh the wait instead of
+              // promoting.
               row.leasedUntil = waitUntil;
               row.error = waitMarker;
               row.updatedAt = now;
             } else {
-              // CI-completion wake for the same head: make it dispatchable.
+              // Wake for the same head: make it dispatchable. A strict-refresh
+              // failure/cancel promotes the parked head so the review does not
+              // stay stuck waiting for an update that will not land.
               row.leasedUntil = null;
               row.error = null;
               row.updatedAt = now;
@@ -3531,20 +3545,20 @@ export class PgReviewJobStore implements ReviewJobStore {
              SET rewake_requested = CASE WHEN state = 'leased' THEN TRUE ELSE rewake_requested END,
                  leased_until = CASE
                    WHEN state = 'queued' AND leased_until > NOW()
-                     AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                     AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')
                    THEN NULL
                    ELSE leased_until
                  END,
                  error = CASE
                    WHEN state = 'queued' AND leased_until > NOW()
-                     AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')
+                     AND (error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')
                    THEN NULL
                    ELSE error
                  END,
                  updated_at = NOW()
              WHERE job_key = $1
                AND (state = 'leased' OR (state = 'queued' AND leased_until > NOW()
-                 AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%')))`,
+                 AND (error LIKE 'ci-lookup-retry:%' OR error LIKE 'ci-wait-pending:%' OR error LIKE 'ci-wait-absent:%' OR error LIKE 'strict-refresh-wait:%')))`,
             [key]
           );
         }

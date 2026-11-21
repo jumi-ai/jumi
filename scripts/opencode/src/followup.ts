@@ -1491,8 +1491,28 @@ async function runMergeOnlyFollowUp(
   );
   const runtime = (opts as { runtime?: import("./runtime.ts").StandingPodRuntime }).runtime ?? standingPodRuntime;
   const branch = pr.head.ref;
+  const isStrictRefresh = Boolean((opts.job as { strictRefresh?: boolean }).strictRefresh);
   try {
     return await runClaimedLoop(loop, (opts as { abortSignal?: AbortSignal }).abortSignal, async () => {
+      if (isStrictRefresh) {
+        const { recheckStrictRefreshEligibility } = await import("./strict_refresh.ts");
+        const { skipReason } = await recheckStrictRefreshEligibility({
+          api: opts.api as never,
+          owner,
+          repo,
+          prNumber: pr.number,
+          expectedHeadSha: opts.job.headSha ?? pr.head.sha,
+          botUsername: opts.botUsername,
+          policy: opts as never,
+          ignoreConflictsLabel: (opts as { ignoreConflictsLabel?: string }).ignoreConflictsLabel,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        });
+        if (skipReason) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: skipReason };
+        }
+      }
       await runtime.ensureBareCache(loop, {
         cloneUrl: opts.job.cloneUrl,
         giteaUrl: (opts as { giteaUrl?: string }).giteaUrl ?? "",
@@ -1544,6 +1564,25 @@ async function runMergeOnlyFollowUp(
       if (porcelain) {
         await commitIfDirty(loop, porcelain, `Merge ${opts.job.defaultBranch} into ${branch}`);
       }
+      if (isStrictRefresh) {
+        const { recheckStrictRefreshEligibility } = await import("./strict_refresh.ts");
+        const { skipReason } = await recheckStrictRefreshEligibility({
+          api: opts.api as never,
+          owner,
+          repo,
+          prNumber: pr.number,
+          expectedHeadSha: opts.job.headSha ?? pr.head.sha,
+          botUsername: opts.botUsername,
+          policy: opts as never,
+          ignoreConflictsLabel: (opts as { ignoreConflictsLabel?: string }).ignoreConflictsLabel,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        });
+        if (skipReason) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: skipReason };
+        }
+      }
       try {
         await pushClaimedBranchWithAutomergeRestore(loop, branch, {
           api: opts.api,
@@ -1562,7 +1601,12 @@ async function runMergeOnlyFollowUp(
         });
       } catch (err) {
         const { errorMessage } = await import("./util/error.ts");
-        throw err instanceof Error ? err : new Error(errorMessage(err));
+        const message = errorMessage(err);
+        if (isStrictRefresh && /non-fast-forward|fetch first|stale|rejected|behind/i.test(message)) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason: "strict refresh: competing head update" };
+        }
+        throw err instanceof Error ? err : new Error(message);
       }
       await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
@@ -1773,7 +1817,15 @@ export async function implementFollowUp(
     fallbackEngine: registeredEngine,
     forgetTerminal: true,
   });
-  if (isClaimedEarlyResult(claimed)) return claimed;
+  if (isClaimedEarlyResult(claimed)) {
+    if ((opts.job as { strictRefresh?: boolean }).strictRefresh && claimed.status === "skipped") {
+      return {
+        status: "skipped",
+        reason: `strict refresh: branch writer busy; retry after writer finishes (${claimed.reason})`,
+      };
+    }
+    return claimed;
+  }
   const { owner, repo, issueNumber, worktree, sanitizeEnv, engine: claimedEngine, now, forgetClaim, claim } = claimed;
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };

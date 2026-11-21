@@ -80,6 +80,13 @@ export interface Pull {
   merged: boolean;
   draft?: boolean;
   mergeable?: boolean | null;
+  /**
+   * GitHub `mergeable_state` lowercased (`behind` when the head is out of
+   * date under strict checks, `clean`/`blocked`/`dirty`/`unstable`/etc.).
+   * Absent on forges without an equivalent and while GitHub computes it.
+   * Callers treat absent/`unknown` as unknown, never as permission.
+   */
+  mergeableState?: string;
   assignee?: Actor | null;
   assignees?: Actor[] | null;
   labels?: Array<string | { name?: string }> | null;
@@ -97,6 +104,16 @@ export interface BranchProtection {
   enableStatusCheck?: boolean;
   requiredContexts?: string[];
   userCanMerge?: boolean;
+  /**
+   * GitHub "require branches to be up to date" for the branch. `true` when
+   * classic protection (`strict`) or an active ruleset
+   * (`strict_required_status_checks_policy` with at least one check)
+   * requires it, `false` when the policy is readable and does not, and
+   * `undefined` when the policy is unreadable or the forge exposes none
+   * (Gitea, older fakes). Callers treat `undefined` as unknown and never as
+   * permission to update.
+   */
+  strict?: boolean;
 }
 
 export interface PullFile {

@@ -225,6 +225,10 @@
       "listPullReviews": 2
     }
   },
+  "followup.test.ts::119": {
+    "name": "implementFollowUp",
+    "reads": {}
+  },
   "followup.test.ts::12": {
     "name": "implementFollowUp",
     "reads": {
@@ -240,6 +244,15 @@
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
+    }
+  },
+  "followup.test.ts::120": {
+    "name": "implementFollowUp",
+    "reads": {
+      "getBranch": 2,
+      "getIssue": 1,
+      "getPR": 2,
+      "listOpenPulls": 1
     }
   },
   "followup.test.ts::13": {

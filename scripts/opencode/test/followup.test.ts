@@ -10,6 +10,7 @@ import {
   followUpStatePath,
   readClaim,
   stuckStatePath,
+  writeClaim,
 } from "../src/claim.ts";
 import { readConflictState, writeConflictState } from "../src/conflict.ts";
 import { EngineFailedError } from "../src/engine.ts";
@@ -5651,6 +5652,115 @@ describe("suggestion hold latch", () => {
       expect(statuses).toHaveLength(1);
       expect(statuses[0]).toMatchObject({ state: "success" });
       expect(statuses[0]?.description).toContain("follow-up skipped");
+    });
+  });
+});
+
+describe("strict refresh merge-only writer races", () => {
+  function strictPr() {
+    return Object.assign(jumiPr(), { autoMergeEnabled: true });
+  }
+
+  function strictJob(overrides: Parameters<typeof followUpJob>[0] = {}) {
+    return followUpJob({
+      mode: "follow-up",
+      mergeOnly: true,
+      strictRefresh: true,
+      headSha: "headsha",
+      prNumber: 127,
+      defaultBranch: "main",
+      ...overrides,
+    } as never);
+  }
+
+  test("busy branch writer skips with retry-after-writer reason", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeClaim(claimFilePath(home, "kirmanak", "demo", 12), {
+        pid: 42,
+        startedAt: "2026-05-23T00:00:00Z",
+        heartbeatAt: new Date().toISOString(),
+        worktree: join(workdir, "kirmanak/demo/12"),
+        branch: "jumi/issue-12-fix-the-thing",
+        issueUpdatedAt: "2026-05-23T00:00:00Z",
+        headShaAtStart: "abc",
+      });
+      const api = followupApi();
+      const result = await implementFollowUp({
+        api,
+        job: strictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        pidAlive: () => true,
+        gitRunner: async () => {
+          throw new Error("git should not run while the writer holds the claim");
+        },
+        openCodeRunner: async () => {
+          throw new Error("model should not run while the writer holds the claim");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "strict refresh: branch writer busy; retry after writer finishes (claim is live)",
+      });
+    });
+  });
+
+  test("rejected push maps to competing head update without throwing", async () => {
+    await withDirs(async (home, workdir) => {
+      const pr = strictPr();
+      const api = followupApi({
+        listOpenPulls: async () => [pr],
+        getPR: async () => pr,
+        getBranch: async () => ({ protected: true, strict: true }) as never,
+      });
+      const runtime = {
+        ...standingPodRuntime,
+        ensureBareCache: async () => undefined,
+        attachPrWorktree: async () => ({}),
+        destroyRuntimeWorkspace: async () => undefined,
+      };
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "fetch") return "";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha-new";
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("MERGE_HEAD")) return "mergehead";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        if (gitArgs[0] === "merge-base") throw new Error("not ancestor");
+        if (gitArgs[0] === "merge") return "";
+        if (gitArgs[0] === "diff") return "";
+        if (gitArgs[0] === "grep") return "";
+        if (gitArgs[0] === "ls-tree") return "";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "commit") return "";
+        if (gitArgs[0] === "push") {
+          throw new Error("To example.com:demo.git ! [rejected] head -> jumi/issue-12 (non-fast-forward)");
+        }
+        return "";
+      };
+      const result = await implementFollowUp({
+        api,
+        job: strictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        runtime: runtime as never,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("model should not run for a clean strict refresh");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "skipped", reason: "strict refresh: competing head update" });
     });
   });
 });
