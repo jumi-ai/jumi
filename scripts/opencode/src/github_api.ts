@@ -878,7 +878,11 @@ export class GithubAPI {
    */
   async getBranch(owner: string, repo: string, branch: string): Promise<BranchProtection> {
     try {
-      const policy = await this.get<{ contexts?: string[]; checks?: Array<{ context?: string }> }>(
+      const policy = await this.get<{
+        strict?: unknown;
+        contexts?: string[];
+        checks?: Array<{ context?: string }>;
+      }>(
         `/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}/protection/required_status_checks`
       );
       const requiredContexts = [
@@ -887,7 +891,12 @@ export class GithubAPI {
           .map((check) => check.context)
           .filter((context): context is string => typeof context === "string" && context.length > 0),
       ];
-      return { protected: true, enableStatusCheck: true, requiredContexts };
+      return {
+        protected: true,
+        enableStatusCheck: true,
+        requiredContexts,
+        strict: policy.strict === true,
+      };
     } catch (err) {
       if (!isNotFoundError(err) && !isForbiddenError(err)) throw err;
       return this.getBranchFromRules(owner, repo, branch, err);
@@ -908,11 +917,15 @@ export class GithubAPI {
     }
     if (!Array.isArray(rules)) throw classicError;
     const requiredContexts: string[] = [];
+    let strict = false;
     for (const rule of rules) {
       if (!rule || typeof rule !== "object") continue;
       const typed = rule as {
         type?: unknown;
-        parameters?: { required_status_checks?: Array<{ context?: unknown }> };
+        parameters?: {
+          required_status_checks?: Array<{ context?: unknown }>;
+          strict_required_status_checks_policy?: unknown;
+        };
       };
       if (typed.type !== "required_status_checks") continue;
       const checks = typed.parameters?.required_status_checks;
@@ -922,11 +935,22 @@ export class GithubAPI {
           requiredContexts.push(check.context);
         }
       }
+      // `GET /rules/branches/{branch}` returns only active rules (including
+      // inherited levels), so a strict rule here is the effective GitHub rule
+      // for the branch. Strict takes effect only with at least one check.
+      if (typed.parameters?.strict_required_status_checks_policy === true && checks.length > 0) {
+        strict = true;
+      }
     }
     // Readable rules without a required-checks rule mean the branch genuinely
     // requires nothing: fail closed with `enableStatusCheck: false` (the "does
     // not require" note) rather than the "could not be read" note.
-    return { protected: true, enableStatusCheck: requiredContexts.length > 0, requiredContexts };
+    return {
+      protected: true,
+      enableStatusCheck: requiredContexts.length > 0,
+      requiredContexts,
+      strict,
+    };
   }
 
   /**

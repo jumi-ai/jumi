@@ -605,6 +605,110 @@ export async function handleGithubWebhookEvent(
             logger(`pr head lookup failed: ${errorMessage(err)}`);
           }
         }
+        // Strict refresh reconcile on PR activity: a PR already behind when
+        // strict checks and auto-merge are armed need not wait for another
+        // base push. Enqueue the merge-only refresh and park this stale-head
+        // review without taking a reviewer slot; the new head re-enters
+        // through the normal CI and review flow.
+        if (deps.worker?.api && deps.worker?.queue) {
+          try {
+            const { shouldEnqueueStrictRefreshForPR, encodeStrictRefreshWait, STRICT_REFRESH_WAIT_FALLBACK_MS } =
+              await import("./strict_refresh.ts");
+            const [strictOwner, strictRepo] = payload.repository.full_name.split("/");
+            if (strictOwner && strictRepo) {
+              let fullPr: import("./ports.ts").Pull | undefined;
+              try {
+                const getPR = deps.worker.api.getPR;
+                if (typeof getPR === "function") {
+                  fullPr = await getPR.call(deps.worker.api, strictOwner, strictRepo, payload.pull_request.number);
+                }
+              } catch (err) {
+                logger(`strict refresh pr lookup failed: ${errorMessage(err)}`);
+              }
+              if (fullPr) {
+                const strictJob = await shouldEnqueueStrictRefreshForPR({
+                  pr: fullPr,
+                  owner: strictOwner,
+                  repo: strictRepo,
+                  defaultBranch: payload.repository.default_branch,
+                  cloneUrl: payload.repository.clone_url,
+                  policy,
+                  api: deps.worker.api,
+                  sender: payload.sender?.login ?? "pull_request",
+                  log: logger,
+                });
+                if (strictJob) {
+                  const receivedAt = new Date().toISOString();
+                  const workerJob: import("./types.ts").IssueJob = { ...strictJob, delivery, receivedAt };
+                  const workerResult = await deps.worker.queue.enqueue(workerJob);
+                  logger(
+                    `${workerResult.queued ? "queued" : "deduped"} ${workerResult.key} delivery=${delivery} strict-refresh`
+                  );
+                  const nowMs = Date.now();
+                  const parked = await deps.review.enqueue(job, {
+                    waitUntilMs: nowMs + STRICT_REFRESH_WAIT_FALLBACK_MS,
+                    waitMarker: encodeStrictRefreshWait(nowMs),
+                    nowMs,
+                  });
+                  logger(
+                    `${parked.queued ? "queued" : "deduped"} ${parked.key} delivery=${delivery} strict-refresh-wait`
+                  );
+                  if (parked.queued) {
+                    const cleared = await clearGithubSit(
+                      reviewSitsFor(deps),
+                      job.owner,
+                      job.repo,
+                      job.prNumber,
+                      logger
+                    );
+                    if (cleared) return cleared;
+                  }
+                  if (action === "opened" && deps.worker) {
+                    try {
+                      const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+                      const [o, r] = payload.repository.full_name.split("/");
+                      if (o && r) {
+                        const outcome = await enqueueTakeoverForOpenedPull({
+                          api: deps.worker.api ?? {},
+                          forgeKind: "github",
+                          owner: o,
+                          repo: r,
+                          prNumber: payload.pull_request.number,
+                          prTitle: payload.pull_request.title,
+                          prDraft: payload.pull_request.draft,
+                          prState: payload.pull_request.state,
+                          prMerged: payload.pull_request.merged,
+                          prAuthorLogin: payload.pull_request.user?.login,
+                          prHeadRef: payload.pull_request.head?.ref ?? "",
+                          prHeadSha: payload.pull_request.head?.sha ?? job.headSha,
+                          prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+                          defaultBranch: payload.repository.default_branch,
+                          cloneUrl: payload.repository.clone_url,
+                          htmlUrl: payload.pull_request.html_url,
+                          updatedAt: payload.pull_request.updated_at,
+                          prBody: payload.pull_request.body,
+                          botUsername: policy.botUsername,
+                          trustedSenderLogins: policy.trustedSenderLogins,
+                          action,
+                          delivery: `takeover-${delivery}`,
+                          queue: deps.worker.queue,
+                          log: (message) => logger(message),
+                        });
+                        if (outcome.type === "skipped")
+                          logger(`takeover skipped ${o}/${r}#${payload.pull_request.number}: ${outcome.reason}`);
+                      }
+                    } catch (err) {
+                      logger(`takeover failed: ${errorMessage(err)}`);
+                    }
+                  }
+                  return json(202, parked);
+                }
+              }
+            }
+          } catch (err) {
+            logger(`strict refresh reconcile failed: ${errorMessage(err)}`);
+          }
+        }
         const result = await enqueueReviewWithCiGate(deps.review, job, {
           ciApi: deps.ciApi ?? deps.worker?.ciApi,
           home: deps.ciHome ?? deps.worker?.ciHome ?? "/data",
@@ -1000,6 +1104,22 @@ export async function handleGithubWebhookEvent(
         }
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
+      }
+      // Strict refresh: GitHub branches that require up-to-date heads. Clean
+      // merges land via the merge-only worker path without a model call;
+      // conflicts stay for the conflict workflow. Unknown/off stays silent.
+      // Deduplicates by head+base via the worker key; the worker merges the
+      // latest tip it fetches so repeated pushes coalesce.
+      try {
+        const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
+        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger);
+        for (const partial of strict.jobs) {
+          const job: IssueJob = { ...partial, delivery, receivedAt };
+          jobs.push(job);
+          logger(`strict refresh merge-only ${job.owner}/${job.repo}#${job.prNumber} delivery=${delivery}`);
+        }
+      } catch (err) {
+        logger(`strict refresh wake failed: ${errorMessage(err)}`);
       }
       if (jobs.length === 0) {
         if (decision.type === "skip") return skipped(decision.reason, logger);

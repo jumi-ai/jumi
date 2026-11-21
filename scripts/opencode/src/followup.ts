@@ -1491,8 +1491,36 @@ async function runMergeOnlyFollowUp(
   );
   const runtime = (opts as { runtime?: import("./runtime.ts").StandingPodRuntime }).runtime ?? standingPodRuntime;
   const branch = pr.head.ref;
+  const isStrictRefresh = Boolean((opts.job as { strictRefresh?: boolean }).strictRefresh);
   try {
     return await runClaimedLoop(loop, (opts as { abortSignal?: AbortSignal }).abortSignal, async () => {
+      if (isStrictRefresh) {
+        const { isStrictRefreshCandidate, resolveStrictPolicy } = await import("./strict_refresh.ts");
+        let fresh: import("./ports.ts").Pull | undefined;
+        try {
+          fresh = await (
+            opts.api as { getPR: (o: string, r: string, n: number) => Promise<import("./ports.ts").Pull> }
+          ).getPR(owner, repo, pr.number);
+        } catch (err) {
+          log(`strict refresh unreadable for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: pull request unreadable" };
+        }
+        if (!fresh || !isStrictRefreshCandidate(fresh, owner, repo, opts.botUsername, opts as never)) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: not eligible" };
+        }
+        const expectedHead = (opts.job.headSha ?? pr.head.sha).toLowerCase();
+        if (fresh.head.sha.toLowerCase() !== expectedHead) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: competing head update" };
+        }
+        const strict = await resolveStrictPolicy(opts.api as never, owner, repo, fresh.base.ref, log);
+        if (strict !== "strict") {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: strictness off or unknown" };
+        }
+      }
       await runtime.ensureBareCache(loop, {
         cloneUrl: opts.job.cloneUrl,
         giteaUrl: (opts as { giteaUrl?: string }).giteaUrl ?? "",
@@ -1544,6 +1572,37 @@ async function runMergeOnlyFollowUp(
       if (porcelain) {
         await commitIfDirty(loop, porcelain, `Merge ${opts.job.defaultBranch} into ${branch}`);
       }
+      if (isStrictRefresh) {
+        const { isStrictRefreshCandidate, resolveStrictPolicy } = await import("./strict_refresh.ts");
+        let fresh: import("./ports.ts").Pull | undefined;
+        try {
+          fresh = await (
+            opts.api as { getPR: (o: string, r: string, n: number) => Promise<import("./ports.ts").Pull> }
+          ).getPR(owner, repo, pr.number);
+        } catch (err) {
+          log(`strict refresh unreadable before push for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: pull request unreadable" };
+        }
+        if (!fresh || !isStrictRefreshCandidate(fresh, owner, repo, opts.botUsername, opts as never)) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: not eligible" };
+        }
+        const expectedHead = (opts.job.headSha ?? pr.head.sha).toLowerCase();
+        if (fresh.head.sha.toLowerCase() !== expectedHead) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: competing head update" };
+        }
+        const strict = await resolveStrictPolicy(opts.api as never, owner, repo, fresh.base.ref, log);
+        if (strict !== "strict") {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: strictness off or unknown" };
+        }
+        if (fresh.autoMergeEnabled !== true) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+          return { status: "skipped", reason: "strict refresh: auto-merge no longer armed" };
+        }
+      }
       try {
         await pushClaimedBranchWithAutomergeRestore(loop, branch, {
           api: opts.api,
@@ -1562,7 +1621,12 @@ async function runMergeOnlyFollowUp(
         });
       } catch (err) {
         const { errorMessage } = await import("./util/error.ts");
-        throw err instanceof Error ? err : new Error(errorMessage(err));
+        const message = errorMessage(err);
+        if (isStrictRefresh && /non-fast-forward|fetch first|stale|rejected|behind/i.test(message)) {
+          await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log }).catch(() => undefined);
+          return { status: "skipped", reason: "strict refresh: competing head update" };
+        }
+        throw err instanceof Error ? err : new Error(message);
       }
       await runtime.destroyRuntimeWorkspace(loop, { pushLanded: true, logger: log });
       return { status: "pushed", prNumber: pr.number, htmlUrl: pr.html_url };
@@ -1773,7 +1837,15 @@ export async function implementFollowUp(
     fallbackEngine: registeredEngine,
     forgetTerminal: true,
   });
-  if (isClaimedEarlyResult(claimed)) return claimed;
+  if (isClaimedEarlyResult(claimed)) {
+    if ((opts.job as { strictRefresh?: boolean }).strictRefresh && claimed.status === "skipped") {
+      return {
+        status: "skipped",
+        reason: `strict refresh: branch writer busy; retry after writer finishes (${claimed.reason})`,
+      };
+    }
+    return claimed;
+  }
   const { owner, repo, issueNumber, worktree, sanitizeEnv, engine: claimedEngine, now, forgetClaim, claim } = claimed;
   const latches = skipLatchesFor(opts);
   const latchKey = { owner, repo, issueNumber };
