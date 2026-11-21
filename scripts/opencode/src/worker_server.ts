@@ -148,7 +148,15 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           automergeEnabled: config.automergeEnabled,
           forgeKind: config.forge,
         },
-        { queue: deps.queue, api: deps.api, cancel: deps.cancel, logger, sits: deps.sits, handoffs: deps.handoffs, strictSlots: deps.strictSlots }
+        {
+          queue: deps.queue,
+          api: deps.api,
+          cancel: deps.cancel,
+          logger,
+          sits: deps.sits,
+          handoffs: deps.handoffs,
+          strictSlots: deps.strictSlots,
+        }
       );
       if (deliveryHeader && (response.status === 200 || response.status === 202)) {
         deliveryDedupe.mark(delivery);
