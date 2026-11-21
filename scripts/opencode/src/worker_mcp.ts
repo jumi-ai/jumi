@@ -305,6 +305,28 @@ export class WorkerResultStore {
   }
 }
 
+/**
+ * Give the next spawn its own result scope: close the previous store and
+ * point the server at a fresh one. Handoff is the one result that persists
+ * across attempts, so carry it forward; skip, PR body, no-changes and
+ * blockers start empty for the new attempt.
+ */
+export function rotateResultScope(
+  log: (message: string) => void,
+  prev: WorkerResultStore,
+  server: { setStore: (store: WorkerResultStore) => void }
+): WorkerResultStore {
+  const handoff = prev.getHandoff();
+  prev.close();
+  const fresh = new WorkerResultStore();
+  if (handoff != null) {
+    const carried = fresh.setHandoff({ notes: handoff });
+    if (!carried.ok) log(`worker result: handoff carry failed: ${carried.error}`);
+  }
+  server.setStore(fresh);
+  return fresh;
+}
+
 function toolSchemas(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
   return [
     {
@@ -391,6 +413,12 @@ export interface StartedWorkerMcpServer {
   url: string;
   token: string;
   close: () => void;
+  /**
+   * Point the server at a fresh result scope. The previous store should
+   * already be closed; the server keeps its URL/token so in-flight spawns
+   * keep a stable endpoint while each attempt gets its own scope.
+   */
+  setStore: (store: WorkerResultStore) => void;
 }
 
 export async function startWorkerMcpServer(opts: {
@@ -398,7 +426,7 @@ export async function startWorkerMcpServer(opts: {
   token?: string;
 }): Promise<StartedWorkerMcpServer> {
   const token = opts.token ?? randomWorkerMcpToken();
-  const store = opts.store;
+  let current = opts.store;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -412,7 +440,7 @@ export async function startWorkerMcpServer(opts: {
       if (!isAuthorized(req, token)) {
         return rpcError(body?.id, -32001, "wrong or missing bearer token");
       }
-      if (store.isClosed) {
+      if (current.isClosed) {
         return rpcError(body?.id, -32000, "worker spawn ended: result store is closed");
       }
       const method = body?.method;
@@ -434,7 +462,7 @@ export async function startWorkerMcpServer(opts: {
       if (method === "tools/call") {
         const name = String(params.name ?? "");
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        const out = callTool(store, name, args);
+        const out = callTool(current, name, args);
         return Response.json({
           jsonrpc: "2.0",
           id: body?.id ?? null,
@@ -447,7 +475,14 @@ export async function startWorkerMcpServer(opts: {
       return rpcError(body?.id, -32601, `unknown method: ${String(method)}`);
     },
   });
-  return { url: `http://127.0.0.1:${server.port}/mcp`, token, close: () => server.stop(true) };
+  return {
+    url: `http://127.0.0.1:${server.port}/mcp`,
+    token,
+    close: () => server.stop(true),
+    setStore: (store: WorkerResultStore) => {
+      current = store;
+    },
+  };
 }
 
 /** Where a worker result came from: tool store first, file fallback for one transition period. */
