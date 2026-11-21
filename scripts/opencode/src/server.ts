@@ -1413,6 +1413,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
             }),
           logger,
           sits: store.sits,
+          strictSlots: store.strictSlots,
         },
       }),
       logger,

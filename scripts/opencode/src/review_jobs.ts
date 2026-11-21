@@ -33,6 +33,12 @@ import {
   type SkipLatchStore,
 } from "./skip_latches.ts";
 import { createBunSqlClient, pgTextArrayLiteral, type SqlClient, wrapSqlError } from "./sql_client.ts";
+import {
+  MemoryStrictRefreshSlotStore,
+  PgStrictRefreshSlotStore,
+  STRICT_REFRESH_SLOTS_SCHEMA_SQL,
+  type StrictRefreshSlotStore,
+} from "./strict_refresh_queue.ts";
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
@@ -363,6 +369,8 @@ export interface ReviewJobStore {
   readonly provenance: ProvenanceStore;
   /** Previous-round worker notes, keyed by forge/owner/repo/issue. Sibling of the issue latch rows. */
   readonly handoffs: HandoffStore;
+  /** Single-slot strict-refresh queue (one active refresh per repo and target branch). */
+  readonly strictSlots: StrictRefreshSlotStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -1131,6 +1139,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly sits = new MemoryRouterSitStore();
   readonly provenance = new MemoryProvenanceStore();
   readonly handoffs = new MemoryHandoffStore();
+  readonly strictSlots = new MemoryStrictRefreshSlotStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly sharedLocks = new Map<string, Promise<void>>();
@@ -3362,6 +3371,7 @@ const REQUIRED_LEDGER_TABLES = [
   "issue_handoffs",
   "jumi_review_suggestions",
   "review_handover_pending",
+  "strict_refresh_slots",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -3414,12 +3424,14 @@ export class PgReviewJobStore implements ReviewJobStore {
   readonly sits: PgRouterSitStore;
   readonly provenance: PgProvenanceStore;
   readonly handoffs: PgHandoffStore;
+  readonly strictSlots: PgStrictRefreshSlotStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
     this.sits = new PgRouterSitStore(sql);
     this.provenance = new PgProvenanceStore(sql);
     this.handoffs = new PgHandoffStore(sql);
+    this.strictSlots = new PgStrictRefreshSlotStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -3441,6 +3453,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(`ALTER TABLE runner_cooldowns ADD COLUMN IF NOT EXISTS fingerprint TEXT`);
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
+        await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);

@@ -682,6 +682,18 @@ export async function handleGithubWebhookEvent(
                 logger(`strict refresh pr lookup failed: ${errorMessage(err)}`);
               }
               if (fullPr) {
+                const strictSlots =
+                  deps.worker?.strictSlots ??
+                  (
+                    deps.worker?.review as unknown as
+                      | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+                      | undefined
+                  )?.strictSlots ??
+                  (
+                    deps.review as unknown as
+                      | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+                      | undefined
+                  )?.strictSlots;
                 const strictJob = await shouldEnqueueStrictRefreshForPR({
                   pr: fullPr,
                   owner: strictOwner,
@@ -692,6 +704,7 @@ export async function handleGithubWebhookEvent(
                   api: deps.worker.api,
                   sender: payload.sender?.login ?? "pull_request",
                   log: logger,
+                  ...(strictSlots ? { slots: strictSlots } : {}),
                 });
                 if (strictJob) {
                   const receivedAt = new Date().toISOString();
@@ -1124,11 +1137,23 @@ export async function handleGithubWebhookEvent(
       // Strict refresh: GitHub branches that require up-to-date heads. Clean
       // merges land via the merge-only worker path without a model call;
       // conflicts stay for the conflict workflow. Unknown/off stays silent.
-      // Deduplicates by head+base via the worker key; the worker merges the
-      // latest tip it fetches so repeated pushes coalesce.
+      // Single-slot per repo and target branch: the oldest ready PR holds the
+      // slot across CI/review/merge; waiting PRs get no speculative push.
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
-        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger);
+        const strictSlots =
+          deps.worker?.strictSlots ??
+          (
+            deps.worker?.review as unknown as
+              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+              | undefined
+          )?.strictSlots ??
+          (
+            deps.review as unknown as
+              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
+              | undefined
+          )?.strictSlots;
+        const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy, deps.worker.api, logger, strictSlots);
         for (const partial of strict.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };
           jobs.push(job);
