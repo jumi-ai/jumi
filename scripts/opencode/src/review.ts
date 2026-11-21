@@ -555,7 +555,7 @@ async function submitPendingAndRefreshPosted(
 ): Promise<void> {
   const submitted = await submitPendingBotReviews(opts);
 
-  let reviews: PullReview[] = [];
+  let reviews: PullReview[] | undefined;
   try {
     reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
   } catch (err) {
@@ -568,7 +568,14 @@ async function submitPendingAndRefreshPosted(
     opts.log(`existing inlines unavailable: ${errorMessage(err)}`);
   }
 
-  for (const key of leftoverAttemptedFingerprints(leftover, attempted, opts.marker, existingIds, reviews, submitted)) {
+  for (const key of leftoverAttemptedFingerprints(
+    leftover,
+    attempted,
+    opts.marker,
+    existingIds,
+    reviews ?? [],
+    submitted
+  )) {
     posted.add(key);
   }
 }
@@ -658,7 +665,7 @@ async function postPullReview(opts: {
 
   await submitPendingBotReviews(opts);
 
-  let reviews: PullReview[] = [];
+  let reviews: PullReview[] | undefined;
   try {
     reviews = await opts.api.listPullReviews(opts.owner, opts.repo, opts.prNumber);
   } catch (err) {
@@ -680,7 +687,7 @@ async function postPullReview(opts: {
     marker: opts.marker,
     findings,
     existing,
-    reviews,
+    reviews: reviews ?? [],
     log: opts.log,
   });
 
@@ -755,7 +762,10 @@ async function postPullReview(opts: {
   let urls = inlineUrlsByFingerprint(existing, opts.marker);
   if (comments.length > 0) {
     try {
-      const published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber, reviews);
+      // Re-fetch the review list here instead of reusing the pre-create
+      // `reviews`: the review just created above has a new id whose inline
+      // `html_url`s would otherwise be missing from the published read.
+      const published = await opts.api.listPullReviewComments(opts.owner, opts.repo, opts.prNumber);
       urls = inlineUrlsByFingerprint(published, opts.marker);
     } catch (err) {
       opts.log(`inline urls unavailable: ${errorMessage(err)}`);
@@ -2401,13 +2411,15 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       earlyRepo ?? forgeApi.getRepo(opts.owner, opts.repo),
       forgeApi.getPRFiles(opts.owner, opts.repo, pr.number),
       loadPrComments(forgeApi, opts.owner, opts.repo, pr.number),
-      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] => {
+      forgeApi.listPullReviews(opts.owner, opts.repo, pr.number).catch((err: unknown): PullReview[] | undefined => {
         log(`previous reviews unavailable: ${errorMessage(err)}`);
-        return [];
+        return undefined;
       }),
     ]);
     // Reuse the review list fetched above so the review-list pages are
-    // requested exactly once per evaluation.
+    // requested exactly once per evaluation. `undefined` on a review-list
+    // failure retries the fetch inside the inline read instead of silently
+    // forcing inlines to `[]`.
     const prInlines = await forgeApi
       .listPullReviewComments(opts.owner, opts.repo, pr.number, prReviews)
       .catch((err: unknown): InlineComment[] => {
@@ -2416,7 +2428,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       });
     const previousReview = findPreviousReview({
       comments: prCommentResult.comments,
-      reviews: prReviews,
+      reviews: prReviews ?? [],
       inlines: prInlines,
       botUsername: opts.botUsername,
       marker: markerFor(opts.owner, opts.repo, pr.number),
@@ -2482,7 +2494,7 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
     // requirement. Dismissed/stale human reviews stay in: dismissal is not a
     // retraction, and a stale review the worker implemented is not withdrawn.
     const botLower = opts.botUsername.trim().toLowerCase();
-    const threadReviews = prReviews.filter((review) => (review.user?.login ?? "").toLowerCase() !== botLower);
+    const threadReviews = (prReviews ?? []).filter((review) => (review.user?.login ?? "").toLowerCase() !== botLower);
     const threadInlines = prInlines.filter((comment) => (comment.user?.login ?? "").toLowerCase() !== botLower);
     const {
       permissions,
