@@ -371,7 +371,9 @@ describePg("PgReviewJobStore against real postgres", () => {
     const leased = await store.lease("engine-1", 60_000);
     await store.markPublished(leased!.id, "engine-1", { state: "failed", reason: "boom" });
 
-    expect(await store.enqueue(job)).toEqual({ key, queued: true });
+    // A new delivery stays eligible; the same delivery would dedupe per effect
+    // (see the retried-delivery test below).
+    expect(await store.enqueue(makeJob({ delivery: "delivery-2" }))).toEqual({ key, queued: true });
     expect(await countJobs(`job_key = $1`, [key])).toBe(2);
     expect(await countJobs(`job_key = $1 AND state IN ('queued', 'leased')`, [key])).toBe(1);
   });
@@ -1038,6 +1040,7 @@ describePg("PgReviewJobStore against real postgres", () => {
   test("concurrent migrators do not conflict and job-mode checks instead of migrating", async () => {
     await Promise.all([store.migrate(), store.migrate(), store.migrate(), store.migrate(), store.migrate()]);
     expect(await indexExists("review_jobs_leased_worker_issue")).toBe(true);
+    expect(await indexExists("review_jobs_delivery_job_key")).toBe(true);
 
     // A migrated schema passes the job-mode check and opens without migrating.
     await assertLedgerSchema(sql);
@@ -1122,6 +1125,37 @@ describePg("PgReviewJobStore against real postgres", () => {
     };
     expect(await store.forceExpireLease(1, expected, new Date(2_000))).toBe(true);
     expect((await store.get(1))?.leasedBy).toBeNull();
+  });
+
+  test("retried delivery repeats only effects that did not settle", async () => {
+    const delivery = "ci-delivery-1";
+    const jobA = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 81,
+      prNumber: 102,
+      headSha: "sha-a",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 11 },
+    });
+    const jobB = makeIssueJob({
+      delivery,
+      mode: "follow-up",
+      issueNumber: 82,
+      prNumber: 103,
+      headSha: "sha-b",
+      trigger: { event: "workflow_job", sender: "bot", workflowJobId: 12 },
+    });
+    expect((await store.enqueueIssue(jobA)).queued).toBe(true);
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.prNumber).toBe(102);
+    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    // Same delivery + same effect is settled even though the key is no longer
+    // in flight; the sibling with the same delivery still enqueues.
+    expect((await store.enqueueIssue(jobA)).queued).toBe(false);
+    expect((await store.enqueueIssue(jobB)).queued).toBe(true);
+    expect(await countJobs(`delivery = 'ci-delivery-1'`)).toBe(2);
+    // A new delivery for the same PR stays eligible.
+    expect((await store.enqueueIssue({ ...jobA, delivery: "ci-delivery-2" })).queued).toBe(true);
   });
 
   test("job-mode schema check covers the review handover pending table", async () => {
