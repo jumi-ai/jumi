@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { GiteaAPI } from "../src/api.ts";
 import {
   beginCheckpointing,
@@ -21,6 +24,7 @@ import {
 import { GithubAPI } from "../src/github_api.ts";
 import { shouldEnqueuePushConflicts } from "../src/push_webhook.ts";
 import { loadWorkerConfig } from "../src/worker_config.ts";
+import { runGit } from "../src/workspace.ts";
 import { makePushPayload, makeRepo } from "./fixtures.ts";
 
 function makeLoop(overrides: Partial<CheckpointLoop> & { git: CheckpointLoop["runConfiguredGit"] }): CheckpointLoop {
@@ -715,5 +719,202 @@ describe("resume from checkpoint", () => {
     expect(restored.sha).toBe("abc");
     expect(staged).toContainEqual({ ref: "refs/heads/jumi/issue-12-x", sha: "abc" });
     expect(pushes[0]).toEqual(["push", "origin", "HEAD:refs/jumi/wip/12"]);
+  });
+});
+
+describe("restoreCheckpoint local tip (temp repos)", () => {
+  const branch = "jumi/issue-12-x";
+  const checkpointRef = "refs/jumi/wip/12";
+  const localRef = `refs/heads/${branch}`;
+  const originRef = `refs/remotes/origin/${branch}`;
+  const originMainRef = "refs/remotes/origin/main";
+
+  async function setupRepo(): Promise<{
+    dir: string;
+    env: Record<string, string | undefined>;
+    cleanup: () => Promise<void>;
+  }> {
+    const dir = await mkdtemp(join(tmpdir(), "jumi-checkpoint-restore-"));
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_SYSTEM: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const run = (args: string[], cwd = dir) => runGit(args, { cwd, env });
+    await run(["init", "-b", "main", dir], tmpdir());
+    await run(["config", "user.email", "t@t"]);
+    await run(["config", "user.name", "t"]);
+    await run(["config", "commit.gpgsign", "false"]);
+    await run(["remote", "add", "origin", dir]);
+    const cleanup = async () => rm(dir, { recursive: true, force: true });
+    return { dir, env, cleanup };
+  }
+
+  async function commitFile(
+    dir: string,
+    env: Record<string, string | undefined>,
+    filename: string,
+    content: string,
+    message: string
+  ): Promise<string> {
+    await Bun.write(join(dir, filename), content);
+    await runGit(["add", filename], { cwd: dir, env });
+    await runGit(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", message], { cwd: dir, env });
+    return (await runGit(["rev-parse", "HEAD"], { cwd: dir, env })).trim();
+  }
+
+  function realLoop(
+    dir: string,
+    env: Record<string, string | undefined>,
+    onGit?: (args: string[]) => void | Promise<void>
+  ): CheckpointLoop {
+    const runConfiguredGit: CheckpointLoop["runConfiguredGit"] = async (args, opts) => {
+      await onGit?.(args);
+      return runGit(args, opts);
+    };
+    return {
+      worktree: dir,
+      barePath: dir,
+      env,
+      refreshGitAuth: async () => undefined,
+      refExists: async (ref) => {
+        try {
+          await runGit(["show-ref", "--verify", "--quiet", ref], { cwd: dir, env });
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      runConfiguredGit,
+    };
+  }
+
+  async function pointRef(dir: string, env: Record<string, string | undefined>, ref: string, sha: string) {
+    await runGit(["update-ref", ref, sha], { cwd: dir, env });
+  }
+
+  test("local ahead of checkpoint keeps the local tip", async () => {
+    const { dir, env, cleanup } = await setupRepo();
+    try {
+      const run = (args: string[]) => runGit(args, { cwd: dir, env });
+      const base = await commitFile(dir, env, "f.txt", "base\n", "base");
+      const checkpoint = await commitFile(dir, env, "f.txt", "base\ncheckpoint\n", "checkpoint");
+      const local = await commitFile(dir, env, "f.txt", "base\ncheckpoint\nlocal\n", "local");
+      await pointRef(dir, env, checkpointRef, checkpoint);
+      await pointRef(dir, env, originMainRef, base);
+      await pointRef(dir, env, originRef, base);
+      await pointRef(dir, env, localRef, local);
+      await run(["remote", "set-url", "origin", dir]);
+      const logs: string[] = [];
+      const loop = realLoop(dir, env);
+      const result = await restoreCheckpoint(loop, checkpointRef, {
+        branch,
+        defaultBranch: "main",
+        log: (m) => logs.push(m),
+      });
+      expect(result.restored).toBe(false);
+      expect(result.reason).toMatch(/local branch ahead/);
+      expect((await run(["rev-parse", localRef])).trim()).toBe(local);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("checkpoint ahead of local restores with compare-and-swap", async () => {
+    const { dir, env, cleanup } = await setupRepo();
+    try {
+      const run = (args: string[]) => runGit(args, { cwd: dir, env });
+      const base = await commitFile(dir, env, "f.txt", "base\n", "base");
+      const local = await commitFile(dir, env, "f.txt", "base\nlocal\n", "local");
+      const checkpoint = await commitFile(dir, env, "f.txt", "base\nlocal\ncheckpoint\n", "checkpoint");
+      await pointRef(dir, env, checkpointRef, checkpoint);
+      await pointRef(dir, env, originMainRef, base);
+      await pointRef(dir, env, originRef, base);
+      await pointRef(dir, env, localRef, local);
+      const updates: string[][] = [];
+      const loop = realLoop(dir, env, (args) => {
+        if (args[0] === "update-ref") updates.push(args);
+      });
+      const result = await restoreCheckpoint(loop, checkpointRef, {
+        branch,
+        defaultBranch: "main",
+        log: () => undefined,
+      });
+      expect(result).toEqual({ restored: true, sha: checkpoint });
+      expect((await run(["rev-parse", localRef])).trim()).toBe(checkpoint);
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toEqual(["update-ref", localRef, checkpoint, local]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("diverged local history is ignored", async () => {
+    const { dir, env, cleanup } = await setupRepo();
+    try {
+      const run = (args: string[]) => runGit(args, { cwd: dir, env });
+      const base = await commitFile(dir, env, "f.txt", "base\n", "base");
+      const checkpoint = await commitFile(dir, env, "f.txt", "checkpoint-side\n", "checkpoint");
+      await runGit(["reset", "--hard", base], { cwd: dir, env });
+      const local = await commitFile(dir, env, "f.txt", "local-side\n", "local");
+      await pointRef(dir, env, checkpointRef, checkpoint);
+      await pointRef(dir, env, originMainRef, base);
+      await pointRef(dir, env, originRef, base);
+      await pointRef(dir, env, localRef, local);
+      const logs: string[] = [];
+      const loop = realLoop(dir, env);
+      const result = await restoreCheckpoint(loop, checkpointRef, {
+        branch,
+        defaultBranch: "main",
+        log: (m) => logs.push(m),
+      });
+      expect(result.restored).toBe(false);
+      expect(result.reason).toMatch(/diverged from local/);
+      expect(logs.join("\n")).toMatch(/diverged/);
+      expect((await run(["rev-parse", localRef])).trim()).toBe(local);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test("concurrent move between read and update is not overwritten", async () => {
+    const { dir, env, cleanup } = await setupRepo();
+    try {
+      const run = (args: string[]) => runGit(args, { cwd: dir, env });
+      const base = await commitFile(dir, env, "f.txt", "base\n", "base");
+      const local = await commitFile(dir, env, "f.txt", "base\nlocal\n", "local");
+      const checkpoint = await commitFile(dir, env, "f.txt", "base\nlocal\ncheckpoint\n", "checkpoint");
+      await runGit(["reset", "--hard", local], { cwd: dir, env });
+      const concurrent = await commitFile(dir, env, "f.txt", "base\nlocal\nconcurrent\n", "concurrent");
+      await pointRef(dir, env, checkpointRef, checkpoint);
+      await pointRef(dir, env, originMainRef, base);
+      await pointRef(dir, env, originRef, base);
+      await pointRef(dir, env, localRef, local);
+      const inner: CheckpointLoop = realLoop(dir, env);
+      let raced = false;
+      const loop: CheckpointLoop = {
+        ...inner,
+        runConfiguredGit: async (args, opts) => {
+          if (args[0] === "update-ref" && args.length === 4 && !raced) {
+            raced = true;
+            await runGit(["update-ref", localRef, concurrent], { cwd: dir, env });
+          }
+          return inner.runConfiguredGit(args, opts);
+        },
+      };
+      const result = await restoreCheckpoint(loop, checkpointRef, {
+        branch,
+        defaultBranch: "main",
+        log: () => undefined,
+      });
+      expect(raced).toBe(true);
+      expect(result.restored).toBe(false);
+      expect(result.reason).toMatch(/cannot stage checkpoint/);
+      expect((await run(["rev-parse", localRef])).trim()).toBe(concurrent);
+    } finally {
+      await cleanup();
+    }
   });
 });

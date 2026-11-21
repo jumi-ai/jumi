@@ -249,10 +249,13 @@ async function isAncestor(loop: CheckpointLoop, ancestor: string, descendant: st
 }
 
 /**
- * Fetch the hidden ref and, when it is a strict fast-forward of what the
- * local worktree and `origin/<branch>` have, point `refs/heads/<branch>` at
- * it so the normal attach path reuses it. Diverged or stale checkpoints are
- * ignored with one logged line, never applied silently.
+ * Fetch the hidden ref and, when it is a strict fast-forward of the local
+ * `refs/heads/<branch>` tip (when it exists) and what `origin/<branch>` has,
+ * point `refs/heads/<branch>` at it so the normal attach path reuses it.
+ * A local tip at or ahead of the checkpoint is kept with no restore;
+ * diverged or stale checkpoints are ignored with one logged line, never
+ * applied silently. The ref move is compare-and-swap against the observed
+ * local tip so a concurrent move fails instead of being overwritten.
  */
 export async function restoreCheckpoint(
   loop: CheckpointLoop,
@@ -292,14 +295,40 @@ export async function restoreCheckpoint(
     opts.log?.(`ignoring checkpoint ${ref}: not a descendant of origin/${opts.defaultBranch}`);
     return { restored: false, reason: "checkpoint not descendant of base" };
   }
+  const localRef = `refs/heads/${opts.branch}`;
+  const localExists = await loop.refExists(localRef).catch(() => false);
+  let localSha = "";
+  let haveLocalSha = false;
+  if (localExists) {
+    try {
+      localSha = (await loop.runConfiguredGit(["rev-parse", localRef], { cwd: loop.barePath, env: loop.env })).trim();
+      haveLocalSha = !!localSha && !/^0+$/.test(localSha);
+    } catch {
+      haveLocalSha = false;
+    }
+  }
+  if (localExists && haveLocalSha) {
+    if (localSha === checkpointSha) return { restored: false, reason: "already current" };
+    if (await isAncestor(loop, checkpointSha, localSha)) {
+      opts.log?.(`ignoring checkpoint ${ref}: local ${opts.branch} is ahead`);
+      return { restored: false, reason: "local branch ahead of checkpoint" };
+    }
+    if (!(await isAncestor(loop, localSha, checkpointSha))) {
+      opts.log?.(`ignoring checkpoint ${ref}: diverged from local ${opts.branch}`);
+      return { restored: false, reason: "checkpoint diverged from local branch" };
+    }
+  }
+  const stageCheckpoint = async (): Promise<void> => {
+    const args = haveLocalSha
+      ? ["update-ref", localRef, checkpointSha, localSha]
+      : ["update-ref", localRef, checkpointSha];
+    await loop.runConfiguredGit(args, { cwd: loop.barePath, env: loop.env });
+  };
   const originBranch = `refs/remotes/origin/${opts.branch}`;
   const originExists = await loop.refExists(originBranch).catch(() => false);
   if (!originExists) {
     try {
-      await loop.runConfiguredGit(["update-ref", `refs/heads/${opts.branch}`, checkpointSha], {
-        cwd: loop.barePath,
-        env: loop.env,
-      });
+      await stageCheckpoint();
     } catch (err) {
       return {
         restored: false,
@@ -316,13 +345,10 @@ export async function restoreCheckpoint(
   } catch {
     return { restored: false, reason: "unknown origin branch" };
   }
-  if (originSha === checkpointSha) return { restored: false, reason: "already current" };
+  if (originSha === checkpointSha && !haveLocalSha) return { restored: false, reason: "already current" };
   if (await isAncestor(loop, originSha, checkpointSha)) {
     try {
-      await loop.runConfiguredGit(["update-ref", `refs/heads/${opts.branch}`, checkpointSha], {
-        cwd: loop.barePath,
-        env: loop.env,
-      });
+      await stageCheckpoint();
     } catch (err) {
       return {
         restored: false,
