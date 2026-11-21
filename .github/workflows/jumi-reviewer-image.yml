@@ -52,6 +52,14 @@ jobs:
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
         working-directory: scripts/opencode
 
+      - name: Compute candidate tag
+        # Non-release tag derived from the commit SHA. Only this tag is
+        # pushed before the probes run; `VERSION`/`latest` move to the
+        # verified digest in the promote step below.
+        if: ${{ env.VERSION != '' }}
+        run: |
+          echo "CANDIDATE_TAG=sha-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
       - name: Set up Docker Buildx
         if: ${{ env.VERSION != '' }}
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
@@ -64,7 +72,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push reviewer image
+      - name: Build and push candidate reviewer image
         if: ${{ env.VERSION != '' }}
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -76,8 +84,7 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:${{ env.CANDIDATE_TAG }}
           build-args: |
             BUN_VERSION=${{ env.BUN_VERSION }}
             OPENCODE_VERSION=${{ env.OPENCODE_VERSION }}
@@ -114,95 +121,102 @@ jobs:
             org.opencontainers.image.version=${{ env.VERSION }}
             org.opencontainers.image.revision=${{ github.sha }}
 
-      - name: Pull pushed image for verification
+      - name: Pull candidate image for verification
         if: ${{ env.VERSION != '' }}
-        run: docker pull "${IMAGE}:${VERSION}"
+        # Pull the exact pushed digest the probes run against below.
+        run: docker pull "${IMAGE}@${{ steps.build.outputs.digest }}"
 
       - name: Verify image user and OCI labels
         if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
-          actual_user="$(docker inspect --format '{{.Config.User}}' "${IMAGE}:${VERSION}")"
+          CANDIDATE_REF="${IMAGE}@${{ steps.build.outputs.digest }}"
+          actual_user="$(docker inspect --format '{{.Config.User}}' "${CANDIDATE_REF}")"
           if [ "${actual_user}" != "10001:10001" ]; then
             echo "Expected image user 10001:10001, got ${actual_user:-<empty>}" >&2
             exit 1
           fi
           echo "Verified image user: ${actual_user}"
-          source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${IMAGE}:${VERSION}")"
+          source_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "${CANDIDATE_REF}")"
           if [ "${source_label}" != "https://github.com/jumi-ai/jumi" ]; then
             echo "Expected source https://github.com/jumi-ai/jumi, got ${source_label:-<empty>}" >&2
             exit 1
           fi
-          revision_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${IMAGE}:${VERSION}")"
+          version_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "${CANDIDATE_REF}")"
+          if [ "${version_label}" != "${VERSION}" ]; then
+            echo "Expected version ${VERSION}, got ${version_label:-<empty>}" >&2
+            exit 1
+          fi
+          revision_label="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${CANDIDATE_REF}")"
           if [ "${revision_label}" != "${GITHUB_SHA}" ]; then
             echo "Expected revision ${GITHUB_SHA}, got ${revision_label:-<empty>}" >&2
             exit 1
           fi
-          echo "Verified OCI source and revision labels"
+          echo "Verified OCI source, version, and revision labels"
 
       - name: Verify reviewer runtime
         if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
-          if docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v java >/dev/null 2>&1'; then
+          if docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'command -v java >/dev/null 2>&1'; then
             echo "reviewer image must not ship a JVM" >&2
             exit 1
           fi
-          if docker run --rm "${IMAGE}:${VERSION}" sh -c 'test -n "${ANDROID_HOME:-}" || test -n "${ANDROID_SDK_ROOT:-}" || test -e /opt/android-sdk'; then
+          if docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'test -n "${ANDROID_HOME:-}" || test -n "${ANDROID_SDK_ROOT:-}" || test -e /opt/android-sdk'; then
             echo "reviewer image must not set ANDROID_HOME" >&2
             exit 1
           fi
-          docker run --rm "${IMAGE}:${VERSION}" python3 --version
-          docker run --rm "${IMAGE}:${VERSION}" python --version
-          docker run --rm "${IMAGE}:${VERSION}" python3.13 --version
-          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'
-          docker run --rm "${IMAGE}:${VERSION}" python -c 'import sys; assert sys.version_info[:2] == (3, 13)'
-          docker run --rm "${IMAGE}:${VERSION}" python3 -m pytest --version
-          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import yaml, pytest'
-          docker run --rm "${IMAGE}:${VERSION}" python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'
-          docker run --rm "${IMAGE}:${VERSION}" helm version --short
-          docker run --rm "${IMAGE}:${VERSION}" claude --version
-          docker run --rm "${IMAGE}:${VERSION}" agy --version
-          docker run --rm "${IMAGE}:${VERSION}" codex --version
-          docker run --rm "${IMAGE}:${VERSION}" bun --version
-          test "$(docker run --rm "${IMAGE}:${VERSION}" node --version)" = "v${NODE_VERSION}"
-          test "$(docker run --rm "${IMAGE}:${VERSION}" sh -c 'node -p "process.versions.bun === undefined"')" = "true"
-          docker run --rm "${IMAGE}:${VERSION}" npm --version
-          docker run --rm "${IMAGE}:${VERSION}" npx --version
-          test "$(docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v node')" = "/usr/local/bin/node"
-          if docker run --rm "${IMAGE}:${VERSION}" sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3 --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3.13 --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3 -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python -c 'import sys; assert sys.version_info[:2] == (3, 13)'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3 -m pytest --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3 -c 'import yaml, pytest'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" python3 -c 'import os, tarfile, tempfile; d=tempfile.mkdtemp(); s=os.path.join(d, "s.txt"); open(s, "w").write("x"); a=os.path.join(d, "a.tar"); t=tarfile.open(a, "w"); t.add(s, arcname="s.txt"); t.close(); o=tempfile.mkdtemp(); tarfile.open(a).extractall(o, filter="data")'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" helm version --short
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" claude --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" agy --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" codex --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" bun --version
+          test "$(docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" node --version)" = "v${NODE_VERSION}"
+          test "$(docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'node -p "process.versions.bun === undefined"')" = "true"
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" npm --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" npx --version
+          test "$(docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'command -v node')" = "/usr/local/bin/node"
+          if docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'command -v node | grep -q "/tmp/bun-node"'; then
             echo "node resolves to the Bun shim in reviewer image" >&2
             exit 1
           fi
-          docker run --rm "${IMAGE}:${VERSION}" curl --version
-          docker run --rm "${IMAGE}:${VERSION}" yq --version
-          docker run --rm "${IMAGE}:${VERSION}" uv --version
-          docker run --rm "${IMAGE}:${VERSION}" promtool --version
-          docker run --rm "${IMAGE}:${VERSION}" kubeconform -v
-          docker run --rm "${IMAGE}:${VERSION}" tofu version
-          docker run --rm "${IMAGE}:${VERSION}" kubectl version --client
-          docker run --rm "${IMAGE}:${VERSION}" ps --version
-          docker run --rm "${IMAGE}:${VERSION}" unzip -v
-          docker run --rm "${IMAGE}:${VERSION}" shellcheck --version
-          docker run --rm "${IMAGE}:${VERSION}" sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" curl --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" yq --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" uv --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" promtool --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" kubeconform -v
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" tofu version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" kubectl version --client
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" ps --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" unzip -v
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" shellcheck --version
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'UV_OFFLINE=1 uv run --no-project --python 3.13 python -V'
           # Tracing hooks are bash (set -euo pipefail, [[ ]]); exercise the POST path under the new interpreter.
-          docker run --rm "${IMAGE}:${VERSION}" bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true'
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" bash -c 'HOME=$(mktemp -d); . /app/claude-plugins/claude-code-tracing/hooks/common.sh; echo {} > /tmp/jumi-post.json; _http_post_json http://127.0.0.1:9 /tmp/jumi-post.json || true'
           # `--version` proves the binary exists, not that it accepts the argv
           # the codex runner spawns. These no-auth help probes fail the image
           # job when a CODEX_VERSION bump renames a flag the fresh spawn or
           # the resume extra turn depends on, instead of failing every Codex
           # run in production. Help output can only prove flag presence;
           # pre/post-resume ordering is pinned by unit tests in test/codex.test.ts.
-          codex_exec_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec --help)"
+          codex_exec_help="$(docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" codex exec --help)"
           for flag in --json --color --sandbox --skip-git-repo-check --dangerously-bypass-hook-trust --trust --model --config; do
             printf '%s\n' "$codex_exec_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
-          codex_resume_help="$(docker run --rm "${IMAGE}:${VERSION}" codex exec resume --help)"
+          codex_resume_help="$(docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" codex exec resume --help)"
           for flag in --json --skip-git-repo-check --dangerously-bypass-hook-trust --trust --model --config; do
             printf '%s\n' "$codex_resume_help" | grep -E -- "$flag([ ,=]|$)" >/dev/null
           done
-          docker run --rm "${IMAGE}:${VERSION}" test -f /app/review-skills/review-proof/SKILL.md
-          config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}:${VERSION}" sh -c 'cd /work && git init -q && opencode debug config')"
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" test -f /app/review-skills/review-proof/SKILL.md
+          config_json="$(docker run --rm --env OPENCODE_DISABLE_PROJECT_CONFIG=1 --env OPENCODE_DISABLE_DEFAULT_PLUGINS=1 "${IMAGE}@${{ steps.build.outputs.digest }}" sh -c 'cd /work && git init -q && opencode debug config')"
           printf '%s\n' "${config_json}" | grep -F '/app/review-skills' >/dev/null
           echo "Verified python3.13 (python3/python), pytest, yaml, tarfile filter, helm, review-proof skill, and opencode debug config"
 
@@ -212,7 +226,7 @@ jobs:
         # forge-host deny is resolved by OpenCode's own matcher, not a copy.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/webfetch_probe.ts'
 
       - name: Verify quota reads against the opencode binary
@@ -221,7 +235,7 @@ jobs:
         # the session DB would otherwise show up only as children timing out.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/quota_probe.ts'
 
       - name: Verify agy forge read_url deny against the installed binary
@@ -230,7 +244,7 @@ jobs:
         # must refuse a fetch of the forge host under the production deny.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/agy_webfetch_probe.ts'
 
       - name: Verify codex overrides against a hostile checkout
@@ -239,7 +253,7 @@ jobs:
         # a repository's `.codex` config on the installed binary.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/codex_probe.ts'
 
       - name: Verify the review Landlock sandbox against the job-pod kernel
@@ -249,7 +263,7 @@ jobs:
         # proves /proc reads, signals, and outside writes stay denied.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 300 bun src/review_sandbox_probe.ts'
 
       - name: Verify token-only codex auth against the installed binary
@@ -260,7 +274,7 @@ jobs:
         # still reports refresh failures in the text the runner hops on.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/codex_token_probe.ts'
 
       - name: Verify claude production flags against the installed binary
@@ -270,7 +284,7 @@ jobs:
         # image job instead of every Claude spawn in production.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/claude_flag_probe.ts'
 
       - name: Verify the xAI child credential against the opencode binary
@@ -280,15 +294,35 @@ jobs:
         # it sends that shape as a bearer instead of refreshing it.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${VERSION}" \
+          docker run --rm "${IMAGE}@${{ steps.build.outputs.digest }}" \
             sh -c 'cd /app/scripts/opencode && timeout 600 bun src/xai_child_auth_probe.ts'
+
+      - name: Promote candidate to release tags
+        if: ${{ env.VERSION != '' }}
+        # Runs only after every probe above passed: a failed probe stops the
+        # job before this step, so the previous public tags stay untouched.
+        # The promoted tags point at the exact verified candidate digest, so
+        # the version/revision baked at build time carries over unchanged.
+        run: |
+          set -euo pipefail
+          CANDIDATE_DIGEST="${{ steps.build.outputs.digest }}"
+          if [ -z "${CANDIDATE_DIGEST}" ]; then
+            echo "missing candidate digest from the build step" >&2
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${VERSION}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}@${CANDIDATE_DIGEST}"
+          echo "Promoted ${IMAGE}@${CANDIDATE_DIGEST} to :${VERSION} and :latest"
 
       - name: Record registry manifest digest
         if: ${{ env.VERSION != '' }}
         run: |
           set -euo pipefail
-          echo "Pushed ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
+          echo "Promoted ${IMAGE}:${VERSION} digest=${{ steps.build.outputs.digest }}"
           docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          docker buildx imagetools inspect "${IMAGE}:latest"
           # Source of truth for the GitOps pin is the registry manifest Docker-Content-Digest after push.
 
       - name: Verify anonymous pull
