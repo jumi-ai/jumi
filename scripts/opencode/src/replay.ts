@@ -17,11 +17,21 @@ import {
   buildPROpenedPrompt,
 } from "./prompt.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
+import {
+  type ReplayPinnedInputs,
+  resolveReplayArtifactName,
+  resolveReplayPinnedInputs,
+  sanitizeFileSegment,
+} from "./replay_inputs.ts";
 import { effectiveReviewBudget } from "./repo_settings.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, loadReviewDelta } from "./review_delta.ts";
 import { DEFAULT_MAX_REVIEW_MD_BYTES, loadReviewMdSectionsFromBase } from "./review_md.ts";
 import { formatRunnerStamp, loadRunnersCatalog, type NamedRunner, orderedRunners, runnerStamp } from "./runners.ts";
+
+export type { ReplayPinnedInputs };
+export { resolveReplayArtifactName, resolveReplayPinnedInputs };
+
 import { errorMessage } from "./util/error.ts";
 import { isRecord } from "./util/object.ts";
 import {
@@ -263,6 +273,8 @@ export interface RunReplayCaseOptions {
   reviewCase: ReplayCase;
   runner: NamedRunner;
   workdirRoot: string;
+  /** Pinned inputs resolved once per case via resolveReplayPinnedInputs. */
+  pinned?: ReplayPinnedInputs;
   engine?: Engine;
   gitRunner?: GitRunner;
   workspacePreparer?: ReplayWorkspacePreparer;
@@ -475,11 +487,6 @@ async function readReplayArtifact(workdir: string, maxOutputBytes: number): Prom
   }
 }
 
-function sanitizeFileSegment(value: string): string {
-  const clean = value.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
-  return clean || "case";
-}
-
 function quotaSkip(reason: string): string {
   return isQuotaText(reason) ? quotaStuckReasonForText(reason) : reason;
 }
@@ -505,7 +512,8 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
     durationMs: Date.now() - started,
   });
 
-  const repo = await opts.api.getRepo(reviewCase.owner, reviewCase.repo);
+  const pinned = opts.pinned;
+  const repo = pinned?.repo ?? (await opts.api.getRepo(reviewCase.owner, reviewCase.repo));
   // Repository size budget comes from the default branch, like the live reviewer.
   // Missing, invalid, or unreadable files run with the deployment values.
   try {
@@ -530,8 +538,8 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
   } catch (err) {
     log(`review budget settings unreadable for ${reviewCase.owner}/${reviewCase.repo}: ${errorMessage(err)}`);
   }
-  let pr: Pull | null = null;
-  if (reviewCase.prNumber != null) {
+  let pr: Pull | null = pinned?.pr ?? null;
+  if (!pinned && reviewCase.prNumber != null) {
     pr = await opts.api.getPR(reviewCase.owner, reviewCase.repo, reviewCase.prNumber);
   }
   if (pr) {
@@ -543,8 +551,8 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
         owner: reviewCase.owner,
         repo: reviewCase.repo,
         prNumber: pr.number,
-        baseSha: reviewCase.baseSha ?? pr.base.sha.toLowerCase(),
-        headSha: reviewCase.headSha ?? pr.head.sha.toLowerCase(),
+        baseSha: pinned?.baseSha ?? reviewCase.baseSha ?? pr.base.sha.toLowerCase(),
+        headSha: pinned?.headSha ?? reviewCase.headSha ?? pr.head.sha.toLowerCase(),
         ...(reviewCase.note ? { note: reviewCase.note } : {}),
         runner: runner.name,
         runnerStamp: stamp,
@@ -557,8 +565,8 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
     }
   }
 
-  const baseSha = (reviewCase.baseSha ?? pr?.base.sha ?? "").toLowerCase();
-  const headSha = (reviewCase.headSha ?? pr?.head.sha ?? "").toLowerCase();
+  const baseSha = (pinned?.baseSha ?? reviewCase.baseSha ?? pr?.base.sha ?? "").toLowerCase();
+  const headSha = (pinned?.headSha ?? reviewCase.headSha ?? pr?.head.sha ?? "").toLowerCase();
   if (!SHA_RE.test(baseSha) || !SHA_RE.test(headSha)) {
     return finish({
       caseId: reviewCase.id,
@@ -680,7 +688,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
 
     let prFiles: PullFile[] = [];
     if (pr) {
-      prFiles = await opts.api.getPRFiles(reviewCase.owner, reviewCase.repo, pr.number);
+      prFiles = pinned?.prFiles ?? (await opts.api.getPRFiles(reviewCase.owner, reviewCase.repo, pr.number));
     } else {
       const git = opts.gitRunner ?? runGit;
       const env: Record<string, string | undefined> = {
@@ -1190,7 +1198,8 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
   }
 }
 
-export interface RunReplayOptions extends Omit<RunReplayCaseOptions, "api" | "reviewCase" | "runner" | "workdirRoot"> {
+export interface RunReplayOptions
+  extends Omit<RunReplayCaseOptions, "api" | "reviewCase" | "runner" | "workdirRoot" | "pinned"> {
   api: ReplayReadApi;
   cases: ReplayCase[];
   runners: NamedRunner[];
@@ -1204,10 +1213,53 @@ export async function runReplay(opts: RunReplayOptions): Promise<ReplayRecord[]>
   const log = opts.logger ?? logDefault;
   const records: ReplayRecord[] = [];
   const lines: string[] = [];
+  const usedNames = new Set<string>();
   const flush = async () => {
     await writeFile(join(opts.outDir, "results.jsonl"), `${lines.join("\n")}\n`);
   };
+  const writeRecord = async (record: ReplayRecord) => {
+    records.push(record);
+    lines.push(JSON.stringify(record));
+    const rawName = resolveReplayArtifactName(record.caseId, record.runner, usedNames);
+    await writeFile(join(opts.outDir, rawName), record.rawMarkdown);
+    // Flush incrementally so a later failure cannot discard completed records.
+    await flush();
+  };
   for (const reviewCase of opts.cases) {
+    let pinned: ReplayPinnedInputs | undefined;
+    let pinError: unknown = null;
+    try {
+      pinned = await resolveReplayPinnedInputs(opts.api, reviewCase);
+    } catch (err) {
+      pinError = err;
+    }
+    if (pinError || !pinned) {
+      const message = errorMessage(pinError);
+      const reason = quotaSkip(message);
+      for (const runner of opts.runners) {
+        log(`replay ${reviewCase.id}/${runner.name} failed: ${message}`);
+        await writeRecord({
+          caseId: reviewCase.id,
+          forge: reviewCase.forge ?? opts.forgeKind ?? "gitea",
+          owner: reviewCase.owner,
+          repo: reviewCase.repo,
+          prNumber: reviewCase.prNumber ?? null,
+          baseSha: reviewCase.baseSha ?? "unknown",
+          headSha: reviewCase.headSha ?? "unknown",
+          ...(reviewCase.note ? { note: reviewCase.note } : {}),
+          runner: runner.name,
+          runnerStamp: formatRunnerStamp(runnerStamp(runner)),
+          verdict: "skip",
+          findings: "",
+          findingsCount: 0,
+          rawMarkdown: "",
+          durationMs: 0,
+          skipReason: reason,
+          ...(isQuotaText(message) ? { quota: true as const } : {}),
+        });
+      }
+      continue;
+    }
     for (const runner of opts.runners) {
       const started = Date.now();
       let record: ReplayRecord;
@@ -1218,6 +1270,7 @@ export async function runReplay(opts: RunReplayOptions): Promise<ReplayRecord[]>
           reviewCase,
           runner,
           workdirRoot: opts.workdirRoot,
+          pinned,
           ...(opts.engineForRunner ? { engine: opts.engineForRunner(runner) } : {}),
         });
       } catch (err) {
@@ -1244,12 +1297,7 @@ export async function runReplay(opts: RunReplayOptions): Promise<ReplayRecord[]>
           ...(isQuotaText(message) ? { quota: true as const } : {}),
         };
       }
-      records.push(record);
-      lines.push(JSON.stringify(record));
-      const rawName = `${sanitizeFileSegment(record.caseId)}.${sanitizeFileSegment(record.runner)}.md`;
-      await writeFile(join(opts.outDir, rawName), record.rawMarkdown);
-      // Flush incrementally so a later failure cannot discard completed records.
-      await flush();
+      await writeRecord(record);
     }
   }
   return records;

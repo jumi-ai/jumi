@@ -273,7 +273,18 @@ export interface ScheduleAutomergeInput {
   owner: string;
   repo: string;
   prNumber: number;
+  /**
+   * Branch that sources Jumi settings (the repository default branch).
+   * Required-check validation never uses this ref; it uses the PR's actual
+   * base branch (`prBaseBranch` when supplied, else the PR's `base.ref`).
+   */
   baseBranch: string;
+  /**
+   * PR's actual base branch for required-check validation. When supplied it
+   * wins; otherwise the PR's `base.ref` is read. An unreadable or missing
+   * base fails closed without falling back to `baseBranch`.
+   */
+  prBaseBranch?: string;
   automergeRepos: readonly string[] | undefined;
   botUsername: string;
   /** Global kill switch. Unset defaults to on. Off never schedules; labels do nothing. */
@@ -397,6 +408,53 @@ function unrestoredInvalidSettingsNote(error: string): string {
     `Jumi did not restore auto-merge on this pull request: the repository settings file ` +
     `\`${REPO_SETTINGS_PATH}\` is invalid: ${error} A person needs to merge once reviews and CI are green.`
   );
+}
+
+function unrestoredGateClosedNote(baseBranch: string): string {
+  return (
+    `Jumi did not restore auto-merge on this pull request: the base branch \`${baseBranch}\` does not require the ` +
+    `\`${JUMI_REVIEW_CONTEXT}\` check. A person needs to merge once reviews and CI are green.`
+  );
+}
+
+function unrestoredGateUnreadableNote(): string {
+  return (
+    `Jumi did not restore auto-merge on this pull request: the base branch requirements could not be read. ` +
+    `A person needs to merge once reviews and CI are green.`
+  );
+}
+
+/**
+ * Shared required-check gate: whether a branch requires Jumi's review check.
+ * Returns `"open"` when the branch requires the check, `"closed"` when it
+ * does not, and `"unreadable"` when the branch cannot be read. Both the
+ * schedule gate and the restore re-arm read through here so the predicate
+ * has one edit site; callers map the outcome onto their own note wording
+ * ("did not schedule" vs "did not restore").
+ */
+type ReviewGateState = "open" | "closed" | "unreadable";
+
+async function readReviewGate(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  branch: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<ReviewGateState> {
+  try {
+    const getBranch = api.getBranch;
+    if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
+    const fetched = await getBranch.call(api, owner, repo, branch);
+    if (!branchRequiresReviewCheck(fetched)) {
+      log(`automerge gate closed for ${owner}/${repo}#${prNumber}: review check not required`);
+      return "closed";
+    }
+    return "open";
+  } catch (err) {
+    log(`automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return "unreadable";
+  }
 }
 
 function labelNameOf(label: string | { name?: string }): string {
@@ -628,7 +686,7 @@ export async function scheduleAutomergeForNewPr(
   const log = input.log ?? (() => undefined);
   const api = input.api as AutomergeApi;
   let names = { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
-  let effectiveTrusted = input.trustedSenderLogins;
+  let effectiveTrusted = effectiveTrustedSenderLogins(input.trustedSenderLogins, { state: "missing" });
   try {
     const policy = await resolveRepoPolicy(
       { api, owner: input.owner, repo: input.repo, ref: input.baseBranch },
@@ -637,8 +695,8 @@ export async function scheduleAutomergeForNewPr(
     );
     if (policy.status === "ok") {
       names = { automergeLabel: policy.automergeLabel, noAutomergeLabel: policy.noAutomergeLabel };
-      effectiveTrusted = policy.trustedSenderLogins;
     }
+    effectiveTrusted = policy.trustedSenderLogins;
   } catch (err) {
     log(`automerge settings unreadable for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
   }
@@ -727,6 +785,58 @@ async function loadPrLabels(
 }
 
 /**
+ * PR's actual base branch ref, or undefined when missing. Safe against
+ * partial PR shapes from webhook mailboxes and fakes.
+ */
+function prBaseRefOf(pr: unknown): string | undefined {
+  if (!pr || typeof pr !== "object") return undefined;
+  const base = (pr as { base?: unknown }).base;
+  if (!base || typeof base !== "object") return undefined;
+  const ref = (base as { ref?: unknown }).ref;
+  return typeof ref === "string" && ref.trim() ? ref.trim() : undefined;
+}
+
+/**
+ * PR labels plus the PR's actual base branch for required-check validation.
+ * Prefers the caller's pre-fetched labels and explicit `prBaseBranch`; when
+ * either is missing the PR is read once. Resolves `undefined` labels when the
+ * PR cannot be read, and `undefined` base when the base ref is missing, so
+ * callers fail closed without falling back to the settings (default-branch)
+ * ref.
+ */
+async function loadPrLabelsAndBase(
+  api: AutomergeApi,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  prLabels: AutomergeLabelList | null | undefined,
+  prBaseBranch: string | undefined,
+  log: (message: string) => void
+): Promise<{ labels: AutomergeLabelList | undefined; baseRef: string | undefined }> {
+  const explicitBase = prBaseBranch?.trim() ? prBaseBranch.trim() : undefined;
+  if (prLabels !== undefined && prLabels !== null) {
+    if (explicitBase) return { labels: prLabels, baseRef: explicitBase };
+    try {
+      const pr = await api.getPR(owner, repo, prNumber);
+      return { labels: prLabels, baseRef: prBaseRefOf(pr) };
+    } catch (err) {
+      log(`automerge pull unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+      return { labels: prLabels, baseRef: undefined };
+    }
+  }
+  try {
+    const pr = await api.getPR(owner, repo, prNumber);
+    return {
+      labels: (pr.labels ?? []) as AutomergeLabelList,
+      baseRef: explicitBase ?? prBaseRefOf(pr),
+    };
+  } catch (err) {
+    log(`automerge pull unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return { labels: undefined, baseRef: explicitBase };
+  }
+}
+
+/**
  * Whether the repository opted in, for the deployment-blocked note path.
  * Opt-in is a valid default-branch file with `automerge: true`, or an
  * admitted `automerge` label on the PR (the copy from the worked issue
@@ -785,7 +895,10 @@ async function maybeNoteDeploymentBlocked(opts: {
     return { posted: true };
   }
   if (!hasLabelCaseInsensitive(labels, names.automergeLabel)) return { posted: false };
-  const effectiveTrusted = policy?.trustedSenderLogins ?? opts.trustedSenderLogins;
+  const effectiveTrusted =
+    policy !== undefined
+      ? policy.trustedSenderLogins
+      : effectiveTrustedSenderLogins(opts.trustedSenderLogins, { state: "missing" });
   const verdict = await isAutomergeLabelAdmitted({
     api,
     owner,
@@ -910,7 +1023,15 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     return { scheduled: false };
   }
   const names = resolveLabelNames(settings);
-  const prLabels = await loadPrLabels(api, input.owner, input.repo, input.prNumber, input.prLabels, log);
+  const { labels: prLabels, baseRef: prBaseRef } = await loadPrLabelsAndBase(
+    api,
+    input.owner,
+    input.repo,
+    input.prNumber,
+    input.prLabels,
+    input.prBaseBranch,
+    log
+  );
   if (prLabels === undefined) {
     log(`automerge pull unreadable for ${input.owner}/${input.repo}#${input.prNumber}: failing closed`);
     await postAutomergeNote(
@@ -920,6 +1041,19 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
       input.prNumber,
       input.botUsername,
       `Jumi did not schedule auto-merge on this pull request: the pull request could not be read. A person needs to merge once reviews and CI are green.`
+    );
+    return { scheduled: false };
+  }
+  const gateBranch = prBaseRef?.trim() ? prBaseRef.trim() : undefined;
+  if (!gateBranch) {
+    log(`automerge gate unreadable for ${input.owner}/${input.repo}#${input.prNumber}: PR base unreadable`);
+    await postAutomergeNote(
+      api,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      input.botUsername,
+      `Jumi did not schedule auto-merge on this pull request: the base branch requirements could not be read. A person needs to merge once reviews and CI are green.`
     );
     return { scheduled: false };
   }
@@ -1027,7 +1161,7 @@ export async function scheduleAutomergeForPr(input: ScheduleAutomergeInput): Pro
     input.owner,
     input.repo,
     input.prNumber,
-    input.baseBranch,
+    gateBranch,
     input.botUsername,
     log,
     settings
@@ -1073,23 +1207,16 @@ async function checkAutomergeGates(
   settings: RepoSettingsLoad
 ): Promise<{ ok: true; mergeMethod: string } | { ok: false; note: string }> {
   void botUsername;
-  let gateOk = false;
-  try {
-    const getBranch = api.getBranch;
-    if (typeof getBranch !== "function") throw new Error("branch requirements are not readable");
-    const branch = await getBranch.call(api, owner, repo, baseBranch);
-    gateOk = branchRequiresReviewCheck(branch);
-    if (!gateOk) {
-      log(`automerge gate closed for ${owner}/${repo}#${prNumber}: review check not required`);
-      return {
-        ok: false,
-        note:
-          `Jumi did not schedule auto-merge on this pull request: the base branch \`${baseBranch}\` does not require the ` +
-          `\`${JUMI_REVIEW_CONTEXT}\` check. A person needs to merge once reviews and CI are green.`,
-      };
-    }
-  } catch (err) {
-    log(`automerge gate unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+  const gateState = await readReviewGate(api, owner, repo, baseBranch, prNumber, log);
+  if (gateState === "closed") {
+    return {
+      ok: false,
+      note:
+        `Jumi did not schedule auto-merge on this pull request: the base branch \`${baseBranch}\` does not require the ` +
+        `\`${JUMI_REVIEW_CONTEXT}\` check. A person needs to merge once reviews and CI are green.`,
+    };
+  }
+  if (gateState === "unreadable") {
     return {
       ok: false,
       note: `Jumi did not schedule auto-merge on this pull request: the base branch requirements could not be read. A person needs to merge once reviews and CI are green.`,
@@ -1325,8 +1452,7 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     try {
       const pr = await noteApi.getPR(input.owner, input.repo, input.prNumber);
       prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
-      const baseRef = (pr as { base?: { ref?: unknown } }).base?.ref;
-      if (typeof baseRef === "string" && baseRef.trim()) prBaseBranch = baseRef.trim();
+      prBaseBranch = prBaseRefOf(pr);
     } catch (err) {
       log(`automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
       return;
@@ -1408,19 +1534,22 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     // Any other sticky (or none) keeps today's behaviour, so a
     // person-cancelled schedule is still left alone.
     if (await hasRefusedAutomergeNote(noteApi, input.owner, input.repo, input.prNumber, input.botUsername, log)) {
-      const baseBranch = prBaseBranch ?? defaultBranch;
       const result = await scheduleAutomergeForPr({
         api: noteApi,
         forgeKind: input.forgeKind,
         owner: input.owner,
         repo: input.repo,
         prNumber: input.prNumber,
-        baseBranch,
+        // Settings come from the default branch; required-check validation
+        // uses the PR's actual base branch (`prBaseBranch`, no fallback).
+        baseBranch: defaultBranch,
+        ...(prBaseBranch ? { prBaseBranch } : {}),
         automergeRepos: input.automergeRepos,
         botUsername: input.botUsername,
         automergeEnabled: input.automergeEnabled,
         trustedSenderLogins: input.trustedSenderLogins,
         issueNumber: input.issueNumber,
+        prLabels,
         log,
       });
       if (result.scheduled) {
@@ -1572,6 +1701,47 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     return;
   }
   if (current.autoMergeEnabled === true) return;
+  // Re-arm validates against the PR's actual base branch, never the default
+  // branch that sourced settings. An unreadable base fails closed without
+  // falling back to the default branch's rules.
+  {
+    const gateBranch = prBaseRefOf(current);
+    if (!gateBranch) {
+      log(`automerge gate unreadable for ${input.owner}/${input.repo}#${input.prNumber}: PR base unreadable`);
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        unrestoredGateUnreadableNote()
+      );
+      return;
+    }
+    const gateState = await readReviewGate(noteApi, input.owner, input.repo, gateBranch, input.prNumber, log);
+    if (gateState === "closed") {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        unrestoredGateClosedNote(gateBranch)
+      );
+      return;
+    }
+    if (gateState === "unreadable") {
+      await postAutomergeNote(
+        noteApi,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        unrestoredGateUnreadableNote()
+      );
+      return;
+    }
+  }
   let mergeMethod: string;
   {
     const policy = forgeCapabilities(input.forgeKind).mergePolicy;
@@ -1710,7 +1880,14 @@ export async function handleAutomergeLabelChange(opts: {
   owner: string;
   repo: string;
   prNumber: number;
+  /**
+   * Branch that sources Jumi settings (the repository default branch).
+   * Required-check validation uses the PR's actual base branch read from the
+   * PR, never this ref.
+   */
   baseBranch: string;
+  /** Explicit PR base for required-check validation; read from the PR when absent. */
+  prBaseBranch?: string;
   automergeRepos: readonly string[] | undefined;
   automergeEnabled?: boolean;
   trustedSenderLogins?: readonly string[];
@@ -1730,10 +1907,12 @@ export async function handleAutomergeLabelChange(opts: {
     return { action: "none" };
   }
   let prLabels: AutomergeLabelList = [];
+  let prBaseBranch: string | undefined = opts.prBaseBranch?.trim() ? opts.prBaseBranch.trim() : undefined;
   try {
     const pr = await api.getPR(opts.owner, opts.repo, opts.prNumber);
     if (pr.merged || pr.state !== "open") return { action: "none" };
     prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
+    if (!prBaseBranch) prBaseBranch = prBaseRefOf(pr);
   } catch (err) {
     log(`automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { action: "none" };
@@ -1812,6 +1991,7 @@ export async function handleAutomergeLabelChange(opts: {
     repo: opts.repo,
     prNumber: opts.prNumber,
     baseBranch: opts.baseBranch,
+    ...(prBaseBranch ? { prBaseBranch } : {}),
     automergeRepos: opts.automergeRepos,
     botUsername: opts.botUsername,
     automergeEnabled: opts.automergeEnabled,

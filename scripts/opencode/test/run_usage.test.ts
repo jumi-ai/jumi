@@ -190,6 +190,95 @@ describe("withLedgerRunUsage", () => {
     const result = await engine({ type: "claude", model: "m", workdir: "/work/x" });
     expect(result.status).toBe("ok");
   });
+
+  test("a multi-model spawn shares one attempt id: exit/duration count once, tokens sum per row", async () => {
+    const store = new MemoryReviewJobStore();
+    const recorded: NewRunUsageRow[] = [];
+    setActiveRunUsageRecording({
+      context: { jobId: 1, jobKey: "review:o/r#1", kind: "review" },
+      recordRunUsageRows: async (rows) => {
+        recorded.push(...rows);
+        await store.recordRunUsageRows(rows);
+      },
+    });
+    const engine = withLedgerRunUsage(async () => {
+      recordClaudeUsage(
+        new Map([
+          ["model-a", { input: 10, cached_input: 0, output: 1, cache_write: 0, reasoning: 0 }],
+          ["model-b", { input: 20, cached_input: 0, output: 2, cache_write: 0, reasoning: 0 }],
+          ["model-c", { input: 30, cached_input: 0, output: 3, cache_write: 0, reasoning: 0 }],
+        ])
+      );
+      return { status: "ok", exitCode: 0, durationMs: 90_000 };
+    });
+    await engine({ type: "claude", model: "model-a", workdir: "/work/x" });
+    expect(recorded).toHaveLength(3);
+    const attempts = new Set(recorded.map((row) => row.attemptId));
+    expect(attempts.size).toBe(1);
+    expect([...attempts][0]).toBeTruthy();
+    expect(await store.getRunExitCounts()).toEqual([{ kind: "review", exitClass: "ok", count: 1 }]);
+    expect(await store.getRunRunnerExitCounts()).toEqual([
+      { kind: "review", runner: "claude", outcome: "ok", count: 1 },
+    ]);
+    expect(await store.getRunDurations()).toHaveLength(1);
+    const tokens = await store.getRunUsageTokenTotals();
+    const agentInstance = recorded[0]!.agentInstance;
+    expect(tokens).toContainEqual({
+      agentInstance,
+      source: "claude",
+      model: "model-a",
+      tokenType: "input",
+      value: 10,
+    });
+    expect(tokens).toContainEqual({
+      agentInstance,
+      source: "claude",
+      model: "model-b",
+      tokenType: "input",
+      value: 20,
+    });
+    expect(tokens).toContainEqual({
+      agentInstance,
+      source: "claude",
+      model: "model-c",
+      tokenType: "input",
+      value: 30,
+    });
+  });
+
+  test("legacy rows without an attempt id each count as their own attempt", async () => {
+    const store = new MemoryReviewJobStore();
+    const base = {
+      attemptId: undefined,
+      jobId: 1,
+      jobKey: "review:o/r#1",
+      kind: "review" as const,
+      runner: "opencode",
+      agentInstance: "jumi",
+      tokensInput: 5,
+      tokensCacheRead: 0,
+      tokensOutput: 1,
+      tokensCacheWrite: 0,
+      tokensReasoning: 0,
+      sessions: 1,
+      exitClass: "ok" as const,
+      runnerOutcome: "ok" as const,
+      quotaResetAt: null,
+      startedAt: new Date(1_000_000),
+      endedAt: new Date(1_001_000),
+      durationSeconds: 1,
+    };
+    await store.recordRunUsageRows([
+      { ...base, model: "model-a" },
+      { ...base, model: "model-b" },
+      { ...base, model: "model-c" },
+    ]);
+    expect(await store.getRunExitCounts()).toEqual([{ kind: "review", exitClass: "ok", count: 3 }]);
+    expect(await store.getRunRunnerExitCounts()).toEqual([
+      { kind: "review", runner: "opencode", outcome: "ok", count: 3 },
+    ]);
+    expect(await store.getRunDurations()).toHaveLength(3);
+  });
 });
 
 describe("per-runner outcomes in the ledger", () => {
