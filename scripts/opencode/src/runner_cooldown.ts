@@ -212,6 +212,19 @@ export class RunnerCooldownStore {
   size(): number {
     return this.entries.size;
   }
+
+  /**
+   * Active entries for one-shot persistence: expired entries are pruned and
+   * only cooldowns still in the future are returned. Copies, never live refs.
+   */
+  activeEntries(nowMs: number): Array<{ runner: string } & RunnerCooldownEntry> {
+    this.prune(nowMs);
+    const out: Array<{ runner: string } & RunnerCooldownEntry> = [];
+    for (const [runner, entry] of this.entries) {
+      out.push({ runner, ...entry });
+    }
+    return out;
+  }
 }
 
 const engineRunnerCooldowns = new RunnerCooldownStore();

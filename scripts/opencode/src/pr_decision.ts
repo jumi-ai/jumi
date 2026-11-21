@@ -560,9 +560,9 @@ function buildSkipEffects(
   if (why === "flake") {
     effects.push({ kind: "recordCiHandled", checks: (params as SkipParamsMap["flake"]).checks });
   }
-  if (why === "shared-failure") {
-    effects.push({ kind: "recordCiHandled", checks: (params as SkipParamsMap["shared-failure"]).checks });
-  }
+  // Waiting is deferred, not handled: the waiter posts the sticky and returns
+  // without recording CI handled so a later qualifying wake re-evaluates.
+  // The sticky upsert is idempotent, so no separate dedup marker is needed.
   if (entry.hold.kind === "completed") {
     effects.push({ kind: "resolveHeld", holdKind: "completed" });
   } else {

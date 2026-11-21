@@ -929,8 +929,10 @@ export interface ReviewVerdictViewInput {
 /**
  * What a finished-review-row consumer needs from the verdict. Either backed
  * by the ledger row's `resultJson` or, for rows without one, by the stored
- * text — both spellings agree on stored markdown (see
- * `test/verdict_view_equivalence.test.ts`).
+ * text — both spellings agree on stored markdown except the suggestion count
+ * (see `test/verdict_view_equivalence.test.ts`): with a usable record the
+ * validated `counts.suggestion` is authoritative and the trailer prose is
+ * never consulted.
  */
 export interface ReviewVerdictView {
   incomplete: boolean;
@@ -1043,10 +1045,11 @@ function descriptionFromRecord(record: ReviewRecord): { state: "success" | "fail
 
 /**
  * Ledger-row verdict view: the suggestion count is the parent-computed
- * published count — `record.counts.suggestion` when a usable record exists,
- * otherwise the published 💡 findings in the stored body
- * (`countSuggestionFindings`) — with the model-written trailer reason
- * (`trailerSuggestionCount`) kept only as a legacy fallback. The max of the
+ * published count — `record.counts.suggestion` when a usable record exists
+ * (authoritative; the model-written trailer reason is never consulted for
+ * counts), otherwise the published 💡 findings in the stored body
+ * (`countSuggestionFindings`) with the model-written trailer reason
+ * (`trailerSuggestionCount`) kept as a legacy fallback. The max of the
  * parent count and the trailer keeps old rows (trailer digit, no body
  * findings) handing over while a spelled-out model reason ("One suggestion")
  * with a real 💡 finding also hands over. A corrupt record falls back to the
@@ -1069,7 +1072,7 @@ export function reviewVerdictView(input: ReviewVerdictViewInput): ReviewVerdictV
     };
   }
   const base = descriptionFromRecord(record);
-  const suggestionCount = Math.max(record.counts.suggestion, trailerSuggestionCount(base.description));
+  const suggestionCount = record.counts.suggestion;
   const maintainerQuestionCount = recordMaintainerQuestionCount(record);
   const isMaintainerOnly =
     base.state === "success" &&

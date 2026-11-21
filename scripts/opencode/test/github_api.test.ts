@@ -892,13 +892,52 @@ describe("GithubAPI", () => {
     await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
   });
 
-  test("listActionJobs throws when a run has more jobs than the page", async () => {
+  test("listActionJobs includes a second page of jobs", async () => {
+    const jobUrls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
-      if (String(url).includes("/actions/runs/") && String(url).includes("/jobs")) {
+      const href = String(url);
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        jobUrls.push(href);
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        if (page === 1) {
+          return Response.json({
+            total_count: 101,
+            jobs: Array.from({ length: 100 }, (_, i) => ({
+              id: i + 1,
+              name: "build",
+              status: "completed",
+              conclusion: "success",
+              run_id: 44,
+            })),
+          });
+        }
         return Response.json({
           total_count: 101,
+          jobs: [{ id: 101, name: "build", status: "completed", conclusion: "success", run_id: 44 }],
+        });
+      }
+      if (href.includes("/actions/runs")) {
+        return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 1 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).resolves.toHaveLength(101);
+    expect(jobUrls).toHaveLength(2);
+    expect(jobUrls[1]).toContain("page=2");
+  });
+
+  test("listActionJobs throws when job pages exceed the bound", async () => {
+    let pages = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        pages += 1;
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        return Response.json({
+          total_count: 5000,
           jobs: Array.from({ length: 100 }, (_, i) => ({
-            id: i + 1,
+            id: (page - 1) * 100 + i + 1,
             name: "build",
             status: "completed",
             conclusion: "success",
@@ -906,13 +945,67 @@ describe("GithubAPI", () => {
           })),
         });
       }
-      if (String(url).includes("/actions/runs")) {
+      if (href.includes("/actions/runs")) {
         return Response.json({ workflow_runs: [{ id: 44, head_branch: "main" }], total_count: 1 });
       }
       return Response.json({ id: 1 });
     }) as unknown as typeof fetch;
 
     await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
+    expect(pages).toBe(40);
+  });
+
+  test("listActionJobs includes a second page of runs", async () => {
+    const runUrls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        return Response.json({
+          jobs: [{ id: 9, name: "build", status: "completed", conclusion: "success", run_id: 44 }],
+        });
+      }
+      if (href.includes("/actions/runs")) {
+        runUrls.push(href);
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        if (page === 1) {
+          return Response.json({
+            total_count: 51,
+            workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_branch: "main" })),
+          });
+        }
+        return Response.json({ total_count: 51, workflow_runs: [{ id: 51, head_branch: "main" }] });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    const jobs = await api().listActionJobs("owner", "repo");
+    expect(jobs).toHaveLength(51);
+    expect(runUrls).toHaveLength(2);
+    expect(runUrls[1]).toContain("page=2");
+  });
+
+  test("listActionJobs throws when run pages exceed the bound", async () => {
+    let pages = 0;
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        return Response.json({
+          jobs: [{ id: 9, name: "build", status: "completed", conclusion: "success", run_id: 44 }],
+        });
+      }
+      if (href.includes("/actions/runs")) {
+        pages += 1;
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        return Response.json({
+          total_count: 5000,
+          workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: (page - 1) * 50 + i + 1 })),
+        });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    await expect(api().listActionJobs("owner", "repo")).rejects.toThrow(/incomplete/);
+    expect(pages).toBe(40);
   });
 
   test("listActionJobs keeps a job page that matches total_count", async () => {
@@ -1037,8 +1130,8 @@ describe("GithubAPI", () => {
       },
     ]);
     expect(urls[0]).toContain("/check-runs");
-    expect(urls[1]).toContain("/actions/runs?head_sha=sha%2F1");
-    expect(urls[2]).toContain("/actions/runs/9/jobs");
+    expect(urls[1]).toContain("/actions/runs?per_page=50&page=1&head_sha=sha%2F1");
+    expect(urls[2]).toContain("/actions/runs/9/jobs?per_page=100&page=1");
   });
 
   test("listCheckRuns throws a check-run 500 instead of substituting action jobs", async () => {
@@ -1112,16 +1205,56 @@ describe("GithubAPI", () => {
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       const href = String(url);
       if (href.includes("/check-runs")) return new Response("nope", { status: 403 });
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        return Response.json({ jobs: [] });
+      }
       if (href.includes("/actions/runs")) {
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        if (page === 1) {
+          return Response.json({
+            workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_sha: "sha/1" })),
+            total_count: 81,
+          });
+        }
         return Response.json({
-          workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_sha: "sha/1" })),
-          total_count: 80,
+          workflow_runs: Array.from({ length: 30 }, (_, i) => ({ id: 51 + i, head_sha: "sha/1" })),
+          total_count: 81,
         });
       }
       return Response.json({ jobs: [] });
     }) as unknown as typeof fetch;
 
     await expect(api().listCheckRuns("owner", "repo", "sha/1")).rejects.toThrow(/incomplete/);
+  });
+
+  test("listCheckRuns fallback includes a second page of runs", async () => {
+    const runUrls: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const href = String(url);
+      if (href.includes("/check-runs")) return new Response("nope", { status: 403 });
+      if (href.includes("/actions/runs/") && href.includes("/jobs")) {
+        return Response.json({
+          jobs: [{ id: 4, name: "checks", status: "completed", conclusion: "success" }],
+        });
+      }
+      if (href.includes("/actions/runs")) {
+        runUrls.push(href);
+        const page = Number(new URL(href).searchParams.get("page") ?? "1");
+        if (page === 1) {
+          return Response.json({
+            workflow_runs: Array.from({ length: 50 }, (_, i) => ({ id: i + 1, head_sha: "sha/1" })),
+            total_count: 51,
+          });
+        }
+        return Response.json({ workflow_runs: [{ id: 51, head_sha: "sha/1" }], total_count: 51 });
+      }
+      return Response.json({ id: 1 });
+    }) as unknown as typeof fetch;
+
+    const checks = await api().listCheckRuns("owner", "repo", "sha/1");
+    expect(checks).toHaveLength(51);
+    expect(runUrls).toHaveLength(2);
+    expect(runUrls[1]).toContain("page=2");
   });
 
   test("throws useful errors for non-2xx responses", async () => {

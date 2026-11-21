@@ -96,6 +96,8 @@ async function reviewPrompt(dir: string, head: string, comments: Comment[], maxT
     botUsername: "jumi",
     workspacePreparer: async () => undefined,
     logger: () => undefined,
+    // File-artifact path: the stubbed runner never wires the structured adapter.
+    verdictContract: "legacy",
     gitRunner: repoGit(head),
     api: deltaApi({
       getPR: async () => makePR({ head: makeBranch({ sha: head }) }),

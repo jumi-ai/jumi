@@ -295,6 +295,8 @@ describe("review runner allow-list", () => {
         },
         logger: () => undefined,
         chain: chain() as never,
+        // File-artifact path: the stubbed runner never wires the structured adapter.
+        verdictContract: "legacy",
         openCodeRunner: async (opts: { model: string; workdir: string }) => {
           seen.push(opts.model);
           await writeFile(join(opts.workdir, "JUMI_REVIEW.md"), "file.ts:1: 🟡 note\n<!-- jumi-check: failure -->");

@@ -5,8 +5,10 @@ import { encodeQuotaWaitMarker } from "../src/quota.ts";
 import {
   HEARTBEAT_MS,
   hasPersistedResult,
+  isReclaimOwner,
   isUniqueViolation,
   MemoryReviewJobStore,
+  makeReclaimOwner,
   PgReviewJobStore,
   QueueUnavailableError,
   RECLAIM_LEASED_BY,
@@ -335,7 +337,7 @@ describe("MemoryReviewJobStore", () => {
     const first = await store.reclaimExpired(2, new Date(5_000));
     expect(first.publish).toHaveLength(1);
     expect(first.publish[0]?.state).toBe("leased");
-    expect(first.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(first.publish[0]?.leasedBy)).toBe(true);
     expect(first.publish[0]?.leasedUntil).toBe(5_000 + HEARTBEAT_MS);
     expect(store.rows[0]?.leasedUntil).toBe(5_000 + HEARTBEAT_MS);
     const second = await store.reclaimExpired(2, new Date(5_000));
@@ -383,23 +385,88 @@ describe("MemoryReviewJobStore", () => {
       markdown: "Persisted review\n<!-- jumi-check: success -->",
     });
     const reclaimed = await store.reclaimExpired(2, new Date(5_000));
-    expect(reclaimed.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(reclaimed.publish[0]?.leasedBy)).toBe(true);
 
     await expect(store.saveResult(leased!.id, "dead-engine", { kind: "skip", reason: "late" })).rejects.toThrow(
       "cannot save result"
     );
     expect(store.rows[0]?.resultMarkdown).toContain("Persisted review");
-    expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
 
     expect(await store.expireLease(leased!.id, "dead-engine")).toBe(false);
-    expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
     expect(store.rows[0]?.leasedUntil).toBe(5_000 + HEARTBEAT_MS);
 
     await expect(store.markPublished(leased!.id, "dead-engine", { state: "succeeded" })).rejects.toThrow(
       "cannot mark published"
     );
     expect(store.rows[0]?.state).toBe("leased");
-    expect(store.rows[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(store.rows[0]?.leasedBy)).toBe(true);
+  });
+
+  test("reclaim owner accepts the legacy constant and per-claim suffixes", async () => {
+    expect(isReclaimOwner(RECLAIM_LEASED_BY)).toBe(true);
+    expect(isReclaimOwner(makeReclaimOwner())).toBe(true);
+    expect(isReclaimOwner("engine-1")).toBe(false);
+    expect(isReclaimOwner(null)).toBe(false);
+  });
+
+  test("sequential reclaims supersede: first holder acknowledge rejected, second succeeds", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob());
+    const leased = await store.lease("dead-engine", 1, new Date(1_000));
+    await store.saveResult(leased!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    const first = await store.reclaimExpired(2, new Date(5_000));
+    expect(first.publish).toHaveLength(1);
+    const firstToken = first.publish[0]!.leasedBy!;
+    expect(isReclaimOwner(firstToken)).toBe(true);
+    const second = await store.reclaimExpired(2, new Date(5_000 + HEARTBEAT_MS + 1));
+    expect(second.publish).toHaveLength(1);
+    const secondToken = second.publish[0]!.leasedBy!;
+    expect(isReclaimOwner(secondToken)).toBe(true);
+    expect(secondToken).not.toBe(firstToken);
+    await expect(store.markPublished(leased!.id, firstToken, { state: "succeeded" })).rejects.toThrow(
+      "cannot mark published"
+    );
+    expect(await store.heartbeat(leased!.id, firstToken, 60_000, new Date(5_000 + HEARTBEAT_MS + 2))).toBe(false);
+    expect(await store.expireLease(leased!.id, firstToken, new Date(5_000 + HEARTBEAT_MS + 2))).toBe(false);
+    expect(store.rows[0]?.state).toBe("leased");
+    await store.markPublished(leased!.id, secondToken, { state: "succeeded" });
+    expect(store.rows[0]?.state).toBe("succeeded");
+  });
+
+  test("reclaim claims are per-row: no cross-effects between rows", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueue(makeJob({ prNumber: 7, headSha: "sha1" }));
+    await store.enqueue(makeJob({ prNumber: 8, headSha: "sha2" }));
+    const one = await store.lease("dead-engine", 1, new Date(1_000));
+    const two = await store.lease("dead-engine", 1, new Date(1_000));
+    expect(one?.id).not.toBe(two?.id);
+    await store.saveResult(one!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    await store.saveResult(two!.id, "dead-engine", {
+      kind: "markdown",
+      markdown: "Persisted review\n<!-- jumi-check: success -->",
+    });
+    const claimed = await store.reclaimExpired(2, new Date(5_000));
+    expect(claimed.publish).toHaveLength(2);
+    const [tokenA, tokenB] = claimed.publish.map((row) => row.leasedBy!);
+    expect(isReclaimOwner(tokenA)).toBe(true);
+    expect(isReclaimOwner(tokenB)).toBe(true);
+    expect(tokenA).not.toBe(tokenB);
+    const idA = claimed.publish[0]!.id;
+    const idB = claimed.publish[1]!.id;
+    await expect(store.markPublished(idA, tokenB, { state: "succeeded" })).rejects.toThrow("cannot mark published");
+    expect(await store.heartbeat(idA, tokenB, 60_000, new Date(6_000))).toBe(false);
+    await store.markPublished(idA, tokenA, { state: "succeeded" });
+    await store.markPublished(idB, tokenB, { state: "succeeded" });
+    expect(store.rows.find((row) => row.id === idA)?.state).toBe("succeeded");
+    expect(store.rows.find((row) => row.id === idB)?.state).toBe("succeeded");
   });
 
   test("releaseLease requeues without attempt++ and rejects persist-ready or foreign leases", async () => {
@@ -443,13 +510,13 @@ describe("MemoryReviewJobStore", () => {
       markdown: "Persisted review\n<!-- jumi-check: success -->",
     });
     const claimed = await store2.reclaimExpired(2, new Date(5_000));
-    expect(claimed.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
-    expect(await store2.expireLease(persist!.id, RECLAIM_LEASED_BY, new Date(6_000))).toBe(true);
+    expect(isReclaimOwner(claimed.publish[0]?.leasedBy)).toBe(true);
+    expect(await store2.expireLease(persist!.id, claimed.publish[0]!.leasedBy!, new Date(6_000))).toBe(true);
     expect(store2.rows[0]?.leasedBy).toBeNull();
     expect(store2.rows[0]?.leasedUntil).toBe(5_999);
     const retry = await store2.reclaimExpired(2, new Date(7_000));
     expect(retry.publish).toHaveLength(1);
-    expect(retry.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(retry.publish[0]?.leasedBy)).toBe(true);
   });
 
   test("expireLease overwrites a stale runner and clears it when the runner is unknown", async () => {
@@ -778,7 +845,7 @@ describe("PgReviewJobStore.reclaimExpired", () => {
     const store = new PgReviewJobStore(sql);
     const first = await store.reclaimExpired(2, new Date(5_000), 30_000);
     expect(first.publish).toHaveLength(1);
-    expect(first.publish[0]?.leasedBy).toBe(RECLAIM_LEASED_BY);
+    expect(isReclaimOwner(first.publish[0]?.leasedBy)).toBe(true);
     expect(first.publish[0]?.leasedUntil).toBe(35_000);
     expect(queries.some((query) => query.includes("UPDATE") && query.includes("leased_until"))).toBe(true);
     const second = await store.reclaimExpired(2, new Date(5_000), 30_000);
