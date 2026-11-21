@@ -22,11 +22,11 @@ import {
 } from "./codex_control.ts";
 import { scrubSecretEnv } from "./config.ts";
 import { type ControlConfig, loadControlConfig } from "./control_config.ts";
-import { createOrdinalDeviceLoginServer, deviceLoginResultLogger, ORDINAL_DEVICE_LOGIN_PORT } from "./device_login.ts";
+import { createOrdinalDeviceLoginServer, deviceLoginResultLogger } from "./device_login.ts";
 import { renderDispatchMetrics, runDispatchTick } from "./dispatch.ts";
 import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import { openPgReviewJobStoreForJob, type ReviewJobStore } from "./review_jobs.ts";
-import { installProcessShutdown } from "./shutdown.ts";
+import { CONTROL_SHUTDOWN_GRACE_MS, installProcessShutdown, stopServersWithinBound } from "./shutdown.ts";
 import { errorMessage } from "./util/error.ts";
 
 function log(message: string) {
@@ -373,8 +373,15 @@ export async function startControl(
     fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
     tokenUrl?: string;
     now?: () => number;
+    /** Test seam: bound for graceful drain before force-close. Defaults to CONTROL_SHUTDOWN_GRACE_MS. */
+    shutdownGraceMs?: number;
+    /** Test seam: replaces the control fetch handler (e.g. a stuck in-flight handler). */
+    fetchHandler?: (request: Request) => Promise<Response>;
+    /** Test seam only: ordinal listener port/host. Production always uses the constant 3010. */
+    deviceLoginPort?: number;
+    deviceLoginHost?: string;
   } = {}
-): Promise<{ stop: () => void }> {
+): Promise<{ stop: () => Promise<void>; closed: Promise<void>; port?: number; deviceLoginPort?: number }> {
   const logger = deps.logger ?? log;
   const state = newControlRuntimeState();
   resetCodexControlMetricsForTests();
@@ -416,7 +423,7 @@ export async function startControl(
     server = Bun.serve({
       hostname: config.host,
       port: config.port,
-      fetch: createControlFetchHandler({ logger }),
+      fetch: deps.fetchHandler ?? createControlFetchHandler({ logger }),
     });
     logger(`listening on ${server.hostname}:${server.port} role=control`);
     try {
@@ -425,6 +432,8 @@ export async function startControl(
         ordinal,
         role: "control",
         home: config.home,
+        host: deps.deviceLoginHost,
+        port: deps.deviceLoginPort,
         // Control owns the Codex login unconditionally: it is the only
         // process that holds the refresh token, independent of any runner
         // chain on engine/worker ordinals.
@@ -437,7 +446,7 @@ export async function startControl(
       });
       deviceLoginServer = created.server;
       logger(
-        `device login listening on ${deviceLoginServer.hostname}:${ORDINAL_DEVICE_LOGIN_PORT} role=control ordinal=${ordinal}`
+        `device login listening on ${deviceLoginServer.hostname}:${deviceLoginServer.port} role=control ordinal=${ordinal}`
       );
     } catch (err) {
       logger(`device login unavailable: ${errorMessage(err)}`);
@@ -445,10 +454,28 @@ export async function startControl(
   }
 
   const shutdown = new AbortController();
-  const onAbort = () => {
-    if (!shutdown.signal.aborted) shutdown.abort();
+  const graceMs = deps.shutdownGraceMs ?? CONTROL_SHUTDOWN_GRACE_MS;
+  let resolveClosed!: () => void;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  let shutdownPromise: Promise<void> | null = null;
+  const initiateShutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      if (!shutdown.signal.aborted) shutdown.abort();
+      const targets = [server, deviceLoginServer].filter((s) => s !== undefined);
+      if (targets.length > 0) await stopServersWithinBound(targets, graceMs, logger).catch(() => undefined);
+      deps.signal?.removeEventListener("abort", onAbort);
+      resolveClosed();
+    })();
+    return shutdownPromise;
   };
-  deps.signal?.addEventListener("abort", onAbort, { once: true });
+  const onAbort = () => {
+    void initiateShutdown();
+  };
+  if (deps.signal?.aborted) void initiateShutdown();
+  else deps.signal?.addEventListener("abort", onAbort, { once: true });
 
   const run = async () => {
     while (!shutdown.signal.aborted && !deps.signal?.aborted) {
@@ -516,20 +543,10 @@ export async function startControl(
   }
 
   return {
-    stop: () => {
-      onAbort();
-      try {
-        deviceLoginServer?.stop(true);
-      } catch {
-        // Best-effort.
-      }
-      try {
-        server?.stop(true);
-      } catch {
-        // Best-effort.
-      }
-      deps.signal?.removeEventListener("abort", onAbort);
-    },
+    stop: () => initiateShutdown(),
+    closed,
+    ...(server ? { port: server.port } : {}),
+    ...(deviceLoginServer ? { deviceLoginPort: deviceLoginServer.port } : {}),
   };
 }
 
@@ -538,7 +555,8 @@ async function main() {
   scrubSecretEnv();
   const shutdown = new AbortController();
   installProcessShutdown(shutdown, log);
-  await startControl(config, { signal: shutdown.signal });
+  const handle = await startControl(config, { signal: shutdown.signal });
+  await handle.closed;
 }
 
 if (import.meta.main) {
