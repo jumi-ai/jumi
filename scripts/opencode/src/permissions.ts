@@ -252,6 +252,19 @@ export function hasTrustedSenders(trustedSenderLogins: readonly string[] | undef
 }
 
 /**
+ * Map a raw deployment sender list to its fallback value: a list naming at
+ * least one login and `undefined` pass through untouched, while an empty or
+ * blank-only list (unset deployment input) maps to absent (`undefined`) so a
+ * raw `[]` never reads as an explicitly configured empty policy downstream.
+ */
+export function normalizeBlankTrustedSenders(
+  trustedSenderLogins: readonly string[] | undefined
+): readonly string[] | undefined {
+  if ((trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return trustedSenderLogins;
+  return undefined;
+}
+
+/**
  * Who may steer Jumi. A configured effective policy is the whole answer: a
  * listed login is admitted and nobody else is, with no forge lookup either
  * way. An explicitly empty effective policy (`[]`) therefore denies everyone

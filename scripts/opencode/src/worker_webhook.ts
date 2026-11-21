@@ -23,7 +23,7 @@ import {
   shouldEnqueueIssue,
 } from "./issue_webhook.ts";
 import { isReleaseCandidateSkipReason, tryReleaseMaintainerHold } from "./maintainer_hold_release.ts";
-import { withIssueAuthorPermission } from "./permissions.ts";
+import { normalizeBlankTrustedSenders, withIssueAuthorPermission } from "./permissions.ts";
 import { parsePushPayload, shouldEnqueuePushConflicts } from "./push_webhook.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
@@ -74,11 +74,12 @@ export async function effectiveWorkerPolicyForRepo(
   log?: (message: string) => void
 ): Promise<WorkerWebhookPolicy> {
   const branch = typeof defaultBranch === "string" && defaultBranch.trim() ? defaultBranch.trim() : "";
-  if (!api || typeof api.getRepoFile !== "function" || !branch) {
-    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
-    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
-    return { ...basePolicy, trustedSenderLogins: undefined };
-  }
+  const fallbackTrusted = normalizeBlankTrustedSenders(basePolicy.trustedSenderLogins);
+  const fallback =
+    fallbackTrusted === basePolicy.trustedSenderLogins
+      ? basePolicy
+      : { ...basePolicy, trustedSenderLogins: fallbackTrusted };
+  if (!api || typeof api.getRepoFile !== "function" || !branch) return fallback;
   const policy = await resolveRepoPolicy(
     { api, owner, repo, ref: branch },
     {
@@ -93,21 +94,13 @@ export async function effectiveWorkerPolicyForRepo(
   );
   if (policy.status === "invalid") {
     log?.(`repo settings invalid for ${owner}/${repo}@${branch}: ${policy.error}`);
-    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
-    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
-    return { ...basePolicy, trustedSenderLogins: undefined };
+    return fallback;
   }
   if (policy.status === "unreadable") {
     log?.(`repo settings unreadable for ${owner}/${repo}@${branch}: ${policy.error}`);
-    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
-    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
-    return { ...basePolicy, trustedSenderLogins: undefined };
+    return fallback;
   }
-  if (policy.status !== "ok") {
-    if ((basePolicy.trustedSenderLogins ?? []).some((entry) => entry.trim() !== "")) return basePolicy;
-    if (basePolicy.trustedSenderLogins === undefined) return basePolicy;
-    return { ...basePolicy, trustedSenderLogins: undefined };
-  }
+  if (policy.status !== "ok") return fallback;
   return {
     ...basePolicy,
     trustedSenderLogins: policy.trustedSenderLogins,
