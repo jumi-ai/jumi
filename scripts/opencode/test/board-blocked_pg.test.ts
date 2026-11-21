@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { createBunSqlClient, PgReviewJobStore, type ReviewJobRecord } from "../src/review_jobs.ts";
+import { PgReviewJobStore, type ReviewJobRecord } from "../src/review_jobs.ts";
 import { makeIssueJob } from "./fixtures.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 describePg("board blocked implement on postgres (#668)", () => {
   test("pg implementKick accepts blocked-on and lists terminal implements", async () => {
-    const sql = createBunSqlClient(pgDatabaseUrl);
+    const sql = openTestSqlClient(pgDatabaseUrl);
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();

@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { createBunSqlClient, PgReviewJobStore } from "../src/review_jobs.ts";
+import { PgReviewJobStore } from "../src/review_jobs.ts";
 import { makeJob } from "./fixtures.ts";
-import { describePg, pgDatabaseUrl } from "./pg.ts";
+import { describePg, openTestSqlClient, pgDatabaseUrl } from "./pg.ts";
 
 describePg("PgReviewJobStore result_json round-trip", () => {
   test("markdown saveResult persists and reads back the record", async () => {
-    const sql = createBunSqlClient(pgDatabaseUrl);
+    const sql = openTestSqlClient(pgDatabaseUrl);
     try {
       const store = new PgReviewJobStore(sql);
       await store.migrate();
