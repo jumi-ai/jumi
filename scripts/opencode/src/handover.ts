@@ -6,7 +6,12 @@ import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { resolveRepoPolicy } from "./repo_policy.ts";
-import { effectivePickupLabel, type RepoSettingsLoad, repoMode } from "./repo_settings.ts";
+import {
+  effectivePickupLabel,
+  isMaintainerQuestionsHoldEnabled,
+  type RepoSettingsLoad,
+  repoMode,
+} from "./repo_settings.ts";
 import type { ReviewResult } from "./review.ts";
 import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
@@ -122,7 +127,9 @@ function followUpJobFrom(
  * Resolve a held suggestion `pending` to `success` when the follow-up cannot
  * run. The review posted `pending` and consumed the one-hold flag; every
  * handover skip that leaves no follow-up job must flip the held head back to
- * `success` with a note, or the merge would wait forever. Never throws.
+ * `success` with a note, or the merge would wait forever. A success review
+ * that still asks an open `❓ maintainer:` question keeps the pending instead:
+ * the maintainer hold owns it, not the suggestion lifecycle. Never throws.
  */
 async function resolveHeldSuggestion(
   store: ReviewJobStore,
@@ -134,7 +141,8 @@ async function resolveHeldSuggestion(
   markdown: string | null | undefined,
   reason: string,
   targetUrl?: string,
-  record?: ReviewRecord | null
+  record?: ReviewRecord | null,
+  maintainerHoldEnabled = true
 ): Promise<void> {
   try {
     const hold = await readSuggestionHold(store.skipLatches, { owner, repo, issueNumber });
@@ -142,10 +150,15 @@ async function resolveHeldSuggestion(
     const sha =
       hold.headSha && hold.headSha.toLowerCase() === headSha.toLowerCase() ? headSha : (hold.headSha ?? headSha);
     let count = hold.count ?? 0;
+    let view: ReturnType<typeof reviewVerdictView> | undefined;
+    try {
+      view = reviewVerdictView({ markdown, record });
+    } catch {
+      view = undefined;
+    }
     if (!count) {
       try {
-        const view = reviewVerdictView({ markdown, record });
-        if (!view.incomplete && view.state === "success") {
+        if (view && !view.incomplete && view.state === "success") {
           count = view.suggestionCount;
         }
       } catch {
@@ -153,6 +166,19 @@ async function resolveHeldSuggestion(
       }
     }
     if (!count) return;
+    // A maintainer hold owns the pending: a success review that still asks a
+    // `❓ maintainer:` question keeps the check pending even when the
+    // suggestion lifecycle ends. The typed verdict decides first; legacy rows
+    // without a record fall back to the markdown parser via the same view.
+    if (
+      maintainerHoldEnabled &&
+      view &&
+      !view.incomplete &&
+      view.state === "success" &&
+      view.maintainerQuestionCount > 0
+    ) {
+      return;
+    }
     await postSuggestionHoldSuccess(api, owner, repo, sha, suggestionHoldSkippedDescription(count, reason), targetUrl);
   } catch {
     // Best-effort: never fail handover on a status post.
@@ -273,6 +299,11 @@ export async function enqueueFollowUpFromReview(
   const effectivePickupPolicy: PickupPolicy = usesGithubPickup
     ? { botUsername: opts.botUsername, isPickedUp: (issue) => hasLabel(issue, effectivePickup) }
     : { botUsername: opts.botUsername };
+  // The suggestion cleanup never clears a maintainer hold: when the typed
+  // verdict (or the legacy markdown) still asks a `❓ maintainer:` question on
+  // a success review, the pending stays pending. Default on, matching
+  // publication; an explicit opt-out still lets the suggestion cleanup post.
+  const maintainerHoldEnabled = isMaintainerQuestionsHoldEnabled(repoSettings);
 
   const pr = await opts.api.getPR(opts.row.owner, opts.row.repo, opts.row.prNumber);
   // The held `pending` lives on the reviewed head: when the head moved, or
@@ -290,7 +321,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "head moved",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("head moved");
   }
@@ -305,7 +337,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "mode restricted",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("repository mode is restricted");
   }
@@ -327,7 +360,8 @@ export async function enqueueFollowUpFromReview(
         opts.markdown,
         trailerSkip,
         pr.html_url,
-        record
+        record,
+        maintainerHoldEnabled
       );
       return logSkip(trailerSkip);
     }
@@ -357,7 +391,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "unassigned",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("no closer");
   }
@@ -375,7 +410,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "unassigned",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("unassigned");
   }
@@ -402,7 +438,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "suggestions disabled",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("suggestions disabled");
   }
@@ -427,7 +464,8 @@ export async function enqueueFollowUpFromReview(
       opts.markdown,
       "round cap",
       pr.html_url,
-      record
+      record,
+      maintainerHoldEnabled
     );
     return logSkip("round cap");
   }

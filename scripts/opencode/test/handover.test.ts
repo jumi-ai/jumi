@@ -875,6 +875,94 @@ describe("suggestion hold fallback", () => {
     expect(statuses[0]?.description).toContain("round cap");
   });
 
+  test("mixed review at round cap keeps the maintainer pending (legacy markdown)", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3);
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = handoverApi({
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const logs: string[] = [];
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: leased!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown:
+        "src/foo.ts:12: 💡 simpler: dedupe the helper\n" +
+        "src/bar.ts:7: ❓ maintainer: please file a follow-up issue?\n" +
+        "<!-- jumi-check: success; 1 suggestion -->",
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(logs).toEqual(["persist-insert skipped: round cap"]);
+    expect(api.comments).toHaveLength(1);
+    expect(api.comments[0]).toContain(TOO_MANY_FOLLOWUP_ROUNDS);
+    expect(statuses).toHaveLength(0);
+  });
+
+  test("mixed review at round cap keeps the maintainer pending (typed record)", async () => {
+    const verdict = new ReviewVerdictStore({ changedFiles: [] });
+    expect(verdict.addFinding({ severity: "suggestion", title: "dedupe the helper", body: "extract it" }).ok).toBe(
+      true
+    );
+    expect(
+      verdict.addFinding({
+        severity: "question",
+        title: "❓ maintainer: please file a follow-up issue?",
+        body: "scope?",
+      }).ok
+    ).toBe(true);
+    expect(verdict.setVerdict({ state: "success", reason: "1 suggestion" }).ok).toBe(true);
+    const markdown = verdict.toMarkdown();
+    const record = verdict.toRecord();
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3);
+    await store.enqueue(makeJob());
+    const leased = await store.lease("engine-1", 60_000);
+    await markSuggestionHoldConsumed(
+      store.skipLatches,
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      "headsha",
+      1
+    );
+    const statuses: Array<{ state: string; description?: string }> = [];
+    const api = handoverApi({
+      createCommitStatus: async (_owner, _repo, _sha, status) => {
+        statuses.push(status);
+        return status;
+      },
+    });
+    const logs: string[] = [];
+    const row: ReviewJobRecord = { ...leased!, resultJson: record };
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown,
+      logger: (message) => logs.push(message),
+    });
+    expect(result).toBeUndefined();
+    expect(logs).toEqual(["persist-insert skipped: round cap"]);
+    expect(api.comments).toHaveLength(1);
+    expect(api.comments[0]).toContain(TOO_MANY_FOLLOWUP_ROUNDS);
+    expect(statuses).toHaveLength(0);
+  });
+
   test("unassigned resolves a held pending to success with a note", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob());
