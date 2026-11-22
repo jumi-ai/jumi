@@ -425,7 +425,16 @@ function pageScript(html: string): string {
 
 function bootBoard(forge: string) {
   const byId = new Map<string, FakeEl>();
-  const hidden = new Set(["load-error", "catalog-mismatch", "grant", "grok-result", "codex-result", "sheet-wrap"]);
+  const hidden = new Set([
+    "load-error",
+    "catalog-mismatch",
+    "stale",
+    "peer-note",
+    "grant",
+    "grok-result",
+    "codex-result",
+    "sheet-wrap",
+  ]);
   const ids = [
     "forge-switch",
     "refresh",
@@ -434,10 +443,16 @@ function bootBoard(forge: string) {
     "sheet",
     "load-error",
     "catalog-mismatch",
+    "stale",
+    "peer-note",
     "grant",
     "inspector",
     "inprogress",
     "sitting",
+    "needs-groups",
+    "run-counts",
+    "run-lists",
+    "waiting-groups",
     "grok",
     "grok-role",
     "grok-ordinal",
@@ -473,6 +488,8 @@ function bootBoard(forge: string) {
   }
   const documentStub = {
     getElementById: (id: string) => byId.get(id) ?? null,
+    querySelector: (_sel: string) => null,
+    activeElement: null,
     createElement: (tag: string) => new FakeEl(tag),
     createTextNode: (text: string) => {
       const node = new FakeEl("#text");
