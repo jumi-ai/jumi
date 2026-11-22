@@ -808,7 +808,8 @@ export function isBlockingQuestionAuthor(
  * example filing or closing another issue, changing labels or assignment),
  * or a product or scope decision (for example whether to ship part 1 now or
  * keep going). Findings about the PR description itself are never
- * maintainer-only: the worker writes it with `set_pr_body`.
+ * maintainer-only: the worker writes it with `set_pr_body` (as a fenced Jumi
+ * section, appended below maintainer text when the body has no fence).
  */
 const MAINTAINER_MARKER_RE =
   /^(?:[`*_]*(?:L\d+|\S+?:\d+(?:[-–]\d+)?)[`*_]*:\s+)?(?:\*\*|__)?\s*(?:(?:❓\s*(?:q\s*:|question\s*:)?|(?:q|question)\s*:)\s*)?❓\s*maintainer\s*:/iu;

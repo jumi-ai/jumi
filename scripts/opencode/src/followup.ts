@@ -74,6 +74,7 @@ import {
   confirmProvenancePublication,
   ensureProvenanceIntent,
   failProvenanceIntent,
+  hasJumiPrBodyFence,
   type ImplementOptions,
   jumiPrBodyRegion,
   noteProvenanceRunners,
@@ -2368,9 +2369,11 @@ export async function implementFollowUp(
     await persistCi();
   };
 
-  // After a pushed follow-up, rewrite only the jumi-owned region from JUMI_PR.md.
-  // Missing/empty artifact or an unfenced body leaves the posted body alone, and
-  // a forge failure here must not fail a good code fix. Returns the live head
+  // After a pushed follow-up, rewrite the Jumi-owned region from JUMI_PR.md.
+  // A body without a fence gains a fenced Jumi section appended below the
+  // maintainer text; later rounds replace only that region. Missing/empty
+  // artifact or identical text writes nothing and logs the reason, and a
+  // forge failure here must not fail a good code fix. Returns the live head
   // and timestamp from the same `getPR` so a body-only requeue never enqueues
   // the stale snapshot with no `prUpdatedAt` (which would cancel a newer
   // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
@@ -2379,7 +2382,10 @@ export async function implementFollowUp(
     fallbackHeadSha?: string
   ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
     const fallback = fallbackHeadSha || pr.head.sha;
-    if (description == null || !description.replaceAll("\0", "").trim()) return { changed: false, headSha: fallback };
+    if (description == null || !description.replaceAll("\0", "").trim()) {
+      log("PR body not refreshed: empty description");
+      return { changed: false, headSha: fallback };
+    }
     try {
       const live = await opts.api.getPR(owner, repo, pr.number);
       const liveHeadSha = live.head?.sha ?? fallback;
@@ -2395,11 +2401,14 @@ export async function implementFollowUp(
           followupConventions.closingKeyword
         )
       );
-      if (body == null || body === live.body) return { changed: false, ...seen };
+      if (body === live.body) {
+        log("PR body not refreshed: identical text");
+        return { changed: false, ...seen };
+      }
       await opts.api.updatePullRequestBody(owner, repo, pr.number, body);
       return { changed: true, ...seen };
     } catch (err) {
-      log(`PR body refresh failed for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
+      log(`PR body not refreshed: forge error for ${owner}/${repo}#${pr.number}: ${errorMessage(err)}`);
       return { changed: false, headSha: fallback };
     }
   };
@@ -2445,8 +2454,13 @@ export async function implementFollowUp(
   // Parent-owned worker MCP server for the follow-up spawns. The model
   // records `no_changes` through the tool; the parent posts from this
   // in-memory state and fails open when the model never calls it.
+  // `prBodyFenced` tells the `set_pr_body` result which case the worker is
+  // in: on a maintainer-written body its markdown becomes a fenced addendum.
   let workerStore = new WorkerResultStore();
-  const workerServer = await startWorkerMcpServer({ store: workerStore });
+  const workerServer = await startWorkerMcpServer({
+    store: workerStore,
+    prBodyFenced: hasJumiPrBodyFence(pr.body),
+  });
   const workerMcpRef = { url: workerServer.url, token: workerServer.token };
   let followUpResult: FollowUpResult;
   try {
@@ -2784,7 +2798,8 @@ export async function implementFollowUp(
             buildCiMarkdown({ sha: pr.head.sha, checks: ci.failed, base: baseForMarkdown(ci) })
           );
         }
-        // Let the child edit the description already posted; only a fenced body is jumi-owned.
+        // Let the child edit the description already posted; an unfenced body
+        // gains a fenced Jumi section below the maintainer text.
         // JUMI_PR.md is a read-only seed: an untouched copy counts as no
         // result, only an edited copy publishes.
         const postedRegion = jumiPrBodyRegion(pr.body);

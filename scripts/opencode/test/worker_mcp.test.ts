@@ -184,6 +184,49 @@ describe("worker MCP server", () => {
     }
   });
 
+  test("set_pr_body names the maintainer-written addendum case", async () => {
+    const store = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store, token: "tok" });
+    try {
+      const res = await fetch(server.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", Authorization: "Bearer tok" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      const payload = (await res.json()) as {
+        result?: { tools?: Array<{ name?: string; description?: string }> };
+      };
+      const tool = (payload.result?.tools ?? []).find((t) => t.name === "set_pr_body");
+      expect(tool?.description).toContain("maintainer-written");
+      expect(tool?.description).toContain("Jumi section appended below it");
+    } finally {
+      server.close();
+    }
+    const unfencedStore = new WorkerResultStore();
+    const unfencedServer = await startWorkerMcpServer({ store: unfencedStore, token: "tok", prBodyFenced: false });
+    try {
+      const out = await probeWorkerMcpServer(unfencedServer.url, "tok", "set_pr_body", {
+        markdown: "Disclosure.\n\nFixes #12",
+      });
+      expect(out.ok).toBe(true);
+      expect(out.text).toContain("addendum");
+      expect(out.text).toContain("maintainer-written");
+    } finally {
+      unfencedServer.close();
+    }
+    const fencedStore = new WorkerResultStore();
+    const fencedServer = await startWorkerMcpServer({ store: fencedStore, token: "tok", prBodyFenced: true });
+    try {
+      const out = await probeWorkerMcpServer(fencedServer.url, "tok", "set_pr_body", {
+        markdown: "Disclosure.\n\nFixes #12",
+      });
+      expect(out.ok).toBe(true);
+      expect(out.text).not.toContain("addendum");
+    } finally {
+      fencedServer.close();
+    }
+  });
+
   test("skip round-trips and validates", async () => {
     expect(validateSkipReason(undefined).ok).toBe(false);
     expect(validateSkipReason("").ok).toBe(false);

@@ -1859,6 +1859,11 @@ describe("resolveOpenCodePrompt", () => {
       await writeFile(join(dir, "JUMI_TASK.md"), "task");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildImplementPrompt());
       await writeFile(join(dir, "JUMI_FEEDBACK.md"), "feedback");
+      // No JUMI_PR.md means a maintainer-written body: the worker gets the addendum note.
+      expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(
+        buildFollowupPrompt(undefined, { prBodyFenced: false })
+      );
+      await writeFile(join(dir, "JUMI_PR.md"), "seed");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildFollowupPrompt());
       await writeFile(join(dir, "JUMI_CONFLICT.md"), "conflict");
       expect(await resolveOpenCodePrompt({ model: "m", workdir: dir })).toContain(buildConflictPrompt());

@@ -17,6 +17,7 @@ import { workerMarker } from "../src/gitea_issues.ts";
 import {
   buildPullRequestBody,
   cancelIssueWork,
+  hasJumiPrBodyFence,
   INCOMPLETE_IMPLEMENT,
   implementIssue,
   isValidatedSkipText,
@@ -183,14 +184,39 @@ describe("jumi PR body fence", () => {
 
   test("reads and replaces only the fenced region", () => {
     expect(jumiPrBodyRegion(body)).toBe("Old.\n\nFixes #12\n\n_Jumi · opencode · m_");
+    expect(hasJumiPrBodyFence(body)).toBe(true);
     expect(replaceJumiPrBodyRegion(body, "New.")).toBe(`Above.\n\n${wrapJumiPrBody("New.")}\n\nBelow.`);
   });
 
   test("an unfenced or half-fenced body is not jumi-owned", () => {
     expect(jumiPrBodyRegion("Fixes #12")).toBeUndefined();
-    expect(replaceJumiPrBodyRegion("Fixes #12", "New.")).toBeUndefined();
-    expect(replaceJumiPrBodyRegion("<!-- jumi-pr-body:start -->\nOld.", "New.")).toBeUndefined();
+    expect(hasJumiPrBodyFence("Fixes #12")).toBe(false);
+    expect(jumiPrBodyRegion("<!-- jumi-pr-body:start -->\nOld.")).toBeUndefined();
+    expect(hasJumiPrBodyFence("<!-- jumi-pr-body:start -->\nOld.")).toBe(false);
     expect(jumiPrBodyRegion(null)).toBeUndefined();
+    expect(hasJumiPrBodyFence(null)).toBe(false);
+  });
+
+  test("an unfenced body gains a fenced Jumi section with the prefix unchanged", () => {
+    const original = "Maintainer text.\n\nFixes #12";
+    const next = replaceJumiPrBodyRegion(original, "New disclosure.\n\nFixes #12");
+    expect(next).toBe(`${original}\n\n${wrapJumiPrBody("New disclosure.\n\nFixes #12")}`);
+    expect(next.startsWith(original)).toBe(true);
+    expect(next.slice(0, original.length)).toBe(original);
+    expect(hasJumiPrBodyFence(next)).toBe(true);
+  });
+
+  test("a second round replaces only the appended region", () => {
+    const original = "Maintainer text.\n\nFixes #12";
+    const first = replaceJumiPrBodyRegion(original, "First disclosure.");
+    const second = replaceJumiPrBodyRegion(first, "Second disclosure.");
+    expect(second).toBe(`${original}\n\n${wrapJumiPrBody("Second disclosure.")}`);
+    expect(second.startsWith(original)).toBe(true);
+  });
+
+  test("an empty body becomes just the fenced region", () => {
+    expect(replaceJumiPrBodyRegion("", "New.")).toBe(wrapJumiPrBody("New."));
+    expect(replaceJumiPrBodyRegion(null, "New.")).toBe(wrapJumiPrBody("New."));
   });
 
   test("seeds the child without the runner stamp", () => {

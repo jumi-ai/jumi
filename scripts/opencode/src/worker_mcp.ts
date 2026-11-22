@@ -327,6 +327,10 @@ export function rotateResultScope(
   return fresh;
 }
 
+/** Unfenced live body: worker markdown becomes a fenced Jumi addendum below maintainer text. */
+export const UNFENCED_PR_BODY_ADDENDUM_NOTE =
+  "The PR description is maintainer-written (no Jumi fence). Your `set_pr_body` markdown becomes a fenced Jumi section appended below it after a blank line: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description. The maintainer text above stays unchanged.";
+
 function toolSchemas(): Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> {
   return [
     {
@@ -342,7 +346,7 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
     {
       name: "set_pr_body",
       description:
-        "Record the pull-request description. If the change does not meet the issue Done condition, use Refs #N and list what is left, not a closing keyword like Fixes #N. A bare Refs #N with no remaining-work list is treated as finished.",
+        "Record the pull-request description. If the change does not meet the issue Done condition, use Refs #N and list what is left, not a closing keyword like Fixes #N. A bare Refs #N with no remaining-work list is treated as finished. If the PR body is maintainer-written (no Jumi fence), your markdown becomes a fenced Jumi section appended below it: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description.",
       inputSchema: {
         type: "object",
         properties: { markdown: { type: "string" } },
@@ -384,7 +388,8 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
 function callTool(
   store: WorkerResultStore,
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  opts?: { prBodyFenced?: boolean }
 ): { ok: boolean; text: string } {
   if (name === "no_changes") {
     const result = store.setNoChanges({ reason: args.reason });
@@ -392,7 +397,14 @@ function callTool(
   }
   if (name === "set_pr_body") {
     const result = store.setPrBody({ markdown: args.markdown });
-    return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
+    if (!result.ok) return { ok: false, text: result.error };
+    if (opts?.prBodyFenced === false) {
+      return {
+        ok: true,
+        text: JSON.stringify({ recorded: true, pr_body_mode: "addendum", note: UNFENCED_PR_BODY_ADDENDUM_NOTE }),
+      };
+    }
+    return { ok: true, text: JSON.stringify({ recorded: true }) };
   }
   if (name === "skip") {
     const result = store.setSkip({ reason: args.reason });
@@ -424,6 +436,8 @@ export interface StartedWorkerMcpServer {
 export async function startWorkerMcpServer(opts: {
   store: WorkerResultStore;
   token?: string;
+  /** False when the live body has no Jumi fence: the `set_pr_body` result names the addendum case. */
+  prBodyFenced?: boolean;
 }): Promise<StartedWorkerMcpServer> {
   const token = opts.token ?? randomWorkerMcpToken();
   let current = opts.store;
@@ -462,7 +476,7 @@ export async function startWorkerMcpServer(opts: {
       if (method === "tools/call") {
         const name = String(params.name ?? "");
         const args = (params.arguments ?? {}) as Record<string, unknown>;
-        const out = callTool(current, name, args);
+        const out = callTool(current, name, args, { prBodyFenced: opts.prBodyFenced });
         return Response.json({
           jsonrpc: "2.0",
           id: body?.id ?? null,

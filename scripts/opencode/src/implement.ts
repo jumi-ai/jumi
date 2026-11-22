@@ -857,11 +857,20 @@ export function wrapJumiPrBody(text: string): string {
 }
 
 function fenceBounds(body: string): { start: number; end: number } | undefined {
-  const start = body.indexOf(PR_BODY_FENCE_START);
+  // Last complete pair wins: a stray start marker in maintainer text (or a
+  // trailing stray after the region) must not swallow the Jumi section on
+  // the next replace. Single-fence bodies behave exactly as before.
+  const endMarker = body.lastIndexOf(PR_BODY_FENCE_END);
+  if (endMarker < 0) return undefined;
+  const start = body.lastIndexOf(PR_BODY_FENCE_START, endMarker);
   if (start < 0) return undefined;
-  const end = body.indexOf(PR_BODY_FENCE_END, start + PR_BODY_FENCE_START.length);
-  if (end < 0) return undefined;
-  return { start, end: end + PR_BODY_FENCE_END.length };
+  if (start + PR_BODY_FENCE_START.length > endMarker) return undefined;
+  return { start, end: endMarker + PR_BODY_FENCE_END.length };
+}
+
+/** Whether a PR body carries a complete Jumi-owned fenced region. */
+export function hasJumiPrBodyFence(body: string | null | undefined): boolean {
+  return fenceBounds(body ?? "") !== undefined;
 }
 
 /** The jumi-owned text of a PR body, or undefined when the body was never fenced. */
@@ -872,11 +881,21 @@ export function jumiPrBodyRegion(body: string | null | undefined): string | unde
   return text.slice(bounds.start + PR_BODY_FENCE_START.length, bounds.end - PR_BODY_FENCE_END.length).trim();
 }
 
-/** Replace only the fenced region; undefined when there is no fence to own. */
-export function replaceJumiPrBodyRegion(body: string | null | undefined, text: string): string | undefined {
+/**
+ * Replace only the fenced region. When the body has no fence (a
+ * maintainer-written body Jumi did not write), append a fenced Jumi section
+ * at the end after a blank line and leave the maintainer text above
+ * byte-for-byte unchanged. Later rounds replace only that region.
+ */
+export function replaceJumiPrBodyRegion(body: string | null | undefined, text: string): string {
   const current = body ?? "";
   const bounds = fenceBounds(current);
-  if (!bounds) return undefined;
+  if (!bounds) {
+    if (!current) return wrapJumiPrBody(text);
+    if (current.endsWith("\n\n")) return `${current}${wrapJumiPrBody(text)}`;
+    if (current.endsWith("\n")) return `${current}\n${wrapJumiPrBody(text)}`;
+    return `${current}\n\n${wrapJumiPrBody(text)}`;
+  }
   return `${current.slice(0, bounds.start)}${wrapJumiPrBody(text)}${current.slice(bounds.end)}`;
 }
 
