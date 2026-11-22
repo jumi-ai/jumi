@@ -634,6 +634,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   const { owner, repo, policy, api } = opts;
   const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
   let pr = opts.pr;
+  let giteaStrict: StrictPolicy | undefined;
   if (gitea) {
     const armed = await readGiteaScheduleArmed(api, owner, repo, pr.number, opts.log);
     if (!armed) return null;
@@ -654,6 +655,9 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
       }
       return null;
     }
+    // Reused below as `giteaStrict`: same branch, same forge routing, so the
+    // shared policy check is not resolved a second time.
+    giteaStrict = strictEarly;
     if (
       await isStrictRefreshLeftToAuthor(
         api,
@@ -681,7 +685,14 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   if (!isStrictRefreshCandidate(pr, owner, repo, policy.botUsername, policy)) return null;
   const baseBranch = pr.base?.ref?.trim() ? pr.base.ref.trim() : "";
   if (!baseBranch) return null;
-  const strict = await strictPolicyForBranch(api, owner, repo, baseBranch, policy, opts.defaultBranch, opts.log);
+  // Gitea reuses the early check above (same branch, same forge routing):
+  // one getBranch plus one repo-settings read per reconcile, no TOCTOU
+  // between the two reads. The left-to-author / blocked passes already ran
+  // on the same enriched PR above, so they are skipped here for Gitea.
+  const strict: StrictPolicy =
+    gitea && giteaStrict
+      ? giteaStrict
+      : await strictPolicyForBranch(api, owner, repo, baseBranch, policy, opts.defaultBranch, opts.log);
   if (strict !== "strict") {
     // Fail-closed: only an explicit off clears a held slot; unknown (e.g.
     // transient getBranch failure) leaves the slot alone.
@@ -695,26 +706,28 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     }
     return null;
   }
-  if (
-    await isStrictRefreshLeftToAuthor(
-      api,
-      owner,
-      repo,
-      pr,
-      {
-        botUsername: policy.botUsername,
-        ignoreConflictsLabel: policy.ignoreConflictsLabel,
-        defaultBranch: opts.defaultBranch,
-      },
-      opts.log
-    )
-  ) {
-    opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
-    return null;
-  }
-  if (isStrictRefreshBlocked(pr)) {
-    opts.log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
-    return null;
+  if (!gitea) {
+    if (
+      await isStrictRefreshLeftToAuthor(
+        api,
+        owner,
+        repo,
+        pr,
+        {
+          botUsername: policy.botUsername,
+          ignoreConflictsLabel: policy.ignoreConflictsLabel,
+          defaultBranch: opts.defaultBranch,
+        },
+        opts.log
+      )
+    ) {
+      opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
+      return null;
+    }
+    if (isStrictRefreshBlocked(pr)) {
+      opts.log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+      return null;
+    }
   }
   const slots = opts.slots;
   const listOpenPulls = (api as { listOpenPulls?: unknown }).listOpenPulls;
