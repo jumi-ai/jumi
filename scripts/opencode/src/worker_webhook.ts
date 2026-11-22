@@ -840,13 +840,8 @@ export async function handleWorkerWebhookEvent(
       // Single-slot per repo and target branch (see github_webhook).
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");
-        const strictSlots =
-          deps.strictSlots ??
-          (
-            deps.review as unknown as
-              | { strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore }
-              | undefined
-          )?.strictSlots;
+        const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
+        const strictSlots = strictSlotsFor(deps);
         const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger, strictSlots);
         for (const partial of strict.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };

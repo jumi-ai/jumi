@@ -142,6 +142,30 @@ export function isStrictRefreshTerminalEvidence(
   );
 }
 
+/**
+ * Shared strict-slot lookup for the webhook paths. The GitHub PR reconcile
+ * and push paths read `worker.strictSlots ?? worker.review.strictSlots ??
+ * review.strictSlots`; the Gitea router path reads the same chain plus the
+ * review queue fallback. One helper keeps the next wiring change from having
+ * to touch every webhook path.
+ */
+export function strictSlotsFor(deps: unknown): StrictRefreshSlotStore | undefined {
+  if (!deps || typeof deps !== "object") return undefined;
+  const holder = deps as {
+    strictSlots?: StrictRefreshSlotStore;
+    worker?: { strictSlots?: StrictRefreshSlotStore; review?: { strictSlots?: StrictRefreshSlotStore } };
+    review?: { strictSlots?: StrictRefreshSlotStore };
+    queue?: { strictSlots?: StrictRefreshSlotStore };
+  };
+  if (holder.strictSlots) return holder.strictSlots;
+  if (holder.worker?.strictSlots) return holder.worker.strictSlots;
+  const workerReview = holder.worker?.review?.strictSlots;
+  if (workerReview) return workerReview;
+  if (holder.review?.strictSlots) return holder.review.strictSlots;
+  if (holder.queue?.strictSlots) return holder.queue.strictSlots;
+  return undefined;
+}
+
 function epochMs(value: unknown, fallback: number): number {
   if (value instanceof Date) return value.getTime();
   if (typeof value === "number" && Number.isFinite(value)) return value;

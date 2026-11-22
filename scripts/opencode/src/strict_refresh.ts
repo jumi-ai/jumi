@@ -678,8 +678,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     const behind = await readGiteaBehindForPull(api, owner, repo, pr, opts.log);
     if (!behind) return null;
   }
-  if (!gitea && !isStrictRefreshCandidate(pr, owner, repo, policy.botUsername, policy)) return null;
-  if (gitea && !isStrictRefreshCandidate(pr, owner, repo, policy.botUsername, policy)) return null;
+  if (!isStrictRefreshCandidate(pr, owner, repo, policy.botUsername, policy)) return null;
   const baseBranch = pr.base?.ref?.trim() ? pr.base.ref.trim() : "";
   if (!baseBranch) return null;
   const strict = await strictPolicyForBranch(api, owner, repo, baseBranch, policy, opts.defaultBranch, opts.log);

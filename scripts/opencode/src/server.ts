@@ -548,17 +548,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                   logger(`strict refresh pr lookup failed: ${errorMessage(err)}`);
                 }
                 if (fullPr) {
-                  const strictSlots =
-                    (
-                      deps.worker as unknown as {
-                        strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
-                      }
-                    )?.strictSlots ??
-                    (
-                      deps.queue as unknown as {
-                        strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
-                      }
-                    )?.strictSlots;
+                  const { strictSlotsFor } = await import("./strict_refresh_queue.ts");
+                  const strictSlots = strictSlotsFor({ worker: deps.worker, queue: deps.queue });
                   const strictJob = await shouldEnqueueStrictRefreshForPR({
                     pr: fullPr,
                     owner: strictOwner,
