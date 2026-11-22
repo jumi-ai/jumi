@@ -205,6 +205,34 @@ describe("scannable board grouping (#774)", () => {
     expect(qGroups.in_progress_overflow).toBe(2);
   });
 
+  test("sit duplicating an in-progress row past the display cap stays hidden", async () => {
+    const store = new MemoryReviewJobStore();
+    const last = BOARD_IN_PROGRESS_PAGE_SIZE + 1;
+    for (let pr = 1; pr <= last; pr += 1) {
+      await store.enqueue(
+        makeJob({
+          delivery: `d-cap-${pr}`,
+          prNumber: pr,
+          headSha: `${HEAD_SHA.slice(0, 36)}${String(pr).padStart(4, "0")}`,
+        })
+      );
+    }
+    // Kickable sit on the same pull as the oldest queued row, which falls
+    // past the 200-row display slice but is still in progress.
+    await store.sits.remember("kirmanak", "demo", last, "implement-latch");
+    const groups = await buildBoardGroups(store);
+    expect(groups.in_progress).toHaveLength(BOARD_IN_PROGRESS_PAGE_SIZE);
+    expect(groups.in_progress_overflow).toBe(1);
+    expect(groups.needs_kick.some((row) => row.number === last)).toBe(false);
+    expect(groups.sitting.some((row) => row.number === last)).toBe(false);
+  });
+
+  test("page merges peer overflow counts into the capped-view disclosure", () => {
+    const html = renderBoardPage("catalog123");
+    expect(html).toContain("needsKickOverflow += p.needs_kick_overflow || p.needsKickOverflow || 0");
+    expect(html).toContain("inProgressOverflow += p.in_progress_overflow || p.inProgressOverflow || 0");
+  });
+
   test("REST stays compatible: aliases match and additive fields survive", async () => {
     const store = new MemoryReviewJobStore();
     await store.enqueue(makeJob({ delivery: "d-1", prNumber: 7, headSha: HEAD_SHA }));

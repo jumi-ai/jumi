@@ -577,8 +577,10 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
   }
   // A sit that duplicates a job already in progress is not a second problem:
   // hide it here. Recording and clearing are unchanged; this is read-time only.
+  // Dedup against the full in-progress list, not the capped display slice, so
+  // a sit duplicating a queued row past the cap stays hidden.
   const inflightKeys = new Set(
-    in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
+    all_in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
   );
   const inflightJobKeys = new Set(inflight.map((row) => row.jobKey));
   // PR numbers with any queued/leased work (review, follow-up, or conflict).
@@ -1341,8 +1343,8 @@ function groupsOf(data) {
   const inProgress = [...(data.in_progress || data.inProgress || [])];
   const needsKick = [...(data.needs_kick || data.needsKick || [])];
   const sitting = [...(data.sitting || data.sitting_on_purpose || [])];
-  const needsKickOverflow = data.needs_kick_overflow || data.needsKickOverflow || 0;
-  const inProgressOverflow = data.in_progress_overflow || data.inProgressOverflow || 0;
+  let needsKickOverflow = data.needs_kick_overflow || data.needsKickOverflow || 0;
+  let inProgressOverflow = data.in_progress_overflow || data.inProgressOverflow || 0;
   const peers = data.peers && typeof data.peers === "object" ? Object.values(data.peers) : [];
   let peerAvailable = true;
   let peerNote = "";
@@ -1352,6 +1354,8 @@ function groupsOf(data) {
     inProgress.push(...(p.in_progress || p.inProgress || []));
     needsKick.push(...(p.needs_kick || p.needsKick || []));
     sitting.push(...(p.sitting || p.sitting_on_purpose || []));
+    needsKickOverflow += p.needs_kick_overflow || p.needsKickOverflow || 0;
+    inProgressOverflow += p.in_progress_overflow || p.inProgressOverflow || 0;
     peerNote = "";
   }
   return { inProgress, needsKick, sitting, needsKickOverflow, inProgressOverflow, peerAvailable, peerNote };
