@@ -490,7 +490,7 @@ describe("GithubAPI", () => {
     ]);
   });
 
-  test("findStickyIssueComment returns only the matching id", async () => {
+  test("findStickyIssueComment returns the matching id and body", async () => {
     const urls: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       urls.push(String(url));
@@ -503,7 +503,7 @@ describe("GithubAPI", () => {
 
     await expect(
       api().findStickyIssueComment("owner", "repo", 7, "jumi", "<!-- jumi-review:owner/repo#7 -->")
-    ).resolves.toEqual({ id: 2 });
+    ).resolves.toEqual({ id: 2, body: "<!-- jumi-review:owner/repo#7 -->\nold" });
     expect(urls[0]).toContain("/issues/7/comments?per_page=50&page=1");
   });
 
@@ -523,7 +523,7 @@ describe("GithubAPI", () => {
       ])) as unknown as typeof fetch;
     await expect(
       api().findStickyIssueComment("owner", "repo", 7, "JUMI", "<!-- jumi-review:owner/repo#7 -->")
-    ).resolves.toEqual({ id: 2 });
+    ).resolves.toEqual({ id: 2, body: "<!-- jumi-review:owner/repo#7 -->\nold" });
   });
 
   test("lists issue comments with exact-50 paging", async () => {

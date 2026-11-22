@@ -2583,6 +2583,200 @@
       "status": "pushed"
     }
   },
+  "conflict.test.ts::44": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          99,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nMerged main cleanly; nothing to push."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::45": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          100,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nMerged main cleanly; nothing to push."
+        ],
+        "method": "updateIssueComment",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::46": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::47": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::48": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
   "conflict.test.ts::5": {
     "claimExists": false,
     "effects": [],

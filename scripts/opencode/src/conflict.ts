@@ -46,7 +46,7 @@ import {
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
-import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
+import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment, workerMarker } from "./gitea_issues.ts";
 import { type HandoffKey, type HandoffStore, handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import { hasIgnoreConflictsLabel, isIgnoreConflictsAuthor } from "./ignore_conflicts.ts";
 import {
@@ -87,6 +87,22 @@ import { type GitRunner, workerOpenCodeChildEnvWithGradleSeed } from "./workspac
 
 export const CONFLICT_TIMEOUT_MS = 60 * 60 * 1000;
 export const MAX_CONFLICT_ROUNDS = 3;
+
+/** Clean-state note written when an up-to-date check clears a stale conflict failure sticky. */
+function conflictCleanNote(defaultBranch: string): string {
+  return `Merged ${defaultBranch} cleanly; nothing to push.`;
+}
+
+/**
+ * Whether a worker sticky body holds a conflict failure: the text after the
+ * marker starts with `Jumi failed:` or with the bare merge-default stuck
+ * text. Every other sticky (implementing, review, quota, ...) is left alone.
+ */
+function isConflictFailureSticky(fullBody: string, marker: string): boolean {
+  const idx = fullBody.indexOf(marker);
+  const after = (idx === -1 ? fullBody : fullBody.slice(idx + marker.length)).trimStart();
+  return after.startsWith("Jumi failed:") || after.startsWith(MERGE_DEFAULT_STUCK_TEXT);
+}
 
 const GENERATED_LOCKS = new Set(["Chart.lock", "requirements.lock"]);
 
@@ -1413,6 +1429,34 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             const cleared = conflictStateWithoutMergeThrow(currentConflictLatch, { prNumber: pr.number, now });
             await writeConflictLatch(latches, latchKey, cleared).catch(() => undefined);
             currentConflictLatch = cleared;
+          }
+          try {
+            const marker = workerMarker(owner, repo, issueNumber);
+            const existing = await opts.api.findStickyIssueComment(owner, repo, pr.number, opts.botUsername, marker);
+            if (existing) {
+              let fullBody = existing.body;
+              if (fullBody === undefined && typeof opts.api.listIssueComments === "function") {
+                try {
+                  const comments = await opts.api.listIssueComments(owner, repo, pr.number);
+                  fullBody = comments.find((comment) => comment.id === existing.id)?.body;
+                } catch {
+                  fullBody = undefined;
+                }
+              }
+              if (typeof fullBody === "string" && isConflictFailureSticky(fullBody, marker)) {
+                const clean = appendRunnerStamp(
+                  conflictCleanNote(taskJob.defaultBranch || opts.job.defaultBranch),
+                  runner
+                );
+                try {
+                  await opts.api.updateIssueComment(owner, repo, existing.id, `${marker}\n${clean}`);
+                } catch {
+                  // Best-effort: a failed clean-note write must not fail the job.
+                }
+              }
+            }
+          } catch {
+            // Best-effort: a failed sticky read must not fail the job.
           }
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "up-to-date" };
