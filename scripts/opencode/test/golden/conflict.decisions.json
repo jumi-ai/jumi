@@ -1563,6 +1563,230 @@
         "op": "put",
         "patch": {
           "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "basesha",
+              "errorHash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "opencode crashed"
+    }
+  },
+  "conflict.test.ts::33": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge --no-ff --no-commit origin/main failed: fatal: stash failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "basesha",
+              "errorHash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "git merge --no-ff --no-commit origin/main failed: fatal: stash failed"
+    }
+  },
+  "conflict.test.ts::34": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge --no-ff --no-commit origin/main failed: fatal: stash failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+                "kind": "error"
+              },
+              {
+                "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
             "lastBaseSha": "basesha",
             "lastHeadSha": "headsha",
             "prNumber": 127,
@@ -1600,7 +1824,11 @@
       "stuck": {
         "fingerprints": [
           {
-            "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+            "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+            "kind": "error"
+          },
+          {
+            "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
             "kind": "error"
           }
         ],
@@ -1609,17 +1837,421 @@
     },
     "latchBefore": {
       "ci": {},
-      "conflict": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "17bec0beceb7c1f840e21efea0b9df955cc67494046bafde2835f32658d0f9ab",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "git merge --no-ff --no-commit origin/main failed: fatal: stash failed"
+    }
+  },
+  "conflict.test.ts::35": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge failed: different error"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "0eb7512b349b9524f1077da052bda1d3af688aeac23b5e419e18f4fcce60bd5b",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "0eb7512b349b9524f1077da052bda1d3af688aeac23b5e419e18f4fcce60bd5b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
       "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "name": "implementConflict",
     "result": {
-      "threw": "opencode crashed"
+      "threw": "git merge failed: different error"
     }
   },
-  "conflict.test.ts::33": {
+  "conflict.test.ts::36": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "0eb7512b349b9524f1077da052bda1d3af688aeac23b5e419e18f4fcce60bd5b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "0eb7512b349b9524f1077da052bda1d3af688aeac23b5e419e18f4fcce60bd5b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "name": "implementConflict",
+    "result": {
+      "reason": "same head and base already attempted",
+      "status": "skipped"
+    }
+  },
+  "conflict.test.ts::37": {
+    "claimExists": false,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::38": {
+    "claimExists": false,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge failed on new base"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "newbase",
+              "errorHash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "newbase",
+          "errorHash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "oldbase",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "threw": "git merge failed on new base"
+    }
+  },
+  "conflict.test.ts::39": {
     "claimExists": false,
     "effects": [
       {
@@ -1690,7 +2322,7 @@
       "status": "stuck"
     }
   },
-  "conflict.test.ts::34": {
+  "conflict.test.ts::4": {
     "claimExists": false,
     "effects": [],
     "input": {
@@ -1724,7 +2356,41 @@
       "status": "up-to-date"
     }
   },
-  "conflict.test.ts::35": {
+  "conflict.test.ts::40": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "push",
+        "issueNumber": 12,
+        "mode": "conflict",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "push",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementConflict",
+    "result": {
+      "status": "up-to-date"
+    }
+  },
+  "conflict.test.ts::41": {
     "claimExists": false,
     "effects": [
       {
@@ -1797,7 +2463,7 @@
       "status": "pushed"
     }
   },
-  "conflict.test.ts::36": {
+  "conflict.test.ts::42": {
     "claimExists": false,
     "effects": [
       {
@@ -1844,7 +2510,7 @@
       "status": "skipped"
     }
   },
-  "conflict.test.ts::37": {
+  "conflict.test.ts::43": {
     "claimExists": false,
     "effects": [
       {
@@ -1915,40 +2581,6 @@
       "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
       "prNumber": 127,
       "status": "pushed"
-    }
-  },
-  "conflict.test.ts::4": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "job": {
-        "action": "push",
-        "issueNumber": 12,
-        "mode": "conflict",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "push",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementConflict",
-    "result": {
-      "status": "up-to-date"
     }
   },
   "conflict.test.ts::5": {
