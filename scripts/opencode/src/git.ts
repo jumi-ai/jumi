@@ -95,6 +95,7 @@ import { TOOL_INSTALL_RULE } from "./prompt.ts";
 import { engineExitMessage } from "./util/engine.ts";
 import { errorMessage } from "./util/error.ts";
 import { pathExists } from "./util/fs.ts";
+import { UNFENCED_PR_BODY_ADDENDUM_NOTE } from "./worker_mcp.ts";
 
 const WORKER_SCOPE_BASE = `Stay in this clone. Start from the parent-injected files named in the injected-files line below; do not glob **/* or inventory the repo first.
 Do not webfetch this Gitea host, its issues, PRs, /api, swagger, or Actions. Do not call tea or the forge API. The parent already wrote the files listed as injected.`;
@@ -173,13 +174,16 @@ Do not call \`blocked_on\` unless the id is on JUMI_QUEUE.md. Do not commit a bl
 ${IMPLEMENT_FINISH}`;
 }
 
-export function buildFollowupPrompt(runnerType?: string): string {
+export function buildFollowupPrompt(runnerType?: string, opts?: { prBodyFenced?: boolean }): string {
+  // On a maintainer-written body (no Jumi fence) the worker markdown becomes
+  // a fenced Jumi section below it, not a full replacement description.
+  const addendumLine = opts?.prBodyFenced === false ? `\n${UNFENCED_PR_BODY_ADDENDUM_NOTE}` : "";
   return `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
 A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).
-${PR_DESCRIPTION_RULE}
+${PR_DESCRIPTION_RULE}${addendumLine}
 ${WORKER_DONE_WHEN_RULE}
 Do not reopen product decisions already specified in JUMI_TASK.md.
 Leftover simplifications in the attached review are ideas to judge, not a backlog that must all land. A clean tree is a valid outcome. If a writer comment answers a question in that review, implement that answer.
@@ -315,12 +319,19 @@ export async function resolveOpenCodePrompt(opts: OpenCodeRunOptions): Promise<s
     return withInstalledTools(task);
   }
   let base: string;
-  if (kind === "follow-up") base = buildFollowupPrompt(runnerType);
-  else if (kind === "conflict") base = buildConflictPrompt(runnerType);
+  if (kind === "follow-up") {
+    // JUMI_PR.md is written only when the live body is fenced; its absence
+    // means a maintainer-written body, so the worker gets the addendum note
+    // and knows which case it is in.
+    const fenced = await pathExists(join(opts.workdir, "JUMI_PR.md"));
+    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced ? true : false });
+  } else if (kind === "conflict") base = buildConflictPrompt(runnerType);
   else if (kind === "implement") base = buildImplementPrompt(runnerType);
   else if (await pathExists(join(opts.workdir, "JUMI_CONFLICT.md"))) base = buildConflictPrompt(runnerType);
-  else if (await pathExists(join(opts.workdir, "JUMI_FEEDBACK.md"))) base = buildFollowupPrompt(runnerType);
-  else base = buildImplementPrompt(runnerType);
+  else if (await pathExists(join(opts.workdir, "JUMI_FEEDBACK.md"))) {
+    const fenced = await pathExists(join(opts.workdir, "JUMI_PR.md"));
+    base = buildFollowupPrompt(runnerType, { prBodyFenced: fenced ? true : false });
+  } else base = buildImplementPrompt(runnerType);
   return withBoth(base);
 }
 

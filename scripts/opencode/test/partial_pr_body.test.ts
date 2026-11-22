@@ -103,6 +103,17 @@ describe("worker prompts describe the PR body and partial work", () => {
       expect(prompt).not.toContain("JUMI_PR.md is the pull-request description");
     }
   });
+
+  test("an unfenced follow-up prompt names the maintainer-written addendum case", () => {
+    const fenced = buildFollowupPrompt(undefined, { prBodyFenced: true });
+    expect(fenced).toContain("set_pr_body");
+    expect(fenced).not.toContain("maintainer-written");
+    const unfenced = buildFollowupPrompt(undefined, { prBodyFenced: false });
+    expect(unfenced).toContain("set_pr_body");
+    expect(unfenced).toContain("maintainer-written");
+    expect(unfenced).toContain("Jumi section appended below it");
+    expect(unfenced).toContain("only what the reviewer asked to be disclosed plus verification notes");
+  });
 });
 
 describe("body-only review requeue helpers", () => {

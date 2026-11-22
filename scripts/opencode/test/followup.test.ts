@@ -234,6 +234,7 @@ describe("implementFollowUp", () => {
       porcelain?: string;
       writePr?: (current: string | null) => string | null;
       updateBody?: IssueApi["updatePullRequestBody"];
+      logs?: string[];
     }) {
       const patches: string[] = [];
       let seeded: string | null = null;
@@ -279,7 +280,9 @@ describe("implementFollowUp", () => {
             else if (opts.writePr) await rm(path, { force: true });
             return { status: "ok" };
           },
-          logger: () => undefined,
+          logger: (message: string) => {
+            opts.logs?.push(message);
+          },
         });
       });
       return { result, patches, seeded: seeded as string | null, statusSawPrFile };
@@ -295,12 +298,31 @@ describe("implementFollowUp", () => {
       ]);
     });
 
-    test("does not touch an unfenced body", async () => {
-      const run = await runFollowUp({ body: "Fixes #12", writePr: () => "Should not land." });
+    test("appends a fenced Jumi section to an unfenced body", async () => {
+      const run = await runFollowUp({ body: "Maintainer text.\n\nFixes #12", writePr: () => "Should land below." });
       expect(run.result?.status).toBe("pushed");
       expect(run.seeded).toBeNull();
       expect(run.statusSawPrFile).toBe(false);
-      expect(run.patches).toEqual([]);
+      expect(run.patches).toHaveLength(1);
+      const patched = run.patches[0] ?? "";
+      expect(patched.startsWith("Maintainer text.\n\nFixes #12")).toBe(true);
+      expect(patched.slice(0, "Maintainer text.\n\nFixes #12".length)).toBe("Maintainer text.\n\nFixes #12");
+      expect(patched).toContain(`${PR_BODY_FENCE_START}\nShould land below.`);
+      expect(patched).toContain(PR_BODY_FENCE_END);
+    });
+
+    test("a second round replaces only the appended region", async () => {
+      const original = "Maintainer text.\n\nFixes #12";
+      const first = await runFollowUp({ body: original, writePr: () => "First disclosure." });
+      expect(first.patches).toHaveLength(1);
+      const firstBody = first.patches[0] ?? "";
+      expect(firstBody.startsWith(original)).toBe(true);
+      const second = await runFollowUp({ body: firstBody, writePr: () => "Second disclosure." });
+      expect(second.patches).toHaveLength(1);
+      const secondBody = second.patches[0] ?? "";
+      expect(secondBody.startsWith(original)).toBe(true);
+      expect(secondBody).toContain("Second disclosure.");
+      expect(secondBody).not.toContain("First disclosure.");
     });
 
     test("leaves the posted body when JUMI_PR.md is removed or empty", async () => {
@@ -317,14 +339,37 @@ describe("implementFollowUp", () => {
     });
 
     test("a failed body PATCH does not fail the pushed fix", async () => {
+      const logs: string[] = [];
       const run = await runFollowUp({
         body: posted,
         writePr: () => "New writeup.",
         updateBody: async () => {
           throw new Error("gitea 500");
         },
+        logs,
       });
       expect(run.result?.status).toBe("pushed");
+      expect(logs.some((line) => line.includes("PR body not refreshed:"))).toBe(true);
+    });
+
+    test("an identical body refresh logs the reason instead of returning silently", async () => {
+      const logs: string[] = [];
+      const run = await runFollowUp({
+        body: posted,
+        porcelain: "",
+        writePr: () => "Old writeup.\n\nFixes #12",
+        logs,
+      });
+      expect(run.result?.status).toBe("no-changes");
+      expect(run.patches).toEqual([]);
+      expect(logs.some((line) => line.includes("PR body not refreshed:"))).toBe(true);
+    });
+
+    test("an empty description logs the reason instead of returning silently", async () => {
+      const logs: string[] = [];
+      const run = await runFollowUp({ body: posted, porcelain: "", writePr: () => null, logs });
+      expect(run.patches).toEqual([]);
+      expect(logs.some((line) => line.includes("PR body not refreshed:"))).toBe(true);
     });
   });
 

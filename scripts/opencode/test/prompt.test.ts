@@ -67,6 +67,16 @@ describe("buildPROpenedPrompt", () => {
     expect(prompt).toContain("❓ maintainer:");
   });
 
+  test("a PR description finding stays worker-fixable through the fenced addendum", () => {
+    const prompt = buildPROpenedPrompt({
+      repo: makeRepo(),
+      pr: makePR(),
+      prFiles: [],
+    });
+    expect(prompt).toContain("fenced Jumi section");
+    expect(prompt).toContain("appended below maintainer text");
+  });
+
   test("asks for JUMI_REVIEW.md with the review rubric and no commit or push", () => {
     const prompt = buildPROpenedPrompt({
       repo: makeRepo(),
