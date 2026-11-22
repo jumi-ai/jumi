@@ -110,12 +110,19 @@ export type ConflictResult =
   | { status: "skipped"; reason: string }
   | { status: "cancelled" };
 
+interface MergeThrowRecord {
+  headSha: string;
+  baseSha: string;
+  errorHash?: string;
+}
+
 export interface ConflictState {
   prNumber: number;
   round: number;
   lastHeadSha: string;
   lastBaseSha: string;
   updatedAt: string;
+  mergeThrow?: MergeThrowRecord;
 }
 
 type MergeDefaultStatus = "up-to-date" | "merged" | "stuck";
@@ -209,14 +216,24 @@ function emptyConflictState(): ConflictState {
 
 function parseConflictState(parsed: unknown): ConflictState {
   if (!parsed || typeof parsed !== "object") return emptyConflictState();
-  const state = parsed as ConflictState;
-  return {
+  const state = parsed as ConflictState & { mergeThrow?: unknown };
+  const base: ConflictState = {
     prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
     round: typeof state.round === "number" ? state.round : 0,
     lastHeadSha: typeof state.lastHeadSha === "string" ? state.lastHeadSha : "",
     lastBaseSha: typeof state.lastBaseSha === "string" ? state.lastBaseSha : "",
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
   };
+  const rawThrow = state.mergeThrow;
+  if (rawThrow && typeof rawThrow === "object") {
+    const rec = rawThrow as { headSha?: unknown; baseSha?: unknown; errorHash?: unknown };
+    if (typeof rec.headSha === "string" && rec.headSha && typeof rec.baseSha === "string" && rec.baseSha) {
+      const record: MergeThrowRecord = { headSha: rec.headSha, baseSha: rec.baseSha };
+      if (typeof rec.errorHash === "string" && rec.errorHash) record.errorHash = rec.errorHash;
+      base.mergeThrow = record;
+    }
+  }
+  return base;
 }
 
 export async function readConflictLatch(store: SkipLatchStore, key: SkipLatchKey): Promise<ConflictState> {
@@ -229,6 +246,68 @@ export async function writeConflictLatch(
   state: ConflictState
 ): Promise<void> {
   await store.put(key, { conflict: state });
+}
+
+/**
+ * One retry per head/base after a `mergeDefaultIntoWorktree` throw. The
+ * first throw on a pair records the pair (plus a `fingerprintError` hash for
+ * diagnostics) without marking it attempted or incrementing the round, so the
+ * requeue runs the merge again. A second throw on the same pair — any error —
+ * records the attempt exactly as before. Success, up-to-date, or a different
+ * pair clears the record. Shared by the conflict job and the follow-up
+ * prefix-merge path so the two cannot drift.
+ */
+export function isMergeThrowStale(state: ConflictState, headSha: string, baseSha: string): boolean {
+  const record = state.mergeThrow;
+  if (!record) return false;
+  return record.headSha !== headSha || record.baseSha !== baseSha;
+}
+
+export function nextConflictStateAfterMergeThrow(
+  current: ConflictState,
+  opts: { headSha: string; baseSha: string; error?: unknown; prNumber: number; now?: () => Date }
+): ConflictState {
+  const nowIso = (opts.now ?? (() => new Date()))().toISOString();
+  if (
+    current.mergeThrow &&
+    current.mergeThrow.headSha === opts.headSha &&
+    current.mergeThrow.baseSha === opts.baseSha
+  ) {
+    return {
+      prNumber: opts.prNumber,
+      round: current.round + 1,
+      lastHeadSha: opts.headSha,
+      lastBaseSha: opts.baseSha,
+      updatedAt: nowIso,
+    };
+  }
+  const errorHash = fingerprintError(errorMessage(opts.error ?? ""));
+  return {
+    prNumber: opts.prNumber,
+    round: current.round,
+    lastHeadSha: current.lastHeadSha,
+    lastBaseSha: current.lastBaseSha,
+    updatedAt: nowIso,
+    mergeThrow: {
+      headSha: opts.headSha,
+      baseSha: opts.baseSha,
+      ...(errorHash ? { errorHash } : {}),
+    },
+  };
+}
+
+export function conflictStateWithoutMergeThrow(
+  current: ConflictState,
+  opts: { prNumber?: number; now?: () => Date } = {}
+): ConflictState {
+  if (!current.mergeThrow) return current;
+  return {
+    prNumber: opts.prNumber ?? current.prNumber,
+    round: current.round,
+    lastHeadSha: current.lastHeadSha,
+    lastBaseSha: current.lastBaseSha,
+    updatedAt: (opts.now ?? (() => new Date()))().toISOString(),
+  };
 }
 
 export async function readConflictState(path: string): Promise<ConflictState> {
@@ -1020,7 +1099,8 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
     }
     break;
   }
-  const state = built.conflictLatch;
+  const conflictLatchState = built.conflictLatch;
+  let currentConflictLatch = conflictLatchState;
 
   const loop = openClaimedLoop(claimed, opts);
 
@@ -1086,7 +1166,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
   const recordAttempt = async (headSha: string, baseSha: string, increment: boolean) => {
     await writeConflictLatch(latches, latchKey, {
       prNumber: pr.number,
-      round: increment ? state.round + 1 : state.round,
+      round: increment ? conflictLatchState.round + 1 : conflictLatchState.round,
       lastHeadSha: headSha,
       lastBaseSha: baseSha,
       updatedAt: now().toISOString(),
@@ -1187,9 +1267,19 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         const handoffKey = handoffKeyForJob({ owner, repo, issueNumber }, provenanceForgeFor(opts));
         const injectedHandoff = await injectStoredHandoff(worktree, handoffStore, handoffKey, log);
 
-        if (state.lastHeadSha && state.lastBaseSha && state.lastHeadSha === headSha && state.lastBaseSha === baseSha) {
+        if (
+          conflictLatchState.lastHeadSha &&
+          conflictLatchState.lastBaseSha &&
+          conflictLatchState.lastHeadSha === headSha &&
+          conflictLatchState.lastBaseSha === baseSha
+        ) {
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: "same head and base already attempted" };
+        }
+        if (isMergeThrowStale(currentConflictLatch, headSha, baseSha)) {
+          const cleared = conflictStateWithoutMergeThrow(currentConflictLatch, { prNumber: pr.number, now });
+          await writeConflictLatch(latches, latchKey, cleared).catch(() => undefined);
+          currentConflictLatch = cleared;
         }
 
         const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
@@ -1319,6 +1409,11 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
         }
         await noteProvenanceRunners(opts, provenanceCollector, log);
         if (mergeResult.status === "up-to-date") {
+          if (currentConflictLatch.mergeThrow) {
+            const cleared = conflictStateWithoutMergeThrow(currentConflictLatch, { prNumber: pr.number, now });
+            await writeConflictLatch(latches, latchKey, cleared).catch(() => undefined);
+            currentConflictLatch = cleared;
+          }
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "up-to-date" };
         }
@@ -1571,7 +1666,17 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
           );
         }
         if (mergeDefaultThrew && attemptedHeadSha && attemptedBaseSha) {
-          await recordAttempt(attemptedHeadSha, attemptedBaseSha, true).catch(() => undefined);
+          await writeConflictLatch(
+            latches,
+            latchKey,
+            nextConflictStateAfterMergeThrow(currentConflictLatch, {
+              headSha: attemptedHeadSha,
+              baseSha: attemptedBaseSha,
+              error: err,
+              prNumber: pr.number,
+              now,
+            })
+          ).catch(() => undefined);
         }
         await (opts.runtime ?? standingPodRuntime).destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
       }
