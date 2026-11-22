@@ -465,20 +465,32 @@ describe("operator board read API", () => {
       expect(response.headers.get("Content-Type")).toContain("text/html");
       expect(response.headers.get("Cache-Control")).toBe("no-store");
       const html = await response.text();
-      // Two lists on the phone; the server sentence is the headline via payload.
-      expect(html).toContain("<h2>In progress</h2>");
-      expect(html).toContain("<h2>Sitting</h2>");
+      // Needs attention first, then running/queued, then waiting/ignored.
+      expect(html).toContain("<h2>Needs attention</h2>");
+      expect(html).toContain("<h2>Running &amp; queued</h2>");
+      expect(html).toContain("<h2>Waiting / ignored</h2>");
+      // Runner sign-in is reachable from the header without scrolling jobs.
+      expect(html).toContain('href="#signin-panel"');
+      expect(html).toContain('id="signin-panel"');
+      // Rows lead with repo/number/short status; raw reason stays in detail.
+      expect(html).toContain("shortStatus(item)");
       expect(html).toContain("headlineOf(item)");
-      expect(html).toContain("Remove row");
+      // Dismissal-only action is secondary and says Remove from board.
+      expect(html).toContain("Remove from board");
+      expect(html).toContain("button.secondary");
       expect(html).toContain("Clear latch and queue follow-up");
-      expect(html).toContain("Sitting on purpose");
-      expect(html).not.toContain("Sitting on purpose ·");
-      expect(html).not.toContain(">Kick<");
+      // Stale data is marked and blocks actions; peer availability is separate.
+      expect(html).toContain('id="stale"');
+      expect(html).toContain("Data is stale");
+      expect(html).toContain('id="peer-note"');
+      // Long queues collapse behind a labeled disclosure; truncation is explicit.
+      expect(html).toContain("more queued");
+      expect(html).toContain("capped, not exhaustive");
       // Forge switch, inspector, and phone sheet.
       expect(html).toContain('id="forge-switch"');
       expect(html).toContain('id="inspector"');
       expect(html).toContain('id="sheet"');
-      // Confirm names the side effect; consequence is a note; one primary control per confirm.
+      // Confirm names the side effect; consequence is a note.
       expect(html).toContain("This will:");
       expect(html).toContain("consequence");
       // Same origin: the browser talks to /api/board, never to the forge.
