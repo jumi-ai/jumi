@@ -290,6 +290,12 @@ export interface Forge extends AttachmentSupport {
   /** Branch protection readable with a write-level token (gate for auto-merge). Throws when unreadable. */
   getBranch?(owner: string, repo: string, branch: string): Promise<BranchProtection>;
   /**
+   * Compare a head SHA against a base ref (`head...base`). Resolves the
+   * number of base commits not reachable from the head (`total_commits`).
+   * Gitea only; absent on forges without an equivalent. Throws when unreadable.
+   */
+  compareCommits?(owner: string, repo: string, basehead: string): Promise<{ totalCommits?: number }>;
+  /**
    * Raw file read at a ref (branch name, tag, or SHA); the repository
    * settings file is the only parent-read consumer. Missing paths resolve
    * `{found:false}` and never throw; other failures throw.

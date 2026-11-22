@@ -524,6 +524,120 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               logger(`pr head lookup failed: ${errorMessage(err)}`);
             }
           }
+          // Strict refresh reconcile on Gitea PR activity: a PR already behind
+          // when the rule or the schedule appears needs no further base push.
+          // When the effective rule (admin) or the `.jumi.yml` opt-in says
+          // strict, the timeline shows a schedule, and the compare shows the
+          // head behind, enqueue the merge-only refresh and park this
+          // stale-head review without taking a reviewer slot; the new head
+          // re-enters through the normal CI and review flow. Otherwise fall
+          // through to the normal CI-gated review.
+          if (deps.worker?.api && deps.worker?.queue) {
+            try {
+              const { shouldEnqueueStrictRefreshForPR, encodeStrictRefreshWait, STRICT_REFRESH_WAIT_FALLBACK_MS } =
+                await import("./strict_refresh.ts");
+              const [strictOwner, strictRepo] = payload.repository.full_name.split("/");
+              if (strictOwner && strictRepo) {
+                let fullPr: import("./ports.ts").Pull | undefined;
+                try {
+                  const getPR = deps.worker.api.getPR;
+                  if (typeof getPR === "function") {
+                    fullPr = await getPR.call(deps.worker.api, strictOwner, strictRepo, payload.pull_request.number);
+                  }
+                } catch (err) {
+                  logger(`strict refresh pr lookup failed: ${errorMessage(err)}`);
+                }
+                if (fullPr) {
+                  const strictSlots =
+                    (
+                      deps.worker as unknown as {
+                        strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
+                      }
+                    )?.strictSlots ??
+                    (
+                      deps.queue as unknown as {
+                        strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
+                      }
+                    )?.strictSlots;
+                  const strictJob = await shouldEnqueueStrictRefreshForPR({
+                    pr: fullPr,
+                    owner: strictOwner,
+                    repo: strictRepo,
+                    defaultBranch: payload.repository.default_branch,
+                    cloneUrl: payload.repository.clone_url,
+                    policy: {
+                      giteaUrl: config.giteaUrl,
+                      allowedOrgs: config.allowedOrgs,
+                      allowedRepos: config.allowedRepos,
+                      botUsername: config.botUsername,
+                      ignoreConflictsLabel: config.ignoreConflictsLabel,
+                      forgeKind: config.forge,
+                    } as never,
+                    api: deps.worker.api as never,
+                    sender: payload.sender?.login ?? "pull_request",
+                    log: logger,
+                    ...(strictSlots ? { slots: strictSlots } : {}),
+                  });
+                  if (strictJob) {
+                    const receivedAt = new Date().toISOString();
+                    const workerJob = { ...strictJob, delivery, receivedAt };
+                    const workerResult = await deps.worker.queue.enqueue(workerJob);
+                    logger(
+                      `${workerResult.queued ? "queued" : "deduped"} ${workerResult.key} delivery=${delivery} strict-refresh`
+                    );
+                    const nowMs = Date.now();
+                    const parked = await deps.queue.enqueue(job, {
+                      waitUntilMs: nowMs + STRICT_REFRESH_WAIT_FALLBACK_MS,
+                      waitMarker: encodeStrictRefreshWait(nowMs),
+                      nowMs,
+                    });
+                    logger(
+                      `${parked.queued ? "queued" : "deduped"} ${parked.key} delivery=${delivery} strict-refresh-wait`
+                    );
+                    if (payload.action === "opened" && deps.worker) {
+                      try {
+                        const { enqueueTakeoverForOpenedPull } = await import("./takeover.ts");
+                        const [o, r] = payload.repository.full_name.split("/");
+                        if (o && r) {
+                          await enqueueTakeoverForOpenedPull({
+                            api: deps.worker.api,
+                            forgeKind: config.forge,
+                            owner: o,
+                            repo: r,
+                            prNumber: payload.pull_request.number,
+                            prTitle: payload.pull_request.title,
+                            prDraft: payload.pull_request.draft,
+                            prState: payload.pull_request.state,
+                            prMerged: payload.pull_request.merged,
+                            prAuthorLogin: payload.pull_request.user?.login,
+                            prHeadRef: payload.pull_request.head?.ref ?? "",
+                            prHeadSha: payload.pull_request.head?.sha ?? job.headSha,
+                            prHeadRepoFullName: payload.pull_request.head?.repo?.full_name,
+                            defaultBranch: payload.repository.default_branch,
+                            cloneUrl: payload.repository.clone_url,
+                            htmlUrl: payload.pull_request.html_url,
+                            updatedAt: payload.pull_request.updated_at,
+                            prBody: payload.pull_request.body,
+                            botUsername: config.botUsername,
+                            trustedSenderLogins: config.trustedSenderLogins,
+                            action: payload.action,
+                            delivery: `takeover-${delivery}`,
+                            queue: deps.worker.queue,
+                            log: (message) => logger(message),
+                          });
+                        }
+                      } catch (err) {
+                        logger(`takeover failed: ${errorMessage(err)}`);
+                      }
+                    }
+                    return markDurable(json(202, parked));
+                  }
+                }
+              }
+            } catch (err) {
+              logger(`strict refresh reconcile failed: ${errorMessage(err)}`);
+            }
+          }
           const result = await enqueueReviewWithCiGate(deps.queue, job, {
             ciApi: deps.ciApi,
             home: deps.ciHome ?? config.home,

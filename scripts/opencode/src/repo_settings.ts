@@ -602,6 +602,16 @@ export const REPO_SETTINGS_REGISTRY = [
       return { ok: true, value: parsed.setup };
     },
   }),
+  requiredSetting({
+    key: "strict_branch_refresh",
+    field: "strictBranchRefresh",
+    doc: "Gitea fallback for strict branch refresh when branch protection is unreadable.",
+    defaultValue: false,
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"strict_branch_refresh" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
 ];
 
 /**
@@ -1022,7 +1032,9 @@ function defaultRepoSettingsFromRegistry(): RepoSettings {
  * above the deployer maximum runs with the maximum. Absent
  * `automerge_method` means today's merge method (first allowed on GitHub,
  * default style on Gitea); a present value must be one of `merge`,
- * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`.
+ * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`. Absent
+ * `strict_branch_refresh` (or `false`) means no Gitea opt-in, as today;
+ * `true` lets Gitea strict refresh run when branch protection is unreadable.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -1222,6 +1234,15 @@ export function resolveSetupTimeoutMaxMs(
     return DEFAULT_SETUP_TIMEOUT_MS;
   }
   return parsed;
+}
+
+/**
+ * Whether the Gitea strict-refresh opt-in is enabled. Missing, invalid, or
+ * unreadable files behave as `false`. GitHub never reads this key.
+ */
+export function isStrictBranchRefreshEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return false;
+  return (load as { strictBranchRefresh?: boolean }).strictBranchRefresh === true;
 }
 
 /**

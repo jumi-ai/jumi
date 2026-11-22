@@ -139,7 +139,9 @@ type WorkerWebhookApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
       | "cancelAutoMerge"
     >
   > &
-  Partial<Pick<import("./ports.ts").Forge, "getPRFiles" | "listIssueTimeline" | "createCommitStatus">> & {
+  Partial<
+    Pick<import("./ports.ts").Forge, "getPRFiles" | "listIssueTimeline" | "createCommitStatus" | "compareCommits">
+  > & {
     rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
   };
 
@@ -831,8 +833,10 @@ export async function handleWorkerWebhookEvent(
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
       }
-      // Strict refresh for GitHub up-to-date branches (no-op when strict is
-      // off or unknown, e.g. Gitea). Same merge-only worker path, no model.
+      // Strict refresh for up-to-date branches (no-op when strict is off or
+      // unknown). Same merge-only worker path, no model. GitHub uses the
+      // effective rule and `mergeable_state`; Gitea uses the admin rule or
+      // the `.jumi.yml` opt-in plus timeline schedule and compare behind.
       // Single-slot per repo and target branch (see github_webhook).
       try {
         const { shouldEnqueueStrictRefreshOnPush } = await import("./strict_refresh.ts");

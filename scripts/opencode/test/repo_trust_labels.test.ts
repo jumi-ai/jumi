@@ -123,6 +123,7 @@ describe("effectiveTrustedSenderLogins", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
     expect(narrowed).toEqual(["Alice"]);
     const widened = effectiveTrustedSenderLogins(["alice"], {
@@ -141,6 +142,7 @@ describe("effectiveTrustedSenderLogins", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
     expect(widened).toEqual(["alice"]);
   });
@@ -162,6 +164,7 @@ describe("effectiveTrustedSenderLogins", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
     expect(effective).toEqual(["carol"]);
     // Listing is the admit: no forge lookup, case-insensitive whole login.
@@ -187,6 +190,7 @@ describe("effectiveTrustedSenderLogins", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toBeUndefined();
   });
@@ -223,6 +227,7 @@ describe("effectiveTrustedSenderLogins", () => {
         mode: "full" as const,
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       };
     }
     // Absent: neither deployment nor repository configures senders.
@@ -278,6 +283,7 @@ describe("effectiveTrustedSenderLogins", () => {
         mode: "full" as const,
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       };
     }
     // Blank deployment entries are ignored: blank-only plus a valid repo list admits the repo list.
@@ -315,6 +321,7 @@ describe("effectiveFollowupIgnoreLogins", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
     expect(merged).toEqual(["deployer-bot", "repo-bot"]);
     const missing = repoFileApi(undefined);
@@ -353,6 +360,7 @@ describe("effectiveIgnoreConflictsLabel", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toBe("skip-me");
   });
