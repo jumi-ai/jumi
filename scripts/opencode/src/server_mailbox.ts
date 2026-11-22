@@ -21,7 +21,13 @@ export function workerMailboxApi(
     Partial<
       Pick<
         Forge,
-        "deleteGitRef" | "getBranch" | "scheduleAutoMerge" | "cancelAutoMerge" | "listIssueTimeline" | "getPRFiles"
+        | "deleteGitRef"
+        | "getBranch"
+        | "scheduleAutoMerge"
+        | "cancelAutoMerge"
+        | "listIssueTimeline"
+        | "getPRFiles"
+        | "compareCommits"
       >
     > & {
       rememberInstallation?: (installationId: string, owner?: string, repo?: string) => void;
@@ -53,6 +59,10 @@ export function workerMailboxApi(
     getPRFiles: api.getPRFiles ? (owner, repo, index) => api.getPRFiles!(owner, repo, index) : undefined,
     listIssueTimeline: api.listIssueTimeline
       ? (owner, repo, index) => api.listIssueTimeline!(owner, repo, index)
+      : undefined,
+    compareCommits: (api as { compareCommits?: Forge["compareCommits"] }).compareCommits
+      ? (owner, repo, basehead) =>
+          (api as { compareCommits?: Forge["compareCommits"] }).compareCommits!(owner, repo, basehead)
       : undefined,
     findStickyIssueComment: (owner, repo, index, bot, marker) =>
       api.findStickyIssueComment(owner, repo, index, bot, marker),

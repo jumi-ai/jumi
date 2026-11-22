@@ -42,6 +42,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -63,6 +64,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
@@ -81,6 +83,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -102,6 +105,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -136,6 +140,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
@@ -154,6 +159,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -189,6 +195,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("no_automerge_label: hold\n")).toEqual({
@@ -207,6 +214,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     for (const text of [
@@ -254,6 +262,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -275,6 +284,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -296,6 +306,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -341,6 +352,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("takeover_authors: []\n")).toEqual({
@@ -359,6 +371,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -380,6 +393,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -449,6 +463,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("ignore_conflicts_authors: [a, a, b]\n")).toEqual({
@@ -467,6 +482,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -488,6 +504,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
@@ -507,6 +524,7 @@ describe("parseRepoSettingsText", () => {
           mode: "full",
           reviewDrafts: false,
           reviewBudget: {},
+          strictBranchRefresh: false,
         },
       }
     );
@@ -529,6 +547,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -572,6 +591,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("mode: review-only\n")).toEqual({
@@ -590,6 +610,7 @@ describe("parseRepoSettingsText", () => {
         mode: "review-only",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
     expect(parseRepoSettingsText("mode: off\n")).toEqual({
@@ -608,6 +629,7 @@ describe("parseRepoSettingsText", () => {
         mode: "off",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -629,6 +651,7 @@ describe("parseRepoSettingsText", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -677,6 +700,7 @@ describe("loadRepoSettings", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
   });
 
@@ -703,6 +727,7 @@ describe("loadRepoSettings", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
   });
 
@@ -724,6 +749,7 @@ describe("loadRepoSettings", () => {
       mode: "off",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
   });
 
@@ -756,6 +782,7 @@ describe("loadRepoSettings", () => {
       mode: "full",
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
     });
   });
 
@@ -919,6 +946,7 @@ describe("effectiveBlockingQuestionAuthors", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toEqual(["deployer-bot", "repo-bot"]);
   });
@@ -955,6 +983,7 @@ describe("repoMode", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toBe("full");
     expect(
@@ -973,6 +1002,7 @@ describe("repoMode", () => {
         mode: "review-only",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toBe("review-only");
     expect(
@@ -991,6 +1021,7 @@ describe("repoMode", () => {
         mode: "off",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       })
     ).toBe("off");
   });
@@ -1103,6 +1134,7 @@ describe("parseRepoSettingsTimeouts", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -1124,6 +1156,7 @@ describe("parseRepoSettingsTimeouts", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -1145,6 +1178,7 @@ describe("parseRepoSettingsTimeouts", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -1215,6 +1249,7 @@ describe("effectiveTimeoutMsForKind", () => {
           mode: "full",
           reviewDrafts: false,
           reviewBudget: {},
+          strictBranchRefresh: false,
         },
         "review",
         900_000,
@@ -1242,6 +1277,7 @@ describe("effectiveTimeoutMsForKind", () => {
           mode: "full",
           reviewDrafts: false,
           reviewBudget: {},
+          strictBranchRefresh: false,
         },
         "review",
         900_000,
@@ -1265,6 +1301,7 @@ describe("effectiveTimeoutMsForKind", () => {
           mode: "full",
           reviewDrafts: false,
           reviewBudget: {},
+          strictBranchRefresh: false,
         },
         "review",
         900_000,
@@ -1291,6 +1328,7 @@ describe("effectiveTimeoutMsForKind", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
       "follow-up",
       3_600_000,
@@ -1644,6 +1682,7 @@ describe("suggestions_hold_merge", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
         timeouts: {},
         automergeLabel: "automerge",
         noAutomergeLabel: "no-automerge",
@@ -1669,6 +1708,7 @@ describe("suggestions_hold_merge", () => {
       mode: "full" as const,
       reviewDrafts: false,
       reviewBudget: {},
+      strictBranchRefresh: false,
       timeouts: {},
       automergeLabel: "automerge",
       noAutomergeLabel: "no-automerge",

@@ -1,6 +1,14 @@
 import { type IssueApi, isAssignedForeignPR, isEligibleWorkerPR, isInScopeJumiPR } from "./gitea_issues.ts";
 import type { BranchProtection, Pull } from "./ports.ts";
 import {
+  isGiteaStrictForge,
+  keepGiteaBehind,
+  readGiteaBehindForPull,
+  readGiteaScheduleArmed,
+  resolveStrictPolicyWithFallback,
+  withGiteaArmed,
+} from "./strict_refresh_gitea.ts";
+import {
   compareStrictRefreshOrder,
   isStrictRefreshBlocked,
   isStrictRefreshTerminalEvidence,
@@ -69,7 +77,15 @@ export type StrictRefreshPolicy = WebhookPolicy & {
 };
 
 export type StrictRefreshApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+  Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">> &
+  Partial<{
+    listIssueTimeline: (
+      owner: string,
+      repo: string,
+      index: number
+    ) => Promise<import("./ports.ts").IssueTimelineEvent[]>;
+    compareCommits: (owner: string, repo: string, basehead: string) => Promise<{ totalCommits?: number }>;
+  }>;
 
 /**
  * True only when GitHub reports the head out of date under strict checks
@@ -173,6 +189,26 @@ async function strictForBranches(
     out.set(branch, await resolveStrictPolicy(api, owner, repo, branch, log));
   }
   return out;
+}
+
+async function strictPolicyForBranch(
+  api: unknown,
+  owner: string,
+  repo: string,
+  branch: string,
+  policy: StrictRefreshPolicy,
+  defaultBranch: string,
+  log?: (message: string) => void
+): Promise<StrictPolicy> {
+  if (isGiteaStrictForge(api, policy)) {
+    return resolveStrictPolicyWithFallback(api, owner, repo, branch, {
+      forgeKind: "gitea",
+      defaultBranch,
+      log,
+    });
+  }
+  const byBranch = await strictForBranches(api as Partial<StrictBranchApi>, owner, repo, [branch], log);
+  return byBranch.get(branch) ?? "unknown";
 }
 
 /**
@@ -297,8 +333,17 @@ export async function shouldEnqueueStrictRefreshOnPush(
     return { jobs: [] };
   }
   const pushedBase = payload.after ?? "";
-  const strictByBranch = await strictForBranches(api, owner, repo, [branch], log);
-  const strict = strictByBranch.get(branch);
+  const defaultBranch = payload.repository.default_branch;
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
+  if (gitea) {
+    try {
+      pulls = await withGiteaArmed(api, pulls, owner, repo, log);
+    } catch (err) {
+      log?.(`strict refresh schedule lookup failed: ${errorMessage(err)}`);
+      return { jobs: [] };
+    }
+  }
+  const strict = await strictPolicyForBranch(api, owner, repo, branch, policy, defaultBranch, log);
   if (strict !== "strict") {
     // Fail-closed: only an explicit off clears a held slot. An unreadable
     // branch (unknown, e.g. transient fetch error) leaves the slot alone.
@@ -315,8 +360,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
     }
     return { jobs: [] };
   }
-  const defaultBranch = payload.repository.default_branch;
-  const ready = await collectReadyStrictCandidates({
+  const readyRaw = await collectReadyStrictCandidates({
     pulls,
     owner,
     repo,
@@ -326,6 +370,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
     baseBranch: branch,
     log,
   });
+  const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, log) : readyRaw;
   if (ready.length === 0) {
     // A holder that is now blocked or ineligible still needs releasing even
     // when no ready candidate remains: otherwise the queue stays stuck.
@@ -572,17 +617,82 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   defaultBranch: string;
   cloneUrl: string;
   policy: StrictRefreshPolicy;
-  api: Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits" | "listOpenPulls">>;
+  api: Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits" | "listOpenPulls">> &
+    Partial<{
+      listIssueTimeline: (
+        owner: string,
+        repo: string,
+        index: number
+      ) => Promise<import("./ports.ts").IssueTimelineEvent[]>;
+      compareCommits: (owner: string, repo: string, basehead: string) => Promise<{ totalCommits?: number }>;
+    }>;
   sender?: string;
   log?: (message: string) => void;
   slots?: StrictRefreshSlotStore;
   nowMs?: number;
 }): Promise<(Omit<IssueJob, "delivery" | "receivedAt"> & { mergeOnly: true; strictRefresh: true }) | null> {
-  const { pr, owner, repo, policy, api } = opts;
+  const { owner, repo, policy, api } = opts;
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
+  let pr = opts.pr;
+  let giteaStrict: StrictPolicy | undefined;
+  if (gitea) {
+    const armed = await readGiteaScheduleArmed(api, owner, repo, pr.number, opts.log);
+    if (!armed) return null;
+    pr = { ...pr, autoMergeEnabled: true };
+    const strictEarly = await resolveStrictPolicyWithFallback(api, owner, repo, pr.base?.ref?.trim() ?? "", {
+      forgeKind: "gitea",
+      defaultBranch: opts.defaultBranch,
+      log: opts.log,
+    });
+    if (strictEarly !== "strict") {
+      if (opts.slots && strictEarly === "off") {
+        try {
+          const held = await opts.slots.getSlot(owner, repo, pr.base?.ref?.trim() ?? "");
+          if (held) await opts.slots.release(owner, repo, pr.base?.ref?.trim() ?? "", { nowMs: opts.nowMs });
+        } catch (err) {
+          opts.log?.(`strict refresh slot release failed: ${errorMessage(err)}`);
+        }
+      }
+      return null;
+    }
+    // Reused below as `giteaStrict`: same branch, same forge routing, so the
+    // shared policy check is not resolved a second time.
+    giteaStrict = strictEarly;
+    if (
+      await isStrictRefreshLeftToAuthor(
+        api,
+        owner,
+        repo,
+        pr,
+        {
+          botUsername: policy.botUsername,
+          ignoreConflictsLabel: policy.ignoreConflictsLabel,
+          defaultBranch: opts.defaultBranch,
+        },
+        opts.log
+      )
+    ) {
+      opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
+      return null;
+    }
+    if (isStrictRefreshBlocked(pr)) {
+      opts.log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+      return null;
+    }
+    const behind = await readGiteaBehindForPull(api, owner, repo, pr, opts.log);
+    if (!behind) return null;
+  }
   if (!isStrictRefreshCandidate(pr, owner, repo, policy.botUsername, policy)) return null;
   const baseBranch = pr.base?.ref?.trim() ? pr.base.ref.trim() : "";
   if (!baseBranch) return null;
-  const strict = await resolveStrictPolicy(api, owner, repo, baseBranch, opts.log);
+  // Gitea reuses the early check above (same branch, same forge routing):
+  // one getBranch plus one repo-settings read per reconcile, no TOCTOU
+  // between the two reads. The left-to-author / blocked passes already ran
+  // on the same enriched PR above, so they are skipped here for Gitea.
+  const strict: StrictPolicy =
+    gitea && giteaStrict
+      ? giteaStrict
+      : await strictPolicyForBranch(api, owner, repo, baseBranch, policy, opts.defaultBranch, opts.log);
   if (strict !== "strict") {
     // Fail-closed: only an explicit off clears a held slot; unknown (e.g.
     // transient getBranch failure) leaves the slot alone.
@@ -596,26 +706,28 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     }
     return null;
   }
-  if (
-    await isStrictRefreshLeftToAuthor(
-      api,
-      owner,
-      repo,
-      pr,
-      {
-        botUsername: policy.botUsername,
-        ignoreConflictsLabel: policy.ignoreConflictsLabel,
-        defaultBranch: opts.defaultBranch,
-      },
-      opts.log
-    )
-  ) {
-    opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
-    return null;
-  }
-  if (isStrictRefreshBlocked(pr)) {
-    opts.log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
-    return null;
+  if (!gitea) {
+    if (
+      await isStrictRefreshLeftToAuthor(
+        api,
+        owner,
+        repo,
+        pr,
+        {
+          botUsername: policy.botUsername,
+          ignoreConflictsLabel: policy.ignoreConflictsLabel,
+          defaultBranch: opts.defaultBranch,
+        },
+        opts.log
+      )
+    ) {
+      opts.log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
+      return null;
+    }
+    if (isStrictRefreshBlocked(pr)) {
+      opts.log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+      return null;
+    }
   }
   const slots = opts.slots;
   const listOpenPulls = (api as { listOpenPulls?: unknown }).listOpenPulls;
@@ -648,8 +760,16 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     opts.log?.(`strict refresh open-pull lookup failed: ${errorMessage(err)}`);
     return null;
   }
+  if (gitea) {
+    try {
+      pulls = await withGiteaArmed(api, pulls, owner, repo, opts.log);
+    } catch (err) {
+      opts.log?.(`strict refresh schedule lookup failed: ${errorMessage(err)}`);
+      return null;
+    }
+  }
   const baseSha = pr.base?.sha ?? "";
-  const ready = await collectReadyStrictCandidates({
+  const readyRaw = await collectReadyStrictCandidates({
     pulls,
     owner,
     repo,
@@ -659,6 +779,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     baseBranch,
     log: opts.log,
   });
+  const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, opts.log) : readyRaw;
   if (ready.length === 0) {
     try {
       await releaseStaleStrictSlot({
@@ -760,7 +881,15 @@ export function strictRecheckSkipReason(opts: {
 
 export type StrictRecheckApi = {
   getPR: (owner: string, repo: string, index: number) => Promise<Pull>;
-} & Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+} & Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">> &
+  Partial<{
+    listIssueTimeline: (
+      owner: string,
+      repo: string,
+      index: number
+    ) => Promise<import("./ports.ts").IssueTimelineEvent[]>;
+    compareCommits: (owner: string, repo: string, basehead: string) => Promise<{ totalCommits?: number }>;
+  }>;
 
 /**
  * Shared worker recheck before any strict-refresh write. Fetches the PR
@@ -787,6 +916,51 @@ export async function recheckStrictRefreshEligibility(opts: {
   } catch (err) {
     opts.log?.(`strict refresh unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
     return { skipReason: "strict refresh: pull request unreadable" };
+  }
+  const gitea = isGiteaStrictForge(opts.api, opts.policy as { forgeKind?: string });
+  if (gitea) {
+    if (!fresh) return { skipReason: "strict refresh: not eligible" };
+    const expected = (opts.expectedHeadSha ?? "").toLowerCase();
+    if (!expected || fresh.head.sha.toLowerCase() !== expected) {
+      return { fresh, skipReason: "strict refresh: competing head update" };
+    }
+    const strict = await resolveStrictPolicyWithFallback(opts.api, opts.owner, opts.repo, fresh.base.ref, {
+      forgeKind: "gitea",
+      defaultBranch: opts.defaultBranch,
+      log: opts.log,
+    });
+    if (strict !== "strict") {
+      return { fresh, skipReason: "strict refresh: strictness off or unknown" };
+    }
+    const armed = await readGiteaScheduleArmed(opts.api, opts.owner, opts.repo, fresh.number, opts.log);
+    if (!armed) {
+      return { fresh, skipReason: "strict refresh: auto-merge no longer armed" };
+    }
+    const enriched = { ...fresh, autoMergeEnabled: true };
+    if (!isStrictRefreshCandidate(enriched, opts.owner, opts.repo, opts.botUsername, opts.policy as never)) {
+      return { fresh: enriched, skipReason: "strict refresh: not eligible" };
+    }
+    if (
+      await isStrictRefreshLeftToAuthor(
+        opts.api,
+        opts.owner,
+        opts.repo,
+        enriched,
+        {
+          botUsername: opts.botUsername,
+          ignoreConflictsLabel: opts.ignoreConflictsLabel,
+          defaultBranch: opts.defaultBranch,
+        },
+        opts.log
+      )
+    ) {
+      return { fresh: enriched, skipReason: "strict refresh: left to author (ignore-conflicts)" };
+    }
+    const behind = await readGiteaBehindForPull(opts.api, opts.owner, opts.repo, enriched, opts.log);
+    if (!behind) {
+      return { fresh: enriched, skipReason: "strict refresh: not behind" };
+    }
+    return { fresh: enriched, skipReason: null };
   }
   if (!fresh || !isStrictRefreshCandidate(fresh, opts.owner, opts.repo, opts.botUsername, opts.policy as never)) {
     return { fresh, skipReason: "strict refresh: not eligible" };

@@ -43,6 +43,7 @@ describe("allowed_runners parsing", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });
@@ -65,6 +66,7 @@ describe("allowed_runners parsing", () => {
         mode: "full",
         reviewDrafts: false,
         reviewBudget: {},
+        strictBranchRefresh: false,
       },
     });
   });

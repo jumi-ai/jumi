@@ -84,6 +84,7 @@ const expectedNoneKeys = [
   "mode",
   "reviewDrafts",
   "reviewBudget",
+  "strictBranchRefresh",
 ];
 
 const expectedFullKeys = [
@@ -117,6 +118,7 @@ const expectedFullKeys = [
   "ciGate",
   "automergeMethod",
   "setup",
+  "strictBranchRefresh",
   "suggestionsHoldMerge",
   "maintainerQuestionsHoldMerge",
 ];
@@ -174,11 +176,12 @@ const invalidPerKey: Array<[string, string, string]> = [
     '"automerge_method" must be one of "merge", "squash", "rebase", "rebase-merge", "fast-forward-only"',
   ],
   ["setup", "setup: {}\n", '"setup.run" must be a non-blank string'],
+  ["strict_branch_refresh", 'strict_branch_refresh: "yes"\n', '"strict_branch_refresh" must be a boolean'],
 ];
 
 describe("repo_settings registry", () => {
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(31);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(32);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);

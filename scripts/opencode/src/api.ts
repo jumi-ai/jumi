@@ -1,6 +1,6 @@
 import { readBoundedAttachmentBytes, readBoundedErrorText } from "./attachment_transfer.ts";
 import { FORGE_CAPABILITIES, type ForgeCapabilities } from "./forge_capabilities.ts";
-import { forgeRequestError, isNotFoundError } from "./forge_errors.ts";
+import { forgeRequestError, isForbiddenError, isNotFoundError } from "./forge_errors.ts";
 import type {
   ActionJob,
   BranchProtection,
@@ -288,6 +288,13 @@ interface GiteaBranch {
   status_check_contexts?: string[];
   user_can_push?: boolean;
   user_can_merge?: boolean;
+  effective_branch_protection_name?: string;
+  effectiveBranchProtectionName?: string;
+}
+
+interface GiteaBranchProtection {
+  block_on_outdated_branch?: boolean;
+  blockOnOutdatedBranch?: boolean;
 }
 
 function toBranchProtection(branch: GiteaBranch): BranchProtection {
@@ -475,11 +482,66 @@ export class GiteaAPI {
    * Branch protection as a write-level token can read it. Used as the
    * fail-closed auto-merge gate: only schedule when the base branch requires
    * status checks and lists the review status among the required contexts.
+   * When the token is a repo admin, the effective branch-protection rule is
+   * also resolved: `effective_branch_protection_name` points at the matching
+   * `branch_protections/{name}` rule, whose `block_on_outdated_branch` maps
+   * to `strict`. A write-level token sees an empty effective name, so
+   * `strict` stays undefined (unknown) and callers fall back to the
+   * `.jumi.yml` opt-in. A 403/404 on the admin rule is not an error here.
    */
   async getBranch(owner: string, repo: string, branch: string): Promise<BranchProtection> {
-    return toBranchProtection(
-      await this.get<GiteaBranch>(`/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}`)
+    const raw = await this.get<GiteaBranch>(
+      `/repos/${this.repoPath(owner, repo)}/branches/${encodeURIComponent(branch)}`
     );
+    const base = toBranchProtection(raw);
+    const effective =
+      typeof raw.effective_branch_protection_name === "string" && raw.effective_branch_protection_name.trim()
+        ? raw.effective_branch_protection_name.trim()
+        : typeof raw.effectiveBranchProtectionName === "string" && raw.effectiveBranchProtectionName.trim()
+          ? raw.effectiveBranchProtectionName.trim()
+          : "";
+    if (!effective) return base;
+    try {
+      const rule = await this.get<GiteaBranchProtection>(
+        `/repos/${this.repoPath(owner, repo)}/branch_protections/${encodeURIComponent(effective)}`
+      );
+      const blocked =
+        typeof rule.block_on_outdated_branch === "boolean"
+          ? rule.block_on_outdated_branch
+          : typeof rule.blockOnOutdatedBranch === "boolean"
+            ? rule.blockOnOutdatedBranch
+            : undefined;
+      if (blocked === undefined) return base;
+      return { ...base, strict: blocked };
+    } catch (err) {
+      if (isNotFoundError(err) || isForbiddenError(err)) return base;
+      throw err;
+    }
+  }
+
+  /**
+   * Compare a head SHA against a base ref (`head...base`). Returns the number
+   * of base commits not reachable from the head (`total_commits`). Used for
+   * Gitea strict-refresh behind detection; an unreadable compare throws so
+   * callers treat behind-ness as not established.
+   */
+  async compareCommits(owner: string, repo: string, basehead: string): Promise<{ totalCommits?: number }> {
+    const encoded = basehead.includes("...")
+      ? basehead
+          .split("...")
+          .map((part) => encodeURIComponent(part))
+          .join("...")
+      : encodeURIComponent(basehead);
+    const body = await this.get<{ total_commits?: unknown; totalCommits?: unknown }>(
+      `/repos/${this.repoPath(owner, repo)}/compare/${encoded}?files=false&verification=false`
+    );
+    const raw =
+      typeof body?.total_commits === "number"
+        ? body.total_commits
+        : typeof body?.totalCommits === "number"
+          ? body.totalCommits
+          : undefined;
+    return typeof raw === "number" ? { totalCommits: raw } : {};
   }
 
   /**
