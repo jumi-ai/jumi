@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { claimFilePath, conflictStatePath, readClaim, stuckStatePath, writeClaim } from "../src/claim.ts";
 import {
   CONFLICT_TIMEOUT_MS,
+  needsConflict,
+  nextConflictStateAfterMergeThrow,
   readConflictState,
   implementConflict as realImplementConflict,
   shouldIncrementRound,
@@ -1189,7 +1191,7 @@ describe("implementConflict", () => {
     }
   });
 
-  test("mergeDefaultIntoWorktree throw records SHA/round", async () => {
+  test("mergeDefaultIntoWorktree throw records throw, not attempt (first throw retries)", async () => {
     await withDirs(async (home, workdir) => {
       const api = conflictApi();
       const gitRunner: GitRunner = notAncestorGit(async (args) => {
@@ -1218,13 +1220,289 @@ describe("implementConflict", () => {
         })
       ).rejects.toThrow("opencode crashed");
       const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
-      expect(state.lastHeadSha).toBe("headsha");
-      expect(state.lastBaseSha).toBe("basesha");
-      expect(state.round).toBe(1);
+      expect(state.lastHeadSha).toBe("");
+      expect(state.lastBaseSha).toBe("");
+      expect(state.round).toBe(0);
+      expect(state.mergeThrow).toMatchObject({ headSha: "headsha", baseSha: "basesha" });
       expect(api.comments.at(-1)).toContain("Jumi failed:");
       expect(api.comments.at(-1)).toContain("_Jumi · opencode · openai/gpt-5.5_");
       expect(await readClaim(claimFilePath(home, "kirmanak", "demo", 12))).toBeUndefined();
     });
+  });
+
+  test("first merge throw (stash failed) does not mark pair attempted; retry runs merge again", async () => {
+    await withDirs(async (home, workdir) => {
+      const stashFailedGit: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge")
+          throw new Error("git merge --no-ff --no-commit origin/main failed: fatal: stash failed");
+        if (gitArgs[0] === "diff") return "";
+        if (gitArgs[0] === "grep") return "";
+        return "";
+      });
+      const api = conflictApi();
+      await expect(
+        implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: stashFailedGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("stash failed");
+      const afterFirst = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(afterFirst.round).toBe(0);
+      expect(afterFirst.lastHeadSha).toBe("");
+      expect(afterFirst.lastBaseSha).toBe("");
+      expect(afterFirst.mergeThrow).toMatchObject({ headSha: "headsha", baseSha: "basesha" });
+
+      // Requeued job on the same pair must run the merge again instead of skipping.
+      let mergeCalled = false;
+      const retryGit: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") {
+          mergeCalled = true;
+          throw new Error("git merge --no-ff --no-commit origin/main failed: fatal: stash failed");
+        }
+        if (gitArgs[0] === "diff") return "";
+        if (gitArgs[0] === "grep") return "";
+        return "";
+      });
+      await expect(
+        implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: retryGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow("stash failed");
+      expect(mergeCalled).toBe(true);
+      const afterSecond = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(afterSecond.round).toBe(1);
+      expect(afterSecond.lastHeadSha).toBe("headsha");
+      expect(afterSecond.lastBaseSha).toBe("basesha");
+      expect(afterSecond.mergeThrow).toBeUndefined();
+    });
+  });
+
+  test("second throw on same pair records attempt; next requeue skips", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 0,
+        lastHeadSha: "",
+        lastBaseSha: "",
+        updatedAt: "2026-05-23T00:00:00Z",
+        mergeThrow: { headSha: "headsha", baseSha: "basesha", errorHash: "abc" },
+      });
+      const gitRunner: GitRunner = notAncestorGit(async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge") throw new Error("git merge failed: different error");
+        if (gitArgs[0] === "diff") return "";
+        if (gitArgs[0] === "grep") return "";
+        return "";
+      });
+      await expect(
+        implementConflict({
+          api: conflictApi(),
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow();
+      const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(state.round).toBe(1);
+      expect(state.lastHeadSha).toBe("headsha");
+      expect(state.lastBaseSha).toBe("basesha");
+      expect(state.mergeThrow).toBeUndefined();
+
+      let openCode = 0;
+      const skipped = await implementConflict({
+        api: conflictApi(),
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+          if (gitArgs[0] === "rev-parse") return "headsha";
+          return "";
+        },
+        openCodeRunner: async () => {
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(skipped).toEqual({ status: "skipped", reason: "same head and base already attempted" });
+      expect(openCode).toBe(0);
+    });
+  });
+
+  test("throw then up-to-date retry clears recorded throw", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 0,
+        lastHeadSha: "",
+        lastBaseSha: "",
+        updatedAt: "2026-05-23T00:00:00Z",
+        mergeThrow: { headSha: "headsha", baseSha: "basesha", errorHash: "abc" },
+      });
+      const api = conflictApi();
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        return "";
+      };
+      const result = await implementConflict({
+        api,
+        job: conflictJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner,
+        openCodeRunner: async () => {
+          throw new Error("opencode should not run");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "up-to-date" });
+      const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(state.mergeThrow).toBeUndefined();
+      expect(state.round).toBe(0);
+    });
+  });
+
+  test("throw on one pair then new base gets its own retry", async () => {
+    await withDirs(async (home, workdir) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 0,
+        lastHeadSha: "",
+        lastBaseSha: "",
+        updatedAt: "2026-05-23T00:00:00Z",
+        mergeThrow: { headSha: "headsha", baseSha: "oldbase", errorHash: "abc" },
+      });
+      const gitRunner: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor") && gitArgs.includes("HEAD")) {
+          throw new Error("git merge-base --is-ancestor failed with exit code 1");
+        }
+        if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "newbase";
+        if (gitArgs[0] === "rev-parse") return "headsha";
+        if (gitArgs[0] === "merge") throw new Error("git merge failed on new base");
+        if (gitArgs[0] === "diff") return "";
+        if (gitArgs[0] === "grep") return "";
+        return "";
+      };
+      await expect(
+        implementConflict({
+          api: conflictApi(),
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        })
+      ).rejects.toThrow();
+      const state = await readConflictState(conflictStatePath(home, "kirmanak", "demo", 12));
+      expect(state.round).toBe(0);
+      expect(state.lastHeadSha).toBe("");
+      expect(state.lastBaseSha).toBe("");
+      expect(state.mergeThrow).toMatchObject({ headSha: "headsha", baseSha: "newbase" });
+    });
+  });
+
+  test("needsConflict still enqueues pair whose first throw was recorded", async () => {
+    await withDirs(async (home) => {
+      await writeConflictState(conflictStatePath(home, "kirmanak", "demo", 12), {
+        prNumber: 127,
+        round: 0,
+        lastHeadSha: "oldhead",
+        lastBaseSha: "oldbase",
+        updatedAt: "2026-05-23T00:00:00Z",
+        mergeThrow: { headSha: "headsha", baseSha: "basesha", errorHash: "abc" },
+      });
+      const pr = { ...jumiPr(), mergeable: false as const };
+      const enqueues = await needsConflict({
+        pr,
+        owner: "kirmanak",
+        repo: "demo",
+        issueNumber: 12,
+        botUsername: "jumi",
+        home,
+      });
+      expect(enqueues).toBe(true);
+    });
+  });
+
+  test("nextConflictStateAfterMergeThrow retries once then records attempt", () => {
+    const base = { prNumber: 127, round: 0, lastHeadSha: "", lastBaseSha: "", updatedAt: "" };
+    const first = nextConflictStateAfterMergeThrow(base, {
+      headSha: "headsha",
+      baseSha: "basesha",
+      error: new Error("fatal: stash failed"),
+      prNumber: 127,
+    });
+    expect(first.round).toBe(0);
+    expect(first.mergeThrow).toMatchObject({ headSha: "headsha", baseSha: "basesha" });
+    const second = nextConflictStateAfterMergeThrow(first, {
+      headSha: "headsha",
+      baseSha: "basesha",
+      error: new Error("different error"),
+      prNumber: 127,
+    });
+    expect(second.round).toBe(1);
+    expect(second.lastHeadSha).toBe("headsha");
+    expect(second.mergeThrow).toBeUndefined();
   });
 
   test("helm regen failure does not send Chart.lock to OpenCode; stuck/fail instead", async () => {

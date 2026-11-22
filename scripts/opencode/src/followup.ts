@@ -40,9 +40,12 @@ import {
 } from "./claimed_worktree.ts";
 import {
   CONFLICT_TIMEOUT_MS,
+  conflictStateWithoutMergeThrow,
+  isMergeThrowStale,
   MAX_CONFLICT_ROUNDS,
   type MergeDefaultResult,
   mergeDefaultIntoWorktree,
+  nextConflictStateAfterMergeThrow,
   shouldIncrementRound,
   shouldResetConflictRound,
   writeConflictLatch,
@@ -2226,7 +2229,8 @@ export async function implementFollowUp(
   const hasFeedback = preRunDecision.hasFeedback;
   const currentFingerprint = preRunDecision.currentFingerprint;
   const sameFindingCurrent = preRunDecision.sameFindingCurrent;
-  const previousConflict = snapshot.latch.conflict;
+  const previousConflictSnapshot = snapshot.latch.conflict;
+  let previousConflict = previousConflictSnapshot;
   const leftToAuthor = leftToAuthorResolved?.value.leftToAuthor ?? false;
 
   const loop = openClaimedLoop(claimed, opts);
@@ -2504,6 +2508,11 @@ export async function implementFollowUp(
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "skipped", reason: "same head and base already attempted" };
         }
+        if (isMergeThrowStale(previousConflict, headSha, baseSha)) {
+          const cleared = conflictStateWithoutMergeThrow(previousConflict, { prNumber: pr.number, now });
+          await writeConflictLatch(latches, latchKey, cleared).catch(() => undefined);
+          previousConflict = cleared;
+        }
 
         const currentIssue = await opts.api.getIssue(owner, repo, issueNumber);
         const taskJob: IssueJob = {
@@ -2616,6 +2625,11 @@ export async function implementFollowUp(
           provenanceCollector.noteRunner(mergeResult.runner, mergeResult.runnerChainIndex);
         }
         await noteProvenanceRunners(opts, provenanceCollector, log);
+        if (mergeResult.status === "up-to-date" && previousConflict.mergeThrow) {
+          const cleared = conflictStateWithoutMergeThrow(previousConflict, { prNumber: pr.number, now });
+          await writeConflictLatch(latches, latchKey, cleared);
+          previousConflict = cleared;
+        }
         const persistConflictAttempt = async (result: typeof mergeResult) => {
           if (shouldResetConflictRound(result)) {
             await writeConflictLatch(latches, latchKey, {
@@ -2625,9 +2639,25 @@ export async function implementFollowUp(
               lastBaseSha: result.baseSha,
               updatedAt: now().toISOString(),
             });
+            if (previousConflict.mergeThrow) {
+              previousConflict = {
+                prNumber: pr.number,
+                round: 0,
+                lastHeadSha: result.headSha,
+                lastBaseSha: result.baseSha,
+                updatedAt: now().toISOString(),
+              };
+            }
             return;
           }
-          if (!shouldIncrementRound(result)) return;
+          if (!shouldIncrementRound(result)) {
+            if (result.status === "up-to-date" && previousConflict.mergeThrow) {
+              const cleared = conflictStateWithoutMergeThrow(previousConflict, { prNumber: pr.number, now });
+              await writeConflictLatch(latches, latchKey, cleared);
+              previousConflict = cleared;
+            }
+            return;
+          }
           await writeConflictLatch(latches, latchKey, {
             prNumber: pr.number,
             round: previousConflict.round + 1,
@@ -3069,13 +3099,17 @@ export async function implementFollowUp(
           );
         }
         if (prefixMergeThrew && attemptedHeadSha && attemptedBaseSha) {
-          await writeConflictLatch(latches, latchKey, {
-            prNumber: pr.number,
-            round: previousConflict.round + 1,
-            lastHeadSha: attemptedHeadSha,
-            lastBaseSha: attemptedBaseSha,
-            updatedAt: now().toISOString(),
-          }).catch(() => undefined);
+          await writeConflictLatch(
+            latches,
+            latchKey,
+            nextConflictStateAfterMergeThrow(previousConflict, {
+              headSha: attemptedHeadSha,
+              baseSha: attemptedBaseSha,
+              error: err,
+              prNumber: pr.number,
+              now,
+            })
+          ).catch(() => undefined);
         }
         await writeFollowUpLatch(latches, latchKey, {
           prNumber: pr.number,

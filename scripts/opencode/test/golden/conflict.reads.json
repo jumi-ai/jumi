@@ -312,24 +312,17 @@
     "name": "implementConflict",
     "reads": {
       "findStickyIssueComment": 1,
-      "getIssue": 3,
-      "getPR": 1,
-      "getRepo": 1,
+      "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
   "conflict.test.ts::36": {
     "name": "implementConflict",
     "reads": {
-      "findStickyIssueComment": 1,
-      "getIssue": 3,
-      "listActionJobs": 1,
-      "listCheckRuns": 1,
-      "listCommitStatuses": 1,
+      "getIssue": 1,
       "listOpenPulls": 1
     }
   },
@@ -337,13 +330,10 @@
     "name": "implementConflict",
     "reads": {
       "findStickyIssueComment": 1,
-      "getIssue": 3,
-      "getPR": 1,
-      "getRepo": 1,
+      "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
       "listOpenPulls": 1
     }
   },
@@ -395,6 +385,45 @@
     "name": "implementConflict",
     "reads": {
       "findStickyIssueComment": 1,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::42": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 3,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::43": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 3,
+      "getPR": 1,
+      "getRepo": 1,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::44": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -402,7 +431,40 @@
       "listOpenPulls": 1
     }
   },
-  "conflict.test.ts::42": {
+  "conflict.test.ts::45": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::46": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::47": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::48": {
     "name": "implementConflict",
     "reads": {
       "findStickyIssueComment": 1,

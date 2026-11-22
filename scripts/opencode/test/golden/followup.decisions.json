@@ -247,7 +247,7 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": false
+    "result": true
   },
   "followup.test.ts::103": {
     "claimExists": false,
@@ -301,19 +301,45 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 93,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 93,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
       "reviewStuck": {},
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": true
+    "result": false
   },
   "followup.test.ts::105": {
     "claimExists": false,
@@ -334,14 +360,40 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 93,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 93,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
       "reviewStuck": {},
       "stuck": {}
     },
@@ -400,40 +452,14 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [
-          {
-            "id": 88,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [
-          {
-            "id": 88,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
@@ -450,7 +476,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
         "number": 127,
         "state": "open"
       },
@@ -471,7 +497,7 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": true
+    "result": false
   },
   "followup.test.ts::109": {
     "claimExists": false,
@@ -483,7 +509,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
         "number": 127,
         "state": "open"
       },
@@ -492,30 +518,14 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 3,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 3,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
@@ -653,6 +663,246 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": true
+  },
+  "followup.test.ts::111": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": true
+  },
+  "followup.test.ts::112": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": true
+  },
+  "followup.test.ts::113": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 88,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [
+          {
+            "id": 88,
+            "sha": "a62c750c0ffee000000000000000000000000000"
+          }
+        ],
+        "handledReviewIds": [],
+        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": false
+  },
+  "followup.test.ts::114": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": true
+  },
+  "followup.test.ts::115": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
+        "headSha": "headsha",
+        "number": 127,
+        "state": "open"
+      },
+      "repo": "demo"
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 3,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "needsFollowUp",
+    "result": false
+  },
+  "followup.test.ts::116": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "issueNumber": 12,
+      "owner": "kirmanak",
+      "pr": {
+        "baseRef": "main",
+        "baseSha": "basesha",
+        "headRef": "jumi/issue-12-fix-the-thing",
         "headSha": "headsha",
         "number": 127,
         "state": "open"
@@ -692,7 +942,7 @@
     "name": "needsFollowUp",
     "result": true
   },
-  "followup.test.ts::111": {
+  "followup.test.ts::117": {
     "claimExists": false,
     "effects": [],
     "input": {
@@ -725,7 +975,7 @@
     "name": "needsFollowUp",
     "result": false
   },
-  "followup.test.ts::112": {
+  "followup.test.ts::118": {
     "claimExists": false,
     "effects": [
       {
@@ -876,7 +1126,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::113": {
+  "followup.test.ts::119": {
     "claimExists": false,
     "effects": [
       {
@@ -955,447 +1205,6 @@
     "name": "implementFollowUp",
     "result": {
       "reason": "comment already handled",
-      "status": "skipped"
-    }
-  },
-  "followup.test.ts::114": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "1 suggestion (follow-up skipped: CI still pending)",
-            "state": "success",
-            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "workflow_job",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 1,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 1,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "reason": "CI still pending",
-      "status": "skipped"
-    }
-  },
-  "followup.test.ts::115": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "2 suggestions (follow-up skipped: job cancelled)",
-            "state": "success"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "status": "cancelled"
-    }
-  },
-  "followup.test.ts::116": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "2 suggestions (follow-up skipped: no open jumi closing PR)",
-            "state": "success"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "reason": "no open jumi closing PR",
-      "status": "skipped"
-    }
-  },
-  "followup.test.ts::117": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "1 suggestion (follow-up skipped: default branch)",
-            "state": "success",
-            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 1,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc",
-        "prNumber": 127,
-        "round": 1,
-        "suggestionHold": {
-          "consumed": true,
-          "count": 1,
-          "headSha": "headsha"
-        },
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "reason": "refusing to follow up on the default branch",
-      "status": "skipped"
-    }
-  },
-  "followup.test.ts::118": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 0
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127
-        ],
-        "method": "closePullRequest",
-        "seam": "forge",
-        "seq": 1
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nClosing this PR because the issue was closed."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 2
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "2 suggestions (follow-up skipped: issue is closed)",
-            "state": "success",
-            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 3
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        }
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "suggestionHold": {
-          "consumed": true,
-          "count": 2,
-          "headSha": "headsha"
-        }
-      },
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "reason": "issue is closed",
-      "status": "skipped"
-    }
-  },
-  "followup.test.ts::119": {
-    "claimExists": true,
-    "effects": [],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "headSha": "headsha",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "reason": "strict refresh: branch writer busy; retry after writer finishes (claim is live)",
       "status": "skipped"
     }
   },
@@ -1521,6 +1330,447 @@
     }
   },
   "followup.test.ts::120": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "1 suggestion (follow-up skipped: CI still pending)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "workflow_job",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 1,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 1,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "CI still pending",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::121": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: job cancelled)",
+            "state": "success"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "status": "cancelled"
+    }
+  },
+  "followup.test.ts::122": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: no open jumi closing PR)",
+            "state": "success"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "no open jumi closing PR",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::123": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "1 suggestion (follow-up skipped: default branch)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 0
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 1,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc",
+        "prNumber": 127,
+        "round": 1,
+        "suggestionHold": {
+          "consumed": true,
+          "count": 1,
+          "headSha": "headsha"
+        },
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "refusing to follow up on the default branch",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::124": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127
+        ],
+        "method": "closePullRequest",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nClosing this PR because the issue was closed."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          "headsha",
+          {
+            "context": "jumi/opencode-review",
+            "description": "2 suggestions (follow-up skipped: issue is closed)",
+            "state": "success",
+            "target_url": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127"
+          }
+        ],
+        "method": "createCommitStatus",
+        "seam": "forge",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        }
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "suggestionHold": {
+          "consumed": true,
+          "count": 2,
+          "headSha": "headsha"
+        }
+      },
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "issue is closed",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::125": {
+    "claimExists": true,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "headSha": "headsha",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "strict refresh: branch writer busy; retry after writer finishes (claim is live)",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::126": {
     "claimExists": true,
     "effects": [],
     "input": {
@@ -5664,6 +5914,448 @@
         "op": "put",
         "patch": {
           "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "basesha",
+              "errorHash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "threw": "opencode crashed"
+    }
+  },
+  "followup.test.ts::51": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge --no-ff failed: fatal: stash failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "basesha",
+              "errorHash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "threw": "git merge --no-ff failed: fatal: stash failed"
+    }
+  },
+  "followup.test.ts::52": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge --no-ff failed: fatal: stash failed"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+                "kind": "error"
+              },
+              {
+                "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "basesha",
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 2,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 2,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+            "kind": "error"
+          },
+          {
+            "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "8c3afcfc31da04836f5150485312d92406e1cd406cb86b88906cc65d9c18cb0c",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "threw": "git merge --no-ff failed: fatal: stash failed"
+    }
+  },
+  "followup.test.ts::53": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge failed again"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "495b55316fd9383e1f9859ecd54736b3f22162f987ef3307424afd873881862d",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
             "lastBaseSha": "basesha",
             "lastHeadSha": "headsha",
             "prNumber": 127,
@@ -5730,7 +6422,7 @@
       "stuck": {
         "fingerprints": [
           {
-            "hash": "38e120774bd4346e548a3faccd3a66aac9dab1e7c54100c486e2e74aa25cba2b",
+            "hash": "495b55316fd9383e1f9859ecd54736b3f22162f987ef3307424afd873881862d",
             "kind": "error"
           }
         ],
@@ -5739,17 +6431,431 @@
     },
     "latchBefore": {
       "ci": {},
-      "conflict": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
       "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "name": "implementFollowUp",
     "result": {
-      "threw": "opencode crashed"
+      "threw": "git merge failed again"
     }
   },
-  "followup.test.ts::51": {
+  "followup.test.ts::54": {
+    "claimExists": false,
+    "effects": [],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "495b55316fd9383e1f9859ecd54736b3f22162f987ef3307424afd873881862d",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "basesha",
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "495b55316fd9383e1f9859ecd54736b3f22162f987ef3307424afd873881862d",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "reason": "same head and base already attempted",
+      "status": "skipped"
+    }
+  },
+  "followup.test.ts::55": {
+    "claimExists": false,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+                "kind": "action"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+            "kind": "action"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "basesha",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "status": "no-changes"
+    }
+  },
+  "followup.test.ts::56": {
+    "claimExists": false,
+    "effects": [
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi failed: git merge failed on new base"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+                "kind": "error"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "conflict": {
+            "lastBaseSha": "",
+            "lastHeadSha": "",
+            "mergeThrow": {
+              "baseSha": "newbase",
+              "errorHash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+              "headSha": "headsha"
+            },
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "headsha",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "newbase",
+          "errorHash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "headsha",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "36bc996207d666c31aa5b4a0e25afd9a9d8826e0e1577980f51bc4c1d09c803d",
+            "kind": "error"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {
+        "lastBaseSha": "",
+        "lastHeadSha": "",
+        "mergeThrow": {
+          "baseSha": "oldbase",
+          "errorHash": "abc",
+          "headSha": "headsha"
+        },
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "threw": "git merge failed on new base"
+    }
+  },
+  "followup.test.ts::57": {
     "claimExists": false,
     "effects": [
       {
@@ -5880,7 +6986,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::52": {
+  "followup.test.ts::58": {
     "claimExists": false,
     "effects": [
       {
@@ -5939,7 +7045,7 @@
       "status": "skipped"
     }
   },
-  "followup.test.ts::53": {
+  "followup.test.ts::59": {
     "claimExists": false,
     "effects": [
       {
@@ -6072,7 +7178,128 @@
       "status": "pushed"
     }
   },
-  "followup.test.ts::54": {
+  "followup.test.ts::6": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed follow-up to https://gitea.kirmanak.stream/kirmanak/demo/pulls/127\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc123",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+                "kind": "action"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc123",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+            "kind": "action"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "followup.test.ts::60": {
     "claimExists": false,
     "effects": [
       {
@@ -6234,7 +7461,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::55": {
+  "followup.test.ts::61": {
     "claimExists": false,
     "effects": [
       {
@@ -6309,7 +7536,7 @@
       "status": "skipped"
     }
   },
-  "followup.test.ts::56": {
+  "followup.test.ts::62": {
     "claimExists": false,
     "effects": [
       {
@@ -6455,7 +7682,7 @@
       "status": "pushed"
     }
   },
-  "followup.test.ts::57": {
+  "followup.test.ts::63": {
     "claimExists": false,
     "effects": [
       {
@@ -6570,7 +7797,7 @@
       "threw": "feedback exploded"
     }
   },
-  "followup.test.ts::58": {
+  "followup.test.ts::64": {
     "claimExists": false,
     "effects": [
       {
@@ -6685,7 +7912,7 @@
       "threw": "host: provider auth death"
     }
   },
-  "followup.test.ts::59": {
+  "followup.test.ts::65": {
     "claimExists": false,
     "effects": [
       {
@@ -6804,128 +8031,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::6": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 0
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed follow-up to https://gitea.kirmanak.stream/kirmanak/demo/pulls/127\n\n_Jumi · opencode · openai/gpt-5.5_"
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 1
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "followup": {
-            "handledCommentIds": [
-              55
-            ],
-            "handledReviewFindings": [],
-            "handledReviewIds": [],
-            "lastHeadSha": "abc123",
-            "prNumber": 127,
-            "round": 1,
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 2
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "stuck": {
-            "fingerprints": [
-              {
-                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-                "kind": "action"
-              }
-            ],
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 3
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [
-          55
-        ],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc123",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {
-        "fingerprints": [
-          {
-            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-            "kind": "action"
-          }
-        ],
-        "updatedAt": "<iso>"
-      }
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
-      "prNumber": 127,
-      "status": "pushed"
-    }
-  },
-  "followup.test.ts::60": {
+  "followup.test.ts::66": {
     "claimExists": false,
     "effects": [
       {
@@ -7040,7 +8146,7 @@
       "threw": "opencode exploded"
     }
   },
-  "followup.test.ts::61": {
+  "followup.test.ts::67": {
     "claimExists": false,
     "effects": [
       {
@@ -7183,7 +8289,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::62": {
+  "followup.test.ts::68": {
     "claimExists": false,
     "effects": [
       {
@@ -7306,7 +8412,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::63": {
+  "followup.test.ts::69": {
     "claimExists": false,
     "effects": [
       {
@@ -7456,7 +8562,137 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::64": {
+  "followup.test.ts::7": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "Human note above.\n\n<!-- jumi-pr-body:start -->\nNew writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->\n\nHuman note below."
+        ],
+        "method": "updatePullRequestBody",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc123",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+                "kind": "action"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc123",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+            "kind": "action"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "status": "no-changes"
+    }
+  },
+  "followup.test.ts::70": {
     "claimExists": false,
     "effects": [
       {
@@ -7606,7 +8842,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::65": {
+  "followup.test.ts::71": {
     "claimExists": false,
     "effects": [
       {
@@ -7779,7 +9015,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::66": {
+  "followup.test.ts::72": {
     "claimExists": false,
     "effects": [
       {
@@ -7905,7 +9141,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::67": {
+  "followup.test.ts::73": {
     "claimExists": false,
     "effects": [
       {
@@ -8035,7 +9271,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::68": {
+  "followup.test.ts::74": {
     "claimExists": false,
     "effects": [
       {
@@ -8164,7 +9400,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::69": {
+  "followup.test.ts::75": {
     "claimExists": false,
     "effects": [
       {
@@ -8283,137 +9519,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::7": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 0
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "Human note above.\n\n<!-- jumi-pr-body:start -->\nNew writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->\n\nHuman note below."
-        ],
-        "method": "updatePullRequestBody",
-        "seam": "forge",
-        "seq": 1
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 2
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "followup": {
-            "handledCommentIds": [
-              55
-            ],
-            "handledReviewFindings": [],
-            "handledReviewIds": [],
-            "lastHeadSha": "abc123",
-            "prNumber": 127,
-            "round": 1,
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 3
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "stuck": {
-            "fingerprints": [
-              {
-                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-                "kind": "action"
-              }
-            ],
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 4
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [
-          55
-        ],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc123",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {
-        "fingerprints": [
-          {
-            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-            "kind": "action"
-          }
-        ],
-        "updatedAt": "<iso>"
-      }
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "status": "no-changes"
-    }
-  },
-  "followup.test.ts::70": {
+  "followup.test.ts::76": {
     "claimExists": false,
     "effects": [
       {
@@ -8517,7 +9623,7 @@
       "threw": "clone failed"
     }
   },
-  "followup.test.ts::71": {
+  "followup.test.ts::77": {
     "claimExists": false,
     "effects": [
       {
@@ -8632,7 +9738,7 @@
       "threw": "opencode exploded"
     }
   },
-  "followup.test.ts::72": {
+  "followup.test.ts::78": {
     "claimExists": false,
     "effects": [
       {
@@ -8747,7 +9853,7 @@
       "threw": "The backend is temporarily overloaded. Please retry."
     }
   },
-  "followup.test.ts::73": {
+  "followup.test.ts::79": {
     "claimExists": false,
     "effects": [
       {
@@ -8921,7 +10027,139 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::74": {
+  "followup.test.ts::8": {
+    "claimExists": false,
+    "effects": [
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "Human note above.\n\n<!-- jumi-pr-body:start -->\nNew writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->\n\nHuman note below."
+        ],
+        "method": "updatePullRequestBody",
+        "seam": "forge",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed follow-up to https://gitea.kirmanak.stream/kirmanak/demo/pulls/127\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [
+              55
+            ],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc123",
+            "prNumber": 127,
+            "round": 1,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+                "kind": "action"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 4
+      }
+    ],
+    "input": {
+      "job": {
+        "action": "assigned",
+        "issueNumber": 12,
+        "mode": "follow-up",
+        "owner": "kirmanak",
+        "prNumber": 127,
+        "repo": "demo",
+        "triggerEvent": "issue_comment",
+        "triggerSender": "alice"
+      }
+    },
+    "latchAfter": {
+      "ci": {},
+      "conflict": {},
+      "followup": {
+        "handledCommentIds": [
+          55
+        ],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc123",
+        "prNumber": 127,
+        "round": 1,
+        "updatedAt": "<iso>"
+      },
+      "reviewStuck": {},
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
+            "kind": "action"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
+    },
+    "latchBefore": {
+      "ci": {},
+      "conflict": {},
+      "followup": {},
+      "reviewStuck": {},
+      "stuck": {}
+    },
+    "name": "implementFollowUp",
+    "result": {
+      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
+      "prNumber": 127,
+      "status": "pushed"
+    }
+  },
+  "followup.test.ts::80": {
     "claimExists": false,
     "effects": [
       {
@@ -9036,7 +10274,7 @@
       "threw": "The backend is temporarily overloaded. Please retry."
     }
   },
-  "followup.test.ts::75": {
+  "followup.test.ts::81": {
     "claimExists": false,
     "effects": [
       {
@@ -9210,7 +10448,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::76": {
+  "followup.test.ts::82": {
     "claimExists": false,
     "effects": [
       {
@@ -9325,7 +10563,7 @@
       "threw": "The backend is temporarily overloaded. Please retry."
     }
   },
-  "followup.test.ts::77": {
+  "followup.test.ts::83": {
     "claimExists": false,
     "effects": [
       {
@@ -9499,7 +10737,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::78": {
+  "followup.test.ts::84": {
     "claimExists": false,
     "effects": [],
     "input": {
@@ -9534,7 +10772,7 @@
       "status": "skipped"
     }
   },
-  "followup.test.ts::79": {
+  "followup.test.ts::85": {
     "claimExists": false,
     "effects": [
       {
@@ -9688,139 +10926,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::8": {
-    "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing review comments."
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 0
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "Human note above.\n\n<!-- jumi-pr-body:start -->\nNew writeup.\n\nFixes #12\n\n_Jumi · opencode · openai/gpt-5.5_\n<!-- jumi-pr-body:end -->\n\nHuman note below."
-        ],
-        "method": "updatePullRequestBody",
-        "seam": "forge",
-        "seq": 1
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nPushed follow-up to https://gitea.kirmanak.stream/kirmanak/demo/pulls/127\n\n_Jumi · opencode · openai/gpt-5.5_"
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 2
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "followup": {
-            "handledCommentIds": [
-              55
-            ],
-            "handledReviewFindings": [],
-            "handledReviewIds": [],
-            "lastHeadSha": "abc123",
-            "prNumber": 127,
-            "round": 1,
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 3
-      },
-      {
-        "key": {
-          "issueNumber": 12,
-          "owner": "kirmanak",
-          "repo": "demo"
-        },
-        "op": "put",
-        "patch": {
-          "stuck": {
-            "fingerprints": [
-              {
-                "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-                "kind": "action"
-              }
-            ],
-            "updatedAt": "<iso>"
-          }
-        },
-        "seam": "latch",
-        "seq": 4
-      }
-    ],
-    "input": {
-      "job": {
-        "action": "assigned",
-        "issueNumber": 12,
-        "mode": "follow-up",
-        "owner": "kirmanak",
-        "prNumber": 127,
-        "repo": "demo",
-        "triggerEvent": "issue_comment",
-        "triggerSender": "alice"
-      }
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {
-        "handledCommentIds": [
-          55
-        ],
-        "handledReviewFindings": [],
-        "handledReviewIds": [],
-        "lastHeadSha": "abc123",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
-      "reviewStuck": {},
-      "stuck": {
-        "fingerprints": [
-          {
-            "hash": "09dfd2a9e6ea2e24e59408d5679ef292f4c6e72366978ca31de4de88864ab8f8",
-            "kind": "action"
-          }
-        ],
-        "updatedAt": "<iso>"
-      }
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "implementFollowUp",
-    "result": {
-      "htmlUrl": "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
-      "prNumber": 127,
-      "status": "pushed"
-    }
-  },
-  "followup.test.ts::80": {
+  "followup.test.ts::86": {
     "claimExists": false,
     "effects": [
       {
@@ -9970,7 +11076,7 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::81": {
+  "followup.test.ts::87": {
     "claimExists": false,
     "effects": [
       {
@@ -10052,7 +11158,7 @@
       "status": "skipped"
     }
   },
-  "followup.test.ts::82": {
+  "followup.test.ts::88": {
     "claimExists": false,
     "effects": [
       {
@@ -10206,206 +11312,6 @@
       "status": "no-changes"
     }
   },
-  "followup.test.ts::83": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": true
-  },
-  "followup.test.ts::84": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": false
-  },
-  "followup.test.ts::85": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": {
-      "threw": "GitHub GraphQL → Something went wrong"
-    }
-  },
-  "followup.test.ts::86": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": true
-  },
-  "followup.test.ts::87": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "headsha",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": false
-  },
-  "followup.test.ts::88": {
-    "claimExists": false,
-    "effects": [],
-    "input": {
-      "issueNumber": 12,
-      "owner": "kirmanak",
-      "pr": {
-        "baseRef": "main",
-        "baseSha": "basesha",
-        "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
-        "number": 127,
-        "state": "open"
-      },
-      "repo": "demo"
-    },
-    "latchAfter": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "latchBefore": {
-      "ci": {},
-      "conflict": {},
-      "followup": {},
-      "reviewStuck": {},
-      "stuck": {}
-    },
-    "name": "needsFollowUp",
-    "result": true
-  },
   "followup.test.ts::89": {
     "claimExists": false,
     "effects": [],
@@ -10416,7 +11322,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "headSha": "headsha",
         "number": 127,
         "state": "open"
       },
@@ -10497,7 +11403,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "headSha": "headsha",
         "number": 127,
         "state": "open"
       },
@@ -10530,7 +11436,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "headSha": "headsha",
         "number": 127,
         "state": "open"
       },
@@ -10551,7 +11457,9 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": true
+    "result": {
+      "threw": "GitHub GraphQL → Something went wrong"
+    }
   },
   "followup.test.ts::92": {
     "claimExists": false,
@@ -10563,7 +11471,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "headSha": "headsha",
         "number": 127,
         "state": "open"
       },
@@ -10572,45 +11480,19 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [
-          {
-            "id": 38022,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [],
-        "handledReviewFindings": [
-          {
-            "id": 38022,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": false
+    "result": true
   },
   "followup.test.ts::93": {
     "claimExists": false,
@@ -10622,7 +11504,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
+        "headSha": "headsha",
         "number": 127,
         "state": "open"
       },
@@ -10631,49 +11513,19 @@
     "latchAfter": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [
-          38022
-        ],
-        "handledReviewFindings": [
-          {
-            "id": 38022,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "latchBefore": {
       "ci": {},
       "conflict": {},
-      "followup": {
-        "handledCommentIds": [
-          38022
-        ],
-        "handledReviewFindings": [
-          {
-            "id": 38022,
-            "sha": "a62c750c0ffee000000000000000000000000000"
-          }
-        ],
-        "handledReviewIds": [],
-        "lastHeadSha": "a62c750c0ffee000000000000000000000000000",
-        "prNumber": 127,
-        "round": 1,
-        "updatedAt": "<iso>"
-      },
+      "followup": {},
       "reviewStuck": {},
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": true
+    "result": false
   },
   "followup.test.ts::94": {
     "claimExists": false,
@@ -10739,7 +11591,7 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": false
+    "result": true
   },
   "followup.test.ts::96": {
     "claimExists": false,
@@ -10772,7 +11624,7 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": true
+    "result": false
   },
   "followup.test.ts::97": {
     "claimExists": false,
@@ -10805,7 +11657,7 @@
       "stuck": {}
     },
     "name": "needsFollowUp",
-    "result": false
+    "result": true
   },
   "followup.test.ts::98": {
     "claimExists": false,
@@ -10830,7 +11682,7 @@
         "handledCommentIds": [],
         "handledReviewFindings": [
           {
-            "id": 93,
+            "id": 38022,
             "sha": "a62c750c0ffee000000000000000000000000000"
           }
         ],
@@ -10850,7 +11702,7 @@
         "handledCommentIds": [],
         "handledReviewFindings": [
           {
-            "id": 93,
+            "id": 38022,
             "sha": "a62c750c0ffee000000000000000000000000000"
           }
         ],
@@ -10876,7 +11728,7 @@
         "baseRef": "main",
         "baseSha": "basesha",
         "headRef": "jumi/issue-12-fix-the-thing",
-        "headSha": "a62c750c0ffee000000000000000000000000000",
+        "headSha": "cccccccccccccccccccccccccccccccccccccccc",
         "number": 127,
         "state": "open"
       },
@@ -10886,10 +11738,12 @@
       "ci": {},
       "conflict": {},
       "followup": {
-        "handledCommentIds": [],
+        "handledCommentIds": [
+          38022
+        ],
         "handledReviewFindings": [
           {
-            "id": 93,
+            "id": 38022,
             "sha": "a62c750c0ffee000000000000000000000000000"
           }
         ],
@@ -10906,10 +11760,12 @@
       "ci": {},
       "conflict": {},
       "followup": {
-        "handledCommentIds": [],
+        "handledCommentIds": [
+          38022
+        ],
         "handledReviewFindings": [
           {
-            "id": 93,
+            "id": 38022,
             "sha": "a62c750c0ffee000000000000000000000000000"
           }
         ],
