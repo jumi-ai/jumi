@@ -1,3 +1,4 @@
+import { BOARD_BULK_SCRIPT } from "./board_bulk_page.ts";
 import {
   DEVICE_LOGIN_BOARD_CANCEL_PATH,
   DEVICE_LOGIN_BOARD_START_PATH,
@@ -7,6 +8,12 @@ import {
   handleDeviceLoginStatus,
 } from "./board_device_login.ts";
 import { BOARD_MCP_KICK_ACTOR, BOARD_MCP_PATH, handleBoardMcp } from "./board_mcp.ts";
+import {
+  BOARD_BULK_PATH,
+  BULK_CATALOG_SUFFIX,
+  bulkEligibleForRequeueItem,
+  handleBulkHttpRequest,
+} from "./bulk_requeue.ts";
 import {
   disabledKickWhy,
   isFailingVerdictRow,
@@ -211,6 +218,7 @@ export interface BoardItem {
   failingVerdict?: boolean;
   /** At most one kick. Absent when there is no button payload. */
   kick?: BoardKick;
+  bulkEligible?: boolean;
 }
 
 export const BOARD_NEEDS_KICK_PAGE_SIZE = 200;
@@ -352,6 +360,7 @@ export const BOARD_KICK_CATALOG_VERSION: string = boardCatalogHash(
     blockedImplement: BLOCKED_IMPLEMENT_KICK_EFFECT,
     stuckConflict: STUCK_CONFLICT_EFFECT,
     peerForward: "peer-kick-v1",
+    bulk: BULK_CATALOG_SUFFIX,
   })
 );
 
@@ -509,6 +518,7 @@ function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): Boar
     number: row.prNumber,
     kind: row.kind,
     kick: { effect: REQUEUE_KICK_EFFECT, kick: reason },
+    ...(bulkEligibleForRequeueItem(row) ? { bulkEligible: true as const } : {}),
   };
   if (forge) item.forge = forge;
   const sha = (row.headSha ?? "").trim();
@@ -709,6 +719,7 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
   if (typeof rec.decidedAt === "number" && Number.isFinite(rec.decidedAt)) item.decidedAt = rec.decidedAt;
   if (typeof rec.createdAt === "number" && Number.isFinite(rec.createdAt)) item.createdAt = rec.createdAt;
   if (rec.failingVerdict === true) item.failingVerdict = true;
+  if (rec.bulkEligible === true) item.bulkEligible = true;
   const kick = rec.kick as { effect?: unknown; kick?: unknown } | undefined;
   if (kick && typeof kick === "object" && typeof kick.effect === "string" && kick.effect.trim() !== "") {
     const id = typeof kick.kick === "string" && kick.kick.trim() !== "" ? kick.kick.trim() : "sit-clear";
@@ -2174,6 +2185,7 @@ mountDeviceLogin({
 });
 setInterval(load, 15000);
 load();
+${BOARD_BULK_SCRIPT}
 </script>
 </body>
 </html>`;
@@ -2264,6 +2276,40 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         peerToken,
         fetchFn,
         peerTimeoutMs,
+      });
+    }
+    if (pathname === BOARD_BULK_PATH) {
+      const originAllowed = isAllowedBoardOrigin(request);
+      const bulkKey = idempotencyKeyOf(request);
+      if (!homelab) {
+        if (!hasBearerAuth(request, peerToken)) return json(401, { error: "missing bearer" });
+        return handleBulkHttpRequest(request, {
+          store: deps.store,
+          forgeApi: deps.forgeApi,
+          actor: "",
+          localForge,
+          peerUrl: "",
+          peerToken: "",
+          fetchFn,
+          logger,
+          isOriginAllowed: originAllowed,
+          headerKey: bulkKey,
+        });
+      }
+      const bulkActor = boardUsername(request);
+      if (!bulkActor) return json(401, { error: "missing edge identity" });
+      return handleBulkHttpRequest(request, {
+        store: deps.store,
+        forgeApi: deps.forgeApi,
+        actor: bulkActor,
+        localForge,
+        peerUrl,
+        peerToken,
+        fetchFn,
+        peerTimeoutMs,
+        logger,
+        isOriginAllowed: originAllowed,
+        headerKey: bulkKey,
       });
     }
     // Device login for one homelab ordinal (Grok and Codex). Not a kick:
