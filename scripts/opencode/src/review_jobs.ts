@@ -1,7 +1,13 @@
 import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
-import { disabledKickWhy, isKickableReviewRow, kickReasonOf, STUCK_KICK_ALIASES } from "./kick.ts";
+import {
+  disabledKickWhy,
+  isKickableReviewRow,
+  isReviewStuckLatchReason,
+  kickReasonOf,
+  STUCK_KICK_ALIASES,
+} from "./kick.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
@@ -39,6 +45,7 @@ import {
   STRICT_REFRESH_SLOTS_SCHEMA_SQL,
   type StrictRefreshSlotStore,
 } from "./strict_refresh_queue.ts";
+import { deleteReviewStuckLatch } from "./stuck.ts";
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
 
@@ -487,6 +494,13 @@ export type RequeueKickOutcome =
       terminalId: number;
       deduped: boolean;
       kickLogId: number;
+      /**
+       * The review stuck latch reason cleared by this kick, when the terminal
+       * row was a review fingerprint latch (`stuck: repeated ...`,
+       * `stuck: ping-pong`, same-finding). Null when no latch was cleared.
+       * Lets the board log and response record the clear with actor + reason.
+       */
+      clearedReviewStuck?: string | null;
     }
   | {
       status: "rejected";
@@ -1963,6 +1977,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
                 terminalId: prior.terminalJobId ?? 0,
                 deduped: true,
                 kickLogId: prior.id,
+                ...(isReviewStuckLatchReason(prior.kick) ? { clearedReviewStuck: prior.kick } : {}),
               };
             }
           }
@@ -2103,8 +2118,27 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       };
       this.rows.push(job);
       await this.sits.clear(input.owner, input.repo, input.prNumber);
+      // An operator requeue is the signal that a runner/provider error is
+      // fixed: clear the PR's review stuck latch so the requeued row runs a
+      // real review instead of skipping. Only fingerprint latches clear here;
+      // quota keeps its TTL and every non-stuck failure keeps its history, so
+      // a returning error re-latches after three more identical failures.
+      // The latch clears only after the insert succeeds, so a conflict leaves
+      // it untouched.
+      let clearedReviewStuck: string | null = null;
+      if (isReviewStuckLatchReason(currentReason)) {
+        await deleteReviewStuckLatch(this.skipLatches, input.owner, input.repo, input.prNumber);
+        clearedReviewStuck = currentReason;
+      }
       const entry = record(terminal.id, job.id, "ok");
-      return { status: "ok", job: { ...job }, terminalId: terminal.id, deduped: false, kickLogId: entry.id };
+      return {
+        status: "ok",
+        job: { ...job },
+        terminalId: terminal.id,
+        deduped: false,
+        kickLogId: entry.id,
+        ...(clearedReviewStuck ? { clearedReviewStuck } : {}),
+      };
     });
   }
 
@@ -4871,6 +4905,7 @@ export class PgReviewJobStore implements ReviewJobStore {
                   terminalId: prior.terminalJobId ?? 0,
                   deduped: true,
                   kickLogId: prior.id,
+                  ...(isReviewStuckLatchReason(prior.kick) ? { clearedReviewStuck: prior.kick } : {}),
                 } as RequeueKickOutcome;
               }
             }
@@ -5003,6 +5038,22 @@ export class PgReviewJobStore implements ReviewJobStore {
         const job = inserted[0] ? mapRow(inserted[0]) : undefined;
         if (!job) throw new Error("failed to requeue kick");
         await this.clearSitTx(tx, input.owner, input.repo, input.prNumber);
+        // Operator kick is the signal that the runner/provider error is
+        // fixed: clear the PR's review stuck latch so the requeued row runs a
+        // real review. Only fingerprint latches clear; quota keeps its TTL and
+        // non-stuck failures keep their history. Clears only after the insert
+        // succeeds so a lost insert race leaves the latch untouched.
+        let clearedReviewStuck: string | null = null;
+        if (isReviewStuckLatchReason(currentReason)) {
+          await tx.unsafe(
+            `INSERT INTO issue_skip_latches (owner, repo, issue_number, review_stuck, updated_at)
+             VALUES ($1, $2, $3, '{"fingerprints":[],"updatedAt":""}'::jsonb, NOW())
+             ON CONFLICT (owner, repo, issue_number)
+             DO UPDATE SET review_stuck = '{"fingerprints":[],"updatedAt":""}'::jsonb, updated_at = NOW()`,
+            [input.owner, input.repo, input.prNumber]
+          );
+          clearedReviewStuck = currentReason;
+        }
         const logged = await this.insertKickLog(tx, input, "ok", terminal.id, job.id);
         return {
           status: "ok",
@@ -5010,6 +5061,7 @@ export class PgReviewJobStore implements ReviewJobStore {
           terminalId: terminal.id,
           deduped: false,
           kickLogId: logged.id,
+          ...(clearedReviewStuck ? { clearedReviewStuck } : {}),
         } as RequeueKickOutcome;
       });
     } catch (err) {

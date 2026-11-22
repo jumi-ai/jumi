@@ -197,6 +197,21 @@ export function disabledKickWhy(reason: string): string | undefined {
   return undefined;
 }
 
+/**
+ * True for a terminal reason produced by the review fingerprint latch
+ * (`stuck: repeated action`, `stuck: repeated error`, `stuck: ping-pong`,
+ * and the same-finding latch with or without its display suffix).
+ *
+ * A same-commit requeue kick on such a row clears the PR's review stuck
+ * state so the requeued row runs a real review. Quota latches keep their TTL
+ * behaviour and never clear here; every other `stuck:` text is not a review
+ * fingerprint latch and never clears either.
+ */
+export function isReviewStuckLatchReason(reason: string | null | undefined): boolean {
+  const parsed = parseSkipWhy(reason);
+  return parsed.why === "stuck" || parsed.why === "same-finding";
+}
+
 /** Terminal states eligible for a same-commit requeue. Succeeded/cancelled never are. */
 function isKickableTerminalState(state: string): boolean {
   return state === "failed" || state === "skipped";
