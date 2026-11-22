@@ -116,6 +116,7 @@ import {
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
+import { inlinesForReviewGroup, reviewGroupIds } from "./review_groups.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -779,7 +780,7 @@ function isSuggestionOnlyBody(
 /** Inlines belonging to one pull review: an exact `pull_request_review_id`
  * match, plus orphans without a review id (both forges normally set it, but
  * an orphan must not silently drop a blocking question). */
-export function inlinesForPullReview(reviewId: number, inlines: readonly InlineComment[]): InlineComment[] {
+function inlinesForPullReview(reviewId: number, inlines: readonly InlineComment[]): InlineComment[] {
   return inlines.filter(
     (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === reviewId
   );
@@ -884,6 +885,8 @@ export interface FollowUpItems {
   jumiInlines: InlineComment[];
   jumiReviews: PullReview[];
   jumiFindingReviews: PullReview[];
+  /** All pull reviews, including empty-body inline-only Jumi reviews. */
+  allReviews?: readonly PullReview[];
 }
 
 export function pickLatestJumiFinding(items: FollowUpItems, headSha: string): Comment | undefined {
@@ -966,9 +969,10 @@ export async function collectFollowUpItems(
         botUsername,
         headSha,
         findingOpts,
-        inlinesForPullReview(review.id, jumiInlinesAll)
+        inlinesForReviewGroup(review, rawReviews, jumiInlinesAll, botUsername)
       )
     ),
+    allReviews: rawReviews,
   };
 }
 
@@ -1011,15 +1015,16 @@ export function unresolvedJumiInlines(items: FollowUpItems): InlineComment[] {
 function isMaintainerOnlyPullReview(
   review: PullReview,
   allJumiInlines: readonly InlineComment[],
-  botUsername?: string
+  botUsername?: string,
+  allReviews?: readonly PullReview[]
 ): boolean {
   const body = review.body ?? review.content ?? "";
   const trailer = lastCheckTrailer(body);
   if (trailer?.state !== "success") return false;
   if (trailerSuggestionCount(trailer.reason) !== 0) return false;
-  const inlines = allJumiInlines.filter(
-    (inline) => inline.pull_request_review_id == null || inline.pull_request_review_id === review.id
-  );
+  const inlines = allReviews
+    ? inlinesForReviewGroup(review, allReviews, allJumiInlines, botUsername)
+    : inlinesForPullReview(review.id, allJumiInlines);
   const total = openQuestionsForReview(body, inlines, botUsername);
   if (total === 0) return false;
   return openMaintainerQuestionsForReview(body, inlines, botUsername) === total;
@@ -1061,7 +1066,7 @@ export function onlyMaintainerQuestionsPending(
       ? !handledFindings.has(reviewFindingKey(finding.id, finding.sha))
       : !handledReviews.has(review.id);
     if (!unhandled) continue;
-    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername)) return false;
+    if (!isMaintainerOnlyPullReview(review, items.jumiInlines, botUsername, items.allReviews)) return false;
     foundMaintainer = true;
   }
   return foundMaintainer;
@@ -3171,12 +3176,16 @@ export async function implementFollowUp(
           // Body + inline view: the published body keeps only the
           // findings-list line for posted findings (parsers skip that
           // section), so an inline-only ❓/🔴/🟡 would read zero from the
-          // body alone. Count the open Jumi inlines for this review too,
-          // the same way `isMaintainerOnlyPullReview` does.
-          const isPullReview = pendingItems.jumiReviews.some((entry) => entry.id === pendingLastReview.id);
-          const reviewInlines = isPullReview
-            ? inlinesForPullReview(pendingLastReview.id, pendingItems.jumiInlines)
-            : [];
+          // body alone. Count the open Jumi inlines for the review pair
+          // the reviewer actually publishes (summary plus its empty-body
+          // companion), the same way `isMaintainerOnlyPullReview` does.
+          const allForGroup = pendingItems.allReviews ?? pendingItems.jumiReviews;
+          const summaryReview = allForGroup.find((entry) => entry.id === pendingLastReview.id);
+          const reviewInlines =
+            summaryReview != null
+              ? inlinesForReviewGroup(summaryReview, allForGroup, pendingItems.jumiInlines, opts.botUsername)
+              : [];
+          const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, allForGroup, opts.botUsername) : [];
           const assessment = assessMaintainerHoldRelease({
             reviewBody,
             inlines: reviewInlines,
@@ -3196,7 +3205,8 @@ export async function implementFollowUp(
               log(
                 `maintainer hold kept for ${owner}/${repo}#${pr.number}: ${keepReason} ` +
                   `(maintainers=${assessment.openMaintainers} bugs=${assessment.openBugs} risks=${assessment.openRisks} ` +
-                  `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess})`
+                  `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess} ` +
+                  `reviews=[${groupIds.join(",")}])`
               );
             }
           }
