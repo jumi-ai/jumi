@@ -528,6 +528,12 @@
       "extractVersion": "^bun-v(?<version>.+)$"
     },
     {
+      "description": "Disable built-in bun tool-constraint updates; constraints.bun moves with BUN_VERSION via the custom regex manager.",
+      "matchDepTypes": ["tool-constraint"],
+      "matchPackageNames": ["bun"],
+      "enabled": false
+    },
+    {
       "description": "Keep the worker JDK on Temurin 21.",
       "matchDatasources": [
         "docker"
