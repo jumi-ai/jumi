@@ -40,6 +40,7 @@ import {
   stuckIdempotencyMismatch,
 } from "./review_jobs.ts";
 import type { RouterSitReason, RouterSitRecord } from "./router_sits.ts";
+import { cancelReviewWork } from "./stuck.ts";
 import { errorMessage } from "./util/error.ts";
 import { redactGitSecrets } from "./workspace.ts";
 import { latchedXaiGrantNotice } from "./xai_auth.ts";
@@ -1097,6 +1098,12 @@ export interface BoardHandlerDeps {
   mcpSecrets?: Array<string | undefined>;
   fetchFn?: BoardFetchFn;
   peerTimeoutMs?: number;
+  /**
+   * HOME for the review stuck file fallback. Ledger mode (DATABASE_URL) clears
+   * the skip-latch row via the store; without a ledger the same kick clears
+   * the state file via `cancelReviewWork`. Unset keeps today's behaviour.
+   */
+  home?: string;
   /**
    * Forge client for the close-then-reopen kick. Only getPR/close/reopen are
    * used; there is never a push and never a job insert on this path.
@@ -2252,7 +2259,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           // secrets before they reach the server log.
           const mcpSecrets = deps.mcpSecrets ?? [];
           const mcpLogger = (message: string) => logger(redactGitSecrets(message, mcpSecrets));
-          return handleMcpKick(body, idempotencyKey, deps.store, mcpLogger, deps.forgeApi, localForge);
+          return handleMcpKick(body, idempotencyKey, deps.store, mcpLogger, deps.forgeApi, localForge, deps.home);
         },
       });
     }
@@ -2276,6 +2283,7 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         peerToken,
         fetchFn,
         peerTimeoutMs,
+        home: deps.home,
       });
     }
     if (pathname === BOARD_BULK_PATH) {
@@ -2473,6 +2481,7 @@ async function handleKick(
     peerToken?: string;
     fetchFn?: BoardFetchFn;
     peerTimeoutMs?: number;
+    home?: string;
   }
 ): Promise<Response> {
   if (request.method !== "POST") return json(405, { error: "method not allowed" });
@@ -2518,7 +2527,7 @@ async function handleKick(
           peerTimeoutMs: opts?.peerTimeoutMs ?? PEER_KICK_TIMEOUT_MS,
         }
       : undefined;
-  return handleKickBody(body, headerKey, store, logger, forgeApi, actor, peer, isPeer ? undefined : actor);
+  return handleKickBody(body, headerKey, store, logger, forgeApi, actor, peer, isPeer ? undefined : actor, opts?.home);
 }
 
 /**
@@ -2537,7 +2546,8 @@ async function handleKickBody(
   forgeApi: BoardPullForge | undefined,
   actor: string,
   peer?: { peerUrl: string; peerToken: string; fetchFn: BoardFetchFn; peerTimeoutMs: number },
-  sitActor?: string
+  sitActor?: string,
+  home?: string
 ): Promise<Response> {
   if (peer && isPeerForgeKick(body)) {
     return handleForwardedKick(headerIdempotencyKey, body, store, logger, {
@@ -2581,8 +2591,28 @@ async function handleKickBody(
       delivery,
     });
     if (outcome.status === "ok") {
+      const cleared = outcome.clearedReviewStuck ?? null;
+      // File fallback: without a ledger the review stuck state lives in the
+      // HOME file, not the skip-latch row the store just cleared. Best-effort:
+      // the latch row is already cleared and the job queued, so a file failure
+      // never rolls back the kick.
+      if (cleared && home && !process.env.DATABASE_URL?.trim()) {
+        try {
+          await cancelReviewWork({
+            home,
+            owner: parsed.owner,
+            repo: parsed.repo,
+            prNumber: parsed.number,
+            ...(store.skipLatches ? { skipLatches: store.skipLatches } : {}),
+          });
+        } catch (err) {
+          logger(
+            `kick cleared file failed actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number}: ${errorMessage(err)}`
+          );
+        }
+      }
       logger(
-        `kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}`
+        `kick ok actor=${actor} ${parsed.owner}/${parsed.repo}#${parsed.number} @ ${parsed.commit} kick=${JSON.stringify(parsed.kick)} job=${outcome.job.id} terminal=${outcome.terminalId}${outcome.deduped ? " deduped" : ""}${cleared ? ` cleared review stuck latch ${JSON.stringify(cleared)}` : ""}`
       );
       return json(200, {
         ok: true,
@@ -2591,6 +2621,7 @@ async function handleKickBody(
         key: outcome.job.jobKey,
         terminalJobId: outcome.terminalId,
         deduped: outcome.deduped,
+        ...(cleared ? { clearedReviewStuck: cleared } : {}),
       });
     }
     logger(
@@ -2634,7 +2665,8 @@ async function handleMcpKick(
   store: ReviewJobStore,
   logger: (message: string) => void,
   forgeApi: BoardPullForge | undefined,
-  localForge: string
+  localForge: string,
+  home?: string
 ): Promise<Response> {
   const forgeField = peerForgeFieldOf(body);
   if (forgeField !== "" && forgeField !== localForge) {
@@ -2660,7 +2692,8 @@ async function handleMcpKick(
     forgeApi,
     BOARD_MCP_KICK_ACTOR,
     undefined,
-    BOARD_MCP_KICK_ACTOR
+    BOARD_MCP_KICK_ACTOR,
+    home
   );
 }
 

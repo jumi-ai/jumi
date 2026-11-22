@@ -1553,6 +1553,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
               config.boardMcpKickToken,
             ],
             forgeApi: boardForge,
+            home: config.home,
           }),
         });
       } catch (err) {
