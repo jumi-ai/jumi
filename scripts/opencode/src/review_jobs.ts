@@ -70,6 +70,16 @@ interface IssueJobPayload {
   action: string;
   trigger?: IssueJobTrigger;
   generation?: number;
+  /**
+   * Merge-only follow-up: only bring the branch up to date with the default
+   * branch, push, and stop. Persisted so a strict-refresh wake that loses a
+   * lease race still runs as a merge-only refresh once the writer finishes.
+   */
+  mergeOnly?: boolean;
+  /** Strict-refresh merge-only (same merge-only path plus strict rechecks). */
+  strictRefresh?: boolean;
+  /** Base tip seen when a strict-refresh job was enqueued (dedupe/debug). */
+  strictBaseSha?: string;
   tracker?: string;
   trackerId?: string;
   trackerUrl?: string;
@@ -987,6 +997,9 @@ function issueJobPayload(job: IssueJob): IssueJobPayload {
     ...(job.trackerUrl ? { trackerUrl: job.trackerUrl } : {}),
     ...(job.issueAuthor ? { issueAuthor: job.issueAuthor } : {}),
     ...(job.issueAuthorPermission ? { issueAuthorPermission: job.issueAuthorPermission } : {}),
+    ...(job.mergeOnly ? { mergeOnly: true as const } : {}),
+    ...(job.strictRefresh ? { strictRefresh: true as const } : {}),
+    ...(typeof job.strictBaseSha === "string" && job.strictBaseSha ? { strictBaseSha: job.strictBaseSha } : {}),
   };
 }
 
@@ -1024,6 +1037,9 @@ export function issueJobFromRecord(row: ReviewJobRecord): IssueJob {
     ...(payload.trackerUrl ? { trackerUrl: payload.trackerUrl } : {}),
     ...(payload.issueAuthor ? { issueAuthor: payload.issueAuthor } : {}),
     ...(payload.issueAuthorPermission ? { issueAuthorPermission: payload.issueAuthorPermission } : {}),
+    ...(payload.mergeOnly ? { mergeOnly: payload.mergeOnly } : {}),
+    ...(payload.strictRefresh ? { strictRefresh: payload.strictRefresh } : {}),
+    ...(payload.strictBaseSha ? { strictBaseSha: payload.strictBaseSha } : {}),
   };
 }
 
@@ -1058,6 +1074,9 @@ function parsePayload(value: unknown): IssueJobPayload | null {
     ...(typeof rec.issueAuthorPermission === "string" && rec.issueAuthorPermission
       ? { issueAuthorPermission: rec.issueAuthorPermission }
       : {}),
+    ...(typeof rec.mergeOnly === "boolean" ? { mergeOnly: rec.mergeOnly } : {}),
+    ...(typeof rec.strictRefresh === "boolean" ? { strictRefresh: rec.strictRefresh } : {}),
+    ...(typeof rec.strictBaseSha === "string" && rec.strictBaseSha ? { strictBaseSha: rec.strictBaseSha } : {}),
   };
 }
 
