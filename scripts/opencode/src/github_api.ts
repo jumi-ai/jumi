@@ -1268,7 +1268,7 @@ export class GithubAPI {
     index: number,
     botUsername: string,
     marker: string
-  ): Promise<{ id: number } | undefined> {
+  ): Promise<{ id: number; body?: string } | undefined> {
     const path = `/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`;
     let page = 1;
     while (page <= MAX_PAGES) {
@@ -1279,7 +1279,7 @@ export class GithubAPI {
           typeof comment.body === "string" &&
           comment.body.includes(marker)
         ) {
-          return { id: comment.id };
+          return { id: comment.id, body: comment.body ?? "" };
         }
       }
       if (batch.length !== PAGE_SIZE) break;

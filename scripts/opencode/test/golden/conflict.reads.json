@@ -133,6 +133,7 @@
   "conflict.test.ts::2": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -247,6 +248,7 @@
   "conflict.test.ts::3": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -298,6 +300,7 @@
   "conflict.test.ts::34": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -344,9 +347,65 @@
       "listOpenPulls": 1
     }
   },
+  "conflict.test.ts::38": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::39": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
   "conflict.test.ts::4": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::40": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::41": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 2,
+      "listActionJobs": 1,
+      "listCheckRuns": 1,
+      "listCommitStatuses": 1,
+      "listOpenPulls": 1
+    }
+  },
+  "conflict.test.ts::42": {
+    "name": "implementConflict",
+    "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -357,6 +416,7 @@
   "conflict.test.ts::5": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,
@@ -367,6 +427,7 @@
   "conflict.test.ts::6": {
     "name": "implementConflict",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 2,
       "listActionJobs": 1,
       "listCheckRuns": 1,

@@ -852,7 +852,7 @@ export class GiteaAPI {
     index: number,
     botUsername: string,
     marker: string
-  ): Promise<{ id: number } | undefined> {
+  ): Promise<{ id: number; body?: string } | undefined> {
     const path = `/repos/${this.repoPath(owner, repo)}/issues/${index}/comments`;
     let page = 1;
     while (page <= 40) {
@@ -863,7 +863,7 @@ export class GiteaAPI {
           typeof comment.body === "string" &&
           comment.body.includes(marker)
         ) {
-          return { id: comment.id };
+          return { id: comment.id, body: comment.body };
         }
       }
       // Gitea may ignore limit and return the full thread (length !== 50).

@@ -835,7 +835,7 @@ type StuckCommentApi = {
     index: number,
     botUsername: string,
     marker: string
-  ): Promise<{ id: number } | undefined>;
+  ): Promise<{ id: number; body?: string } | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<unknown>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<unknown>;
 };

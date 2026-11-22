@@ -16,12 +16,13 @@ import { traced } from "./golden/trace.ts";
 const implementConflict = traced("implementConflict", realImplementConflict);
 
 import { attachmentsTrackedReason, engineScratchTrackedReason } from "../src/engine_scratch.ts";
-import type { IssueApi } from "../src/gitea_issues.ts";
+import { type IssueApi, workerMarker } from "../src/gitea_issues.ts";
 import { handoffKey, MemoryHandoffStore } from "../src/handoff.ts";
 import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { issueJobFromRecord, MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { standingPodRuntime } from "../src/runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason } from "../src/sentinels.ts";
+import { MERGE_DEFAULT_STUCK_TEXT } from "../src/skip_why_texts.ts";
 import { writeStuckState } from "../src/stuck.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
@@ -1412,6 +1413,197 @@ describe("implementConflict", () => {
         });
         expect(gitCalls.some((args) => args[0] === "push")).toBe(true);
       }
+    });
+  });
+
+  describe("up-to-date sticky refresh", () => {
+    const upToDateGit: GitRunner = async (args) => {
+      const gitArgs = stripGitConfigArgs(args);
+      if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+      if (gitArgs[0] === "rev-parse") return "headsha";
+      return "";
+    };
+
+    test("existing Jumi failed sticky is overwritten with the clean note", async () => {
+      await withDirs(async (home, workdir) => {
+        const marker = workerMarker("kirmanak", "demo", 12);
+        const updated: Array<{ id: number; body: string }> = [];
+        const created: string[] = [];
+        const api = conflictApi({
+          findStickyIssueComment: async () => ({
+            id: 99,
+            body: `${marker}\nJumi failed: git merge failed with exit code 128: fatal: stash failed`,
+          }),
+          updateIssueComment: async (_owner, _repo, id, body) => {
+            updated.push({ id, body });
+            return makeComment({ id, body });
+          },
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            created.push(body);
+            return makeComment({ body });
+          },
+        });
+        const result = await implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: upToDateGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        });
+        expect(result).toEqual({ status: "up-to-date" });
+        expect(created).toEqual([]);
+        expect(updated).toHaveLength(1);
+        expect(updated[0]?.id).toBe(99);
+        expect(updated[0]?.body).toContain(marker);
+        expect(updated[0]?.body).toContain("Merged main cleanly; nothing to push.");
+        expect(updated[0]?.body).not.toContain("Jumi failed:");
+      });
+    });
+
+    test("existing stuck sticky is overwritten with the clean note", async () => {
+      await withDirs(async (home, workdir) => {
+        const marker = workerMarker("kirmanak", "demo", 12);
+        const updated: Array<{ id: number; body: string }> = [];
+        const api = conflictApi({
+          findStickyIssueComment: async () => ({ id: 100, body: `${marker}\n${MERGE_DEFAULT_STUCK_TEXT}` }),
+          updateIssueComment: async (_owner, _repo, id, body) => {
+            updated.push({ id, body });
+            return makeComment({ id, body });
+          },
+        });
+        const result = await implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: upToDateGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        });
+        expect(result).toEqual({ status: "up-to-date" });
+        expect(updated).toHaveLength(1);
+        expect(updated[0]?.body).toContain("Merged main cleanly; nothing to push.");
+      });
+    });
+
+    test("existing non-failure sticky is left alone", async () => {
+      await withDirs(async (home, workdir) => {
+        const marker = workerMarker("kirmanak", "demo", 12);
+        const updated: Array<{ id: number; body: string }> = [];
+        const created: string[] = [];
+        const api = conflictApi({
+          findStickyIssueComment: async () => ({ id: 101, body: `${marker}\nImplementing the thing` }),
+          updateIssueComment: async (_owner, _repo, id, body) => {
+            updated.push({ id, body });
+            return makeComment({ id, body });
+          },
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            created.push(body);
+            return makeComment({ body });
+          },
+        });
+        const result = await implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: upToDateGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        });
+        expect(result).toEqual({ status: "up-to-date" });
+        expect(updated).toEqual([]);
+        expect(created).toEqual([]);
+        expect(api.comments).toEqual([]);
+      });
+    });
+
+    test("no sticky creates none", async () => {
+      await withDirs(async (home, workdir) => {
+        const created: string[] = [];
+        const updated: Array<{ id: number; body: string }> = [];
+        const api = conflictApi({
+          findStickyIssueComment: async () => undefined,
+          updateIssueComment: async (_owner, _repo, id, body) => {
+            updated.push({ id, body });
+            return makeComment({ id, body });
+          },
+          createIssueComment: async (_owner, _repo, _index, body) => {
+            created.push(body);
+            return makeComment({ body });
+          },
+        });
+        const result = await implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: upToDateGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        });
+        expect(result).toEqual({ status: "up-to-date" });
+        expect(created).toEqual([]);
+        expect(updated).toEqual([]);
+      });
+    });
+
+    test("sticky lookup throwing still returns up-to-date", async () => {
+      await withDirs(async (home, workdir) => {
+        const api = conflictApi({
+          findStickyIssueComment: async () => {
+            throw new Error("forge boom");
+          },
+        });
+        const result = await implementConflict({
+          api,
+          job: conflictJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: upToDateGit,
+          openCodeRunner: async () => {
+            throw new Error("opencode should not run");
+          },
+          logger: () => undefined,
+        });
+        expect(result).toEqual({ status: "up-to-date" });
+        expect(api.comments).toEqual([]);
+      });
     });
   });
 });

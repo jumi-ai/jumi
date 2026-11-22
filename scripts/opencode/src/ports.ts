@@ -216,6 +216,13 @@ export interface ActionJob {
   run_id?: number;
 }
 
+/** Sticky comment identity plus its full body (including the marker line). */
+interface StickyCommentRef {
+  id: number;
+  /** Full comment body. Absent only from older fakes that predate body reads. */
+  body?: string;
+}
+
 /** Tracker: brief + pickup + outcome (issue/task identity). */
 export interface Tracker extends AttachmentSupport {
   getIssue(owner: string, repo: string, index: number): Promise<Task>;
@@ -226,7 +233,7 @@ export interface Tracker extends AttachmentSupport {
     index: number,
     botUsername: string,
     marker: string
-  ): Promise<{ id: number } | undefined>;
+  ): Promise<StickyCommentRef | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
   listIssueDependencies(owner: string, repo: string, index: number): Promise<LinkedIssue[]>;
@@ -340,7 +347,7 @@ export interface Forge extends AttachmentSupport {
     index: number,
     botUsername: string,
     marker: string
-  ): Promise<{ id: number } | undefined>;
+  ): Promise<StickyCommentRef | undefined>;
   createIssueComment(owner: string, repo: string, index: number, body: string): Promise<Comment>;
   updateIssueComment(owner: string, repo: string, commentId: number, body: string): Promise<Comment>;
   listPullReviewComments(owner: string, repo: string, index: number, reviews?: PullReview[]): Promise<InlineComment[]>;
