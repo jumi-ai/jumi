@@ -196,17 +196,35 @@ export interface BoardItem {
   headSha?: string;
   /** Epoch ms when the sit was decided. Sits only. */
   decidedAt?: number;
+  /**
+   * Additive presentation metadata: epoch ms when an in-progress ledger row
+   * was enqueued. Lets the page show queue age without a new endpoint.
+   * Omitted for sits and for rows the ledger did not timestamp.
+   */
+  createdAt?: number;
+  /**
+   * Additive presentation metadata: true when a requeueable review row is a
+   * published failing verdict (succeeded with a failure trailer) rather than
+   * a failed review execution. Lets the page group verdict findings apart
+   * from execution failures without inferring from prose.
+   */
+  failingVerdict?: boolean;
   /** At most one kick. Absent when there is no button payload. */
   kick?: BoardKick;
 }
 
 export const BOARD_NEEDS_KICK_PAGE_SIZE = 200;
 
+/** In-progress page size: same cap as needs_kick, with an explicit overflow count. */
+export const BOARD_IN_PROGRESS_PAGE_SIZE = 200;
+
 export interface BoardGroups {
   in_progress: BoardItem[];
   needs_kick: BoardItem[];
   sitting: BoardItem[];
   needs_kick_overflow?: number;
+  /** Count of in-progress rows beyond the page cap. Absent when nothing was cut. */
+  in_progress_overflow?: number;
 }
 
 export interface BoardPeerStatus {
@@ -220,6 +238,8 @@ export interface BoardPeerStatus {
   needsKick?: BoardItem[];
   needs_kick_overflow?: number;
   needsKickOverflow?: number;
+  in_progress_overflow?: number;
+  inProgressOverflow?: number;
   sitting?: BoardItem[];
   sitting_on_purpose?: BoardItem[];
   /** Stable unavailable marker. Never a token, URL, or forge secret. */
@@ -343,6 +363,52 @@ function primaryNumber(row: ReviewJobRecord): number {
   return row.prNumber;
 }
 
+/** Sit reasons whose only board action dismisses the row. Never a retry. */
+const BOARD_DISMISSAL_SIT_REASONS: ReadonlySet<string> = new Set([
+  "foreign-branch",
+  "no-closer",
+  "no-write-access",
+  "not-labeled",
+]);
+
+/** True for a sit whose kick only removes the board row. */
+export function isDismissalSitReason(reason: string | null | undefined): boolean {
+  return typeof reason === "string" && BOARD_DISMISSAL_SIT_REASONS.has(reason);
+}
+
+/**
+ * Presentation grouping for one board item. Pure and prose-free: verdict is
+ * the ledger's `failingVerdict` flag, never a message match; maintainer
+ * answer is the structured `waiting-maintainer` sit code, never prose.
+ */
+export type BoardAttentionKind =
+  | "exec-failure"
+  | "verdict"
+  | "stuck-recovery"
+  | "blocked"
+  | "answer-needed"
+  | "dismissal"
+  | "waiting"
+  | "running"
+  | "queued";
+
+export function boardAttentionKindOf(item: BoardItem): BoardAttentionKind {
+  const reason = (item.reason ?? "").trim();
+  // In-progress rows: running (leased) sorts before queued.
+  if (reason.endsWith(" leased")) return "running";
+  if (reason.endsWith(" queued")) return "queued";
+  if (reason === "implement-latch") return "stuck-recovery";
+  if (reason === "implement skipped") return "blocked";
+  if (reason === "waiting-maintainer") return "answer-needed";
+  if (isDismissalSitReason(reason)) return "dismissal";
+  if (item.failingVerdict === true) return "verdict";
+  if (item.kick?.effect === REQUEUE_KICK_EFFECT) return "exec-failure";
+  // Requeue rows without the exact effect string (peer payloads, older
+  // images) still read as execution failures when they carry a commit kick.
+  if (item.kind === "review" && item.kick && (item.commit || item.headSha)) return "exec-failure";
+  return "waiting";
+}
+
 function inflightMessage(kind: string, state: string): string {
   const key = `${kind} ${state}`;
   const messages: Record<string, string> = {
@@ -374,6 +440,7 @@ function inflightItem(row: ReviewJobRecord, forge?: string): BoardItem {
     item.commit = sha;
     item.headSha = sha;
   }
+  if (Number.isFinite(row.createdAt)) item.createdAt = row.createdAt;
   return item;
 }
 
@@ -449,6 +516,8 @@ function requeueItem(row: ReviewJobRecord, reason: string, forge?: string): Boar
     item.commit = sha;
     item.headSha = sha;
   }
+  if (failing) item.failingVerdict = true;
+  if (Number.isFinite(row.createdAt)) item.createdAt = row.createdAt;
   return item;
 }
 
@@ -479,7 +548,9 @@ function isBlockedImplementRow(row: ReviewJobRecord): boolean {
 
 export async function buildBoardGroups(store: BoardStore, forge?: string): Promise<BoardGroups> {
   const [inflight, sits, terminals, terminalImplements, closedPulls] = await Promise.all([
-    store.listInflight(200),
+    // Fetch up to the ledger cap (500) so a long queue reports an exact
+    // overflow count instead of describing a capped view as exhaustive.
+    store.listInflight(500),
     store.sits.list(),
     store.listTerminalReviews ? store.listTerminalReviews() : Promise.resolve([]),
     store.listTerminalImplements ? store.listTerminalImplements() : Promise.resolve([]),
@@ -488,11 +559,28 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
   const closedKeys = new Set(
     closedPulls.map((pull) => `${pull.owner.toLowerCase()}/${pull.repo.toLowerCase()}#${pull.number}`)
   );
-  const in_progress = inflight.map((row) => inflightItem(row, forge));
+  const all_in_progress = inflight.map((row) => inflightItem(row, forge));
+  // Running rows sort before queued rows so the operator sees what Jumi is
+  // doing before what is waiting for a worker. Queued age comes from the
+  // oldest queued createdAt the ledger reported.
+  all_in_progress.sort((a, b) => {
+    const aRun = a.reason.endsWith(" leased") ? 0 : 1;
+    const bRun = b.reason.endsWith(" leased") ? 0 : 1;
+    if (aRun !== bRun) return aRun - bRun;
+    return (a.createdAt ?? 0) - (b.createdAt ?? 0);
+  });
+  let in_progress = all_in_progress;
+  let in_progress_overflow: number | undefined;
+  if (all_in_progress.length > BOARD_IN_PROGRESS_PAGE_SIZE) {
+    in_progress_overflow = all_in_progress.length - BOARD_IN_PROGRESS_PAGE_SIZE;
+    in_progress = all_in_progress.slice(0, BOARD_IN_PROGRESS_PAGE_SIZE);
+  }
   // A sit that duplicates a job already in progress is not a second problem:
   // hide it here. Recording and clearing are unchanged; this is read-time only.
+  // Dedup against the full in-progress list, not the capped display slice, so
+  // a sit duplicating a queued row past the cap stays hidden.
   const inflightKeys = new Set(
-    in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
+    all_in_progress.map((item) => `${item.owner.toLowerCase()}/${item.repo.toLowerCase()}#${item.number}`)
   );
   const inflightJobKeys = new Set(inflight.map((row) => row.jobKey));
   // PR numbers with any queued/leased work (review, follow-up, or conflict).
@@ -588,9 +676,15 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
       needs_kick: needs_kick.slice(0, BOARD_NEEDS_KICK_PAGE_SIZE),
       sitting,
       needs_kick_overflow: overflow,
+      ...(in_progress_overflow ? { in_progress_overflow } : {}),
     };
   }
-  return { in_progress, needs_kick, sitting };
+  return {
+    in_progress,
+    needs_kick,
+    sitting,
+    ...(in_progress_overflow ? { in_progress_overflow } : {}),
+  };
 }
 
 /** Keep only the public board shape. Drops tokens, payloads, and forge secrets. */
@@ -613,6 +707,8 @@ function sanitizeBoardItem(value: unknown, fallbackForge: string): BoardItem | u
   if (typeof rec.commit === "string" && rec.commit.trim() !== "") item.commit = rec.commit.trim();
   if (typeof rec.headSha === "string" && rec.headSha.trim() !== "") item.headSha = rec.headSha.trim();
   if (typeof rec.decidedAt === "number" && Number.isFinite(rec.decidedAt)) item.decidedAt = rec.decidedAt;
+  if (typeof rec.createdAt === "number" && Number.isFinite(rec.createdAt)) item.createdAt = rec.createdAt;
+  if (rec.failingVerdict === true) item.failingVerdict = true;
   const kick = rec.kick as { effect?: unknown; kick?: unknown } | undefined;
   if (kick && typeof kick === "object" && typeof kick.effect === "string" && kick.effect.trim() !== "") {
     const id = typeof kick.kick === "string" && kick.kick.trim() !== "" ? kick.kick.trim() : "sit-clear";
@@ -707,6 +803,11 @@ async function fetchPeerBoard(
     const overflowRaw = body.needs_kick_overflow ?? body.needsKickOverflow;
     const overflow =
       typeof overflowRaw === "number" && Number.isInteger(overflowRaw) && overflowRaw > 0 ? overflowRaw : undefined;
+    const inProgressOverflowRaw = body.in_progress_overflow ?? body.inProgressOverflow;
+    const inProgressOverflow =
+      typeof inProgressOverflowRaw === "number" && Number.isInteger(inProgressOverflowRaw) && inProgressOverflowRaw > 0
+        ? inProgressOverflowRaw
+        : undefined;
     const peerForgeUrl =
       typeof body.forgeUrl === "string" && /^https?:\/\/[^/\s]/i.test(body.forgeUrl.trim())
         ? body.forgeUrl.trim()
@@ -720,6 +821,9 @@ async function fetchPeerBoard(
       needs_kick,
       needsKick: [...needs_kick],
       ...(overflow ? { needs_kick_overflow: overflow, needsKickOverflow: overflow } : {}),
+      ...(inProgressOverflow
+        ? { in_progress_overflow: inProgressOverflow, inProgressOverflow: inProgressOverflow }
+        : {}),
       sitting,
       sitting_on_purpose: [...sitting],
     };
@@ -1022,6 +1126,7 @@ function withForgeGroups(groups: BoardGroups, forge: string): BoardGroups {
     needs_kick: groups.needs_kick.map(tag),
     sitting: groups.sitting.map(tag),
     ...(groups.needs_kick_overflow ? { needs_kick_overflow: groups.needs_kick_overflow } : {}),
+    ...(groups.in_progress_overflow ? { in_progress_overflow: groups.in_progress_overflow } : {}),
   };
 }
 
@@ -1033,14 +1138,29 @@ function withForgeGroups(groups: BoardGroups, forge: string): BoardGroups {
  * never calls the forge. Forge URLs below are link hrefs only.
  *
  * Layout contract:
- * - Phone: two lists (In progress, Sitting). Message is the headline; reason
- *   stays as code in the inspector only. A button naming the real side effect
- *   renders only when the payload carries `kick`. Sitting on purpose
- *   is a status line, never a disabled button.
+ * - Needs attention first, grouped by next action with counts and reasons:
+ *   review execution failures, published findings (failing verdicts),
+ *   stuck-job recovery, dependency re-checks, and maintainer answers.
+ *   Dependency waits, drafts, unlabeled rows, and terminal no-ops stay out
+ *   of the execution-failure group.
+ * - Running & queued puts running jobs before queued jobs, shows
+ *   running/queued counts and the oldest queued age, collapses a long queue
+ *   behind a labeled disclosure, and marks capped views as capped.
+ * - Waiting / ignored is collapsed by reason. A dismissal-only action says
+ *   Remove from board, lives in secondary controls, and keeps the same
+ *   effect and confirmation.
+ * - Runner sign-in is reachable from the header without scrolling through
+ *   jobs; its effects and access rules are unchanged.
+ * - Rows lead with repository, number, and short status. Raw reason,
+ *   commit, timestamps, and consequence text stay in the desktop inspector
+ *   or the phone detail sheet. Forge filtering, keyboard access, selection,
+ *   focus, and disclosures survive refresh where possible. A failed refresh
+ *   marks data stale and blocks actions until a fresh response; peer
+ *   availability is tracked independently.
  * - Confirm names the server-provided side effect (`kick.effect`) before it
  *   commits. Narrow viewports confirm in a bottom sheet; wide viewports
- *   confirm in the inspector. Consequence text is a note, not extra buttons.
- *   Each confirm has exactly one primary control.
+ *   confirm in the inspector. Actionable confirms keep one primary control;
+ *   dismissal-only confirms use secondary controls.
  * - Tablet widths and up are list plus detail, not a centered phone column.
  * - The grant notice is a single line.
  * - The embedded catalog version must match the API `catalog`; on mismatch
@@ -1061,17 +1181,26 @@ export function renderBoardPage(catalog: string): string {
 body { margin: 0; font-family: system-ui, -apple-system, sans-serif; font-size: 15px; line-height: 1.4; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid #8884; }
 header h1 { font-size: 17px; margin: 0 8px 0 0; }
+header nav { display: flex; flex-wrap: wrap; gap: 8px; font-size: 13px; }
+header nav a { padding: 4px 8px; }
 .grant { flex-basis: 100%; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
 .catalog-note { font-size: 12px; opacity: 0.7; }
 #catalog-mismatch { padding: 8px 12px; font-size: 13px; background: #fff3cd; color: #442d00; }
 #load-error { padding: 8px 12px; font-size: 13px; }
+#stale { padding: 8px 12px; font-size: 13px; background: #f8d7da; color: #58151c; }
+#peer-note { padding: 8px 12px; font-size: 13px; opacity: 0.85; }
 #layout { display: block; padding: 0 0 40px; }
 #lists { display: block; }
 section.list { padding: 8px 12px; }
 section.list h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 8px 0; }
+.group-count { font-size: 13px; opacity: 0.8; }
+details.group { border: 1px solid #8883; border-radius: 8px; margin: 8px 0; padding: 4px 8px; }
+details.group summary { cursor: pointer; padding: 6px 4px; font-weight: 600; }
+details.group summary .why { font-weight: 400; opacity: 0.75; font-size: 13px; }
 ul.rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 li.row { border: 1px solid #8884; border-radius: 8px; padding: 8px 10px; }
 li.row.selected { outline: 2px solid currentColor; }
+li.row:focus { outline: 2px solid currentColor; }
 .row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .reason { font-weight: 650; margin: 0; overflow-wrap: anywhere; }
 .sub { font-size: 13px; opacity: 0.8; overflow-wrap: anywhere; }
@@ -1080,10 +1209,13 @@ li.row.selected { outline: 2px solid currentColor; }
 button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #8888; background: transparent; }
 button.primary { background: #0b5fff; border-color: #0b5fff; color: #fff; font-weight: 650; }
 button.secondary { opacity: 0.85; }
+button:disabled { opacity: 0.45; }
 #inspector { border-top: 1px solid #8884; padding: 12px; }
 #inspector h2 { font-size: 15px; margin: 0 0 4px; overflow-wrap: anywhere; }
 .consequence { font-size: 13px; border-left: 3px solid #0b5fff; padding-left: 8px; }
 .forge-link { font-size: 13px; }
+#signin-panel { border-bottom: 1px solid #8884; padding: 8px 12px; }
+#signin-panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.75; margin: 8px 0; }
 #grok { border-top: 1px solid #8884; }
 #grok .grok-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 #grok input, #grok select { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid #8888; background: transparent; max-width: 100%; }
@@ -1112,6 +1244,12 @@ button.secondary { opacity: 0.85; }
 <body>
 <header>
 <h1>Board</h1>
+<nav aria-label="Board sections">
+<a href="#needs-attention">Needs attention</a>
+<a href="#running">Running &amp; queued</a>
+<a href="#waiting">Waiting / ignored</a>
+<a href="#signin-panel">Runner sign-in</a>
+</nav>
 <label>Forge <select id="forge-switch" aria-label="Forge">
 <option value="gitea">gitea</option>
 <option value="github">github</option>
@@ -1121,17 +1259,12 @@ button.secondary { opacity: 0.85; }
 <div id="grant" class="grant" hidden></div>
 </header>
 <div id="catalog-mismatch" hidden>Board updated — refresh to get the latest kick list.</div>
+<div id="stale" hidden>Data is stale — actions are disabled until a fresh response loads. Use Refresh to load again.</div>
 <div id="load-error" hidden></div>
-<main id="layout">
-<div id="lists">
-<section class="list" aria-label="In progress">
-<h2>In progress</h2>
-<ul id="inprogress" class="rows"></ul>
-</section>
-<section class="list" aria-label="Sitting">
-<h2>Sitting</h2>
-<ul id="sitting" class="rows"></ul>
-</section>
+<div id="peer-note" hidden></div>
+<section id="signin-panel" aria-label="Runner sign-in">
+<h2>Runner sign-in</h2>
+<div class="sub">Runner sign-in lives here so it stays reachable without scrolling through jobs. Effects and access rules are unchanged.</div>
 <section class="list" aria-label="Grok sign-in" id="grok">
 <h2>Grok sign-in</h2>
 <div class="sub">Start a Grok device login on one homelab engine or worker ordinal. No exec into the pod.</div>
@@ -1171,6 +1304,24 @@ button.secondary { opacity: 0.85; }
 <div id="codex-state" class="codex-state"></div>
 </div>
 </section>
+</section>
+<main id="layout">
+<div id="lists">
+<section class="list" aria-label="Needs attention" id="needs-attention">
+<h2>Needs attention</h2>
+<div id="needs-groups"></div>
+</section>
+<section class="list" aria-label="Running and queued" id="running">
+<h2>Running &amp; queued</h2>
+<div id="run-counts" class="group-count"></div>
+<div id="run-lists"></div>
+</section>
+<section class="list" aria-label="Waiting or ignored" id="waiting">
+<h2>Waiting / ignored</h2>
+<div id="waiting-groups"></div>
+</section>
+<ul id="inprogress" class="rows" hidden></ul>
+<ul id="sitting" class="rows" hidden></ul>
 </div>
 <aside id="inspector" aria-live="polite" aria-label="Detail"></aside>
 </main>
@@ -1181,7 +1332,10 @@ button.secondary { opacity: 0.85; }
 <script>
 const PAGE_CATALOG = ${JSON.stringify(catalog)};
 const REQUEUE_EFFECT = ${JSON.stringify(REQUEUE_KICK_EFFECT)};
-const state = { data: null, selected: null, forge: "gitea", catalogOk: true };
+const BLOCKED_EFFECT = ${JSON.stringify(BLOCKED_IMPLEMENT_KICK_EFFECT)};
+const QUEUE_COLLAPSE_AT = 10;
+const DISMISSAL_REASONS = { "foreign-branch": 1, "no-closer": 1, "no-write-access": 1, "not-labeled": 1 };
+const state = { data: null, selected: null, forge: "gitea", catalogOk: true, stale: false, openGroups: {} };
 const $ = (id) => document.getElementById(id);
 const narrow = () => !window.matchMedia("(min-width: 700px)").matches;
 function keyOf(item) { const forge = item.forge || (state.data && state.data.forge) || "gitea"; return forge + "/" + item.owner + "/" + item.repo + "/" + item.kind + "#" + item.number; }
@@ -1189,14 +1343,22 @@ function groupsOf(data) {
   const inProgress = [...(data.in_progress || data.inProgress || [])];
   const needsKick = [...(data.needs_kick || data.needsKick || [])];
   const sitting = [...(data.sitting || data.sitting_on_purpose || [])];
+  let needsKickOverflow = data.needs_kick_overflow || data.needsKickOverflow || 0;
+  let inProgressOverflow = data.in_progress_overflow || data.inProgressOverflow || 0;
   const peers = data.peers && typeof data.peers === "object" ? Object.values(data.peers) : [];
+  let peerAvailable = true;
+  let peerNote = "";
   for (const p of peers) {
-    if (!p || typeof p !== "object" || !p.available) continue;
+    if (!p || typeof p !== "object") continue;
+    if (!p.available) { peerAvailable = false; peerNote = "Peer (" + (p.forge || "github") + ") unavailable — showing local rows only."; continue; }
     inProgress.push(...(p.in_progress || p.inProgress || []));
     needsKick.push(...(p.needs_kick || p.needsKick || []));
     sitting.push(...(p.sitting || p.sitting_on_purpose || []));
+    needsKickOverflow += p.needs_kick_overflow || p.needsKickOverflow || 0;
+    inProgressOverflow += p.in_progress_overflow || p.inProgressOverflow || 0;
+    peerNote = "";
   }
-  return { inProgress, sitting: [...needsKick, ...sitting] };
+  return { inProgress, needsKick, sitting, needsKickOverflow, inProgressOverflow, peerAvailable, peerNote };
 }
 function forgeOf(item, data) { return item.forge || data.forge || "gitea"; }
 function forgeBaseFor(item, data) {
@@ -1218,24 +1380,99 @@ function forgeHref(item, data) {
   const path = item.kind === "review" ? (forge === "github" ? "pull" : "pulls") : "issues";
   return base + "/" + encodeURIComponent(item.owner) + "/" + encodeURIComponent(item.repo) + "/" + path + "/" + item.number;
 }
+function isDismissal(item) { return Boolean(item.kick) && DISMISSAL_REASONS[item.reason]; }
+function attentionKind(item) {
+  const reason = (item.reason || "").trim();
+  if (reason.endsWith(" leased")) return "running";
+  if (reason.endsWith(" queued")) return "queued";
+  if (reason === "implement-latch") return "stuck-recovery";
+  if (reason === "implement skipped") return "blocked";
+  if (reason === "waiting-maintainer") return "answer-needed";
+  if (DISMISSAL_REASONS[reason]) return "dismissal";
+  if (item.failingVerdict === true) return "verdict";
+  if (item.kick && item.kick.effect === REQUEUE_EFFECT) return "exec-failure";
+  if (item.kind === "review" && item.kick && (item.commit || item.headSha)) return "exec-failure";
+  return "waiting";
+}
+function shortStatus(item) {
+  const kind = attentionKind(item);
+  if (kind === "running") return "Running " + item.kind;
+  if (kind === "queued") return "Queued " + item.kind;
+  if (kind === "exec-failure") return "Review failed";
+  if (kind === "verdict") return "Findings published";
+  if (kind === "stuck-recovery") {
+    const effect = item.kick && item.kick.effect ? item.kick.effect : "";
+    if (/conflict/i.test(effect)) return "Stuck — conflict recovery";
+    return "Stuck — follow-up recovery";
+  }
+  if (kind === "blocked") return "Blocked — re-check ready";
+  if (kind === "answer-needed") return "Needs maintainer answer";
+  if (kind === "dismissal") return "Can remove from board";
+  return item.reason;
+}
+function headlineOf(item) { return (typeof item.message === "string" && item.message.trim() !== "" ? item.message : item.reason); }
+function isActionable(item) {
+  if (state.stale) return false;
+  if (!state.catalogOk) return false;
+  if (!item.kick || typeof item.kick.effect !== "string" || item.kick.effect.trim() === "") return false;
+  if (item.reason === "conflict-ignored") return false;
+  return true;
+}
+function isPrimaryAction(item) {
+  if (!isActionable(item)) return false;
+  return !isDismissal(item);
+}
+function kickLabelOf(item) {
+  if (isDismissal(item)) return "Remove from board";
+  const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
+  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") {
+    const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
+    if (/conflict/i.test(effect)) return "Clear latch and queue conflict resolution";
+    return "Clear latch and queue follow-up";
+  }
+  if (id === "implement") return "Re-check and queue implement";
+  const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
+  if (effect === REQUEUE_EFFECT) return "Requeue review";
+  if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
+  return "Remove from board";
+}
+function ageText(ms) {
+  if (!ms || ms <= 0) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 48) return h + "h";
+  return Math.floor(h / 24) + "d";
+}
 async function load() {
   const errBox = $("load-error");
+  const staleBox = $("stale");
   errBox.hidden = true;
   errBox.textContent = "";
   let res;
   try {
     res = await fetch("/api/board", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
   } catch (err) {
+    state.stale = true;
+    staleBox.hidden = false;
     errBox.hidden = false;
-    errBox.textContent = "Board unavailable. Use Refresh to load again.";
+    errBox.textContent = "Board unavailable. Data is stale — actions are disabled until a fresh response loads. Use Refresh to load again.";
+    render();
     return;
   }
   if (!res.ok) {
+    state.stale = true;
+    staleBox.hidden = false;
     errBox.hidden = false;
-    errBox.textContent = res.status === 401 ? "Sign in via the edge proxy, then Refresh." : "Board unavailable (" + res.status + "). Use Refresh to load again.";
+    errBox.textContent = res.status === 401 ? "Sign in via the edge proxy, then Refresh. Data is stale — actions are disabled." : "Board unavailable (" + res.status + "). Data is stale — actions are disabled. Use Refresh to load again.";
+    render();
     return;
   }
   const data = await res.json();
+  state.stale = false;
+  staleBox.hidden = true;
   state.data = data;
   const serverForge = data.forge || "gitea";
   if (!$("forge-switch").dataset.touched) state.forge = serverForge;
@@ -1253,60 +1490,222 @@ async function load() {
     grant.textContent = "";
   }
   if (state.selected) {
-    const all = [...groupsOf(data).inProgress, ...groupsOf(data).sitting];
+    const all = [...groupsOf(data).inProgress, ...groupsOf(data).needsKick, ...groupsOf(data).sitting];
     const stillThere = all.some((item) => keyOf(item) === state.selected && forgeOf(item, data) === state.forge);
     if (!stillThere) state.selected = null;
   }
   render();
 }
-function headlineOf(item) { return (typeof item.message === "string" && item.message.trim() !== "" ? item.message : item.reason); }
-function kickLabelOf(item) {
-  const id = item.kick && typeof item.kick.kick === "string" ? item.kick.kick.trim() : "";
-  if (id === "stuck" || id === "follow-up" || id === "followup" || id === "stuck-latch") {
-    const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
-    if (/conflict/i.test(effect)) return "Clear latch and queue conflict resolution";
-    return "Clear latch and queue follow-up";
-  }
-  if (id === "implement") return "Re-check and queue implement";
-  const effect = item.kick && typeof item.kick.effect === "string" ? item.kick.effect : "";
-  if (effect === REQUEUE_EFFECT) return "Requeue review";
-  if ((typeof item.commit === "string" && item.commit.trim() !== "") || (typeof item.headSha === "string" && item.headSha.trim() !== "")) return "Requeue review";
-  return "Remove row";
-}
 function rowItem(item, opts) {
   const li = document.createElement("li");
   li.className = "row" + (state.selected === keyOf(item) ? " selected" : "");
+  li.tabIndex = 0;
+  li.dataset.key = keyOf(item);
   const head = document.createElement("div");
   head.className = "row-head";
   const h = document.createElement("p");
   h.className = "reason";
-  h.textContent = headlineOf(item);
+  h.textContent = item.owner + "/" + item.repo + "#" + item.number + " · " + shortStatus(item);
   head.appendChild(h);
   li.appendChild(head);
   const sub = document.createElement("div");
   sub.className = "sub";
-  let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind;
+  let subText = item.kind + " · " + forgeOf(item, state.data);
   if (item.commit) subText += " · " + String(item.commit).slice(0, 8);
+  else if (item.headSha) subText += " · " + String(item.headSha).slice(0, 8);
   sub.textContent = subText;
   li.appendChild(sub);
-  const hasKick = Boolean(item.kick && typeof item.kick.effect === "string" && item.kick.effect.trim() !== "");
-  if (opts.section === "sitting" && hasKick && state.catalogOk) {
+  const actionable = isActionable(item);
+  if (actionable) {
     const actions = document.createElement("div");
     actions.className = "row-actions";
     const btn = document.createElement("button");
     btn.type = "button";
     btn.textContent = kickLabelOf(item);
-    btn.addEventListener("click", (ev) => { ev.stopPropagation(); state.selected = keyOf(item); render(); openConfirm(item); });
+    btn.className = isPrimaryAction(item) ? "primary" : "secondary";
+    if (state.stale || !state.catalogOk) btn.disabled = true;
+    btn.addEventListener("click", (ev) => { ev.stopPropagation(); if (state.stale) return; state.selected = keyOf(item); render(); openConfirm(item); });
     actions.appendChild(btn);
     li.appendChild(actions);
-  } else if (opts.section === "sitting" && !hasKick) {
+  } else if (attentionKind(item) === "dismissal" || !item.kick) {
     const line = document.createElement("div");
     line.className = "status-line";
-    line.textContent = "Sitting on purpose";
+    line.textContent = item.reason === "conflict-ignored" ? "Left to author — no board action" : "Waiting — no board action";
     li.appendChild(line);
   }
-  li.addEventListener("click", () => { state.selected = keyOf(item); render(); if (!narrow()) { const el = $("inspector").querySelector("button.primary"); } });
+  const activate = () => { state.selected = keyOf(item); render(); const el = $("inspector").querySelector("button"); if (el && !narrow()) { } };
+  li.addEventListener("click", activate);
+  li.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(); } });
   return li;
+}
+function renderNeeds(groups, data, forge) {
+  const box = $("needs-groups");
+  box.textContent = "";
+  const needs = groups.needsKick.filter((item) => forgeOf(item, data) === forge);
+  const waitingMaintainer = groups.sitting.filter((item) => forgeOf(item, data) === forge && item.reason === "waiting-maintainer");
+  const defs = [
+    { key: "exec-failure", title: "Review execution failed", why: "Requeue the same commit; prose stays in detail." },
+    { key: "verdict", title: "Published findings", why: "A failing verdict was published; requeue to address it." },
+    { key: "stuck-recovery", title: "Stuck recovery", why: "Clear the latch and queue follow-up or conflict resolution." },
+    { key: "blocked", title: "Dependency wait", why: "Re-check dependencies and queue implement when unblocked." },
+    { key: "answer-needed", title: "Needs maintainer answer", why: "A maintainer question is waiting on the forge." },
+  ];
+  let total = 0;
+  for (const def of defs) {
+    let items = [];
+    if (def.key === "answer-needed") items = waitingMaintainer;
+    else if (def.key === "exec-failure") items = needs.filter((i) => attentionKind(i) === "exec-failure");
+    else if (def.key === "verdict") items = needs.filter((i) => attentionKind(i) === "verdict");
+    else if (def.key === "stuck-recovery") items = needs.filter((i) => attentionKind(i) === "stuck-recovery");
+    else if (def.key === "blocked") items = needs.filter((i) => attentionKind(i) === "blocked");
+    total += items.length;
+    const det = document.createElement("details");
+    det.className = "group";
+    det.dataset.group = "needs-" + def.key;
+    const wasOpen = state.openGroups["needs-" + def.key];
+    det.open = wasOpen === undefined ? items.length > 0 : wasOpen;
+    det.addEventListener("toggle", () => { state.openGroups["needs-" + def.key] = det.open; });
+    const sum = document.createElement("summary");
+    sum.textContent = def.title + " (" + items.length + ") — " + def.why;
+    det.appendChild(sum);
+    if (items.length === 0) {
+      const p = document.createElement("div");
+      p.className = "sub";
+      p.textContent = "None — nothing in this group.";
+      det.appendChild(p);
+    } else {
+      const ul = document.createElement("ul");
+      ul.className = "rows";
+      for (const item of items) ul.appendChild(rowItem(item, { section: "needs" }));
+      det.appendChild(ul);
+    }
+    box.appendChild(det);
+  }
+  if (groups.needsKickOverflow > 0) {
+    const p = document.createElement("div");
+    p.className = "sub";
+    p.textContent = "Showing " + needs.length + " of " + (needs.length + groups.needsKickOverflow) + " — capped, not exhaustive. Refresh shows the latest.";
+    box.appendChild(p);
+  }
+  return total;
+}
+function renderRunning(groups, data, forge) {
+  const counts = $("run-counts");
+  const lists = $("run-lists");
+  counts.textContent = "";
+  lists.textContent = "";
+  const all = groups.inProgress.filter((item) => forgeOf(item, data) === forge);
+  const running = all.filter((i) => attentionKind(i) === "running");
+  const queued = all.filter((i) => attentionKind(i) !== "running");
+  const queuedAges = queued.map((i) => (typeof i.createdAt === "number" ? Date.now() - i.createdAt : 0)).filter((n) => n > 0);
+  const oldest = queuedAges.length > 0 ? Math.max.apply(null, queuedAges) : 0;
+  let text = "Running (" + running.length + ") · Queued (" + queued.length + ")";
+  if (queued.length > 0) text += oldest > 0 ? " · Oldest queued " + ageText(oldest) : " · Oldest queued unknown";
+  if (groups.inProgressOverflow > 0) text += " · Showing " + all.length + " of " + (all.length + groups.inProgressOverflow) + " — capped, not exhaustive";
+  counts.textContent = text;
+  const peerNote = $("peer-note");
+  if (!groups.peerAvailable) { peerNote.hidden = false; peerNote.textContent = groups.peerNote; }
+  else if (groups.peerNote) { peerNote.hidden = false; peerNote.textContent = groups.peerNote; }
+  else { peerNote.hidden = true; peerNote.textContent = ""; }
+  if (all.length === 0) {
+    const li = document.createElement("div");
+    li.className = "sub";
+    li.textContent = groups.peerAvailable ? "None — nothing running or queued on this forge." : "None locally — peer unavailable, showing local rows only.";
+    lists.appendChild(li);
+    return;
+  }
+  const runHead = document.createElement("div");
+  runHead.className = "sub";
+  runHead.textContent = "Running first (" + running.length + ")";
+  lists.appendChild(runHead);
+  const runUl = document.createElement("ul");
+  runUl.className = "rows";
+  for (const item of running) runUl.appendChild(rowItem(item, { section: "inprogress" }));
+  if (running.length === 0) {
+    const li = document.createElement("div");
+    li.className = "sub";
+    li.textContent = "None running.";
+    lists.appendChild(li);
+  } else lists.appendChild(runUl);
+  const qHead = document.createElement("div");
+  qHead.className = "sub";
+  qHead.textContent = "Queued (" + queued.length + ")";
+  lists.appendChild(qHead);
+  if (queued.length === 0) {
+    const li = document.createElement("div");
+    li.className = "sub";
+    li.textContent = "None queued.";
+    lists.appendChild(li);
+  } else if (queued.length <= QUEUE_COLLAPSE_AT) {
+    const qUl = document.createElement("ul");
+    qUl.className = "rows";
+    for (const item of queued) qUl.appendChild(rowItem(item, { section: "inprogress" }));
+    lists.appendChild(qUl);
+  } else {
+    const first = queued.slice(0, QUEUE_COLLAPSE_AT);
+    const rest = queued.slice(QUEUE_COLLAPSE_AT);
+    const qUl = document.createElement("ul");
+    qUl.className = "rows";
+    for (const item of first) qUl.appendChild(rowItem(item, { section: "inprogress" }));
+    lists.appendChild(qUl);
+    const det = document.createElement("details");
+    det.className = "group";
+    det.dataset.group = "queued-rest";
+    det.open = state.openGroups["queued-rest"] === true;
+    det.addEventListener("toggle", () => { state.openGroups["queued-rest"] = det.open; });
+    const sum = document.createElement("summary");
+    sum.textContent = "Show " + rest.length + " more queued";
+    det.appendChild(sum);
+    const rUl = document.createElement("ul");
+    rUl.className = "rows";
+    for (const item of rest) rUl.appendChild(rowItem(item, { section: "inprogress" }));
+    det.appendChild(rUl);
+    lists.appendChild(det);
+  }
+  if (groups.inProgressOverflow > 0) {
+    const p = document.createElement("div");
+    p.className = "sub";
+    p.textContent = "Capped view: oldest queued age covers visible rows only.";
+    lists.appendChild(p);
+  }
+}
+function renderWaiting(groups, data, forge) {
+  const box = $("waiting-groups");
+  box.textContent = "";
+  const waiting = [...groups.sitting.filter((i) => i.reason !== "waiting-maintainer"), ...groups.needsKick.filter((i) => attentionKind(i) === "dismissal" || attentionKind(i) === "waiting")];
+  const filtered = waiting.filter((item) => forgeOf(item, data) === forge);
+  const byReason = {};
+  for (const item of filtered) {
+    const r = item.reason;
+    if (!byReason[r]) byReason[r] = [];
+    byReason[r].push(item);
+  }
+  const reasons = Object.keys(byReason).sort();
+  if (reasons.length === 0) {
+    const p = document.createElement("div");
+    p.className = "sub";
+    p.textContent = "None — nothing waiting on this forge.";
+    box.appendChild(p);
+    return;
+  }
+  for (const reason of reasons) {
+    const items = byReason[reason];
+    const det = document.createElement("details");
+    det.className = "group";
+    det.dataset.group = "waiting-" + reason;
+    const wasOpen = state.openGroups["waiting-" + reason];
+    det.open = wasOpen === undefined ? false : wasOpen;
+    det.addEventListener("toggle", () => { state.openGroups["waiting-" + reason] = det.open; });
+    const dismissible = items.filter(isDismissal).length;
+    const sum = document.createElement("summary");
+    sum.textContent = reason + " (" + items.length + ")" + (dismissible > 0 ? " — " + dismissible + " can remove from board" : " — waiting");
+    det.appendChild(sum);
+    const ul = document.createElement("ul");
+    ul.className = "rows";
+    for (const item of items) ul.appendChild(rowItem(item, { section: "waiting" }));
+    det.appendChild(ul);
+    box.appendChild(det);
+  }
 }
 function render() {
   const data = state.data;
@@ -1314,32 +1713,23 @@ function render() {
   const groups = groupsOf(data);
   const inList = $("inprogress");
   const sitList = $("sitting");
-  inList.textContent = "";
-  sitList.textContent = "";
-  const inFiltered = groups.inProgress.filter((item) => forgeOf(item, data) === state.forge);
-  const sitFiltered = groups.sitting.filter((item) => forgeOf(item, data) === state.forge);
-  if (inFiltered.length === 0) {
-    const li = document.createElement("li");
-    li.className = "row";
-    li.textContent = "Nothing in progress on this forge.";
-    inList.appendChild(li);
-  } else {
-    for (const item of inFiltered) inList.appendChild(rowItem(item, { section: "inprogress" }));
-  }
-  if (sitFiltered.length === 0) {
-    const li = document.createElement("li");
-    li.className = "row";
-    li.textContent = "Nothing sitting on this forge.";
-    sitList.appendChild(li);
-  } else {
-    for (const item of sitFiltered) sitList.appendChild(rowItem(item, { section: "sitting" }));
-  }
+  if (inList) inList.textContent = "";
+  if (sitList) sitList.textContent = "";
+  const focusedKey = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.key : null;
+  renderNeeds(groups, data, state.forge);
+  renderRunning(groups, data, state.forge);
+  renderWaiting(groups, data, state.forge);
   renderInspector();
+  if (focusedKey) {
+    const next = document.querySelector('[data-key="' + focusedKey + '"]');
+    if (next && document.activeElement !== next) { try { next.focus({ preventScroll: true }); } catch (e) {} }
+  }
 }
 function selectedItem() {
   const data = state.data;
   if (!data || !state.selected) return null;
-  const all = [...groupsOf(data).inProgress, ...groupsOf(data).sitting];
+  const groups = groupsOf(data);
+  const all = [...groups.inProgress, ...groups.needsKick, ...groups.sitting];
   return all.find((item) => keyOf(item) === state.selected && forgeOf(item, data) === state.forge) || null;
 }
 function confirmBlock(item, data, confirmIdPrefix) {
@@ -1347,6 +1737,13 @@ function confirmBlock(item, data, confirmIdPrefix) {
   const hasKick = Boolean(item.kick && typeof item.kick.effect === "string");
   const kickId = item.kick && typeof item.kick.kick === "string" && item.kick.kick.trim() !== "" ? item.kick.kick.trim() : "";
   const idempotencyKey = (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : String(Date.now()) + "-" + Math.floor(Math.random() * 1e9));
+  if (state.stale) {
+    const note = document.createElement("p");
+    note.className = "consequence";
+    note.textContent = "Data is stale — actions are disabled until a fresh response loads.";
+    wrap.appendChild(note);
+    return wrap;
+  }
   if (hasKick && state.catalogOk) {
     const note = document.createElement("p");
     note.className = "consequence";
@@ -1354,13 +1751,14 @@ function confirmBlock(item, data, confirmIdPrefix) {
     wrap.appendChild(note);
     const primary = document.createElement("button");
     primary.type = "button";
-    primary.className = "primary";
+    primary.className = isDismissal(item) ? "secondary" : "primary";
     primary.id = confirmIdPrefix + "-confirm";
     primary.textContent = kickLabelOf(item);
     const msg = document.createElement("div");
     msg.className = "sub";
     msg.id = confirmIdPrefix + "-msg";
     primary.addEventListener("click", async () => {
+      if (state.stale) { msg.textContent = "Data is stale — refresh before confirming."; return; }
       if (!state.catalogOk) {
         msg.textContent = "Board updated — refresh to get the latest kick list before confirming.";
         return;
@@ -1431,13 +1829,20 @@ function renderInspector() {
   const item = selectedItem();
   if (!item || !data) { box.textContent = "Select a row to see detail."; return; }
   const title = document.createElement("h2");
-  title.textContent = headlineOf(item);
+  title.textContent = item.owner + "/" + item.repo + "#" + item.number + " · " + shortStatus(item);
   box.appendChild(title);
+  const msg = document.createElement("div");
+  msg.className = "sub";
+  msg.textContent = headlineOf(item);
+  box.appendChild(msg);
   const sub = document.createElement("div");
   sub.className = "sub";
   let subText = item.owner + "/" + item.repo + "#" + item.number + " · " + item.kind + " · " + forgeOf(item, data) + " · " + item.reason;
   if (item.commit) subText += " · " + item.commit;
+  else if (item.headSha) subText += " · " + item.headSha;
   if (typeof item.decidedAt === "number") subText += " · decided " + new Date(item.decidedAt).toLocaleString();
+  if (typeof item.createdAt === "number") subText += " · enqueued " + new Date(item.createdAt).toLocaleString();
+  if (item.failingVerdict === true) subText += " · failing verdict";
   sub.textContent = subText;
   box.appendChild(sub);
   const href = forgeHref(item, data);
@@ -1452,18 +1857,23 @@ function renderInspector() {
   box.appendChild(confirmBlock(item, data, "insp"));
 }
 function openConfirm(item) {
-  if (!narrow()) { render(); const btn = $("inspector").querySelector("button.primary"); if (btn) btn.focus(); return; }
+  if (state.stale) { render(); return; }
+  if (!narrow()) { render(); const btn = $("inspector").querySelector("button.primary, button.secondary"); if (btn) btn.focus(); return; }
   const wrap = $("sheet-wrap");
   const sheet = $("sheet");
   sheet.textContent = "";
   const data = state.data;
   const title = document.createElement("h2");
-  title.textContent = headlineOf(item);
+  title.textContent = item.owner + "/" + item.repo + "#" + item.number + " · " + shortStatus(item);
   sheet.appendChild(title);
   const sub = document.createElement("div");
   sub.className = "sub";
   sub.textContent = item.owner + "/" + item.repo + "#" + item.number + " · " + forgeOf(item, data);
   sheet.appendChild(sub);
+  const msg = document.createElement("div");
+  msg.className = "sub";
+  msg.textContent = headlineOf(item);
+  sheet.appendChild(msg);
   sheet.appendChild(confirmBlock(item, data, "sheet"));
   wrap.hidden = false;
 }
@@ -1901,6 +2311,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           ...(groups.needs_kick_overflow
             ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
             : {}),
+          ...(groups.in_progress_overflow
+            ? { in_progress_overflow: groups.in_progress_overflow, inProgressOverflow: groups.in_progress_overflow }
+            : {}),
           sitting: groups.sitting,
           sitting_on_purpose: [...groups.sitting],
           forge: localForge,
@@ -1933,6 +2346,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
         needsKick: [...groups.needs_kick],
         ...(groups.needs_kick_overflow
           ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
+          : {}),
+        ...(groups.in_progress_overflow
+          ? { in_progress_overflow: groups.in_progress_overflow, inProgressOverflow: groups.in_progress_overflow }
           : {}),
         sitting: groups.sitting,
         sitting_on_purpose: [...groups.sitting],
@@ -1983,6 +2399,9 @@ export function createBoardFetchHandler(deps: BoardHandlerDeps) {
           needsKick: [...groups.needs_kick],
           ...(groups.needs_kick_overflow
             ? { needs_kick_overflow: groups.needs_kick_overflow, needsKickOverflow: groups.needs_kick_overflow }
+            : {}),
+          ...(groups.in_progress_overflow
+            ? { in_progress_overflow: groups.in_progress_overflow, inProgressOverflow: groups.in_progress_overflow }
             : {}),
           sitting: groups.sitting,
           sitting_on_purpose: [...groups.sitting],

@@ -168,6 +168,7 @@ function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
         logger(`[board-mcp] tool=board ${coords} rows=${rows} ms=${Date.now() - started}`);
         const unfiltered = owner === "" && repo === "";
         const overflow = unfiltered ? groups.needs_kick_overflow : undefined;
+        const inProgressOverflow = unfiltered ? groups.in_progress_overflow : undefined;
         return mcpResult(
           redact(
             JSON.stringify({
@@ -175,6 +176,9 @@ function createBoardMcpServer(deps: BoardMcpDeps): McpServer {
               in_progress,
               needs_kick,
               ...(overflow ? { needs_kick_overflow: overflow, needsKickOverflow: overflow } : {}),
+              ...(inProgressOverflow
+                ? { in_progress_overflow: inProgressOverflow, inProgressOverflow: inProgressOverflow }
+                : {}),
               sitting,
             }),
             secrets
