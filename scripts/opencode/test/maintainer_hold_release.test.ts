@@ -545,3 +545,126 @@ describe("router release-only path on both forges", () => {
     expect(logs.some((line) => line.includes("maintainer hold released for kirmanak/demo#15"))).toBe(true);
   });
 });
+
+describe("tryReleaseMaintainerHold with a two-review publish pair", () => {
+  const INLINE_ID = 4109;
+  const SUMMARY_ID = 4110;
+
+  function pairSummaryBody(): string {
+    return [
+      "<!-- jumi-review:kirmanak/demo#15 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      "<!-- jumi-findings-list:start -->",
+      "- ❓ [`src/table.ts:73`](https://gitea.kirmanak.stream/kirmanak/demo/pulls/15#issuecomment-1): maintainer: can the table see that?",
+      "<!-- jumi-findings-list:end -->",
+      "",
+      "<!-- jumi-check: success; 1 maintainer question -->",
+    ].join("\n");
+  }
+
+  function pairReviews() {
+    return [
+      {
+        id: INLINE_ID,
+        body: "",
+        user: makeUser({ login: "jumi" }),
+        commit_id: HEAD,
+        submitted_at: "2026-11-19T18:29:19Z",
+        updated_at: "2026-11-19T18:29:19Z",
+      },
+      {
+        id: SUMMARY_ID,
+        body: pairSummaryBody(),
+        user: makeUser({ login: "jumi" }),
+        commit_id: HEAD,
+        submitted_at: "2026-11-19T18:29:20Z",
+        updated_at: "2026-11-19T18:29:20Z",
+      },
+    ];
+  }
+
+  function pairInline(id: number, body: string, reviewId: number) {
+    return {
+      ...makeComment({ id, body, user: makeUser({ login: "jumi" }) }),
+      path: "src/table.ts",
+      pull_request_review_id: reviewId,
+    };
+  }
+
+  function pairApi(statuses: Array<{ state: string; description?: string; context?: string }>, inlines: unknown[]) {
+    return {
+      getPR: async () => nonJumiPr(),
+      listPullReviews: async () => pairReviews(),
+      listIssueComments: async () => [],
+      listPullReviewComments: async () => inlines,
+      createCommitStatus: async (
+        _owner: string,
+        _repo: string,
+        _sha: string,
+        status: { state: string; description?: string; context?: string }
+      ) => {
+        statuses.push(status);
+        return status as never;
+      },
+      getRepoFile: async () => ({ found: false }),
+      getCollaboratorPermission: async () => ({ permission: "write" }),
+      listOpenPulls: async () => [],
+      getIssue: async () => makeIssue(),
+    };
+  }
+
+  test("companion inline-only ❓ releases the held head", async () => {
+    const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+    const api = pairApi(statuses, [
+      pairInline(9001, "❓ maintainer: can the table see that?\n\n<!-- jumi-review:kirmanak/demo#15 -->", INLINE_ID),
+    ]);
+    const logged: string[] = [];
+    const outcome = await tryReleaseMaintainerHold({
+      api: api as never,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 15,
+      senderLogin: "kirmanak",
+      botUsername: "jumi",
+      trustedSenderLogins: [],
+      followupIgnoreLogins: [],
+      defaultBranch: "main",
+      logger: (message) => logged.push(message),
+    });
+    expect(outcome.outcome).toBe("released");
+    if (outcome.outcome === "released") {
+      expect(outcome.openMaintainers).toBe(1);
+    }
+    expect(statuses.filter((status) => status.state === "success")).toHaveLength(1);
+    expect(logged.some((line) => line.includes("maintainer hold released") && line.includes("1 answered"))).toBe(true);
+  });
+
+  test("companion 🟡 keeps the hold and logs the counted review ids", async () => {
+    const statuses: Array<{ state: string; description?: string; context?: string }> = [];
+    const api = pairApi(statuses, [
+      pairInline(9001, "❓ maintainer: can the table see that?\n\n<!-- jumi-review:kirmanak/demo#15 -->", INLINE_ID),
+      pairInline(9002, "🟡 risk: race in the retry loop.\n\n<!-- jumi-review:kirmanak/demo#15 -->", INLINE_ID),
+    ]);
+    const logged: string[] = [];
+    const outcome = await tryReleaseMaintainerHold({
+      api: api as never,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 15,
+      senderLogin: "kirmanak",
+      botUsername: "jumi",
+      trustedSenderLogins: [],
+      followupIgnoreLogins: [],
+      defaultBranch: "main",
+      logger: (message) => logged.push(message),
+    });
+    expect(outcome.outcome).toBe("skip");
+    expect(statuses.filter((status) => status.state === "success")).toHaveLength(0);
+    const kept = logged.filter((line) => line.includes("maintainer hold kept"));
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.some((line) => line.includes(`${INLINE_ID}`) && line.includes(`${SUMMARY_ID}`))).toBe(true);
+  });
+});

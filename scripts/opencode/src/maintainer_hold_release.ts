@@ -1,7 +1,6 @@
 import {
   assessMaintainerHoldRelease,
   commitMatchesHead,
-  inlinesForPullReview,
   isJumiPullReviewWriteup,
   isJumiReviewSticky,
   lastCheckTrailer,
@@ -18,6 +17,7 @@ import {
   isMaintainerQuestionsHoldEnabled,
   loadSettingsSnapshot,
 } from "./repo_settings.ts";
+import { inlinesForReviewGroup, reviewGroupIds } from "./review_groups.ts";
 import { type HoldStatusPort, postSuggestionHoldSuccessOrThrow } from "./suggestion_hold.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
@@ -176,8 +176,10 @@ export async function tryReleaseMaintainerHold(opts: {
     );
     return { outcome: "skip", reason: `PR head changed from ${from} to ${to}` };
   }
-  const isPullReview = jumiReviews.some((entry) => entry.id === latest.id);
-  const reviewInlines = isPullReview ? inlinesForPullReview(latest.id, rawInlines) : [];
+  const summaryReview = rawReviews.find((entry) => entry.id === latest.id);
+  const reviewInlines =
+    summaryReview != null ? inlinesForReviewGroup(summaryReview, rawReviews, rawInlines, opts.botUsername) : [];
+  const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, rawReviews, opts.botUsername) : [];
   const assessment = assessMaintainerHoldRelease({
     reviewBody,
     inlines: reviewInlines,
@@ -216,7 +218,8 @@ export async function tryReleaseMaintainerHold(opts: {
   log(
     `maintainer hold kept for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${keepReason} ` +
       `(maintainers=${assessment.openMaintainers} bugs=${assessment.openBugs} risks=${assessment.openRisks} ` +
-      `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess})`
+      `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess} ` +
+      `reviews=[${groupIds.join(",")}])`
   );
   return { outcome: "skip", reason: `maintainer hold kept: ${keepReason}` };
 }
