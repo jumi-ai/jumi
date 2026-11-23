@@ -48,7 +48,12 @@ import {
   type WebhookPolicy,
 } from "./webhook.ts";
 import type { DeliveryDedupe } from "./webhook_delivery.ts";
-import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
+import {
+  type HandleWorkerWebhookDeps,
+  handleWorkerWebhookEvent,
+  settleReviewsForClosedPull,
+  type WorkerWebhookPolicy,
+} from "./worker_webhook.ts";
 
 const JUMI_LABEL = "jumi";
 const GITHUB_ORIGIN = "https://github.com";
@@ -941,13 +946,14 @@ export async function handleGithubWebhookEvent(
     }
     if ((action === "closed" || action === "merged") && event === "pull_request") {
       // Review-only mode has no worker handler to record the close: mark it
-      // here so the board hides the requeue row. Forge-free, best-effort.
+      // here so the board hides the requeue row, and settle the pull's
+      // review rows. Forge-free, best-effort.
       try {
         const payload = parsePullRequestPayload(rawBody);
         const [owner, repo] = payload.repository.full_name.split("/");
         const sits = reviewSitsFor(deps);
-        if (owner && repo && sits?.markPullClosed) {
-          await sits.markPullClosed(owner, repo, payload.pull_request.number).catch(() => {});
+        if (owner && repo) {
+          await settleReviewsForClosedPull(sits, deps.review, owner, repo, payload.pull_request.number, logger);
         }
       } catch {
         // Best-effort marker only; the skip below owns the response.
