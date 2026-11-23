@@ -3293,21 +3293,14 @@ export async function implementFollowUp(
       } catch {
         // Best-effort: never fail the follow-up on a status post.
       }
-      // Refused schedule retry: the forge refused Jumi's auto-merge
-      // schedule at open, and this no-changes round (for example a
-      // maintainer reply) may have fixed the cause without a push. Run
-      // on every no-changes round, whatever the hold outcome: Gitea's
-      // merge-when-checks-succeed still waits for the required checks,
-      // so a kept hold still blocks the merge on the forge side.
-      // Best-effort like the hold release: never throws, never changes
-      // the follow-up result. Pushed rounds keep using
-      // `ensureAutomergeAfterPush` only, so a round makes at most one
-      // schedule call.
+      // Refused-schedule retry: this no-changes round may have fixed the
+      // refusal cause without a push. Runs on every no-changes round
+      // whatever the hold outcome (a kept hold still blocks the merge
+      // forge-side); best-effort, never changes the result. Pushed rounds
+      // keep using `ensureAutomergeAfterPush` only (at most one call/round).
       try {
-        const prBaseRef =
-          pr.base && typeof pr.base === "object" && typeof pr.base.ref === "string" && pr.base.ref.trim()
-            ? pr.base.ref.trim()
-            : undefined;
+        const rawBase = (pr as { base?: { ref?: unknown } }).base?.ref;
+        const prBaseRef = typeof rawBase === "string" && rawBase.trim() ? rawBase.trim() : undefined;
         await retryRefusedAutomergeSchedule({
           api: opts.api as never,
           forgeKind: opts.forgeKind ?? "gitea",
