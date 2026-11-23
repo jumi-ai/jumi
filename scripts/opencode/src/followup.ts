@@ -1,7 +1,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
-import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
+import { pushClaimedBranchWithAutomergeRestore, retryRefusedAutomergeSchedule } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -3282,6 +3282,40 @@ export async function implementFollowUp(
         }
       } catch {
         // Best-effort: never fail the follow-up on a status post.
+      }
+      // Refused schedule retry: the forge refused Jumi's auto-merge
+      // schedule at open, and this no-changes round (for example a
+      // maintainer reply) may have fixed the cause without a push. Run
+      // on every no-changes round, whatever the hold outcome: Gitea's
+      // merge-when-checks-succeed still waits for the required checks,
+      // so a kept hold still blocks the merge on the forge side.
+      // Best-effort like the hold release: never throws, never changes
+      // the follow-up result. Pushed rounds keep using
+      // `ensureAutomergeAfterPush` only, so a round makes at most one
+      // schedule call.
+      try {
+        const prBaseRef =
+          pr.base && typeof pr.base === "object" && typeof pr.base.ref === "string" && pr.base.ref.trim()
+            ? pr.base.ref.trim()
+            : undefined;
+        await retryRefusedAutomergeSchedule({
+          api: opts.api as never,
+          forgeKind: opts.forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: pr.number,
+          automergeRepos: opts.automergeRepos,
+          botUsername: opts.botUsername,
+          automergeEnabled: opts.automergeEnabled,
+          trustedSenderLogins: effectiveTrustedUpFront,
+          issueNumber: opts.job.issueNumber,
+          baseBranch: opts.job.defaultBranch,
+          prLabels: ((pr as { labels?: unknown }).labels ?? []) as never,
+          ...(prBaseRef ? { prBaseBranch: prBaseRef } : {}),
+          log,
+        });
+      } catch {
+        // Best-effort: never fail the follow-up on an automerge retry.
       }
     } else if (followUpResult.status === "skipped") {
       await resolveHeld("skipped", holdReasonForSkippedResult((followUpResult as { reason?: unknown }).reason));

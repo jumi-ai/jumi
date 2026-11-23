@@ -39,7 +39,7 @@ function hasAutomergeRefusedMarker(body: unknown): boolean {
 function automergeRefusedNote(detail?: string, retryAfterPush = true): string {
   const reason = detail ? ` but the forge refused (${detail})` : " but the forge refused";
   const retry = retryAfterPush
-    ? "Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green."
+    ? "Jumi tries again after its next push or its next follow-up round (for example after a maintainer reply); otherwise a person merges once reviews and CI are green."
     : "A person needs to merge once reviews and CI are green.";
   return `Jumi tried to schedule auto-merge on this pull request${reason}. ${retry}\n${AUTOMERGE_REFUSED_MARKER}`;
 }
@@ -1375,6 +1375,118 @@ export interface RestoreAutomergeInput {
 }
 
 /**
+ * Input for retrying a refused auto-merge schedule. The schedule at open was
+ * refused but Jumi's own sticky says so: a later push — or a later follow-up
+ * round with no push — may have made the PR mergeable, so run the full gate
+ * again. Any other sticky (or none) keeps today's behaviour, so a
+ * person-cancelled schedule is still left alone.
+ */
+export interface RetryRefusedAutomergeInput {
+  api: AutomergeApi;
+  forgeKind: ForgeKind;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  automergeRepos: readonly string[] | undefined;
+  botUsername: string;
+  automergeEnabled?: boolean;
+  trustedSenderLogins?: readonly string[];
+  issueNumber?: number;
+  /**
+   * Branch that sources Jumi settings (the repository default branch). Read
+   * from the repository when absent.
+   */
+  baseBranch?: string;
+  /** Pre-fetched PR labels (avoids an extra getPR when the caller already has them). */
+  prLabels?: AutomergeLabelList | null;
+  /** PR's actual base branch for required-check validation. Read from the PR when absent. */
+  prBaseBranch?: string;
+  log?: (message: string) => void;
+}
+
+/**
+ * Retry a refused auto-merge schedule: when the PR's automerge sticky still
+ * holds Jumi's own refused-schedule note (bot-authored, both markers), run
+ * the full `scheduleAutomergeForPr` gate — PR labels, default-branch
+ * settings, the PR's actual base for required checks, `issueNumber` for the
+ * labeller fallback — and upsert the scheduled note on success. Only the
+ * refused-note state triggers a schedule. Never throws; failures stay
+ * silent. Shared by the post-push restore and the no-changes follow-up
+ * branch so a round makes at most one schedule call.
+ */
+export async function retryRefusedAutomergeSchedule(
+  input: RetryRefusedAutomergeInput
+): Promise<{ scheduled: boolean }> {
+  const log = input.log ?? (() => undefined);
+  try {
+    const enabled = input.automergeEnabled ?? true;
+    if (!enabled) return { scheduled: false };
+    if (!isAutomergeRepo(input.owner, input.repo, input.automergeRepos)) return { scheduled: false };
+    if (!(await hasRefusedAutomergeNote(input.api, input.owner, input.repo, input.prNumber, input.botUsername, log))) {
+      return { scheduled: false };
+    }
+    let baseBranch = input.baseBranch?.trim() ? input.baseBranch.trim() : undefined;
+    if (!baseBranch) {
+      try {
+        const info = await input.api.getRepo(input.owner, input.repo);
+        baseBranch =
+          typeof info.default_branch === "string" && info.default_branch.trim() ? info.default_branch.trim() : "main";
+      } catch (err) {
+        log(`automerge repo unreadable for ${input.owner}/${input.repo}: ${errorMessage(err)}`);
+        return { scheduled: false };
+      }
+    }
+    let prLabels: AutomergeLabelList | undefined =
+      input.prLabels === undefined || input.prLabels === null ? undefined : input.prLabels;
+    let prBaseBranch: string | undefined = input.prBaseBranch?.trim() ? input.prBaseBranch.trim() : undefined;
+    if (prLabels === undefined || prBaseBranch === undefined) {
+      try {
+        const pr = await input.api.getPR(input.owner, input.repo, input.prNumber);
+        if (prLabels === undefined) {
+          prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
+        }
+        if (prBaseBranch === undefined) prBaseBranch = prBaseRefOf(pr);
+      } catch (err) {
+        log(`automerge re-read failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
+        return { scheduled: false };
+      }
+    }
+    const result = await scheduleAutomergeForPr({
+      api: input.api,
+      forgeKind: input.forgeKind,
+      owner: input.owner,
+      repo: input.repo,
+      prNumber: input.prNumber,
+      // Settings come from the default branch; required-check validation
+      // uses the PR's actual base branch (`prBaseBranch`, no fallback).
+      baseBranch,
+      ...(prBaseBranch ? { prBaseBranch } : {}),
+      automergeRepos: input.automergeRepos,
+      botUsername: input.botUsername,
+      automergeEnabled: input.automergeEnabled,
+      trustedSenderLogins: input.trustedSenderLogins,
+      issueNumber: input.issueNumber,
+      prLabels,
+      log,
+    });
+    if (result.scheduled) {
+      await postAutomergeNote(
+        input.api,
+        input.owner,
+        input.repo,
+        input.prNumber,
+        input.botUsername,
+        automergeScheduledNote()
+      );
+    }
+    return result;
+  } catch (err) {
+    log(`automerge refused retry failed for ${input.owner}/${input.repo}#${input.prNumber}: ${errorMessage(err)}`);
+    return { scheduled: false };
+  }
+}
+
+/**
  * Keep the schedule across a follow-up or conflict push. Restores the
  * schedule only when it was present just before Jumi's push and the forge
  * dropped it; a person-cancelled (or never scheduled) pull is left alone.
@@ -1533,36 +1645,22 @@ export async function ensureAutomergeAfterPush(input: RestoreAutomergeInput): Pr
     // push may have made the PR mergeable, so run the full gate again.
     // Any other sticky (or none) keeps today's behaviour, so a
     // person-cancelled schedule is still left alone.
-    if (await hasRefusedAutomergeNote(noteApi, input.owner, input.repo, input.prNumber, input.botUsername, log)) {
-      const result = await scheduleAutomergeForPr({
-        api: noteApi,
-        forgeKind: input.forgeKind,
-        owner: input.owner,
-        repo: input.repo,
-        prNumber: input.prNumber,
-        // Settings come from the default branch; required-check validation
-        // uses the PR's actual base branch (`prBaseBranch`, no fallback).
-        baseBranch: defaultBranch,
-        ...(prBaseBranch ? { prBaseBranch } : {}),
-        automergeRepos: input.automergeRepos,
-        botUsername: input.botUsername,
-        automergeEnabled: input.automergeEnabled,
-        trustedSenderLogins: input.trustedSenderLogins,
-        issueNumber: input.issueNumber,
-        prLabels,
-        log,
-      });
-      if (result.scheduled) {
-        await postAutomergeNote(
-          noteApi,
-          input.owner,
-          input.repo,
-          input.prNumber,
-          input.botUsername,
-          automergeScheduledNote()
-        );
-      }
-    }
+    await retryRefusedAutomergeSchedule({
+      api: noteApi,
+      forgeKind: input.forgeKind,
+      owner: input.owner,
+      repo: input.repo,
+      prNumber: input.prNumber,
+      automergeRepos: input.automergeRepos,
+      botUsername: input.botUsername,
+      automergeEnabled: input.automergeEnabled,
+      trustedSenderLogins: input.trustedSenderLogins,
+      issueNumber: input.issueNumber,
+      baseBranch: defaultBranch,
+      prLabels,
+      ...(prBaseBranch ? { prBaseBranch } : {}),
+      log,
+    });
     return;
   }
   let current: { merged?: boolean; state?: string; autoMergeEnabled?: boolean; labels?: AutomergeLabelList | null };
