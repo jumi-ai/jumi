@@ -11,7 +11,7 @@
   "auth.ts": 83,
   "automerge.ts": 1983,
   "automerge_webhook.ts": 265,
-  "board.ts": 3811,
+  "board.ts": 3815,
   "board_device_login.ts": 467,
   "board_mcp.ts": 443,
   "checkpoint.ts": 712,
@@ -107,7 +107,7 @@
   "review_groups.ts": 106,
   "review_handover_pending.ts": 172,
   "review_history.ts": 161,
-  "review_jobs.ts": 6182,
+  "review_jobs.ts": 6317,
   "review_mcp.ts": 298,
   "review_md.ts": 321,
   "review_sandbox.ts": 1072,
@@ -125,7 +125,7 @@
   "searxng.ts": 342,
   "searxng_server.ts": 75,
   "sentinels.ts": 69,
-  "server.ts": 1714,
+  "server.ts": 1695,
   "server_mailbox.ts": 77,
   "shared_failure.ts": 135,
   "shutdown.ts": 40,
@@ -160,5 +160,7 @@
   "bulk_requeue.ts": 630,
   "board_bulk_page.ts": 482,
   "ci_refresh.ts": 82,
-  "followup_ci_refresh.ts": 107
+  "followup_ci_refresh.ts": 107,
+  "reclaim_publish.ts": 113,
+  "requeue_gate.ts": 103
 }
