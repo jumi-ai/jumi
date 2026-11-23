@@ -126,7 +126,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -232,7 +232,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -266,7 +266,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -454,7 +454,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -591,7 +591,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -606,7 +606,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -670,7 +670,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -732,7 +732,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -746,7 +746,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -822,7 +822,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -838,7 +838,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -867,7 +867,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -896,7 +896,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -911,7 +911,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -926,7 +926,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -956,7 +956,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -987,7 +987,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1120,7 +1120,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1167,7 +1167,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1214,7 +1214,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1291,7 +1291,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1338,7 +1338,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1353,7 +1353,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1368,7 +1368,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1383,7 +1383,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1399,7 +1399,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1414,7 +1414,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1429,7 +1429,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1444,7 +1444,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1459,7 +1459,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1536,7 +1536,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1566,7 +1566,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1596,7 +1596,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1625,7 +1625,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1641,7 +1641,7 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2
@@ -1656,7 +1656,7 @@
       "listActionJobs": 5,
       "listCheckRuns": 3,
       "listCommitStatuses": 3,
-      "listIssueComments": 1,
+      "listIssueComments": 2,
       "listOpenPulls": 1,
       "listPullReviewComments": 1,
       "listPullReviews": 1
@@ -1687,7 +1687,7 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 1,
       "listPullReviewComments": 2,
       "listPullReviews": 2

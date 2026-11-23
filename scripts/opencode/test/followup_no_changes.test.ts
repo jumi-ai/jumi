@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { AUTOMERGE_NOTE_MARKER, AUTOMERGE_REFUSED_MARKER, retryRefusedAutomergeSchedule } from "../src/automerge.ts";
+import { JUMI_REVIEW_CONTEXT } from "../src/ci.ts";
 import { implementFollowUp } from "../src/followup.ts";
 import { FORGE_CAPABILITIES } from "../src/forge_capabilities.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
@@ -735,6 +737,346 @@ describe("maintainer hold release from a two-review publish pair", () => {
       expect(kept.some((line) => line.includes(`${INLINE_REVIEW_ID}`) && line.includes(`${SUMMARY_REVIEW_ID}`))).toBe(
         true
       );
+    });
+  });
+});
+
+const NEW_RETRY_SENTENCE =
+  "Jumi tries again after its next push or its next follow-up round (for example after a maintainer reply);" +
+  " otherwise a person merges once reviews and CI are green.";
+
+function refusedBody(detail = "405: User not allowed to merge PR"): string {
+  return (
+    `Jumi tried to schedule auto-merge on this pull request but the forge refused (${detail}). ` +
+    `${NEW_RETRY_SENTENCE}\n` +
+    AUTOMERGE_REFUSED_MARKER
+  );
+}
+
+function refusedComment(body: string, login: string | undefined): ReturnType<typeof makeComment> {
+  return makeComment({
+    id: 9001,
+    body: `${AUTOMERGE_NOTE_MARKER}\n${body}`,
+    ...(login === undefined ? { user: undefined as never } : { user: makeUser({ login }) }),
+  });
+}
+
+type GiteaAutomergeFake = IssueApi & { calls: string[]; notes: string[]; scheduled: Array<unknown> };
+
+function giteaAutomergeApi(overrides: Record<string, unknown> = {}): GiteaAutomergeFake {
+  const calls: string[] = [];
+  const notes: string[] = [];
+  const scheduled: Array<unknown> = [];
+  const {
+    listIssueComments: listIssueCommentsOverride,
+    listIssueTimeline: listIssueTimelineOverride,
+    getPRFiles: getPRFilesOverride,
+    ...rest
+  } = overrides as Record<string, unknown> & {
+    listIssueComments?: unknown;
+    listIssueTimeline?: unknown;
+    getPRFiles?: unknown;
+  };
+  const fake = makeIssueApi({
+    getRepo: async () => {
+      calls.push("getRepo");
+      return makeRepo();
+    },
+    getPR: async (_owner: string, _repo: string, index: number) => {
+      calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge"] as never });
+    },
+    getRepoFile: async () => {
+      calls.push("getRepoFile");
+      return { found: true, content: "automerge: true\n" };
+    },
+    getBranch: async () => {
+      calls.push("getBranch");
+      return { protected: true, enableStatusCheck: true, requiredContexts: [JUMI_REVIEW_CONTEXT] };
+    },
+    scheduleAutoMerge: async () => {
+      calls.push("scheduleAutoMerge");
+      scheduled.push({});
+    },
+    cancelAutoMerge: async () => {
+      calls.push("cancelAutoMerge");
+      return true;
+    },
+    getCollaboratorPermission: async () => ({ permission: "write" }),
+    createIssueComment: async (_owner: string, _repo: string, _index: number, body: string) => {
+      calls.push("createIssueComment");
+      notes.push(body);
+      return makeComment({ body });
+    },
+    updateIssueComment: async (_owner: string, _repo: string, _id: number, body: string) => {
+      calls.push("updateIssueComment");
+      notes.push(body);
+      return makeComment({ body });
+    },
+    ...(listIssueCommentsOverride !== undefined ? { listIssueComments: listIssueCommentsOverride } : {}),
+    ...(rest as Partial<IssueApi>),
+  } as Partial<IssueApi>);
+  const api = fake as unknown as GiteaAutomergeFake;
+  (api as unknown as Record<string, unknown>)["listIssueTimeline"] =
+    listIssueTimelineOverride !== undefined
+      ? listIssueTimelineOverride
+      : async () => {
+          calls.push("listIssueTimeline");
+          return [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+        };
+  (api as unknown as Record<string, unknown>)["getPRFiles"] =
+    getPRFilesOverride !== undefined
+      ? getPRFilesOverride
+      : async () => {
+          calls.push("getPRFiles");
+          return [];
+        };
+  return Object.assign(api, { calls, notes, scheduled });
+}
+
+function withRefusedSticky(api: GiteaAutomergeFake, body: string, login = "jumi"): void {
+  (api as unknown as Record<string, unknown>)["listIssueComments"] = async () => {
+    api.calls.push("listIssueComments");
+    return [refusedComment(body, login)];
+  };
+}
+
+describe("retryRefusedAutomergeSchedule on a Gitea fake", () => {
+  test("refused at open retried through the shared helper schedules and clears the note", async () => {
+    const api = giteaAutomergeApi();
+    withRefusedSticky(api, refusedBody());
+    const result = await retryRefusedAutomergeSchedule({
+      api: api as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: true });
+    expect(api.calls.filter((call) => call === "scheduleAutoMerge")).toHaveLength(1);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain("Auto-merge is now scheduled");
+  });
+
+  test("refused again keeps the refused marker with the new reason", async () => {
+    const api = giteaAutomergeApi();
+    withRefusedSticky(api, refusedBody("405: User not allowed to merge PR"));
+    api.scheduleAutoMerge = async () => {
+      api.calls.push("scheduleAutoMerge");
+      throw new Error(
+        "Gitea API POST https://gitea.example.test/api/v1/repos/kirmanak/demo/pulls/3/merge → 405: " +
+          '{"message":"User not allowed to merge PR"}'
+      );
+    };
+    const result = await retryRefusedAutomergeSchedule({
+      api: api as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls.filter((call) => call === "scheduleAutoMerge")).toHaveLength(1);
+    expect(api.notes).toHaveLength(1);
+    expect(api.notes[0]).toContain(AUTOMERGE_REFUSED_MARKER);
+    expect(api.notes[0]).toContain("405: User not allowed to merge PR");
+  });
+
+  test("no refused note means no schedule call", async () => {
+    const absent = giteaAutomergeApi({
+      listIssueComments: async () => [],
+    });
+    const absentResult = await retryRefusedAutomergeSchedule({
+      api: absent as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(absentResult).toEqual({ scheduled: false });
+    expect(absent.calls).not.toContain("scheduleAutoMerge");
+    expect(absent.notes).toEqual([]);
+
+    const personCancelled = giteaAutomergeApi({
+      listIssueComments: async () => [
+        makeComment({
+          id: 2,
+          body: `${AUTOMERGE_NOTE_MARKER}\nJumi did not schedule auto-merge: the labeller could not be read.`,
+          user: makeUser({ login: "jumi" }),
+        }),
+      ],
+    });
+    const cancelledResult = await retryRefusedAutomergeSchedule({
+      api: personCancelled as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(cancelledResult).toEqual({ scheduled: false });
+    expect(personCancelled.calls).not.toContain("scheduleAutoMerge");
+    expect(personCancelled.notes).toEqual([]);
+  });
+
+  test("refused markers without the bot author never trigger a schedule", async () => {
+    for (const comments of [
+      [refusedComment(refusedBody(), undefined)],
+      [refusedComment(refusedBody(), "someone-else")],
+    ]) {
+      const api = giteaAutomergeApi({
+        listIssueComments: async () => comments,
+      });
+      const result = await retryRefusedAutomergeSchedule({
+        api: api as never,
+        forgeKind: "gitea",
+        owner: "kirmanak",
+        repo: "demo",
+        prNumber: 3,
+        automergeRepos: ["kirmanak/demo"],
+        botUsername: "jumi",
+        log: () => undefined,
+      });
+      expect(result).toEqual({ scheduled: false });
+      expect(api.calls).not.toContain("scheduleAutoMerge");
+      expect(api.notes).toEqual([]);
+    }
+  });
+
+  test("refused sticky plus no_automerge label makes no schedule call", async () => {
+    const api = giteaAutomergeApi();
+    withRefusedSticky(api, refusedBody());
+    api.getPR = async (_owner: string, _repo: string, index: number) => {
+      api.calls.push("getPR");
+      return makePR({ number: index, labels: ["no-automerge"] as never });
+    };
+    const result = await retryRefusedAutomergeSchedule({
+      api: api as never,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      automergeRepos: ["kirmanak/demo"],
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+    expect(result).toEqual({ scheduled: false });
+    expect(api.calls).not.toContain("scheduleAutoMerge");
+  });
+});
+
+describe("follow-up no-changes automerge retry", () => {
+  function automergeFollowupApi(opts: {
+    comments: Array<ReturnType<typeof makeComment>>;
+    scheduleCalls: unknown[];
+  }): ReturnType<typeof followupApi> {
+    const pr = { ...jumiPr(), labels: ["automerge"] as never };
+    const api = followupApi({
+      listOpenPulls: async () => [pr],
+      getPR: async () => pr,
+      getRepo: async () => makeRepo(),
+      getRepoFile: async () => ({ found: true, content: "automerge: true\n" }),
+      getBranch: async () => ({
+        protected: true,
+        enableStatusCheck: true,
+        requiredContexts: [JUMI_REVIEW_CONTEXT],
+      }),
+      scheduleAutoMerge: async () => {
+        opts.scheduleCalls.push({});
+      },
+      cancelAutoMerge: async () => true,
+      getCollaboratorPermission: async () => ({ permission: "write" }),
+      listIssueComments: async () => opts.comments,
+      listPullReviews: async () => [],
+      listPullReviewComments: async () => [],
+    });
+    const rec = api as unknown as Record<string, unknown>;
+    rec["getPRFiles"] = async () => [];
+    rec["listIssueTimeline"] = async () => [{ event: "labeled", label: "automerge", actor: { login: "alice" } }];
+    return api;
+  }
+
+  function dirtyGitRunner(): GitRunner {
+    return async (args) => {
+      const gitArgs = stripGitConfigArgs(args);
+      if (gitArgs[0] === "rev-parse") return "abc123";
+      if (gitArgs[0] === "status") return " M src/demo.ts";
+      if (gitArgs[0] === "rev-list") return "1";
+      return "";
+    };
+  }
+
+  test("refused at open, trusted reply, no-changes: schedule retried exactly once", async () => {
+    await withDirs(async (home, workdir) => {
+      const scheduleCalls: unknown[] = [];
+      const api = automergeFollowupApi({
+        comments: [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          refusedComment(refusedBody(), "jumi"),
+        ],
+        scheduleCalls,
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        forgeKind: "gitea",
+        automergeRepos: ["kirmanak/demo"],
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: cleanGitRunner(),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(scheduleCalls).toHaveLength(1);
+      expect(api.comments.some((body) => body.includes("Auto-merge is now scheduled."))).toBe(true);
+    });
+  });
+
+  test("pushed follow-up schedules exactly once through ensureAutomergeAfterPush", async () => {
+    await withDirs(async (home, workdir) => {
+      const scheduleCalls: unknown[] = [];
+      const api = automergeFollowupApi({
+        comments: [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          refusedComment(refusedBody(), "jumi"),
+        ],
+        scheduleCalls,
+      });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        forgeKind: "gitea",
+        automergeRepos: ["kirmanak/demo"],
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: dirtyGitRunner(),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(scheduleCalls).toHaveLength(1);
     });
   });
 });
