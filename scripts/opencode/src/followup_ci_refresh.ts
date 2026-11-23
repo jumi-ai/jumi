@@ -12,8 +12,13 @@ export const CLEAN_BASE_MERGE_ONLY_REASON = "worker result was a clean base merg
 export function isCleanBaseMergeOnlyResult(
   mergeResult: { status: string; conflicted: boolean; openCodeRan: boolean },
   porcelain: string,
-  aheadOfOrigin: number
+  aheadOfOrigin: number,
+  postMergeSha?: string,
+  finalSha?: string
 ): boolean {
+  // A committed worker fix leaves a clean worktree too. Only a HEAD that is
+  // still the post-merge SHA proves the worker added no commits.
+  if (!postMergeSha || !finalSha || postMergeSha !== finalSha) return false;
   return (
     !porcelain &&
     aheadOfOrigin > 0 &&
