@@ -401,3 +401,70 @@ forEachForge("a clean base merge with green base surfaces stuck/needs_kick", (pr
     expect(String((result as { reason?: unknown }).reason ?? "")).toContain("attributable to");
   });
 });
+
+forEachForge("a clean prefix merge plus a committed worker fix pushes", (preset) => {
+  return withDirs(async (home, workdir) => {
+    const comments: string[] = [];
+    const api = cleanMergeApi(comments, "failure") as unknown as ReturnType<typeof makeIssueApi> & {
+      capabilities: unknown;
+    };
+    (api as { capabilities: unknown }).capabilities = preset.capabilities;
+    // Spend the refresh budget so the worker path runs instead of the mechanical refresh.
+    const { recordCiRefreshes } = await import("../src/ci_refresh.ts");
+    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
+    const store = memorySkipLatchesFor(home);
+    await recordCiRefreshes({
+      home,
+      owner: "kirmanak",
+      repo: "demo",
+      issueNumber: 12,
+      prNumber: 127,
+      baseSha: "basesha",
+      checkNames: ["build"],
+      skipLatches: store,
+    });
+    let workerRan = false;
+    const pushArgs: string[][] = [];
+    const gitRunner = async (args: string[]) => {
+      const gitArgs = stripGitConfigArgs(args);
+      if (gitArgs[0] === "merge-base" && gitArgs.includes("--is-ancestor")) throw new Error("not ancestor");
+      if (gitArgs[0] === "rev-parse" && gitArgs.includes("origin/main")) return "basesha";
+      // The worker commits after the prefix merge, so HEAD moves.
+      if (gitArgs[0] === "rev-parse") return workerRan ? "workersha" : "mergesha";
+      if (gitArgs[0] === "status") return "";
+      if (gitArgs[0] === "rev-list") return workerRan ? "2" : "1";
+      if (gitArgs[0] === "push") {
+        pushArgs.push(gitArgs);
+        return "";
+      }
+      return "";
+    };
+    const logs: string[] = [];
+    const result = await implementFollowUp({
+      api: api as never,
+      job: makeIssueJob({
+        mode: "follow-up",
+        prNumber: 127,
+        trigger: { event: "workflow_job", sender: "alice" },
+      }),
+      giteaUrl: "https://gitea.kirmanak.stream",
+      giteaToken: "bot-token",
+      botUsername: "jumi",
+      model: "openai/gpt-5.5",
+      home,
+      workdir,
+      heartbeatIntervalMs: 0,
+      gitRunner: gitRunner as never,
+      openCodeRunner: async () => {
+        workerRan = true;
+        return { status: "ok" };
+      },
+      logger: (message: string) => {
+        logs.push(message);
+      },
+    });
+    expect(result.status).toBe("pushed");
+    expect(pushArgs.filter((push) => push.includes("jumi/issue-12-fix-the-thing"))).toHaveLength(1);
+    expect(logs.some((line) => line.includes("worker result was a clean base merge only; not pushed"))).toBe(false);
+  });
+});

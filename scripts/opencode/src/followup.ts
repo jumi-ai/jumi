@@ -2603,8 +2603,10 @@ export async function implementFollowUp(
           }
         }
         let mergeResult: MergeDefaultResult;
+        let postMergeSha: string | undefined;
         if (leftToAuthor) {
           mergeResult = { status: "up-to-date", headSha, baseSha, openCodeRan: false, conflicted: false };
+          postMergeSha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
         } else {
           try {
             mergeResult = await mergeDefaultIntoWorktree({
@@ -2672,6 +2674,7 @@ export async function implementFollowUp(
             prefixMergeThrew = true;
             throw err;
           }
+          postMergeSha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
         }
         runner = mergeResult.runner;
         if (mergeResult.contributors && mergeResult.contributors.length > 0) {
@@ -3013,9 +3016,16 @@ export async function implementFollowUp(
         // A clean base merge is not a fix: no tree change with only the
         // prefix merge ahead means no push; the #771 guard may turn it stuck.
         const aheadOfOrigin = await commitsAheadOf(loop, `origin/${branch}`);
-        const isCleanBaseMergeOnly = isCleanBaseMergeOnlyResult(mergeResult, porcelain, aheadOfOrigin);
+        const finalSha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+        const isCleanBaseMergeOnly = isCleanBaseMergeOnlyResult(
+          mergeResult,
+          porcelain,
+          aheadOfOrigin,
+          postMergeSha,
+          finalSha
+        );
         if ((!porcelain && aheadOfOrigin <= 0) || isCleanBaseMergeOnly) {
-          const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+          const sha = finalSha;
           if (isCleanBaseMergeOnly) {
             log(CLEAN_BASE_MERGE_ONLY_REASON);
           }
