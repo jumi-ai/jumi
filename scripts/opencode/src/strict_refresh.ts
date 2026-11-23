@@ -1,4 +1,10 @@
-import { type IssueApi, isAssignedForeignPR, isEligibleWorkerPR, isInScopeJumiPR } from "./gitea_issues.ts";
+import {
+  extractWorkingIssueNumber,
+  type IssueApi,
+  isAssignedForeignPR,
+  isEligibleWorkerPR,
+  isInScopeJumiPR,
+} from "./gitea_issues.ts";
 import type { BranchProtection, Pull } from "./ports.ts";
 import {
   isGiteaStrictForge,
@@ -265,6 +271,7 @@ function strictRefreshJobFor(
   opts: {
     owner: string;
     repo: string;
+    botUsername: string;
     defaultBranch: string;
     cloneUrl: string;
     trigger: IssueJob["trigger"];
@@ -274,7 +281,7 @@ function strictRefreshJobFor(
   return {
     owner: opts.owner,
     repo: opts.repo,
-    issueNumber: pr.number,
+    issueNumber: strictRefreshIssueNumber(pr, opts.owner, opts.repo, opts.botUsername),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
@@ -290,6 +297,22 @@ function strictRefreshJobFor(
     strictRefresh: true as const,
     ...(opts.baseSha ? { strictBaseSha: opts.baseSha } : {}),
   };
+}
+
+/**
+ * Ledger identity for a strict-refresh merge-only job. A Jumi closer is keyed
+ * to its closing issue (the same `issueNumber` the conflict and ordinary
+ * follow-up jobs use), so the worker's pickup/open recheck reads the labeled
+ * closing issue instead of the unlabeled PR. Foreign assigned PRs have no
+ * closing issue and stay keyed to the PR itself, where the pickup label lives.
+ * A bare `Fixes #N` / `Refs #N` mention in a foreign PR body must not re-key
+ * it: only in-scope Jumi PRs use the working issue number.
+ */
+function strictRefreshIssueNumber(pr: Pull, owner: string, repo: string, botUsername: string): number {
+  if (isInScopeJumiPR(pr, owner, repo, botUsername)) {
+    return extractWorkingIssueNumber(pr) ?? pr.number;
+  }
+  return pr.number;
 }
 
 /**
@@ -402,6 +425,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
         strictRefreshJobFor(first, {
           owner,
           repo,
+          botUsername: policy.botUsername,
           defaultBranch: payload.repository.default_branch,
           cloneUrl: payload.repository.clone_url,
           trigger: { event: "push" as const, sender: payload.sender?.login ?? payload.pusher?.login ?? "push" },
@@ -432,6 +456,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
         strictRefreshJobFor(admitted, {
           owner,
           repo,
+          botUsername: policy.botUsername,
           defaultBranch: payload.repository.default_branch,
           cloneUrl: payload.repository.clone_url,
           trigger: { event: "push" as const, sender: payload.sender?.login ?? payload.pusher?.login ?? "push" },
@@ -735,7 +760,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     return {
       owner,
       repo,
-      issueNumber: pr.number,
+      issueNumber: strictRefreshIssueNumber(pr, owner, repo, policy.botUsername),
       action: "push",
       title: pr.title,
       body: pr.body ?? "",
@@ -846,7 +871,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   return {
     owner,
     repo,
-    issueNumber: pr.number,
+    issueNumber: strictRefreshIssueNumber(pr, owner, repo, policy.botUsername),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
