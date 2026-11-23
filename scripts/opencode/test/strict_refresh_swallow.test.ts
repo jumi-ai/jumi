@@ -391,6 +391,40 @@ describe("strict refresh pickup gate on Jumi closers (#814)", () => {
     expect(jobs[0]?.issueNumber).toBe(802);
   });
 
+  test("foreign PR mentioning an issue stays keyed to the PR number", async () => {
+    const repo = makeRepo();
+    const pr = Object.assign(
+      makePR({
+        number: 900,
+        title: "External improvement",
+        body: "Fixes #123",
+        user: makeUser({ login: "alice" }),
+        html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/900",
+        labels: [{ name: "jumi" }],
+        head: {
+          label: "kirmanak:feature-thing",
+          ref: "feature-thing",
+          sha: "headsha",
+          repo,
+          repo_id: repo.id,
+        },
+      }),
+      { autoMergeEnabled: true }
+    );
+    const api = forgeApi({
+      listOpenPulls: async () => [pr],
+      getBranch: async () => ({ protected: true, strict: true }) as never,
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(
+      makePushPayload({ after: "basesha-new" }),
+      strictPolicy,
+      api
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(900);
+    expect(jobs[0]?.issueNumber).toBe(900);
+  });
+
   test("behind Jumi closer without a PR pickup label still gets the merge pushed", async () => {
     await withDirs(async (home, workdir) => {
       const pr = closerPr();

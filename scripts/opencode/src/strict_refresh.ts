@@ -271,6 +271,7 @@ function strictRefreshJobFor(
   opts: {
     owner: string;
     repo: string;
+    botUsername: string;
     defaultBranch: string;
     cloneUrl: string;
     trigger: IssueJob["trigger"];
@@ -280,7 +281,7 @@ function strictRefreshJobFor(
   return {
     owner: opts.owner,
     repo: opts.repo,
-    issueNumber: strictRefreshIssueNumber(pr),
+    issueNumber: strictRefreshIssueNumber(pr, opts.owner, opts.repo, opts.botUsername),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
@@ -304,9 +305,14 @@ function strictRefreshJobFor(
  * follow-up jobs use), so the worker's pickup/open recheck reads the labeled
  * closing issue instead of the unlabeled PR. Foreign assigned PRs have no
  * closing issue and stay keyed to the PR itself, where the pickup label lives.
+ * A bare `Fixes #N` / `Refs #N` mention in a foreign PR body must not re-key
+ * it: only in-scope Jumi PRs use the working issue number.
  */
-function strictRefreshIssueNumber(pr: Pull): number {
-  return extractWorkingIssueNumber(pr) ?? pr.number;
+function strictRefreshIssueNumber(pr: Pull, owner: string, repo: string, botUsername: string): number {
+  if (isInScopeJumiPR(pr, owner, repo, botUsername)) {
+    return extractWorkingIssueNumber(pr) ?? pr.number;
+  }
+  return pr.number;
 }
 
 /**
@@ -419,6 +425,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
         strictRefreshJobFor(first, {
           owner,
           repo,
+          botUsername: policy.botUsername,
           defaultBranch: payload.repository.default_branch,
           cloneUrl: payload.repository.clone_url,
           trigger: { event: "push" as const, sender: payload.sender?.login ?? payload.pusher?.login ?? "push" },
@@ -449,6 +456,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
         strictRefreshJobFor(admitted, {
           owner,
           repo,
+          botUsername: policy.botUsername,
           defaultBranch: payload.repository.default_branch,
           cloneUrl: payload.repository.clone_url,
           trigger: { event: "push" as const, sender: payload.sender?.login ?? payload.pusher?.login ?? "push" },
@@ -752,7 +760,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     return {
       owner,
       repo,
-      issueNumber: strictRefreshIssueNumber(pr),
+      issueNumber: strictRefreshIssueNumber(pr, owner, repo, policy.botUsername),
       action: "push",
       title: pr.title,
       body: pr.body ?? "",
@@ -863,7 +871,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   return {
     owner,
     repo,
-    issueNumber: strictRefreshIssueNumber(pr),
+    issueNumber: strictRefreshIssueNumber(pr, owner, repo, policy.botUsername),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
