@@ -30,6 +30,7 @@ import {
   rawKickIdOf,
 } from "./kick.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
+import { fetchRequeueForgeSnapshot } from "./requeue_gate.ts";
 import type { KickLogRecord, ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import {
   implementIdempotencyMismatch,
@@ -1131,7 +1132,7 @@ export interface BoardPullForge {
    * adds the pickup label so the forge matches; it never opens a pull.
    */
   addIssueLabel?(owner: string, repo: string, index: number, label: string): Promise<unknown>;
-  getRepo?(owner: string, repo: string): Promise<{ default_branch?: string }>;
+  getRepo?(owner: string, repo: string): Promise<{ default_branch?: string; full_name?: string }>;
   getRepoFile?(owner: string, repo: string, path: string, ref: string): Promise<{ found: boolean; content?: string }>;
   /** Dependency re-check surface for a blocked implement kick. Optional; absent means no re-check. */
   listIssueDependencies?(owner: string, repo: string, index: number): Promise<import("./ports.ts").LinkedIssue[]>;
@@ -2585,6 +2586,8 @@ async function handleKickBody(
   const parsed = parseKickBody(body, headerIdempotencyKey);
   if ("error" in parsed) return json(400, { error: parsed.error });
   const delivery = `board-kick:${Date.now()}:${Math.floor(Math.random() * 1_000_000)}`;
+  const forgeSnapshot = await fetchRequeueForgeSnapshot(forgeApi, parsed, logger, actor);
+  if (forgeSnapshot === "unavailable") return json(503, { error: "forge unavailable" });
   try {
     const outcome = await store.requeueKick({
       owner: parsed.owner,
@@ -2595,6 +2598,7 @@ async function handleKickBody(
       actor,
       idempotencyKey: parsed.idempotencyKey,
       delivery,
+      ...(forgeSnapshot ? { forge: forgeSnapshot } : {}),
     });
     if (outcome.status === "ok") {
       const cleared = outcome.clearedReviewStuck ?? null;
@@ -2888,7 +2892,7 @@ function nonEmptyString(value: unknown): boolean {
 }
 
 function isNotFoundForgeError(err: unknown): boolean {
-  return err instanceof Error && /→ 404\b/.test(err.message);
+  return err instanceof Error && (/→ 404\b/.test(err.message) || /→ 410\b/.test(err.message));
 }
 
 /**

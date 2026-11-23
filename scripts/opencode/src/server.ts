@@ -35,6 +35,7 @@ import { adoptOpenCodeDbCredentials } from "./opencode_credentials.ts";
 import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
+import { handleReclaimPublishFailure } from "./reclaim_publish.ts";
 import {
   effectiveLeaseMs,
   effectiveReviewBudget,
@@ -796,13 +797,7 @@ export async function reclaimExpiredJobs(
       const result = await publishAndCompleteJob(store, api, config, row, logger);
       logger(`reclaim-published ${row.jobKey} ${result.status}${result.reason ? `: ${result.reason}` : ""}`);
     } catch (err) {
-      logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
-      try {
-        if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
-        await store.expireLease(row.id, row.leasedBy);
-      } catch (expireErr) {
-        logger(`reclaim expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
-      }
+      await handleReclaimPublishFailure(store, api, row, err, logger, "review");
     }
   }
   // With no worker running, an expired worker lease blocks every job for the
@@ -819,13 +814,7 @@ export async function reclaimExpiredJobs(
       await publishWorkerReclaimRow(store, api, config, row, logger);
       logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
     } catch (err) {
-      logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
-      try {
-        if (row.leasedBy == null) throw new Error(`cannot expire lease for job ${row.id}`);
-        await store.expireLease(row.id, row.leasedBy);
-      } catch (expireErr) {
-        logger(`reclaim expire failed ${row.jobKey}: ${errorMessage(expireErr)}`);
-      }
+      await handleReclaimPublishFailure(store, api, row, err, logger, "worker");
     }
   }
   return {
