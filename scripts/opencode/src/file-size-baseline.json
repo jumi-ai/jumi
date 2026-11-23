@@ -17,7 +17,7 @@
   "checkpoint.ts": 712,
   "child_env.ts": 108,
   "child_git_proxy.ts": 282,
-  "ci.ts": 1234,
+  "ci.ts": 1291,
   "ci_base.ts": 145,
   "ci_webhook.ts": 364,
   "claim.ts": 148,
@@ -48,7 +48,7 @@
   "engine_scratch.ts": 154,
   "exhausted_hold.ts": 154,
   "fallback.ts": 731,
-  "followup.ts": 3214,
+  "followup.ts": 3283,
   "followup_webhook.ts": 503,
   "forge.ts": 74,
   "forge_capabilities.ts": 144,
@@ -158,5 +158,7 @@
   "xai_auth.ts": 545,
   "xai_child_auth_probe.ts": 174,
   "bulk_requeue.ts": 630,
-  "board_bulk_page.ts": 482
+  "board_bulk_page.ts": 482,
+  "ci_refresh.ts": 82,
+  "followup_ci_refresh.ts": 107
 }
