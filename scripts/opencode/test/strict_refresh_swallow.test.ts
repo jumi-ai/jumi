@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { hasLabel } from "../src/assignee.ts";
 import { implementConflict } from "../src/conflict.ts";
 import { implementFollowUp } from "../src/followup.ts";
 import type { IssueApi } from "../src/gitea_issues.ts";
 import { issueJobFromRecord, MemoryReviewJobStore, WORKER_JOB_KINDS, workerJobKey } from "../src/review_jobs.ts";
 import { standingPodRuntime } from "../src/runtime.ts";
+import { shouldEnqueueStrictRefreshOnPush } from "../src/strict_refresh.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
-import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
+import { makeComment, makeIssue, makeIssueJob, makePR, makePushPayload, makeRepo, makeUser } from "./fixtures.ts";
 import { withDirs } from "./harness/temp.ts";
 
 function stripGitConfigArgs(args: string[]): string[] {
@@ -298,6 +300,238 @@ describe("strict refresh swallowed by the same-push conflict job (#784)", () => 
         logger: () => undefined,
       });
       expect(conflictResult).toEqual({ status: "up-to-date" });
+    });
+  });
+});
+
+describe("strict refresh pickup gate on Jumi closers (#814)", () => {
+  // GitHub production pickup: the `jumi` label, not assignment. The closing
+  // issue carries it; the PR itself does not.
+  const labelPickup = (issue: { labels?: unknown }) => hasLabel(issue as never, "jumi");
+  const strictPolicy = {
+    giteaUrl: "https://gitea.kirmanak.stream",
+    allowedOrgs: ["kirmanak"],
+    allowedRepos: [],
+    botUsername: "jumi",
+    isPickedUp: labelPickup,
+  } as never;
+
+  function closerPr() {
+    const repo = makeRepo();
+    return Object.assign(
+      makePR({
+        number: 803,
+        title: "Do the thing",
+        body: "Fixes #802",
+        user: makeUser({ login: "jumi" }),
+        html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/803",
+        labels: [],
+        head: {
+          label: "kirmanak:jumi/issue-802-do-the-thing",
+          ref: "jumi/issue-802-do-the-thing",
+          sha: "headsha",
+          repo,
+          repo_id: repo.id,
+        },
+      }),
+      { autoMergeEnabled: true }
+    );
+  }
+
+  function closingIssue() {
+    return makeIssue({
+      number: 802,
+      title: "Do the thing",
+      assignee: null,
+      assignees: [],
+      labels: [{ name: "jumi" }],
+    });
+  }
+
+  function prAsIssue() {
+    return makeIssue({ number: 803, state: "open", assignee: null, assignees: [], labels: [] });
+  }
+
+  function labelApi(pr: ReturnType<typeof closerPr>, issue802: ReturnType<typeof closingIssue>) {
+    return forgeApi({
+      getIssue: async (_owner, _repo, index) => (index === 802 ? issue802 : prAsIssue()),
+      listOpenPulls: async () => [pr],
+      getPR: async () => pr as never,
+      getBranch: async () => ({ protected: true, strict: true }) as never,
+    });
+  }
+
+  function strictCloserJob() {
+    return makeIssueJob({
+      issueNumber: 802,
+      mode: "follow-up",
+      prNumber: 803,
+      headSha: "headsha",
+      action: "push",
+      trigger: { event: "push", sender: "alice" },
+      mergeOnly: true,
+      strictRefresh: true,
+      strictBaseSha: "basesha-new",
+    });
+  }
+
+  test("enqueue keys a Jumi closer to its closing issue, not the PR number", async () => {
+    const pr = closerPr();
+    const api = forgeApi({
+      listOpenPulls: async () => [pr],
+      getBranch: async () => ({ protected: true, strict: true }) as never,
+    });
+    const { jobs } = await shouldEnqueueStrictRefreshOnPush(
+      makePushPayload({ after: "basesha-new" }),
+      strictPolicy,
+      api
+    );
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.prNumber).toBe(803);
+    expect(jobs[0]?.issueNumber).toBe(802);
+  });
+
+  test("behind Jumi closer without a PR pickup label still gets the merge pushed", async () => {
+    await withDirs(async (home, workdir) => {
+      const pr = closerPr();
+      const api = labelApi(pr, closingIssue());
+      const pushCalls: string[][] = [];
+      const result = await implementFollowUp({
+        api,
+        job: strictCloserJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        isPickedUp: labelPickup,
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        useClaim: false,
+        runtime: mergeOnlyRuntime(),
+        gitRunner: cleanMergeableGit(async (args, opts) => {
+          const gitArgs = stripGitConfigArgs(args);
+          pushCalls.push(gitArgs);
+          if (gitArgs[0] === "push") return "";
+          return "";
+        }),
+        openCodeRunner: async () => {
+          throw new Error("model should not run for a clean strict refresh");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "pushed",
+        prNumber: 803,
+        htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/803",
+      });
+      expect(pushCalls.some((args) => args[0] === "push" && args.includes("jumi/issue-802-do-the-thing"))).toBe(true);
+    });
+  });
+
+  test("Renovate case (pickup label on the PR itself) still refreshes", async () => {
+    await withDirs(async (home, workdir) => {
+      const repo = makeRepo();
+      const pr = Object.assign(
+        makePR({
+          number: 804,
+          title: "Update postgres Docker tag to v19",
+          body: "Update postgres Docker tag to v19",
+          user: makeUser({ login: "renovate" }),
+          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/804",
+          labels: [{ name: "jumi" }],
+          head: {
+            label: "kirmanak:renovate/postgres-19",
+            ref: "renovate/postgres-19",
+            sha: "headsha",
+            repo,
+            repo_id: repo.id,
+          },
+        }),
+        { autoMergeEnabled: true }
+      );
+      const api = forgeApi({
+        getIssue: async () => makeIssue({ number: 804, assignee: null, assignees: [], labels: [{ name: "jumi" }] }),
+        listOpenPulls: async () => [pr],
+        getPR: async () => pr as never,
+        getBranch: async () => ({ protected: true, strict: true }) as never,
+      });
+      const { jobs } = await shouldEnqueueStrictRefreshOnPush(
+        makePushPayload({ after: "basesha-new" }),
+        strictPolicy,
+        api
+      );
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]?.issueNumber).toBe(804);
+      const pushCalls: string[][] = [];
+      const result = await implementFollowUp({
+        api,
+        job: makeIssueJob({
+          issueNumber: 804,
+          mode: "follow-up",
+          prNumber: 804,
+          headSha: "headsha",
+          action: "push",
+          trigger: { event: "push", sender: "alice" },
+          mergeOnly: true,
+          strictRefresh: true,
+          strictBaseSha: "basesha-new",
+        }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        isPickedUp: labelPickup,
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        useClaim: false,
+        runtime: mergeOnlyRuntime(),
+        gitRunner: cleanMergeableGit(async (args, opts) => {
+          const gitArgs = stripGitConfigArgs(args);
+          pushCalls.push(gitArgs);
+          if (gitArgs[0] === "push") return "";
+          return "";
+        }),
+        openCodeRunner: async () => {
+          throw new Error("model should not run for a clean strict refresh");
+        },
+        logger: () => undefined,
+      });
+      expect(result.status).toBe("pushed");
+      expect(pushCalls.some((args) => args[0] === "push" && args.includes("renovate/postgres-19"))).toBe(true);
+    });
+  });
+
+  test("unpicked closing issue ends skipped with a reason, not a bare cancel", async () => {
+    await withDirs(async (home, workdir) => {
+      const pr = closerPr();
+      const api = labelApi(pr, makeIssue({ number: 802, assignee: null, assignees: [], labels: [] }));
+      const result = await implementFollowUp({
+        api,
+        job: strictCloserJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        isPickedUp: labelPickup,
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        useClaim: false,
+        runtime: mergeOnlyRuntime(),
+        gitRunner: async () => {
+          throw new Error("git should not run when the pickup gate fails");
+        },
+        openCodeRunner: async () => {
+          throw new Error("model should not run when the pickup gate fails");
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "skipped",
+        reason: "strict refresh: closing issue not picked up or closed",
+      });
     });
   });
 });

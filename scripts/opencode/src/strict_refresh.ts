@@ -1,4 +1,10 @@
-import { type IssueApi, isAssignedForeignPR, isEligibleWorkerPR, isInScopeJumiPR } from "./gitea_issues.ts";
+import {
+  extractWorkingIssueNumber,
+  type IssueApi,
+  isAssignedForeignPR,
+  isEligibleWorkerPR,
+  isInScopeJumiPR,
+} from "./gitea_issues.ts";
 import type { BranchProtection, Pull } from "./ports.ts";
 import {
   isGiteaStrictForge,
@@ -274,7 +280,7 @@ function strictRefreshJobFor(
   return {
     owner: opts.owner,
     repo: opts.repo,
-    issueNumber: pr.number,
+    issueNumber: strictRefreshIssueNumber(pr),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
@@ -290,6 +296,17 @@ function strictRefreshJobFor(
     strictRefresh: true as const,
     ...(opts.baseSha ? { strictBaseSha: opts.baseSha } : {}),
   };
+}
+
+/**
+ * Ledger identity for a strict-refresh merge-only job. A Jumi closer is keyed
+ * to its closing issue (the same `issueNumber` the conflict and ordinary
+ * follow-up jobs use), so the worker's pickup/open recheck reads the labeled
+ * closing issue instead of the unlabeled PR. Foreign assigned PRs have no
+ * closing issue and stay keyed to the PR itself, where the pickup label lives.
+ */
+function strictRefreshIssueNumber(pr: Pull): number {
+  return extractWorkingIssueNumber(pr) ?? pr.number;
 }
 
 /**
@@ -735,7 +752,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     return {
       owner,
       repo,
-      issueNumber: pr.number,
+      issueNumber: strictRefreshIssueNumber(pr),
       action: "push",
       title: pr.title,
       body: pr.body ?? "",
@@ -846,7 +863,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   return {
     owner,
     repo,
-    issueNumber: pr.number,
+    issueNumber: strictRefreshIssueNumber(pr),
     action: "push",
     title: pr.title,
     body: pr.body ?? "",
