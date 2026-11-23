@@ -12,6 +12,7 @@ import { parseSkipWhy } from "./pr_decision.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
+import { canonicalKickCoords, type RequeueForgeSnapshot, requeueForgeRefusal } from "./requeue_gate.ts";
 import { BODY_ONLY_REVIEW_ACTION, isTerminalSkipReason, type PersistReviewResult, reviewJobKey } from "./review.ts";
 import type { ReviewSuggestionCounts, ReviewSuggestionTotalsRow } from "./review_suggestions.ts";
 import type { ReviewRecord } from "./review_verdict_store.ts";
@@ -89,6 +90,14 @@ interface IssueJobPayload {
 
 export const MAX_ATTEMPTS_REASON = "Jumi review failed: max attempts exceeded";
 export const WORKER_MAX_ATTEMPTS_REASON = "Jumi failed: max attempts exceeded";
+/**
+ * Consecutive reclaim-publish failures that settle a still-leased row to
+ * `failed` instead of expiring the lease for another retry. A permanently
+ * failing publish (gone repo/installation/PR, closed or merged PR) settles on
+ * the first failure; a transient-looking error loops at most this many
+ * reclaim passes so it cannot spin forever like the 404 loop in #810.
+ */
+export const RECLAIM_PUBLISH_MAX_FAILURES = 5;
 export const HEARTBEAT_MS = 30_000;
 export const QUEUE_POLL_MS = 1_000;
 export const RECLAIM_LEASED_BY = "reclaim";
@@ -159,6 +168,13 @@ export interface ReviewJobRecord {
   resultJson?: ReviewRecord | null;
   resultReason: string | null;
   error: string | null;
+  /**
+   * Consecutive reclaim-publish failures on this row (see
+   * `RECLAIM_PUBLISH_MAX_FAILURES`). Absent on rows written before #810 and
+   * read as 0. Never set by the runner path; only the router's reclaim
+   * publish failure path bumps it, and a terminal settle ends its use.
+   */
+  reclaimPublishFailures?: number | null;
   pendingStatusAt: number | null;
   publishedAt: number | null;
   prUpdatedAt: number | null;
@@ -220,6 +236,14 @@ export interface ReviewJobStore {
   ): Promise<{ leased: true; row: ReviewJobRecord } | { leased: false; reason: string }>;
   heartbeat(id: number, leasedBy: string, leaseMs: number, now?: Date): Promise<boolean>;
   expireLease(id: number, leasedBy: string, now?: Date, failedRunner?: string | null): Promise<boolean>;
+  /**
+   * Reclaim-publish failure accounting (#810). Bumps the row's
+   * `reclaimPublishFailures` counter, refreshes `error`/`result_reason` with
+   * the latest publish error, and keeps the reclaim lease held so the caller
+   * can either settle `failed` (permanent error or the retry bound) or
+   * `expireLease` for another pass. Returns the new consecutive count.
+   */
+  recordReclaimPublishFailure(id: number, leasedBy: string, publishError: string, now?: Date): Promise<number>;
   /**
    * Dispatch-only fast path for a dead pod (#359): mark a still-leased row
    * expired when it still matches what the dispatcher observed (generation,
@@ -495,6 +519,14 @@ export interface RequeueKickInput {
   idempotencyKey: string;
   /** Delivery stamp for the new queued row. */
   delivery: string;
+  /**
+   * Live forge snapshot for the kick gate (#810). Set by the board's requeue
+   * kick handler; absent means unchecked. A `notFound` PR, or a closed/merged
+   * PR, refuses the kick instead of inserting a job. `canonicalFullName` is
+   * the forge's canonical `owner/repo`: when it differs from the terminal
+   * row, the new row uses it instead of the stale terminal coordinates.
+   */
+  forge?: RequeueForgeSnapshot;
 }
 
 export type RequeueKickOutcome =
@@ -754,6 +786,7 @@ ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_runner TEXT;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS result_json JSONB;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS rewake_requested BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS cancel_requested BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE review_jobs ADD COLUMN IF NOT EXISTS reclaim_publish_failures INTEGER NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS review_jobs_queued_kind_created
   ON review_jobs (kind, created_at, id)
@@ -1485,6 +1518,21 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
+  recordReclaimPublishFailure(id: number, leasedBy: string, publishError: string, now = new Date()): Promise<number> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy)
+        throw new Error(`cannot record publish failure for job ${id}`);
+      const ts = now.getTime();
+      const next = (row.reclaimPublishFailures ?? 0) + 1;
+      row.reclaimPublishFailures = next;
+      row.error = publishError;
+      row.resultReason = publishError;
+      row.updatedAt = ts;
+      return next;
+    });
+  }
+
   forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
@@ -2074,6 +2122,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           kickLogId: entry.id,
         };
       }
+      const forgeRefusal = requeueForgeRefusal(input.owner, input.repo, input.prNumber, input.forge);
+      if (forgeRefusal) {
+        const entry = record(terminal.id, null, forgeRefusal.code === "not-found" ? "not-found" : "not-kickable");
+        return {
+          status: "rejected",
+          code: forgeRefusal.code,
+          why: forgeRefusal.why,
+          terminalId: terminal.id,
+          newJobId: null,
+          kickLogId: entry.id,
+        };
+      }
       if (!isKickableReviewRow(terminal)) {
         const entry = record(terminal.id, null, "not-kickable");
         return {
@@ -2113,8 +2173,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         id: this.nextId++,
         jobKey: key,
         kind: REVIEW_KIND,
-        owner: terminal.owner,
-        repo: terminal.repo,
+        owner: canonicalKickCoords(input.forge?.canonicalFullName)?.owner ?? terminal.owner,
+        repo: canonicalKickCoords(input.forge?.canonicalFullName)?.repo ?? terminal.repo,
         prNumber: terminal.prNumber,
         headSha: terminal.headSha,
         issueNumber: null,
@@ -3264,6 +3324,7 @@ type ReviewJobRow = {
   pr_updated_at: unknown;
   rewake_requested?: unknown;
   cancel_requested?: unknown;
+  reclaim_publish_failures?: unknown;
   created_at: unknown;
   updated_at: unknown;
 };
@@ -3365,6 +3426,9 @@ function asJsonObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 function mapRow(row: ReviewJobRow): ReviewJobRecord {
+  // Old rows predate the #810 column and read as absent: only carry a
+  // nonzero count so existing whole-row assertions do not change.
+  const reclaimFailures = reclaimPublishFailuresOf(row);
   return {
     id: num(row.id),
     jobKey: str(row.job_key),
@@ -3392,9 +3456,19 @@ function mapRow(row: ReviewJobRow): ReviewJobRecord {
     prUpdatedAt: epoch(row.pr_updated_at),
     rewakeRequested: row.rewake_requested === true || row.rewake_requested === "t",
     cancelRequested: row.cancel_requested === true || row.cancel_requested === "t",
+    // Old rows predate the #810 column and read as absent: only carry a
+    // nonzero count so existing whole-row assertions do not change.
+    ...(reclaimFailures > 0 ? { reclaimPublishFailures: reclaimFailures } : {}),
     createdAt: epochRequired(row.created_at),
     updatedAt: epochRequired(row.updated_at),
   };
+}
+
+function reclaimPublishFailuresOf(row: ReviewJobRow): number {
+  const raw = row.reclaim_publish_failures;
+  if (raw == null || raw === "") return 0;
+  const n = typeof raw === "bigint" ? Number(raw) : typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
 /**
@@ -3952,6 +4026,29 @@ export class PgReviewJobStore implements ReviewJobStore {
       )
     );
     return rows.length > 0;
+  }
+
+  async recordReclaimPublishFailure(
+    id: number,
+    leasedBy: string,
+    publishError: string,
+    now = new Date()
+  ): Promise<number> {
+    const rows = asRows<{ reclaim_publish_failures: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs
+         SET reclaim_publish_failures = COALESCE(reclaim_publish_failures, 0) + 1,
+             error = $3, result_reason = $3, updated_at = NOW()
+         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+         RETURNING reclaim_publish_failures`,
+        [id, leasedBy, publishError]
+      )
+    );
+    if (rows.length === 0) throw new Error(`cannot record publish failure for job ${id}`);
+    const raw = rows[0]?.reclaim_publish_failures;
+    const n = typeof raw === "bigint" ? Number(raw) : typeof raw === "number" ? raw : Number(raw);
+    void now;
+    return Number.isFinite(n) ? Math.floor(n) : 1;
   }
 
   async forceExpireLease(id: number, expected: ForceExpireLeaseExpected, now = new Date()): Promise<boolean> {
@@ -4981,6 +5078,24 @@ export class PgReviewJobStore implements ReviewJobStore {
             kickLogId: logged.id,
           } as RequeueKickOutcome;
         }
+        const forgeRefusal = requeueForgeRefusal(input.owner, input.repo, input.prNumber, input.forge);
+        if (forgeRefusal) {
+          const logged = await this.insertKickLog(
+            tx,
+            input,
+            forgeRefusal.code === "not-found" ? "not-found" : "not-kickable",
+            terminal.id,
+            null
+          );
+          return {
+            status: "rejected",
+            code: forgeRefusal.code,
+            why: forgeRefusal.why,
+            terminalId: terminal.id,
+            newJobId: null,
+            kickLogId: logged.id,
+          } as RequeueKickOutcome;
+        }
         if (!isKickableReviewRow(terminal)) {
           const logged = await this.insertKickLog(tx, input, "not-kickable", terminal.id, null);
           return {
@@ -5025,6 +5140,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         // is the conflict path below. Catch-and-continue on a unique
         // violation would abort the Postgres transaction and turn the
         // follow-up kick-log insert into a 25P02 rollback (503, no audit row).
+        const canonical = canonicalKickCoords(input.forge?.canonicalFullName);
         const inserted = asRows<ReviewJobRow>(
           await tx.unsafe(
             `INSERT INTO review_jobs (job_key, owner, repo, pr_number, head_sha, delivery, state, attempt, pr_updated_at)
@@ -5034,8 +5150,8 @@ export class PgReviewJobStore implements ReviewJobStore {
              RETURNING *`,
             [
               terminal.jobKey,
-              terminal.owner,
-              terminal.repo,
+              canonical?.owner ?? terminal.owner,
+              canonical?.repo ?? terminal.repo,
               terminal.prNumber,
               terminal.headSha,
               input.delivery,
