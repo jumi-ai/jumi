@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { type CiRefreshRecord, parseCiRefreshes } from "./ci_refresh.ts";
 import type { ActionJob, BranchProtection, Check, CheckState, Forge, Pull } from "./ports.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { type CiGateWait, DEFAULT_CI_GATE_WAIT } from "./repo_settings.ts";
@@ -29,6 +30,8 @@ export interface CiFollowUpState {
   handled: CiHandledCheck[];
   /** One automatic rerun per (head SHA, check name). Never includes logHash. */
   flakeReruns?: FlakeRerunRecord[];
+  /** One mechanical base refresh per (base SHA, check name). Never includes logHash. */
+  ciRefreshes?: CiRefreshRecord[];
   updatedAt: string;
 }
 
@@ -607,6 +610,9 @@ export function infraFlakeReason(log: string): string | undefined {
   if (/toomanyrequests/i.test(log) && /rate limit/i.test(log)) {
     return "Docker Hub unauthenticated pull rate limit";
   }
+  if (/kernel does not support overlay fs/i.test(log) || /'overlay' is not supported over/i.test(log)) {
+    return "Buildah overlay fs unsupported (kernel does not support overlay fs)";
+  }
   return undefined;
 }
 
@@ -729,6 +735,7 @@ export function parseCiState(parsed: unknown): CiFollowUpState {
     prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
     handled: parseHandled(state.handled),
     flakeReruns: parseFlakeReruns((state as { flakeReruns?: unknown }).flakeReruns),
+    ciRefreshes: parseCiRefreshes((state as { ciRefreshes?: unknown }).ciRefreshes),
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
   };
 }
@@ -748,7 +755,7 @@ export async function readCiState(path: string): Promise<CiFollowUpState> {
 }
 
 function emptyCiState(): CiFollowUpState {
-  return { prNumber: 0, handled: [], flakeReruns: [], updatedAt: "" };
+  return { prNumber: 0, handled: [], flakeReruns: [], ciRefreshes: [], updatedAt: "" };
 }
 
 function parseFlakeReruns(value: unknown): FlakeRerunRecord[] {
@@ -824,6 +831,7 @@ export async function recordCiHandled(opts: {
     prNumber: opts.prNumber,
     handled: [...byKey.values()],
     flakeReruns: state.flakeReruns ?? [],
+    ciRefreshes: state.ciRefreshes ?? [],
     updatedAt: (opts.now?.() ?? new Date()).toISOString(),
   });
 }
@@ -879,6 +887,7 @@ export async function recordFlakeReruns(opts: {
     prNumber: opts.prNumber,
     handled: state.handled,
     flakeReruns: next,
+    ciRefreshes: state.ciRefreshes ?? [],
     updatedAt: (opts.now?.() ?? new Date()).toISOString(),
   });
 }

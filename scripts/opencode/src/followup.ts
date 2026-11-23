@@ -64,6 +64,11 @@ import {
   tipTracksAttachments,
   tipTracksEngineScratch,
 } from "./engine_scratch.ts";
+import {
+  CLEAN_BASE_MERGE_ONLY_REASON,
+  isCleanBaseMergeOnlyResult,
+  maybeRunCiRefreshBeforeWorker,
+} from "./followup_ci_refresh.ts";
 import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_webhook.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
@@ -2232,6 +2237,37 @@ export async function implementFollowUp(
     await applyEffects(preRunDecision.effects, decisionDeps);
     return { status: "skipped", reason: preRunDecision.reason };
   }
+  // Mechanical refresh first for red CI: on a CI-only wake, run the
+  // merge-only path instead of a worker run (budgeted per base/check).
+  const ciRefreshResult = await maybeRunCiRefreshBeforeWorker({
+    opts: opts as unknown as Record<string, unknown>,
+    pr,
+    ci,
+    ciWake,
+    snapshotMergeable: snapshot.pr.mergeable,
+    leftToAuthor: leftToAuthorResolved?.value.leftToAuthor ?? false,
+    latches,
+    latchKey,
+    owner,
+    repo,
+    issueNumber,
+    home: opts.home,
+    log,
+    now,
+    forgetClaim,
+    effectiveTrustedUpFront,
+    claimed: claimed as unknown as Record<string, unknown>,
+    sticky,
+    preRunIsRun: preRunDecision.kind === "run",
+    preRunHasFeedback: preRunDecision.kind === "run" ? preRunDecision.hasFeedback : false,
+    isMergeOnlyJob: Boolean((opts.job as { mergeOnly?: boolean }).mergeOnly),
+    isStrictRefreshJob: Boolean((opts.job as { strictRefresh?: boolean }).strictRefresh),
+    runMergeOnly: runMergeOnlyFollowUp as unknown as (
+      ctx: Record<string, unknown>,
+      cl: Record<string, unknown>
+    ) => Promise<FollowUpResult>,
+  });
+  if (ciRefreshResult) return ciRefreshResult;
   const hasFeedback = preRunDecision.hasFeedback;
   const currentFingerprint = preRunDecision.currentFingerprint;
   const sameFindingCurrent = preRunDecision.sameFindingCurrent;
@@ -2974,8 +3010,15 @@ export async function implementFollowUp(
         );
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
         const porcelain = await worktreePorcelain(loop);
-        if (!porcelain && (await commitsAheadOf(loop, `origin/${branch}`)) <= 0) {
+        // A clean base merge is not a fix: no tree change with only the
+        // prefix merge ahead means no push; the #771 guard may turn it stuck.
+        const aheadOfOrigin = await commitsAheadOf(loop, `origin/${branch}`);
+        const isCleanBaseMergeOnly = isCleanBaseMergeOnlyResult(mergeResult, porcelain, aheadOfOrigin);
+        if ((!porcelain && aheadOfOrigin <= 0) || isCleanBaseMergeOnly) {
           const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
+          if (isCleanBaseMergeOnly) {
+            log(CLEAN_BASE_MERGE_ONLY_REASON);
+          }
           // A red-CI follow-up must not end with no pushed change by calling
           // the failure pre-existing: when the same check passed on the base
           // commit, the failure is attributable to this PR. Block the
@@ -2999,12 +3042,13 @@ export async function implementFollowUp(
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
           const noChangesReason = workerStore.getNoChangesReason();
           if (noChangesReason) log("worker result: no_changes from tool");
-          else log("worker result: no_changes missing (fail-open)");
+          else if (!isCleanBaseMergeOnly) log("worker result: no_changes missing (fail-open)");
+          const cleanMergeReason = isCleanBaseMergeOnly ? CLEAN_BASE_MERGE_ONLY_REASON : undefined;
           await sticky(
             buildNoChangesSticky(
               noChangesReason
                 ? redactGitSecrets(noChangesReason, workerPublishSecrets(loop.auth.token, jobChain))
-                : undefined
+                : cleanMergeReason
             ),
             pr.number
           );
