@@ -1897,14 +1897,24 @@ export async function implementFollowUp(
     // results, so resolve the held `pending` before leaving. The live-claim
     // early result above intentionally does NOT resolve: the claim holder is
     // still running and will settle the hold itself.
+    //
+    // A strict-refresh merge-only job is PR-driven (see
+    // `recheckStrictRefreshEligibility`): a bare `cancelled` would publish as
+    // `skipped` with a null reason, which hides the cause on the ledger row.
+    // Record the pickup/closed cause explicitly instead.
+    const isStrictRefreshGate = Boolean((opts.job as { strictRefresh?: boolean }).strictRefresh);
+    const strictGateReason = "strict refresh: closing issue not picked up or closed";
     await resolveHeldFromLatch(
       opts.api,
       latches,
       latchKey,
       { owner, repo, headSha: opts.job.headSha ?? "" },
       "skipped",
-      assigned.status === "cancelled" ? "job cancelled" : assigned.reason
+      assigned.status === "cancelled" ? (isStrictRefreshGate ? strictGateReason : "job cancelled") : assigned.reason
     );
+    if (isStrictRefreshGate && assigned.status === "cancelled") {
+      return { status: "skipped", reason: strictGateReason };
+    }
     return assigned;
   }
 
