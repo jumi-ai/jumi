@@ -332,12 +332,7 @@ async function markPullClosedBestEffort(
   }
 }
 
-/**
- * Best-effort settle for a closed pull's review rows. Queued reviews become
- * `cancelled`; leased reviews get `cancel_requested` so the running one-shot
- * settles itself. Mirrors `cancelQueuedForIssue` for worker kinds. Never
- * fails the webhook.
- */
+/** Best-effort settle for a closed pull's review rows (queued -> cancelled, leased -> cancel_requested). */
 async function cancelReviewsForPullClosedBestEffort(
   review: unknown,
   owner: string,
@@ -348,16 +343,25 @@ async function cancelReviewsForPullClosedBestEffort(
   const cancel = (review as { cancelQueuedForPull?: unknown } | undefined)?.cancelQueuedForPull;
   if (typeof cancel !== "function" || !owner || !repo || !Number.isFinite(prNumber)) return;
   try {
-    const cancelled = await (cancel as (o: string, r: string, n: number) => Promise<number>).call(
-      review,
-      owner,
-      repo,
-      prNumber
-    );
+    const fn = cancel as (o: string, r: string, n: number) => Promise<number>;
+    const cancelled = await fn.call(review, owner, repo, prNumber);
     if (cancelled > 0) logger(`cancelled ${cancelled} queued review row(s) for closed ${owner}/${repo}#${prNumber}`);
   } catch (err) {
     logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
   }
+}
+
+/** Shared closed-pull settle: board marker + review cancel, each best-effort and independent. */
+export async function settleReviewsForClosedPull(
+  sits: Pick<RouterSitStore, "markPullClosed"> | undefined,
+  review: unknown,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  logger: (message: string) => void
+): Promise<void> {
+  await markPullClosedBestEffort(sits as RouterSitStore | undefined, owner, repo, prNumber, logger);
+  await cancelReviewsForPullClosedBestEffort(review, owner, repo, prNumber, logger);
 }
 
 function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
@@ -593,28 +597,17 @@ export async function handleWorkerWebhookEvent(
             // Close or merge that needs no kick removes the record.
             if (deps.sits) {
               const [owner, repo] = payload.repository.full_name.split("/");
+              const prNumber = payload.pull_request.number;
               if (owner && repo) {
-                await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
-                await cancelReviewsForPullClosedBestEffort(
-                  deps.review,
-                  owner,
-                  repo,
-                  payload.pull_request.number,
-                  logger
-                );
-                const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.pull_request.number, logger);
+                await settleReviewsForClosedPull(deps.sits, deps.review, owner, repo, prNumber, logger);
+                const cleared = await clearSitForEnqueue(deps.sits, owner, repo, prNumber, logger);
                 if (cleared) return cleared;
               }
             } else {
               const [owner, repo] = payload.repository.full_name.split("/");
+              const prNumber = payload.pull_request.number;
               if (owner && repo) {
-                await cancelReviewsForPullClosedBestEffort(
-                  deps.review,
-                  owner,
-                  repo,
-                  payload.pull_request.number,
-                  logger
-                );
+                await settleReviewsForClosedPull(undefined, deps.review, owner, repo, prNumber, logger);
               }
             }
             return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
@@ -623,9 +616,9 @@ export async function handleWorkerWebhookEvent(
           // so the board hides its requeue row. The woken issue rows are separate.
           try {
             const [owner, repo] = payload.repository.full_name.split("/");
+            const prNumber = payload.pull_request.number;
             if (owner && repo) {
-              await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
-              await cancelReviewsForPullClosedBestEffort(deps.review, owner, repo, payload.pull_request.number, logger);
+              await settleReviewsForClosedPull(deps.sits, deps.review, owner, repo, prNumber, logger);
             }
           } catch {
             // Best-effort marker only; the enqueue below owns the response.

@@ -88,7 +88,12 @@ import {
   verifyGiteaSignature,
 } from "./webhook.ts";
 import { createDeliveryDedupe, type DeliveryDedupe } from "./webhook_delivery.ts";
-import { cancelLedgerWorkerJobs, type HandleWorkerWebhookDeps, handleWorkerWebhookEvent } from "./worker_webhook.ts";
+import {
+  cancelLedgerWorkerJobs,
+  type HandleWorkerWebhookDeps,
+  handleWorkerWebhookEvent,
+  settleReviewsForClosedPull,
+} from "./worker_webhook.ts";
 import type { GitRunner } from "./workspace.ts";
 import { createReviewWorkspace, gitAuthResolverFor, removeReviewWorkspace } from "./workspace.ts";
 import { adoptOrphanXaiSibling } from "./xai_auth.ts";
@@ -471,15 +476,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                 cancelQueuedForPull?: (o: string, r: string, n: number) => Promise<number>;
               };
               const sits = queueStore?.sits;
-              if (owner && repo && sits?.markPullClosed) {
-                await sits.markPullClosed(owner, repo, payload.pull_request.number);
-              }
-              if (owner && repo && typeof queueStore?.cancelQueuedForPull === "function") {
-                try {
-                  await queueStore.cancelQueuedForPull.call(queueStore, owner, repo, payload.pull_request.number);
-                } catch (err) {
-                  logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
-                }
+              if (owner && repo) {
+                await settleReviewsForClosedPull(sits, queueStore, owner, repo, payload.pull_request.number, logger);
               }
             } catch {
               // Best-effort marker only; the skip below owns the response.

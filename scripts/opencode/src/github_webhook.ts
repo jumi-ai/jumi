@@ -48,7 +48,12 @@ import {
   type WebhookPolicy,
 } from "./webhook.ts";
 import type { DeliveryDedupe } from "./webhook_delivery.ts";
-import { type HandleWorkerWebhookDeps, handleWorkerWebhookEvent, type WorkerWebhookPolicy } from "./worker_webhook.ts";
+import {
+  type HandleWorkerWebhookDeps,
+  handleWorkerWebhookEvent,
+  settleReviewsForClosedPull,
+  type WorkerWebhookPolicy,
+} from "./worker_webhook.ts";
 
 const JUMI_LABEL = "jumi";
 const GITHUB_ORIGIN = "https://github.com";
@@ -947,20 +952,8 @@ export async function handleGithubWebhookEvent(
         const payload = parsePullRequestPayload(rawBody);
         const [owner, repo] = payload.repository.full_name.split("/");
         const sits = reviewSitsFor(deps);
-        if (owner && repo && sits?.markPullClosed) {
-          await sits.markPullClosed(owner, repo, payload.pull_request.number).catch(() => {});
-        }
         if (owner && repo) {
-          const reviewStore = deps.review as unknown as
-            | { cancelQueuedForPull?: (o: string, r: string, n: number) => Promise<number> }
-            | undefined;
-          if (typeof reviewStore?.cancelQueuedForPull === "function") {
-            try {
-              await reviewStore.cancelQueuedForPull.call(reviewStore, owner, repo, payload.pull_request.number);
-            } catch (err) {
-              logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
-            }
-          }
+          await settleReviewsForClosedPull(sits, deps.review, owner, repo, payload.pull_request.number, logger);
         }
       } catch {
         // Best-effort marker only; the skip below owns the response.
