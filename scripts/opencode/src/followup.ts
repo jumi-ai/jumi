@@ -3293,14 +3293,9 @@ export async function implementFollowUp(
       } catch {
         // Best-effort: never fail the follow-up on a status post.
       }
-      // Refused-schedule retry: this no-changes round may have fixed the
-      // refusal cause without a push. Runs on every no-changes round
-      // whatever the hold outcome (a kept hold still blocks the merge
-      // forge-side); best-effort, never changes the result. Pushed rounds
-      // keep using `ensureAutomergeAfterPush` only (at most one call/round).
+      // Refused-schedule retry: fresh labels/base inside the helper so a
+      // mid-round label change is visible. Best-effort, never changes result.
       try {
-        const rawBase = (pr as { base?: { ref?: unknown } }).base?.ref;
-        const prBaseRef = typeof rawBase === "string" && rawBase.trim() ? rawBase.trim() : undefined;
         await retryRefusedAutomergeSchedule({
           api: opts.api as never,
           forgeKind: opts.forgeKind ?? "gitea",
@@ -3313,8 +3308,6 @@ export async function implementFollowUp(
           trustedSenderLogins: effectiveTrustedUpFront,
           issueNumber: opts.job.issueNumber,
           baseBranch: opts.job.defaultBranch,
-          prLabels: ((pr as { labels?: unknown }).labels ?? []) as never,
-          ...(prBaseRef ? { prBaseBranch: prBaseRef } : {}),
           log,
         });
       } catch {

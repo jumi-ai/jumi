@@ -1049,6 +1049,42 @@ describe("follow-up no-changes automerge retry", () => {
     });
   });
 
+  test("mid-round no_automerge is visible to the no-changes retry", async () => {
+    await withDirs(async (home, workdir) => {
+      const scheduleCalls: unknown[] = [];
+      const api = automergeFollowupApi({
+        comments: [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          refusedComment(refusedBody(), "jumi"),
+        ],
+        scheduleCalls,
+      });
+      // Round-start snapshot still carries `automerge`; the live PR has
+      // since gained `no-automerge`. The retry must honour the live labels.
+      const rec = api as unknown as Record<string, unknown>;
+      rec["listOpenPulls"] = async () => [{ ...jumiPr(), labels: ["automerge"] as never }];
+      rec["getPR"] = async () => ({ ...jumiPr(), labels: ["no-automerge"] as never });
+      const result = await implementFollowUp({
+        api,
+        job: followUpJob(),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        forgeKind: "gitea",
+        automergeRepos: ["kirmanak/demo"],
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: cleanGitRunner(),
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(scheduleCalls).toHaveLength(0);
+    });
+  });
+
   test("pushed follow-up schedules exactly once through ensureAutomergeAfterPush", async () => {
     await withDirs(async (home, workdir) => {
       const scheduleCalls: unknown[] = [];
