@@ -941,13 +941,26 @@ export async function handleGithubWebhookEvent(
     }
     if ((action === "closed" || action === "merged") && event === "pull_request") {
       // Review-only mode has no worker handler to record the close: mark it
-      // here so the board hides the requeue row. Forge-free, best-effort.
+      // here so the board hides the requeue row, and settle the pull's
+      // review rows. Forge-free, best-effort.
       try {
         const payload = parsePullRequestPayload(rawBody);
         const [owner, repo] = payload.repository.full_name.split("/");
         const sits = reviewSitsFor(deps);
         if (owner && repo && sits?.markPullClosed) {
           await sits.markPullClosed(owner, repo, payload.pull_request.number).catch(() => {});
+        }
+        if (owner && repo) {
+          const reviewStore = deps.review as unknown as
+            | { cancelQueuedForPull?: (o: string, r: string, n: number) => Promise<number> }
+            | undefined;
+          if (typeof reviewStore?.cancelQueuedForPull === "function") {
+            try {
+              await reviewStore.cancelQueuedForPull.call(reviewStore, owner, repo, payload.pull_request.number);
+            } catch (err) {
+              logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
+            }
+          }
         }
       } catch {
         // Best-effort marker only; the skip below owns the response.

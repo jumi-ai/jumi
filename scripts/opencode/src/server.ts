@@ -461,16 +461,25 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           const payload = parsePullRequestPayload(rawBody);
           if (payload.action === "closed" || payload.action === "merged") {
             // Review-only mode has no worker handler to record the close:
-            // mark it here so the board hides the requeue row. Forge-free.
+            // mark it here so the board hides the requeue row, and settle
+            // the pull's review rows (queued -> cancelled, leased ->
+            // cancel_requested). Forge-free, best-effort.
             try {
               const [owner, repo] = payload.repository.full_name.split("/");
-              const sits = (
-                deps.queue as unknown as {
-                  sits?: { markPullClosed?: (o: string, r: string, n: number) => Promise<void> };
-                }
-              )?.sits;
+              const queueStore = deps.queue as unknown as {
+                sits?: { markPullClosed?: (o: string, r: string, n: number) => Promise<void> };
+                cancelQueuedForPull?: (o: string, r: string, n: number) => Promise<number>;
+              };
+              const sits = queueStore?.sits;
               if (owner && repo && sits?.markPullClosed) {
                 await sits.markPullClosed(owner, repo, payload.pull_request.number);
+              }
+              if (owner && repo && typeof queueStore?.cancelQueuedForPull === "function") {
+                try {
+                  await queueStore.cancelQueuedForPull.call(queueStore, owner, repo, payload.pull_request.number);
+                } catch (err) {
+                  logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
+                }
               }
             } catch {
               // Best-effort marker only; the skip below owns the response.
@@ -1073,6 +1082,26 @@ export async function processEngineTick(
   if (extras.abortSignal?.aborted) {
     await store.releaseLease(row.id, leasedBy);
     return "idle";
+  }
+  // Forge-free closed-pull backstop for a missed close webhook: a leased
+  // row whose pull is in `closed_pulls` settles as skipped without any
+  // runner, CI look, or status call, rather than dispatching a review.
+  // The forge check in `runReviewJob` below stays as the authoritative
+  // close/merge gate when the marker is absent.
+  try {
+    if (typeof store.sits?.isPullClosed === "function" && row.prNumber > 0) {
+      const closed = await store.sits.isPullClosed(row.owner, row.repo, row.prNumber);
+      if (closed) {
+        await store.markPublished(row.id, leasedBy, { state: "skipped", reason: "PR is closed" });
+        recordJobCompleted(row.kind, "skipped");
+        logger(`${row.jobKey} skipped: PR is closed`);
+        if (extras.breaker) extras.breaker.recordModelReached();
+        else await store.recordRoleSuccess("engine");
+        return "processed";
+      }
+    }
+  } catch {
+    // Fail-open to the forge-authoritative check below.
   }
   // Repository mode is read when the job starts so a change on the default
   // branch applies to the next job without a restart; a running job finishes.

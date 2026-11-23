@@ -332,6 +332,34 @@ async function markPullClosedBestEffort(
   }
 }
 
+/**
+ * Best-effort settle for a closed pull's review rows. Queued reviews become
+ * `cancelled`; leased reviews get `cancel_requested` so the running one-shot
+ * settles itself. Mirrors `cancelQueuedForIssue` for worker kinds. Never
+ * fails the webhook.
+ */
+async function cancelReviewsForPullClosedBestEffort(
+  review: unknown,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  logger: (message: string) => void
+): Promise<void> {
+  const cancel = (review as { cancelQueuedForPull?: unknown } | undefined)?.cancelQueuedForPull;
+  if (typeof cancel !== "function" || !owner || !repo || !Number.isFinite(prNumber)) return;
+  try {
+    const cancelled = await (cancel as (o: string, r: string, n: number) => Promise<number>).call(
+      review,
+      owner,
+      repo,
+      prNumber
+    );
+    if (cancelled > 0) logger(`cancelled ${cancelled} queued review row(s) for closed ${owner}/${repo}#${prNumber}`);
+  } catch (err) {
+    logger(`review cancel for closed pull failed: ${errorMessage(err)}`);
+  }
+}
+
 function wakeFailedResponse(err: unknown, logger: (message: string) => void): Response {
   if (isQueueUnavailable(err)) {
     logger(`queue unavailable: ${err.message}`);
@@ -567,8 +595,26 @@ export async function handleWorkerWebhookEvent(
               const [owner, repo] = payload.repository.full_name.split("/");
               if (owner && repo) {
                 await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
+                await cancelReviewsForPullClosedBestEffort(
+                  deps.review,
+                  owner,
+                  repo,
+                  payload.pull_request.number,
+                  logger
+                );
                 const cleared = await clearSitForEnqueue(deps.sits, owner, repo, payload.pull_request.number, logger);
                 if (cleared) return cleared;
+              }
+            } else {
+              const [owner, repo] = payload.repository.full_name.split("/");
+              if (owner && repo) {
+                await cancelReviewsForPullClosedBestEffort(
+                  deps.review,
+                  owner,
+                  repo,
+                  payload.pull_request.number,
+                  logger
+                );
               }
             }
             return skipped(action ? `unsupported action ${action}` : "no waiting issues to wake", logger);
@@ -579,6 +625,7 @@ export async function handleWorkerWebhookEvent(
             const [owner, repo] = payload.repository.full_name.split("/");
             if (owner && repo) {
               await markPullClosedBestEffort(deps.sits, owner, repo, payload.pull_request.number, logger);
+              await cancelReviewsForPullClosedBestEffort(deps.review, owner, repo, payload.pull_request.number, logger);
             }
           } catch {
             // Best-effort marker only; the enqueue below owns the response.

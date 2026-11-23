@@ -570,7 +570,13 @@ export async function buildBoardGroups(store: BoardStore, forge?: string): Promi
   const closedKeys = new Set(
     closedPulls.map((pull) => `${pull.owner.toLowerCase()}/${pull.repo.toLowerCase()}#${pull.number}`)
   );
-  const all_in_progress = inflight.map((row) => inflightItem(row, forge));
+  // A closed pull never shows as in progress: the close webhook cancels its
+  // review rows, and this read-time filter is the backstop for a missed
+  // webhook (e.g. a ci-wait-pending row parked until its 24h fallback).
+  // Same key shape as needs_kick below.
+  const all_in_progress = inflight
+    .filter((row) => !closedKeys.has(`${row.owner.toLowerCase()}/${row.repo.toLowerCase()}#${primaryNumber(row)}`))
+    .map((row) => inflightItem(row, forge));
   // Running rows sort before queued rows so the operator sees what Jumi is
   // doing before what is waiting for a worker. Queued age comes from the
   // oldest queued createdAt the ledger reported.

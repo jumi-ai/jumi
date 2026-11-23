@@ -299,6 +299,7 @@ export interface ReviewJobStore {
    * posts `stopped` when it settles, so the router must not post it twice).
    */
   cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number>;
+  cancelQueuedForPull(owner: string, repo: string, prNumber: number): Promise<number>; // queued->cancelled, leased->cancel_requested
   /** True when the router has marked a leased row cancel-requested. Polled on every heartbeat. */
   isCancelRequested(id: number): Promise<boolean>;
   /**
@@ -2697,6 +2698,25 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     });
   }
 
+  cancelQueuedForPull(owner: string, repo: string, prNumber: number): Promise<number> {
+    return this.locked(() => {
+      let n = 0;
+      for (const row of this.rows) {
+        if (row.owner !== owner || row.repo !== repo || row.prNumber !== prNumber || rowKind(row) !== REVIEW_KIND)
+          continue;
+        if (row.state === "queued") {
+          row.state = "cancelled";
+          row.leasedBy = null;
+          row.leasedUntil = null;
+          row.cancelRequested = false;
+          row.updatedAt = Date.now();
+          n++;
+        } else if (row.state === "leased") row.cancelRequested = true;
+      }
+      return n;
+    });
+  }
+
   isCancelRequested(id: number): Promise<boolean> {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
@@ -4373,6 +4393,16 @@ export class PgReviewJobStore implements ReviewJobStore {
     );
     await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
+    return cancelled.filter((row) => str(row.state) === "cancelled").length;
+  }
+
+  async cancelQueuedForPull(owner: string, repo: string, prNumber: number): Promise<number> {
+    const cancelled = asRows<{ id: unknown; state: unknown }>(
+      await this.sql.unsafe(
+        `UPDATE review_jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END, leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END, updated_at = NOW() WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = 'review' AND state IN ('queued', 'leased') RETURNING id, state`,
+        [owner, repo, prNumber]
+      )
+    );
     return cancelled.filter((row) => str(row.state) === "cancelled").length;
   }
 
