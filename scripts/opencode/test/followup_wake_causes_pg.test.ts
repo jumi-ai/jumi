@@ -177,12 +177,12 @@ describePg("follow-up wake causes against real postgres", () => {
     expect((await store.wakeCauses.get("gen", "delivery:newer"))?.state).toBe("pending");
 
     await store.wakeCauses.record(
-      input({ jobKey: "issue-park", owner: "o", repo: "r", issueNumber: 12, delivery: "stale", payload: payload(0) })
+      input({ jobKey: "issue-park", owner: "o", repo: "r", issueNumber: 13, delivery: "stale", payload: payload(0) })
     );
     await store.wakeCauses.record(
-      input({ jobKey: "issue-park", owner: "o", repo: "r", issueNumber: 12, delivery: "fresh", payload: payload(4) })
+      input({ jobKey: "issue-park", owner: "o", repo: "r", issueNumber: 13, delivery: "fresh", payload: payload(4) })
     );
-    expect(await store.wakeCauses.parkPendingForIssue("o", "r", 12, "superseded", { generation: 4 })).toBe(1);
+    expect(await store.wakeCauses.parkPendingForIssue("o", "r", 13, "superseded", { generation: 4 })).toBe(1);
     expect((await store.wakeCauses.get("issue-park", "delivery:stale"))?.state).toBe("parked");
     expect((await store.wakeCauses.get("issue-park", "delivery:fresh"))?.state).toBe("pending");
   });

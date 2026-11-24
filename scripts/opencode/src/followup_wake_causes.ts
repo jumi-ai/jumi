@@ -490,7 +490,11 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
             input.headSha ?? "",
             causeId,
             typeof input.delivery === "string" ? input.delivery : "",
-            JSON.stringify(input.payload),
+            // Pass the value through, not a pre-stringified string: Bun's
+            // driver JSON-encodes the bound value for a ::jsonb target, so a
+            // pre-stringified string would land as a jsonb string scalar and
+            // server-side payload->>'generation' filters would see NULL.
+            input.payload === undefined ? null : input.payload,
           ]
         )
       );
