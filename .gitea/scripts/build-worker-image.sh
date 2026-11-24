@@ -41,6 +41,7 @@ fi
 : "${NODE_SHA256_AMD64:?NODE_SHA256_AMD64 is required}"
 : "${NODE_SHA256_ARM64:?NODE_SHA256_ARM64 is required}"
 : "${TEMURIN_TAG:?TEMURIN_TAG is required}"
+: "${TEMURIN_25_TAG:?TEMURIN_25_TAG is required}"
 
 primary_tag="$1"
 shift
@@ -102,6 +103,7 @@ buildah bud \
       --build-arg "NODE_SHA256_AMD64=${NODE_SHA256_AMD64}" \
       --build-arg "NODE_SHA256_ARM64=${NODE_SHA256_ARM64}" \
       --build-arg "TEMURIN_TAG=${TEMURIN_TAG}" \
+      --build-arg "TEMURIN_25_TAG=${TEMURIN_25_TAG}" \
       --build-arg "VERSION=${VERSION}" \
       --build-arg "REVISION=${REVISION}" \
       -f Dockerfile \
@@ -161,6 +163,26 @@ verify_worker_jdk() {
   fi
   echo "Verified worker JDK: ${java_home}"
   printf '%s\n' "${java_version}"
+  local java25_version
+  if ! java25_version="$(buildah run "${ctr}" -- /opt/java/temurin-25/bin/java -version 2>&1)"; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "java25 missing in worker image" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${java25_version}" | grep -E 'version "25(\.|$)' >/dev/null; then
+    printf '%s\n' "${java25_version}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker image java25 is not JDK 25" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${java25_version}" | grep -F Temurin >/dev/null; then
+    printf '%s\n' "${java25_version}" >&2
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker image java25 is not Temurin" >&2
+    exit 1
+  fi
+  echo "Verified worker JDK 25"
+  printf '%s\n' "${java25_version}"
   buildah rm "${ctr}" >/dev/null
 }
 
@@ -383,6 +405,11 @@ verify_worker_skills() {
   if ! buildah run "${ctr}" -- sh -c 'grep -E "^java " /app/installed-tools.txt >/dev/null'; then
     buildah rm "${ctr}" >/dev/null 2>&1 || true
     echo "worker installed-tools manifest must include java" >&2
+    exit 1
+  fi
+  if ! buildah run "${ctr}" -- sh -c 'grep -E "^java25 " /app/installed-tools.txt >/dev/null'; then
+    buildah rm "${ctr}" >/dev/null 2>&1 || true
+    echo "worker installed-tools manifest must include java25" >&2
     exit 1
   fi
   if ! buildah run "${ctr}" -- sh -c 'set -eu; while IFS= read -r line; do [ -n "$line" ] || continue; tool=${line%% *}; command -v "$tool" >/dev/null 2>&1 || { echo "manifest tool missing from PATH: $tool ($line)" >&2; exit 1; }; done < /app/installed-tools.txt'; then

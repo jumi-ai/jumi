@@ -28,6 +28,7 @@ ARG NODE_VERSION
 ARG NODE_SHA256_AMD64
 ARG NODE_SHA256_ARM64
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
+ARG TEMURIN_25_TAG=25.0.5.1_2-jdk@sha256:ce2ef9d2d67a68de5e196d4de9d743327c44a10b57fe02ec39f572c652cacfd3
 
 FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS tools
 
@@ -483,11 +484,18 @@ CMD ["bun", "run", "src/server.ts"]
 ARG TEMURIN_TAG
 FROM docker.io/library/eclipse-temurin:${TEMURIN_TAG} AS jdk
 
+ARG TEMURIN_25_TAG
+FROM docker.io/library/eclipse-temurin:${TEMURIN_25_TAG} AS jdk25
+
 FROM runtime AS worker
 USER root
 COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
+COPY --from=jdk25 /opt/java/openjdk /opt/java/temurin-25
 COPY --from=android-sdk /opt/android-sdk /opt/android-sdk
 RUN chmod -R a+rX /opt/android-sdk
+# `installed-tools.txt` requires every entry to resolve via `command -v`, so
+# expose the second JDK as `java25` on PATH (JAVA_HOME stays on 21).
+RUN ln -s /opt/java/temurin-25/bin/java /usr/local/bin/java25
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 # The reviewer manifest above is inherited from `runtime`; the worker appends
 # the JDK and the baked Android SDK tools so its `<installed_tools>` block
@@ -497,6 +505,7 @@ RUN set -eu; \
   export JAVA_HOME=/opt/java/openjdk; \
   export PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${JAVA_HOME}/bin:${PATH}"; \
   printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
+  printf 'java25 %s\n' "$(/opt/java/temurin-25/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   printf 'sdkmanager %s\n' "$(sdkmanager --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   printf 'adb %s\n' "$(adb --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   cat /app/installed-tools.txt; \

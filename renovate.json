@@ -33,6 +33,20 @@
       "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
     },
     {
+      "description": "Temurin 25 JDK tag with Docker digest pinning in .gitea/tool-versions.env.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.gitea\\/tool-versions\\.env$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=docker depName=eclipse-temurin-25\\nTEMURIN_25_TAG=(?<currentValue>[^\\s@]+)(@(?<currentDigest>sha256:[0-9a-f]+))?"
+      ],
+      "datasourceTemplate": "docker",
+      "packageNameTemplate": "eclipse-temurin",
+      "depNameTemplate": "eclipse-temurin-25",
+      "autoReplaceStringTemplate": "# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG={{{newValue}}}{{#if newDigest}}@{{{newDigest}}}{{/if}}"
+    },
+    {
       "description": "Codex amd64 musl-package archive checksum: tag plus its verified sha256 moves with the release via github-release-attachments (hosted-supported digest updating, no post-upgrade commands). Values stay in tag form so getDigest requests releases/tags/rust-vX.Y.Z.",
       "customType": "regex",
       "managerFilePatterns": [
@@ -543,6 +557,16 @@
         "docker.io/library/eclipse-temurin"
       ],
       "allowedVersions": "/^21\\./"
+    },
+    {
+      "description": "Keep the second worker JDK on Temurin 25.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchDepNames": [
+        "eclipse-temurin-25"
+      ],
+      "allowedVersions": "/^25\\./"
     }
   ],
   "constraints": {

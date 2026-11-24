@@ -109,6 +109,7 @@ jobs:
             NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
             NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
+            TEMURIN_25_TAG=${{ env.TEMURIN_25_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
@@ -147,6 +148,18 @@ jobs:
             exit 1
           fi
           echo "Verified worker JDK is Temurin 21"
+
+          java25_version="$(docker run --rm --read-only --tmpfs /tmp --user 10001:10001 "${TEST_TAG}" /opt/java/temurin-25/bin/java -version 2>&1)"
+          printf '%s\n' "${java25_version}"
+          if ! printf '%s\n' "${java25_version}" | grep -E 'version "25(\.|$)' >/dev/null; then
+            echo "worker image java25 is not JDK 25" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "${java25_version}" | grep -F Temurin >/dev/null; then
+            echo "worker image java25 is not Temurin" >&2
+            exit 1
+          fi
+          echo "Verified worker JDK is Temurin 25"
 
           android_home="$(docker run --rm "${TEST_TAG}" printenv ANDROID_HOME)"
           if [ "${android_home}" != "/opt/android-sdk" ]; then
@@ -330,6 +343,7 @@ jobs:
             NODE_SHA256_AMD64=${{ env.NODE_SHA256_AMD64 }}
             NODE_SHA256_ARM64=${{ env.NODE_SHA256_ARM64 }}
             TEMURIN_TAG=${{ env.TEMURIN_TAG }}
+            TEMURIN_25_TAG=${{ env.TEMURIN_25_TAG }}
             VERSION=${{ env.VERSION }}
             REVISION=${{ github.sha }}
           labels: |
