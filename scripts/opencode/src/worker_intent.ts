@@ -1,5 +1,9 @@
-import type { ReviewJobRecord } from "./review_jobs.ts";
+import { recordJobCompleted } from "./control_metrics.ts";
+import { resolveWorkerHeld } from "./exhausted_hold.ts";
+import type { IssueApi } from "./gitea_issues.ts";
+import type { ReviewJobRecord, ReviewJobStore } from "./review_jobs.ts";
 import type { IssueJob } from "./types.ts";
+import { errorMessage } from "./util/error.ts";
 
 /** Prefix for every malformed worker-row settlement reason. */
 export const INVALID_JOB_INTENT_PREFIX = "invalid job intent: ";
@@ -94,4 +98,47 @@ export function assertValidIssueJobForEnqueue(job: IssueJob): void {
     return;
   }
   throw new InvalidJobIntentError(`job unknown kind ${String(kind)}`);
+}
+
+/**
+ * Settle a leased worker row whose persisted payload cannot be a valid job.
+ * Stops the heartbeat, then attempts the owner-fenced `markPublished` with
+ * state `failed` and an `invalid job intent: ` reason. An error that is not
+ * an {@link InvalidJobIntentError} is rethrown for the generic outer worker
+ * handler, so only the typed failure settles here. A failed settlement
+ * attempt is logged and rethrown without resolving a hold or recording
+ * completion, keeping fenced recovery authoritative; a retry after the ledger
+ * recovers can still settle the row.
+ */
+export async function settleInvalidWorkerJobIntent(args: {
+  store: ReviewJobStore;
+  api: IssueApi;
+  row: ReviewJobRecord;
+  leasedBy: string;
+  error: unknown;
+  stopHeartbeat: () => void;
+  logger: (message: string) => void;
+}): Promise<"processed"> {
+  const { store, api, row, leasedBy, error, stopHeartbeat, logger } = args;
+  if (!(error instanceof InvalidJobIntentError)) throw error;
+  stopHeartbeat();
+  const reason = error.message;
+  let published: { cancelled: boolean };
+  try {
+    published = await store.markPublished(row.id, leasedBy, { state: "failed", reason });
+  } catch (settleErr) {
+    logger(`invalid job intent settle failed ${row.jobKey}: ${errorMessage(settleErr)}`);
+    throw settleErr;
+  }
+  if (published.cancelled) {
+    logger(`${row.jobKey} cancelled`);
+    return "processed";
+  }
+  if (row.kind === "follow-up" && row.issueNumber != null) {
+    const { owner, repo, issueNumber, headSha, prNumber } = row;
+    await resolveWorkerHeld(api, store, owner, repo, issueNumber, headSha, "skipped", "job failed", prNumber);
+  }
+  recordJobCompleted(row.kind, "failed");
+  logger(`${row.jobKey} failed: ${reason}`);
+  return "processed";
 }
