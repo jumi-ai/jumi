@@ -58,7 +58,7 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `timeouts.followup` | integer minutes, at least 1 | `FOLLOWUP_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long follow-up rounds (`follow-up` jobs) may run | Ceiling: `FOLLOWUP_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
 | `timeouts.conflict` | integer minutes, at least 1 | `CONFLICT_TIMEOUT_MS`. Does not inherit `OPENCODE_TIMEOUT_MS` | How long conflict resolution may run | Ceiling: `CONFLICT_TIMEOUT_MAX_MS` (unset defaults to the deployment timeout for this kind) |
 | `setup` | mapping (see the four rows below) | absent (no setup) | Runs a repository's own preparation command in the job's worktree once per job, after the checkout is ready and before the first engine spawn. Read from the default branch only; a pull request cannot change its own setup. `run` is required; `timeout`, `on_failure`, and `kinds` are optional. Unknown sub-keys, a non-mapping `setup`, a missing or blank `run`, a non-integer or below-1 `timeout`, an unknown `on_failure`, or a blank or unknown `kinds` entry makes the whole file invalid. Exactly one spelling per key (`kinds` entries use the `timeouts` spelling, `followup`); dash and camel spellings are unknown keys rejected with "did you mean" | Timeout is a ceiling against `SETUP_TIMEOUT_MAX_MS` (below); the job's own timeout and queue lease are not extended |
-| `setup.run` | non-blank string | — (required when `setup` is present) | Shell script run from the worktree root with `sh -e`, so a failing line stops it. The command string comes from the default branch, but it runs against the checked-out pull request head (see "Before you set") | No deployer setting |
+| `setup.run` | non-blank string | — (required when `setup` is present) | Shell script run from the worktree root with `sh -e`, so a failing line stops it. The command string comes from the default branch, but it runs against the checked-out pull request head (see "Before you set"). Review setup runs sandboxed through the Landlock shell wrapper with a scratch `HOME` (see `docs/review-sandbox.md`); worker setup kinds run with today's env | No deployer setting |
 | `setup.timeout` | integer minutes, at least 1 | `10` | How long the setup command may run. A failed, timed-out, or dirty setup never counts as a runner exit, never triggers a hop, and never consumes hop budget | Ceiling: `SETUP_TIMEOUT_MAX_MS` (unset defaults to 10 minutes, so a repository can only shorten out of the box); a value above the maximum applies as the maximum |
 | `setup.on_failure` | `"continue"` \| `"fail"` | `"continue"` | `continue` runs the job anyway (the agent prompt carries a `<repo_setup state="failed\|timeout\|dirty">` block with the output tail); `fail` starts no engine (a review posts a `failure` status naming the setup error, a worker job leaves one comment where it was started) | No deployer setting |
 | `setup.kinds` | list of `"review"`, `"implement"`, `"followup"`, `"conflict"` | all four | Which job kinds run setup. Can only narrow; there is no way to run setup on another kind. A blank or unknown entry makes the whole file invalid | No deployer setting |
@@ -255,7 +255,10 @@ never applied.
 - Before you set `setup.run`: the command string comes from the default branch, but
   it runs against the checked-out pull request head, so anything it calls from the
   tree is pull-request code. The sandbox has no forge token and no model credentials,
-  but egress is open. Prefer commands that only invoke installed tools; don't point
+  and review setup additionally runs inside the Landlock shell sandbox with a scratch
+  `HOME` (checkout plus scratch read-write, no agent `HOME`; an unavailable sandbox
+  fails the setup under `on_failure` instead of running unwrapped), but egress is
+  open. Prefer commands that only invoke installed tools; don't point
   `run` at a script a contributor can rewrite unless that's acceptable.
 - Every change to `.jumi.yml` needs a person's merge: a pull request that touches the
   file never auto-merges through Jumi, and turning auto-merge on (or changing any
