@@ -493,6 +493,9 @@ COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
 COPY --from=jdk25 /opt/java/openjdk /opt/java/temurin-25
 COPY --from=android-sdk /opt/android-sdk /opt/android-sdk
 RUN chmod -R a+rX /opt/android-sdk
+# `installed-tools.txt` requires every entry to resolve via `command -v`, so
+# expose the second JDK as `java25` on PATH (JAVA_HOME stays on 21).
+RUN ln -s /opt/java/temurin-25/bin/java /usr/local/bin/java25
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 # The reviewer manifest above is inherited from `runtime`; the worker appends
 # the JDK and the baked Android SDK tools so its `<installed_tools>` block
