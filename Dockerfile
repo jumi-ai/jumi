@@ -29,7 +29,7 @@ ARG NODE_SHA256_AMD64
 ARG NODE_SHA256_ARM64
 ARG TEMURIN_TAG=21.0.12_8-jdk@sha256:92a2a4d7a928d057e7bd999c418d66c26a34eb9a0442f3ab67721c3f88110b2d
 
-FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS tools
+FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS tools
 
 ARG BUN_VERSION
 ARG OPENCODE_VERSION
@@ -130,7 +130,7 @@ RUN set -eu; \
     install -m 755 "${tmp_dir}/bun-${bun_platform}/bun" /usr/local/bin/bun; \
     rm -rf "${tmp_dir}"
 
-FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS android-sdk
+FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS android-sdk
 
 # Android SDK in its own cache-stable stage: only the pins below affect this
 # layer, never the Jumi sources or the Codex/Claude/opencode versions, so nodes
@@ -182,7 +182,7 @@ COPY scripts/opencode/src ./src
 COPY .gitea/opencode-review.json /app/.gitea/opencode-review.json
 COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 
-FROM docker.io/library/debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+FROM docker.io/library/debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
