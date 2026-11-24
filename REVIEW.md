@@ -97,7 +97,7 @@ Renovate PRs automerge behind the required checks, so this review is their only 
 - A doubt about a security boundary is a 🟡 with the upstream citation, because a ❓ on a success trailer does not stop automerge (#325).
 - Commits beyond Renovate's are code: review them under every other rule (#122, #325).
 - On a bump-only PR, report no 💡, because a Jumi commit stops Renovate rebasing that branch (#291).
-- `bun.lock` stays readable by `BUN_VERSION` (#36), Temurin stays on 21 (#15), pins and checksums move together for both architectures (#250), and the OpenCode, Helm, Claude, Bun, and Codex build args have no default version, while `AGY_VERSION` stays pinned in the Dockerfile (#154).
+- `bun.lock` stays readable by `BUN_VERSION` (#36), Temurin 21 stays the default `JAVA_HOME` and Temurin 25 is the second JDK at `/opt/java/temurin-25`; each pin stays on its own major (#15, this issue), pins and checksums move together for both architectures (#250), and the OpenCode, Helm, Claude, Bun, and Codex build args have no default version, while `AGY_VERSION` stays pinned in the Dockerfile (#154).
 
 ## deploy/contract.md, config.ts, worker_config.ts, release.ts, .github/workflows/**
 

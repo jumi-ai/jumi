@@ -14,6 +14,7 @@ const renovate = JSON.parse(renovateRaw) as {
     matchStrings?: string[];
     datasourceTemplate?: string;
     depNameTemplate?: string;
+    packageNameTemplate?: string;
     versioningTemplate?: string;
     autoReplaceStringTemplate?: string;
   }[];
@@ -21,6 +22,7 @@ const renovate = JSON.parse(renovateRaw) as {
     description?: string;
     matchDatasources?: string[];
     matchPackageNames?: string[];
+    matchDepNames?: string[];
     matchUpdateTypes?: string[];
     allowedVersions?: string;
     groupName?: string;
@@ -41,6 +43,10 @@ function temurinManager() {
   return toolManager()?.find((m) => m.depNameTemplate === "eclipse-temurin");
 }
 
+function temurin25Manager() {
+  return toolManager()?.find((m) => m.depNameTemplate === "eclipse-temurin-25");
+}
+
 function nonDockerManager() {
   return toolManager()?.find((m) => m.depNameTemplate === undefined);
 }
@@ -58,6 +64,26 @@ const UNPINNED = "# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN
 const PINNED_OLD = `# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG=${TAG}@${OLD_DIGEST}`;
 const PINNED_OLD_TAG = `# renovate: datasource=docker depName=eclipse-temurin\nTEMURIN_TAG=${OLD_TAG}@${OLD_DIGEST}`;
 
+const TAG25 = "25.0.5.1_2-jdk";
+const OLD_TAG25 = "25.0.4_7-jdk";
+
+const UNPINNED25 = "# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=25.0.5.1_2-jdk";
+const PINNED25 = `# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=${TAG25}@${OLD_DIGEST}`;
+const PINNED25_OLD_TAG = `# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=${OLD_TAG25}@${OLD_DIGEST}`;
+
+function effectiveAllowedVersions(depName: string, packageName: string): string | undefined {
+  // Renovate applies matching packageRules in order; the last match wins.
+  let effective: string | undefined;
+  for (const r of renovate.packageRules ?? []) {
+    const matchesPackage = r.matchPackageNames?.includes(packageName) === true;
+    const matchesDep = r.matchDepNames?.includes(depName) === true;
+    if (matchesPackage || matchesDep) {
+      effective = r.allowedVersions;
+    }
+  }
+  return effective;
+}
+
 describe("renovate tool-versions config", () => {
   test("keeps digest pinning enabled via preset and digest group", () => {
     expect(renovate.extends).toContain("config:best-practices");
@@ -72,11 +98,25 @@ describe("renovate tool-versions config", () => {
     expect(/^21\./.test(TAG)).toBe(true);
     expect(/^21\./.test(OLD_TAG)).toBe(true);
     expect(/^21\./.test("17.0.0-jdk")).toBe(false);
+    // The 21 pin stays on its own major: it still rejects a Temurin 25 tag.
+    expect(/^21\./.test(TAG25)).toBe(false);
+  });
+
+  test("keeps the Temurin 25 restriction on its own major", () => {
+    const effective25 = effectiveAllowedVersions("eclipse-temurin-25", "eclipse-temurin");
+    expect(effective25).toBe("/^25\\./");
+    expect(new RegExp(effective25!.slice(1, effective25!.lastIndexOf("/"))).test(TAG25)).toBe(true);
+    expect(new RegExp(effective25!.slice(1, effective25!.lastIndexOf("/"))).test("21.0.13.1_2-jdk")).toBe(false);
+    expect(new RegExp(effective25!.slice(1, effective25!.lastIndexOf("/"))).test("26.0.0-jdk")).toBe(false);
+    // The last matching rule wins, so the 25 dep is not held on 21...
+    const effective21 = effectiveAllowedVersions("eclipse-temurin", "eclipse-temurin");
+    expect(effective21).toBe("/^21\\./");
+    expect(new RegExp(effective21!.slice(1, effective21!.lastIndexOf("/"))).test(TAG25)).toBe(false);
   });
 
   test("has separate non-docker and Temurin docker managers for the same file", () => {
     const managers = toolManager();
-    expect(managers?.length).toBe(18);
+    expect(managers?.length).toBe(19);
     const nonDocker = nonDockerManager();
     const temurin = temurinManager();
     expect(nonDocker?.matchStrings?.length).toBe(1);
@@ -85,6 +125,23 @@ describe("renovate tool-versions config", () => {
     expect(temurin?.depNameTemplate).toBe("eclipse-temurin");
     expect(temurin?.autoReplaceStringTemplate).toContain("{{{newValue}}}");
     expect(temurin?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    // The Temurin 25 manager mirrors the 21 one on its own dep name.
+    const temurin25 = temurin25Manager();
+    expect(temurin25?.matchStrings?.length).toBe(1);
+    expect(temurin25?.datasourceTemplate).toBe("docker");
+    expect(temurin25?.packageNameTemplate).toBe("eclipse-temurin");
+    expect(temurin25?.depNameTemplate).toBe("eclipse-temurin-25");
+    expect(temurin25?.autoReplaceStringTemplate).toContain("# renovate: datasource=docker depName=eclipse-temurin-25");
+    expect(temurin25?.autoReplaceStringTemplate).toContain("TEMURIN_25_TAG={{{newValue}}}");
+    expect(temurin25?.autoReplaceStringTemplate).toContain("{{{newDigest}}}");
+    expect(temurin25?.autoReplaceStringTemplate).toContain("@");
+    expect(temurin25?.autoReplaceStringTemplate?.includes("sha256:")).toBe(false);
+    // The two Temurin managers are mutually exclusive: neither matches the other's line.
+    expect(extractFirst(temurin?.matchStrings?.[0] ?? "", UNPINNED25)).toBeNull();
+    expect(extractFirst(temurin25?.matchStrings?.[0] ?? "", UNPINNED)).toBeNull();
+    expect(extractFirst(temurin25?.matchStrings?.[0] ?? "", UNPINNED25)?.groups.currentValue).toBe("25.0.5.1_2-jdk");
+    expect(extractFirst(temurin25?.matchStrings?.[0] ?? "", PINNED25)?.groups.currentValue).toBe(TAG25);
+    expect(extractFirst(temurin25?.matchStrings?.[0] ?? "", PINNED25)?.groups.currentDigest).toBe(OLD_DIGEST);
     // yq/uv per-arch checksum managers move with the version like codex.
     const yqManagers = managers?.filter((m) => m.depNameTemplate === "mikefarah/yq");
     const uvManagers = managers?.filter((m) => m.depNameTemplate === "astral-sh/uv");
@@ -191,6 +248,8 @@ describe("renovate tool-versions config", () => {
     // Managers are mutually exclusive: no duplicate dep for the Temurin line.
     expect(extractFirst(pattern, UNPINNED)).toBeNull();
     expect(extractFirst(pattern, PINNED_OLD)).toBeNull();
+    expect(extractFirst(pattern, UNPINNED25)).toBeNull();
+    expect(extractFirst(pattern, PINNED25)).toBeNull();
     expect(extractFirst(temurinPattern, UNPINNED)?.groups.currentValue).toBe(TAG);
   });
 
@@ -264,10 +323,85 @@ describe("temurin tag-and-digest replacement", () => {
   });
 });
 
+describe("temurin 25 tag-and-digest replacement", () => {
+  test("initial pin keeps the tag and appends the digest, preserving the comment", () => {
+    const temurin25 = temurin25Manager();
+    const pattern = temurin25?.matchStrings?.[0] ?? "";
+    const template = temurin25?.autoReplaceStringTemplate ?? "";
+    const found = extractFirst(pattern, UNPINNED25);
+    expect(found?.groups.currentValue).toBe("25.0.5.1_2-jdk");
+    expect(found?.groups.currentDigest).toBeUndefined();
+    const replaceString = found?.replaceString ?? "";
+    expect(UNPINNED25).toContain(replaceString);
+
+    const newString = compileAutoReplace(template, { newValue: TAG25, newDigest: NEW_DIGEST });
+    expect(newString).toBe(
+      `# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=${TAG25}@${NEW_DIGEST}`
+    );
+    const newContent = UNPINNED25.replace(replaceString, newString);
+    expect(newContent).toContain(`TEMURIN_25_TAG=${TAG25}@${NEW_DIGEST}`);
+    expect(newContent).not.toContain(`${NEW_DIGEST}@${NEW_DIGEST}`);
+
+    const reextracted = extractFirst(pattern, newContent);
+    expect(reextracted?.groups.currentValue).toBe(TAG25);
+    expect(reextracted?.groups.currentDigest).toBe(NEW_DIGEST);
+  });
+
+  test("same-tag digest refresh replaces the digest without duplicating it", () => {
+    const temurin25 = temurin25Manager();
+    const pattern = temurin25?.matchStrings?.[0] ?? "";
+    const template = temurin25?.autoReplaceStringTemplate ?? "";
+    const found = extractFirst(pattern, PINNED25);
+    expect(found?.groups.currentValue).toBe(TAG25);
+    expect(found?.groups.currentDigest).toBe(OLD_DIGEST);
+
+    const newString = compileAutoReplace(template, { newValue: TAG25, newDigest: NEW_DIGEST });
+    const newContent = PINNED25.replace(found?.replaceString ?? "", newString);
+    expect(newContent).toBe(
+      `# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=${TAG25}@${NEW_DIGEST}`
+    );
+    expect(newContent.match(/@sha256:/g)?.length).toBe(1);
+
+    const reextracted = extractFirst(pattern, newContent);
+    expect(reextracted?.groups.currentValue).toBe(TAG25);
+    expect(reextracted?.groups.currentDigest).toBe(NEW_DIGEST);
+  });
+
+  test("tag-plus-digest update moves both without losing the tag", () => {
+    const temurin25 = temurin25Manager();
+    const pattern = temurin25?.matchStrings?.[0] ?? "";
+    const template = temurin25?.autoReplaceStringTemplate ?? "";
+    const found = extractFirst(pattern, PINNED25_OLD_TAG);
+    expect(found?.groups.currentValue).toBe(OLD_TAG25);
+    expect(found?.groups.currentDigest).toBe(OLD_DIGEST);
+
+    const newString = compileAutoReplace(template, { newValue: TAG25, newDigest: NEW_DIGEST });
+    const newContent = PINNED25_OLD_TAG.replace(found?.replaceString ?? "", newString);
+    expect(newContent).toContain(`TEMURIN_25_TAG=${TAG25}@${NEW_DIGEST}`);
+    expect(newContent).not.toContain(OLD_TAG25);
+
+    const reextracted = extractFirst(pattern, newContent);
+    expect(reextracted?.groups.currentValue).toBe(TAG25);
+    expect(reextracted?.groups.currentDigest).toBe(NEW_DIGEST);
+  });
+});
+
 describe("worker image consumes the full pinned reference", () => {
   test("Dockerfile keeps a digest-pinned default and passes the full ARG to the jdk stage", () => {
     expect(dockerfile).toMatch(/^ARG TEMURIN_TAG=21\.[^\\s]*@sha256:[0-9a-f]+$/m);
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
+  });
+
+  test("Dockerfile adds a no-default Temurin 25 ARG, a jdk25 stage, and a second JDK copy", () => {
+    expect(dockerfile).toMatch(/^ARG TEMURIN_25_TAG$/m);
+    expect(dockerfile).not.toMatch(/^ARG TEMURIN_25_TAG=/m);
+    expect(dockerfile).toMatch(/FROM docker\.io\/library\/eclipse-temurin:\$\{TEMURIN_25_TAG\} AS jdk25/);
+    expect(dockerfile).toContain("COPY --from=jdk25 /opt/java/openjdk /opt/java/temurin-25");
+    expect(dockerfile).toContain(
+      "printf 'java25 %s\\n' \"$(/opt/java/temurin-25/bin/java -version 2>&1 | head -n 1)\""
+    );
+    // The default JAVA_HOME stays on 21.
+    expect(dockerfile).toMatch(/^ENV JAVA_HOME=\/opt\/java\/openjdk /m);
   });
 
   test("workflows and build script pass TEMURIN_TAG through without stripping the digest", () => {
@@ -277,12 +411,18 @@ describe("worker image consumes the full pinned reference", () => {
     for (const content of [workerWorkflow, checksWorkflow]) {
       expect(content).toContain("grep -v '^#' .gitea/tool-versions.env >> \"$GITHUB_ENV\"");
       expect(content).toContain("TEMURIN_TAG=${{ env.TEMURIN_TAG }}");
+      expect(content).toContain("TEMURIN_25_TAG=${{ env.TEMURIN_25_TAG }}");
     }
     expect(buildScript).toContain('--build-arg "TEMURIN_TAG=${TEMURIN_TAG}"');
+    expect(buildScript).toContain('--build-arg "TEMURIN_25_TAG=${TEMURIN_25_TAG}"');
+    expect(buildScript).toContain(': "${TEMURIN_25_TAG:?TEMURIN_25_TAG is required}"');
     for (const content of [workerWorkflow, checksWorkflow, buildScript, dockerfile]) {
       expect(content).not.toMatch(/TEMURIN_TAG%@\*/);
       expect(content).not.toMatch(/cut -d@/);
     }
+    expect(workerWorkflow).toContain("/opt/java/temurin-25/bin/java -version");
+    expect(checksWorkflow).toContain("/opt/java/temurin-25/bin/java -version");
+    expect(buildScript).toContain("/opt/java/temurin-25/bin/java -version");
   });
 
   test("postgres service pinning and Dockerfile digest defaults remain enabled", () => {
@@ -291,6 +431,8 @@ describe("worker image consumes the full pinned reference", () => {
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS tools/);
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS runtime/);
     expect(toolVersions).toMatch(/^TEMURIN_TAG=21\./m);
+    expect(toolVersions).toMatch(/^TEMURIN_25_TAG=25\./m);
+    expect(toolVersions).toContain("# renovate: datasource=docker depName=eclipse-temurin-25\nTEMURIN_25_TAG=");
   });
 });
 
