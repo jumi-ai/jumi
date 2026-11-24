@@ -411,6 +411,10 @@ describe("review setup sandbox wrapping (unit)", () => {
         expect(invoked?.run).toContain("review_sandbox.py");
         expect(invoked?.run).toContain("env -u OPENCODE_API_KEY");
         expect(invoked?.run).toContain("echo hi");
+        // Review setup preserves `sh -e` on the inner shell: the outer
+        // `sh -e -c <wrapped>` only sees one command, so the inner `sh -c`
+        // must carry `-e` or `false\necho hi` would report `ok`.
+        expect(invoked?.run).toContain("sh -e -c");
         const scratch = childScratchDir(workdir);
         expect(invoked?.env?.HOME).toBe(join(scratch, "sandbox-home"));
         expect(invoked?.env?.HOME).not.toBe(fakeHome);
@@ -638,6 +642,38 @@ describe("review setup sandbox red-team (real wrapper)", () => {
         expect(existsSync(join(scratch, "sandbox-home", ".cache", "x"))).toBe(true);
         expect(existsSync(join(checkout, "benign-tmp.txt"))).toBe(false);
         expect(existsSync(join(fakeHome, ".cache", "x"))).toBe(false);
+      });
+    });
+  });
+
+  test("sandboxed setup preserves sh -e: a failing first line reports failed", async () => {
+    const live = checkReviewSandbox();
+    if (!live.available) {
+      expect(live.reason ?? "").toMatch(/Landlock|executable/);
+      return;
+    }
+    await withWorkspace(async (checkout) => {
+      await initCleanRepo(checkout);
+      const git = realGitRunner();
+      const gitEnv = { PATH: process.env.PATH };
+      await withTempDirs(["setup-agent-home-"], async (fakeHome) => {
+        // Under `sh -e` the `false` aborts before `echo hi`; without `-e`
+        // on the inner shell this would report `ok` with exit 0.
+        const load = await validLoad("setup:\n  run: |\n    false\n    echo hi\n");
+        const result = await runRepoSetupForJob({
+          workdir: checkout,
+          kind: "review",
+          load,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git,
+          gitEnv,
+        });
+        expect(result.ran).toBe(true);
+        if (!result.ran) return;
+        expect(result.state).toBe("failed");
       });
     });
   });

@@ -444,7 +444,11 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
           gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
         });
         Object.assign(env, sandboxedShellEnv(scratch));
-        run = wrapShellCommand(setup.run, rules, { wrapperPath: reviewSandboxWrapperPath(), scratchDir: scratch });
+        run = wrapShellCommand(setup.run, rules, {
+          wrapperPath: reviewSandboxWrapperPath(),
+          scratchDir: scratch,
+          errexit: true,
+        });
       }
     }
     const runScript = opts.runScript ?? runRepoSetupScript;
