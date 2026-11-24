@@ -91,6 +91,64 @@ function log(message: string) {
 }
 
 /**
+ * Mint a fresh owner token for one persistent-worker tick (`<workerId>:<uuid>`).
+ * The `:` suffix keeps the legacy exact-id `isLeased` check working while a
+ * stale holder can never match the new holder. Never begins with the reclaim
+ * prefix; heartbeat/completion/release/expiry keep the persisted token.
+ */
+export function mintWorkerTickToken(workerId: string): string {
+  try {
+    return `${workerId}:${crypto.randomUUID()}`;
+  } catch {
+    return `${workerId}:${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+  }
+}
+
+/** Device-login `isLeased` match: exact legacy id or any `<workerId>:<uuid>` token. */
+export function isWorkerTickOwner(leasedBy: string | null | undefined, workerId: string): boolean {
+  if (!leasedBy) return false;
+  return leasedBy === workerId || leasedBy.startsWith(`${workerId}:`);
+}
+
+export interface PersistentWorkerTickDeps {
+  store: ReviewJobStore;
+  config: WorkerConfig;
+  api: IssueApi;
+  workerId: string;
+  extras?: RunWorkerJobExtras;
+  logger?: (message: string) => void;
+  aborts?: Map<string, AbortController>;
+  pids?: Map<string, number>;
+}
+
+/**
+ * One persistent-worker loop iteration: reclaim, then lease with a fresh
+ * per-tick token. The run loop (not the test) owns minting; callers pass the
+ * stable `workerId` and get the minted token back.
+ */
+export async function runPersistentWorkerTick(
+  deps: PersistentWorkerTickDeps
+): Promise<{ leasedBy: string; result: "idle" | "processed" }> {
+  const logger = deps.logger ?? log;
+  await reclaimExpiredWorkerJobs(deps.store, deps.config.maxJobAttempts, logger, {
+    api: deps.api,
+    botUsername: deps.config.botUsername,
+  });
+  const leasedBy = mintWorkerTickToken(deps.workerId);
+  const result = await processWorkerTick(
+    deps.store,
+    deps.config,
+    deps.api,
+    leasedBy,
+    deps.extras ?? {},
+    logger,
+    deps.aborts,
+    deps.pids
+  );
+  return { leasedBy, result };
+}
+
+/**
  * Repository timeouts for one worker job, read once from the default branch
  * at job start. A change does not affect an already running job. Fail-open to
  * deployment defaults when the file is missing, invalid, or unreadable.
