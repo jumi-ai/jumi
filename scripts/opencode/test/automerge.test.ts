@@ -555,7 +555,7 @@ describe("automerge gate", () => {
     expect(api.notes).toHaveLength(1);
     expect(api.notes[0]).toContain("forge refused (405: User not allowed to merge PR)");
     expect(api.notes[0]).toContain(AUTOMERGE_REFUSED_MARKER);
-    expect(api.notes[0]).toContain("try again after its next push");
+    expect(api.notes[0]).toContain("tries again after its next push or its next follow-up round");
     // The forge request line stays in the server log, never in the public note.
     expect(api.notes[0]).not.toContain("Gitea API");
     expect(api.notes[0]).not.toContain("https://");
@@ -596,7 +596,7 @@ describe("automerge gate", () => {
     expect(api.notes).toHaveLength(1);
     expect(api.notes[0]).toContain("forge refused (405: Auto-merge is not allowed)");
     expect(api.notes[0]).toContain(AUTOMERGE_REFUSED_MARKER);
-    expect(api.notes[0]).not.toContain("try again after its next push");
+    expect(api.notes[0]).not.toContain("tries again after its next push");
   });
 
   test("github refuses when auto-merge is disabled on the repository", async () => {
@@ -1591,7 +1591,7 @@ describe("gitea refused schedule retry after push", () => {
   function refusedBody(detail = "405: Please try again later"): string {
     return (
       `Jumi tried to schedule auto-merge on this pull request but the forge refused (${detail}). ` +
-      `Jumi will try again after its next push to the branch; otherwise a person needs to merge once reviews and CI are green.\n` +
+      `Jumi tries again after its next push or its next follow-up round (for example after a maintainer reply); otherwise a person merges once reviews and CI are green.\n` +
       AUTOMERGE_REFUSED_MARKER
     );
   }
@@ -2218,7 +2218,7 @@ describe("PR base branch required checks diverge from default", () => {
       return [
         {
           id: 1,
-          body: `${AUTOMERGE_NOTE_MARKER}\nJumi tried to schedule auto-merge but the forge refused (405: retry). Jumi will try again after its next push.\n${AUTOMERGE_REFUSED_MARKER}`,
+          body: `${AUTOMERGE_NOTE_MARKER}\nJumi tried to schedule auto-merge but the forge refused (405: retry). Jumi tries again after its next push or its next follow-up round (for example after a maintainer reply); otherwise a person merges once reviews and CI are green.\n${AUTOMERGE_REFUSED_MARKER}`,
           user: { login: "jumi" },
         },
       ];

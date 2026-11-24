@@ -1,7 +1,7 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
-import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
+import { pushClaimedBranchWithAutomergeRestore, retryRefusedAutomergeSchedule } from "./automerge.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -3292,6 +3292,26 @@ export async function implementFollowUp(
         }
       } catch {
         // Best-effort: never fail the follow-up on a status post.
+      }
+      // Refused-schedule retry: fresh labels/base inside the helper so a
+      // mid-round label change is visible. Best-effort, never changes result.
+      try {
+        await retryRefusedAutomergeSchedule({
+          api: opts.api as never,
+          forgeKind: opts.forgeKind ?? "gitea",
+          owner,
+          repo,
+          prNumber: pr.number,
+          automergeRepos: opts.automergeRepos,
+          botUsername: opts.botUsername,
+          automergeEnabled: opts.automergeEnabled,
+          trustedSenderLogins: effectiveTrustedUpFront,
+          issueNumber: opts.job.issueNumber,
+          baseBranch: opts.job.defaultBranch,
+          log,
+        });
+      } catch {
+        // Best-effort: never fail the follow-up on an automerge retry.
       }
     } else if (followUpResult.status === "skipped") {
       await resolveHeld("skipped", holdReasonForSkippedResult((followUpResult as { reason?: unknown }).reason));
