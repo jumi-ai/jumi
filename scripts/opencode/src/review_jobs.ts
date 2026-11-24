@@ -49,6 +49,7 @@ import {
 import { deleteReviewStuckLatch } from "./stuck.ts";
 import { isExternalIssueJob } from "./tracker.ts";
 import type { IssueJob, IssueJobTrigger, ReviewJob } from "./types.ts";
+import { assertValidIssueJobForEnqueue } from "./worker_intent.ts";
 
 export { isQueueUnavailable, QueueUnavailableError } from "./sql_client.ts";
 
@@ -1430,6 +1431,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
 
   enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
     return this.locked(async () => {
+      assertValidIssueJobForEnqueue(job);
       const key = workerJobKey(job);
       const kind = workerJobKind(job);
       const now = Date.now();
@@ -3877,6 +3879,7 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async enqueueIssue(job: IssueJob): Promise<EnqueueResult> {
+    assertValidIssueJobForEnqueue(job);
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
     return this.sql.begin(async (tx) => {

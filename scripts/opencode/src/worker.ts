@@ -59,6 +59,7 @@ import {
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
+import { decodeWorkerJobIntent, InvalidJobIntentError } from "./worker_intent.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
@@ -815,7 +816,42 @@ export async function processWorkerTick(
   }
 
   try {
-    const job = issueJobFromRecord(row);
+    let job: IssueJob;
+    try {
+      decodeWorkerJobIntent(row);
+      job = issueJobFromRecord(row);
+    } catch (err) {
+      if (!(err instanceof InvalidJobIntentError)) throw err;
+      stopHeartbeat();
+      const reason = err.message;
+      let published: { cancelled: boolean };
+      try {
+        published = await store.markPublished(row.id, leasedBy, { state: "failed", reason });
+      } catch (settleErr) {
+        logger(`invalid job intent settle failed ${row.jobKey}: ${errorMessage(settleErr)}`);
+        throw settleErr;
+      }
+      if (published.cancelled) {
+        logger(`${row.jobKey} cancelled`);
+        return "processed";
+      }
+      if (row.kind === "follow-up" && row.issueNumber != null) {
+        await resolveWorkerHeld(
+          api,
+          store,
+          row.owner,
+          row.repo,
+          row.issueNumber,
+          row.headSha,
+          "skipped",
+          "job failed",
+          row.prNumber
+        );
+      }
+      recordJobCompleted(row.kind, "failed");
+      logger(`${row.jobKey} failed: ${reason}`);
+      return "processed";
+    }
     const latch = await store.readIssueSkipLatch(job.owner, job.repo, job.issueNumber);
     await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
     // A follow-up round-cap latch must not refuse a later conflict wake: the
