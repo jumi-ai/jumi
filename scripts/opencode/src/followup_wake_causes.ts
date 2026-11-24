@@ -577,8 +577,8 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
           `UPDATE follow_up_wake_causes
             SET state = 'parked', park_reason = $2, settled_at = NOW()
             WHERE job_key = $1 AND state = 'pending'
-              AND CASE WHEN payload->>'generation' ~ '^-?\\d+$'
-                THEN (payload->>'generation')::integer ELSE 0 END < $3
+              AND CASE WHEN jsonb_typeof(payload -> 'generation') = 'number'
+                THEN TRUNC((payload ->> 'generation')::numeric)::integer ELSE 0 END < $3
             RETURNING id`,
           [jobKey, reason, Math.trunc(opts.generation)]
         )
@@ -602,7 +602,7 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
         const rows = asRows<{ id: unknown }>(
           await client.unsafe(
             `UPDATE follow_up_wake_causes
-              SET state = 'parked', park_reason = $2, settled_at = NOW()
+              SET state = 'parked', park_reason = $4, settled_at = NOW()
               WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND state = 'pending'
               RETURNING id`,
             [owner, repo, issueNumber, reason]
@@ -613,10 +613,10 @@ export class PgFollowUpWakeCauseStore implements FollowUpWakeCauseStore {
       const rows = asRows<{ id: unknown }>(
         await client.unsafe(
           `UPDATE follow_up_wake_causes
-            SET state = 'parked', park_reason = $2, settled_at = NOW()
+            SET state = 'parked', park_reason = $4, settled_at = NOW()
             WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND state = 'pending'
-              AND CASE WHEN payload->>'generation' ~ '^-?\\d+$'
-                THEN (payload->>'generation')::integer ELSE 0 END < $4
+              AND CASE WHEN jsonb_typeof(payload -> 'generation') = 'number'
+                THEN TRUNC((payload ->> 'generation')::numeric)::integer ELSE 0 END < $5
             RETURNING id`,
           [owner, repo, issueNumber, reason, Math.trunc(opts.generation)]
         )

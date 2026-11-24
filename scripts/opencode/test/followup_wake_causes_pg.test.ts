@@ -132,12 +132,13 @@ describePg("follow-up wake causes against real postgres", () => {
     );
     expect(await store.wakeCauses.get("digest", digest)).toBeDefined();
     // Same payload and generation replays; key order does not matter.
-    expect(
-      await store.wakeCauses.record(
-        input({ jobKey: "digest", delivery: "", payload: { generation: 0, b: 1, a: { y: 2, x: 1 } } })
-      )
-    ).toBe("duplicate");
-    void digest;
+    const first = payload(0);
+    const reorderedEntries = Object.entries(first).reverse();
+    const reordered: Record<string, unknown> = Object.fromEntries(reorderedEntries);
+    reordered.trigger = Object.fromEntries(Object.entries(first.trigger as Record<string, unknown>).reverse());
+    expect(await store.wakeCauses.record(input({ jobKey: "digest", delivery: "", payload: reordered }))).toBe(
+      "duplicate"
+    );
     // Changed payload and newly authorized generation are distinct.
     expect(await store.wakeCauses.record(input({ jobKey: "digest", delivery: "", payload: payload(0, "b") }))).toBe(
       "recorded"
