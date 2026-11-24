@@ -291,6 +291,17 @@ export interface ReviewJobStore {
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
   ): Promise<{ cancelled: boolean }>;
   /**
+   * Atomic settle plus handover obligation: the same fenced `markPublished`
+   * transition and the `review_handover_pending` insert in one transaction
+   * (one locked step in memory). No production caller yet.
+   */
+  markPublishedWithHandover(
+    id: number,
+    leasedBy: string,
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    publishedStatus: "posted" | "updated" | "skipped"
+  ): Promise<{ cancelled: boolean }>;
+  /**
    * Durable per-run usage: one row per (runner spawn, model). Called by the
    * engine wrapper before the job completes, so a pod that exits after one
    * job does not take its counters with it. Fail-open: callers swallow errors
@@ -971,6 +982,61 @@ function isTerminalOutcome(state: ReviewJobState, reason: string | null | undefi
 // row is leased (and is deduped against it) must not be lost when the lease ends in a CI wait.
 function isCiRewakeOutcome(outcome: { state: string; reason?: string }): boolean {
   return outcome.state === "skipped" && isCiWaitSkipReason(outcome.reason);
+}
+
+function isHandoverPendingStatus(status: string): boolean {
+  return status === "posted" || status === "updated";
+}
+
+type MarkPublishedOutcome = { state: "succeeded" | "skipped" | "failed"; reason?: string };
+
+// Shared memory terminal transition so `markPublished` and
+// `markPublishedWithHandover` cannot drift. Returns whether the row settled to
+// `cancelled` (cancel wins) or requeued (CI-wait rewake).
+function applyMarkPublishedRow(
+  row: ReviewJobRecord,
+  outcome: MarkPublishedOutcome,
+  ts: number
+): { cancelled: boolean; requeued: boolean } {
+  if (row.cancelRequested) {
+    row.rewakeRequested = false;
+    row.cancelRequested = false;
+    row.state = "cancelled";
+    row.leasedBy = null;
+    row.leasedUntil = null;
+    row.updatedAt = ts;
+    return { cancelled: true, requeued: false };
+  }
+  const rewake = Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome);
+  row.rewakeRequested = false;
+  row.cancelRequested = false;
+  if (rewake) {
+    row.state = "queued";
+    row.resultReason = null;
+    row.leasedBy = null;
+    row.leasedUntil = null;
+    row.updatedAt = ts;
+    return { cancelled: false, requeued: true };
+  }
+  row.state = outcome.state;
+  if (outcome.reason) row.resultReason = outcome.reason;
+  row.publishedAt = ts;
+  row.leasedBy = null;
+  row.leasedUntil = null;
+  row.updatedAt = ts;
+  return { cancelled: false, requeued: false };
+}
+
+function memoryHandoverPendings(
+  store: ReviewJobStore
+): Map<number, { reviewJobId: number; publishedStatus: string; createdAt: number }> {
+  // Same process-shared side map `review_handover_pending.ts` uses (one-shot
+  // proxies forward property reads, so both see one map). Same key on purpose.
+  const holder = store as unknown as {
+    __reviewHandoverPending?: Map<number, { reviewJobId: number; publishedStatus: string; createdAt: number }>;
+  };
+  if (!holder.__reviewHandoverPending) holder.__reviewHandoverPending = new Map();
+  return holder.__reviewHandoverPending;
 }
 
 function jobPrUpdatedAtMs(job: ReviewJob): number | null {
@@ -1677,36 +1743,32 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(() => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
-      const ts = Date.now();
       // A cancel that lands after the tick's final `isCancelRequested` poll
       // must not publish a normal result: settle atomically like the rewake
-      // branch below so the late mark wins and the caller posts `stopped`.
-      if (row.cancelRequested) {
-        row.rewakeRequested = false;
-        row.cancelRequested = false;
-        row.state = "cancelled";
-        row.leasedBy = null;
-        row.leasedUntil = null;
-        row.updatedAt = ts;
+      // branch so the late mark wins and the caller posts `stopped`.
+      return { cancelled: applyMarkPublishedRow(row, outcome, Date.now()).cancelled };
+    });
+  }
+
+  markPublishedWithHandover(
+    id: number,
+    leasedBy: string,
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    publishedStatus: "posted" | "updated" | "skipped"
+  ): Promise<{ cancelled: boolean }> {
+    return this.locked(() => {
+      const row = this.rows.find((item) => item.id === id);
+      if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
+      const settled = applyMarkPublishedRow(row, outcome, Date.now());
+      const pendings = memoryHandoverPendings(this);
+      if (settled.cancelled) {
+        pendings.delete(id);
         return { cancelled: true };
       }
-      const rewake = Boolean(row.rewakeRequested) && isCiRewakeOutcome(outcome);
-      row.rewakeRequested = false;
-      row.cancelRequested = false;
-      if (rewake) {
-        row.state = "queued";
-        row.resultReason = null;
-        row.leasedBy = null;
-        row.leasedUntil = null;
-        row.updatedAt = ts;
-        return { cancelled: false };
+      if (settled.requeued) return { cancelled: false };
+      if (isHandoverPendingStatus(publishedStatus) && !pendings.has(id)) {
+        pendings.set(id, { reviewJobId: id, publishedStatus, createdAt: Date.now() });
       }
-      row.state = outcome.state;
-      if (outcome.reason) row.resultReason = outcome.reason;
-      row.publishedAt = ts;
-      row.leasedBy = null;
-      row.leasedUntil = null;
-      row.updatedAt = ts;
       return { cancelled: false };
     });
   }
@@ -3577,6 +3639,39 @@ export async function assertLedgerSchema(sql: SqlClient): Promise<void> {
   }
 }
 
+/**
+ * Single fenced terminal transition shared by `markPublished` and
+ * `markPublishedWithHandover` so semantics cannot drift. Returns the settled
+ * state; throws `cannot mark published for job <id>` when nothing matched.
+ */
+async function pgMarkPublishedUpdate(
+  sql: SqlClient,
+  id: number,
+  leasedBy: string,
+  outcome: MarkPublishedOutcome
+): Promise<string> {
+  // Cancel wins atomically like the rewake branch: a mark that lands after
+  // the tick's final poll settles to `cancelled` instead of publishing.
+  const rows = asRows<{ state: unknown }>(
+    await sql.unsafe(
+      `UPDATE review_jobs
+       SET state = CASE WHEN cancel_requested THEN 'cancelled' WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
+           result_reason = CASE WHEN cancel_requested THEN result_reason WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
+           published_at = CASE WHEN cancel_requested THEN published_at WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
+           rewake_requested = FALSE,
+           cancel_requested = FALSE,
+           leased_by = NULL,
+           leased_until = NULL,
+           updated_at = NOW()
+       WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+       RETURNING state`,
+      [id, leasedBy, outcome.state, outcome.reason ?? null, isCiRewakeOutcome(outcome)]
+    )
+  );
+  if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);
+  return str(rows[0].state);
+}
+
 export class PgReviewJobStore implements ReviewJobStore {
   readonly skipLatches: PgSkipLatchStore;
   readonly sits: PgRouterSitStore;
@@ -4264,26 +4359,33 @@ export class PgReviewJobStore implements ReviewJobStore {
     leasedBy: string,
     outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
   ): Promise<{ cancelled: boolean }> {
-    // Cancel wins atomically like the rewake branch: a mark that lands after
-    // the tick's final poll settles to `cancelled` instead of publishing.
-    const rows = asRows<{ state: unknown }>(
-      await this.sql.unsafe(
-        `UPDATE review_jobs
-         SET state = CASE WHEN cancel_requested THEN 'cancelled' WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
-             result_reason = CASE WHEN cancel_requested THEN result_reason WHEN $5::boolean AND rewake_requested THEN NULL ELSE COALESCE($4, result_reason) END,
-             published_at = CASE WHEN cancel_requested THEN published_at WHEN $5::boolean AND rewake_requested THEN published_at ELSE NOW() END,
-             rewake_requested = FALSE,
-             cancel_requested = FALSE,
-             leased_by = NULL,
-             leased_until = NULL,
-             updated_at = NOW()
-         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-         RETURNING state`,
-        [id, leasedBy, outcome.state, outcome.reason ?? null, isCiRewakeOutcome(outcome)]
-      )
-    );
-    if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);
-    return { cancelled: str(rows[0].state) === "cancelled" };
+    const state = await pgMarkPublishedUpdate(this.sql, id, leasedBy, outcome);
+    return { cancelled: state === "cancelled" };
+  }
+
+  async markPublishedWithHandover(
+    id: number,
+    leasedBy: string,
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    publishedStatus: "posted" | "updated" | "skipped"
+  ): Promise<{ cancelled: boolean }> {
+    return this.sql.begin(async (tx) => {
+      const state = await pgMarkPublishedUpdate(tx, id, leasedBy, outcome);
+      if (state === "cancelled") {
+        await tx.unsafe(`DELETE FROM review_handover_pending WHERE review_job_id = $1`, [id]);
+        return { cancelled: true };
+      }
+      if (state === "queued") return { cancelled: false };
+      if (isHandoverPendingStatus(publishedStatus)) {
+        await tx.unsafe(
+          `INSERT INTO review_handover_pending (review_job_id, published_status)
+           VALUES ($1, $2)
+           ON CONFLICT (review_job_id) DO NOTHING`,
+          [id, publishedStatus]
+        );
+      }
+      return { cancelled: false };
+    });
   }
 
   async reclaimExpired(

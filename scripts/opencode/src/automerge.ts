@@ -646,10 +646,47 @@ export async function isAutomergeLabelAdmitted(opts: {
   }
 }
 
-/** Best-effort cancel of a schedule Jumi set earlier. Never throws. Resolves
- * `true` when a schedule was removed; `false` (missing cancel entrypoint,
- * nothing to remove, or a failed cancel) keeps Gitea silent, where the
- * schedule state is unreadable. */
+export type CancelAutomergeOutcome = "removed" | "absent" | "unsupported" | "failed";
+
+/**
+ * Truthful cancel outcome for a schedule Jumi set earlier. Never throws.
+ * Missing entrypoint -> `unsupported`; resolved `true` -> `removed`;
+ * resolved `false` -> `absent`; anything else (older fakes resolving `void`)
+ * -> `removed`; threw -> `failed` (logged, never rethrown).
+ */
+export async function cancelAutomergeScheduleOutcome(
+  api: AutomergeApi,
+  forgeKind: ForgeKind,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  log: (message: string) => void
+): Promise<CancelAutomergeOutcome> {
+  void forgeKind;
+  try {
+    const cancel = api.cancelAutoMerge;
+    if (typeof cancel !== "function") {
+      log(`automerge cancel unsupported for ${owner}/${repo}#${prNumber}: forge does not expose cancellation`);
+      return "unsupported";
+    }
+    const removed = await cancel.call(api, owner, repo, prNumber);
+    if (removed === false) {
+      log(`automerge cancelled for ${owner}/${repo}#${prNumber} (nothing to remove)`);
+      return "absent";
+    }
+    // Older fakes resolve `void`: only an explicit `false` means "nothing
+    // to remove"; anything else keeps the previous claim-a-cancel behaviour.
+    log(`automerge cancelled for ${owner}/${repo}#${prNumber}`);
+    return "removed";
+  } catch (err) {
+    // A missing schedule is the steady state; any other failure stays in the
+    // server log and never fails the job.
+    log(`automerge cancel failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
+    return "failed";
+  }
+}
+
+/** Compatibility wrapper for the nine non-handler call sites: `true` only for `removed`. */
 async function cancelAutomergeSchedule(
   api: AutomergeApi,
   forgeKind: ForgeKind,
@@ -658,21 +695,7 @@ async function cancelAutomergeSchedule(
   prNumber: number,
   log: (message: string) => void
 ): Promise<boolean> {
-  void forgeKind;
-  try {
-    const cancel = api.cancelAutoMerge;
-    if (typeof cancel !== "function") return false;
-    const removed = await cancel.call(api, owner, repo, prNumber);
-    log(`automerge cancelled for ${owner}/${repo}#${prNumber} (settings file in pull)`);
-    // Older fakes resolve `void`: only an explicit `false` means "nothing
-    // to remove"; anything else keeps the previous claim-a-cancel behaviour.
-    return removed !== false;
-  } catch (err) {
-    // A missing schedule is the steady state; any other failure stays in the
-    // server log and never fails the job.
-    log(`automerge cancel failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
-    return false;
-  }
+  return (await cancelAutomergeScheduleOutcome(api, forgeKind, owner, repo, prNumber, log)) === "removed";
 }
 
 /**
@@ -1992,7 +2015,16 @@ export async function handleAutomergeLabelChange(opts: {
   botUsername: string;
   issueNumber?: number;
   log?: (message: string) => void;
-}): Promise<{ action: "scheduled" | "cancelled" | "none" }> {
+}): Promise<{
+  action:
+    | "scheduled"
+    | "cancelled"
+    | "cancel-unsupported"
+    | "cancel-failed"
+    | "deployment-blocked"
+    | "unreadable"
+    | "none";
+}> {
   const log = opts.log ?? (() => undefined);
   const api = opts.api;
   // Fail-closed when the caller holds a partial forge client (webhook
@@ -2013,7 +2045,7 @@ export async function handleAutomergeLabelChange(opts: {
     if (!prBaseBranch) prBaseBranch = prBaseRefOf(pr);
   } catch (err) {
     log(`automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
-    return { action: "none" };
+    return { action: "unreadable" };
   }
   const listed = isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos);
   const enabled = opts.automergeEnabled ?? true;
@@ -2035,7 +2067,7 @@ export async function handleAutomergeLabelChange(opts: {
       log,
       gate,
     });
-    return { action: res.posted ? "cancelled" : "none" };
+    return { action: res.posted ? "deployment-blocked" : "none" };
   }
   let settings: RepoSettingsLoad;
   try {
@@ -2048,7 +2080,7 @@ export async function handleAutomergeLabelChange(opts: {
     ).load;
   } catch (err) {
     log(`automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
-    return { action: "none" };
+    return { action: "unreadable" };
   }
   if (settings.state === "invalid") {
     await postAutomergeNote(
@@ -2064,7 +2096,14 @@ export async function handleAutomergeLabelChange(opts: {
   const names = resolveLabelNames(settings);
   const decision = automergeLabelEventAction(prLabels, settings);
   if (decision.conflict) {
-    await cancelAutomergeSchedule(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
+    const outcome = await cancelAutomergeScheduleOutcome(
+      api,
+      opts.forgeKind,
+      opts.owner,
+      opts.repo,
+      opts.prNumber,
+      log
+    );
     await postAutomergeNote(
       api,
       opts.owner,
@@ -2073,13 +2112,24 @@ export async function handleAutomergeLabelChange(opts: {
       opts.botUsername,
       automergeConflictNote(names.automergeLabel, names.noAutomergeLabel)
     );
-    return { action: "cancelled" };
+    return {
+      action: outcome === "failed" ? "cancel-failed" : outcome === "unsupported" ? "cancel-unsupported" : "cancelled",
+    };
   }
   if (decision.action === "cancel") {
     // No-automerge label, or the label was removed and the file does not opt in:
     // cancel anything scheduled.
-    await cancelAutomergeSchedule(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
-    return { action: "cancelled" };
+    const outcome = await cancelAutomergeScheduleOutcome(
+      api,
+      opts.forgeKind,
+      opts.owner,
+      opts.repo,
+      opts.prNumber,
+      log
+    );
+    return {
+      action: outcome === "failed" ? "cancel-failed" : outcome === "unsupported" ? "cancel-unsupported" : "cancelled",
+    };
   }
   const hadRefused = await hasRefusedAutomergeNote(api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, log);
   const result = await scheduleAutomergeForPr({
