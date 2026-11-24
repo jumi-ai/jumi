@@ -1639,23 +1639,7 @@
   },
   "followup.test.ts::125": {
     "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "2 suggestions (follow-up skipped: job cancelled)",
-            "state": "success"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
+    "effects": [],
     "input": {
       "job": {
         "action": "assigned",
@@ -1715,23 +1699,7 @@
   },
   "followup.test.ts::126": {
     "claimExists": false,
-    "effects": [
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          "headsha",
-          {
-            "context": "jumi/opencode-review",
-            "description": "2 suggestions (follow-up skipped: no open jumi closing PR)",
-            "state": "success"
-          }
-        ],
-        "method": "createCommitStatus",
-        "seam": "forge",
-        "seq": 0
-      }
-    ],
+    "effects": [],
     "input": {
       "job": {
         "action": "assigned",

@@ -5966,7 +5966,7 @@ describe("suggestion hold latch", () => {
     });
   });
 
-  test("an unassigned issue (cancelled) resolves a held pending to success", async () => {
+  test("an unassigned issue (cancelled) keeps a held pending without fresh evidence", async () => {
     await withDirs(async (home, workdir) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
@@ -6013,13 +6013,11 @@ describe("suggestion hold latch", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "cancelled" });
-      expect(statuses).toHaveLength(1);
-      expect(statuses[0]).toMatchObject({ state: "success" });
-      expect(statuses[0]?.description).toContain("job cancelled");
+      expect(statuses).toHaveLength(0);
     });
   });
 
-  test("no open jumi closing PR resolves a held pending to success", async () => {
+  test("no open jumi closing PR keeps a held pending without a fresh read", async () => {
     await withDirs(async (home, workdir) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
@@ -6066,9 +6064,7 @@ describe("suggestion hold latch", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "no open jumi closing PR" });
-      expect(statuses).toHaveLength(1);
-      expect(statuses[0]).toMatchObject({ state: "success" });
-      expect(statuses[0]?.description).toContain("no open jumi closing PR");
+      expect(statuses).toHaveLength(0);
     });
   });
 

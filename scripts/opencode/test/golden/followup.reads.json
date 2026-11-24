@@ -3,7 +3,11 @@
     "name": "implementFollowUp",
     "reads": {
       "getIssue": 1,
-      "listOpenPulls": 1
+      "getPR": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::10": {
@@ -303,14 +307,22 @@
   "followup.test.ts::125": {
     "name": "implementFollowUp",
     "reads": {
-      "getIssue": 1
+      "getIssue": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::126": {
     "name": "implementFollowUp",
     "reads": {
       "getIssue": 1,
-      "listOpenPulls": 1
+      "getPR": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::127": {

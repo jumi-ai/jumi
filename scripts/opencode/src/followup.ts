@@ -137,12 +137,7 @@ import {
   markQuotaStuckLatch,
   sameFindingDisplayFromParts,
 } from "./stuck.ts";
-import {
-  type HoldStatusPort,
-  postSuggestionHoldSuccess,
-  suggestionHoldCompletedDescription,
-  suggestionHoldSkippedDescription,
-} from "./suggestion_hold.ts";
+import type { HoldStatusPort } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { loginEquals } from "./util/login.ts";
@@ -259,30 +254,63 @@ async function writeFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey, stat
 }
 
 /**
- * Resolve a held suggestion `pending` on a path with no `pr` snapshot yet
- * (before the pull is fetched). Reads the latch itself; a no-op without a
- * consumed hold. Never throws.
+ * Early-exit settlement before a `pr` snapshot exists. Routes through the
+ * shared hold-settlement gate once a PR number is known (job or latch);
+ * keeps without posting when the PR cannot be re-read fresh. Never throws.
  */
-async function resolveHeldFromLatch(
+async function resolveHeldEarlyThroughGate(
   api: HoldStatusPort,
   latches: SkipLatchStore,
   latchKey: SkipLatchKey,
-  fallback: { owner: string; repo: string; headSha: string },
+  opts: {
+    owner: string;
+    repo: string;
+    prNumber?: number;
+    botUsername: string;
+    defaultBranch: string;
+    deploymentTrusted?: readonly string[];
+    deploymentIgnore?: readonly string[];
+    deploymentBlocking?: readonly string[];
+    trigger?: IssueJob["trigger"];
+    log: (message: string) => void;
+  },
   kind: "completed" | "skipped",
   reason?: string
 ): Promise<void> {
   try {
-    const hold = (await readFollowUpLatch(latches, latchKey)).suggestionHold;
-    if (!hold?.consumed) return;
-    const count = hold.count ?? 0;
-    if (!count) return;
-    const sha = hold.headSha ?? fallback.headSha;
-    if (!sha) return;
-    const description =
-      kind === "completed"
-        ? suggestionHoldCompletedDescription(count)
-        : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
-    await postSuggestionHoldSuccess(api, fallback.owner, fallback.repo, sha, description);
+    let prNumber = opts.prNumber ?? 0;
+    if (!prNumber) {
+      try {
+        prNumber = (await readFollowUpLatch(latches, latchKey)).prNumber ?? 0;
+      } catch {
+        prNumber = 0;
+      }
+    }
+    if (!prNumber) return;
+    await settleFollowUpHold({
+      api,
+      owner: opts.owner,
+      repo: opts.repo,
+      prNumber,
+      latches,
+      latchKey,
+      intent: kind === "completed" ? { kind: "completed" } : { kind: "skipped", reason: reason ?? "follow-up skipped" },
+      trigger:
+        opts.trigger != null
+          ? {
+              event: opts.trigger.event,
+              commentId: opts.trigger.commentId,
+              reviewId: opts.trigger.reviewId,
+              sender: opts.trigger.sender,
+            }
+          : undefined,
+      botUsername: opts.botUsername,
+      defaultBranch: opts.defaultBranch,
+      deploymentTrusted: opts.deploymentTrusted,
+      deploymentIgnore: opts.deploymentIgnore,
+      deploymentBlocking: opts.deploymentBlocking,
+      log: opts.log,
+    });
   } catch {
     // Best-effort.
   }
@@ -413,11 +441,6 @@ export function isJumiPullReviewWriteup(review: PullReview, botUsername: string)
   const body = pullReviewBody(review);
   if (!body.trim() || isJumiWorkerBody(body) || isEmptySuccessReview(body)) return false;
   return lastCheckTrailer(body) !== undefined;
-}
-
-function _isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
-  if (!isJumiPullReviewWriteup(review, botUsername)) return false;
-  return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
 }
 
 /** Queue a fresh review only when Jumi changed the body on a failed head. */
@@ -648,11 +671,6 @@ export function openRisksForReview(
     if (isRiskInline(inline, botUsername)) inlineCount++;
   }
   return bodyCount + inlineCount;
-}
-
-/** Open blocking-question inlines among the given Jumi inlines. */
-function _blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
-  return inlines.filter((inline) => isBlockingQuestionInline(inline, botUsername));
 }
 
 /**
@@ -1903,11 +1921,22 @@ export async function implementFollowUp(
     // Record the pickup/closed cause explicitly instead.
     const isStrictRefreshGate = Boolean((opts.job as { strictRefresh?: boolean }).strictRefresh);
     const strictGateReason = "strict refresh: closing issue not picked up or closed";
-    await resolveHeldFromLatch(
+    await resolveHeldEarlyThroughGate(
       opts.api,
       latches,
       latchKey,
-      { owner, repo, headSha: opts.job.headSha ?? "" },
+      {
+        owner,
+        repo,
+        prNumber: opts.job.prNumber,
+        botUsername: opts.botUsername,
+        defaultBranch: opts.job.defaultBranch,
+        deploymentTrusted: opts.trustedSenderLogins,
+        deploymentIgnore: opts.followupIgnoreLogins,
+        deploymentBlocking: opts.blockingQuestionAuthors,
+        trigger: opts.job.trigger,
+        log,
+      },
       "skipped",
       assigned.status === "cancelled" ? (isStrictRefreshGate ? strictGateReason : "job cancelled") : assigned.reason
     );
@@ -1929,11 +1958,22 @@ export async function implementFollowUp(
     followupPrefix
   );
   if (!pr || !isEligibleWorkerPR(pr, owner, repo)) {
-    await resolveHeldFromLatch(
+    await resolveHeldEarlyThroughGate(
       opts.api,
       latches,
       latchKey,
-      { owner, repo, headSha: opts.job.headSha ?? "" },
+      {
+        owner,
+        repo,
+        prNumber: opts.job.prNumber,
+        botUsername: opts.botUsername,
+        defaultBranch: opts.job.defaultBranch,
+        deploymentTrusted: opts.trustedSenderLogins,
+        deploymentIgnore: opts.followupIgnoreLogins,
+        deploymentBlocking: opts.blockingQuestionAuthors,
+        trigger: opts.job.trigger,
+        log,
+      },
       "skipped",
       "no open jumi closing PR"
     );
