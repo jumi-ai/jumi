@@ -536,7 +536,7 @@ bun run ci
 ```bash
 docker run --rm -d --name jumi-queue-pg -p 5432:5432 \
   -e POSTGRES_USER=jumi -e POSTGRES_PASSWORD=jumi -e POSTGRES_DB=jumi_queue_test \
-  postgres:18-alpine
+  postgres:19-alpine
 JUMI_TEST_DATABASE_URL=postgres://jumi:jumi@127.0.0.1:5432/jumi_queue_test bun run test:pg
 ```
 

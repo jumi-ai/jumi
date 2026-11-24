@@ -51,6 +51,7 @@ When several bypasses or symptoms share a mechanism, report the mechanism once w
 - A refused hop stays visible to the caller through `throwIfEngineFailed` (#142).
 - A later round reads fresh artifacts and task text, never the previous round's snapshot (#117).
 - `ignore-conflicts` PRs get no default-branch merge from any path until Jumi has committed to them (#293, #317).
+- Code that reads Jumi's own published review back (hold release, open-finding counts, follow-up finding detection) is tested on what `postPullReview` publishes: inlines in a separate empty-body review on the same commit and a summary body stripped of them. The release path also runs for every PR the hold covers, not only Jumi-authored ones (#648, #674, #682, #793).
 
 ## git.ts, claude.ts, agy.ts, codex.ts, fallback.ts, auth.ts, quota.ts, quota_wait.ts, runners.ts, engine.ts, engine_dispatch.ts, provenance.ts, independent_review.ts
 

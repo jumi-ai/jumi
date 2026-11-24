@@ -195,6 +195,8 @@ export interface RouterSitStore {
   /** Forge-free closed/merged marker for the board requeue filter. Set from the closed/merged webhook path, cleared on reopen. */
   markPullClosed?(owner: string, repo: string, number: number): Promise<void>;
   clearPullClosed?(owner: string, repo: string, number: number): Promise<void>;
+  /** Forge-free closed check for the engine backstop. Absent means unknown (not closed). */
+  isPullClosed?(owner: string, repo: string, number: number): Promise<boolean>;
   listClosedPulls?(): Promise<ClosedPullRecord[]>;
 }
 
@@ -264,6 +266,11 @@ export class MemoryRouterSitStore implements RouterSitStore {
 
   async clearPullClosed(owner: string, repo: string, number: number): Promise<void> {
     this.closed.delete(this.key(owner, repo, number));
+  }
+
+  async isPullClosed(owner: string, repo: string, number: number): Promise<boolean> {
+    if (!owner || !repo || !Number.isFinite(number)) return false;
+    return this.closed.has(this.key(owner, repo, number));
   }
 
   async listClosedPulls(): Promise<ClosedPullRecord[]> {
@@ -424,6 +431,22 @@ export class PgRouterSitStore implements RouterSitStore {
         repo,
         number,
       ]);
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async isPullClosed(owner: string, repo: string, number: number): Promise<boolean> {
+    if (!owner || !repo || !Number.isFinite(number)) return false;
+    try {
+      const rows = asRows<{ one: unknown }>(
+        await this.sql.unsafe(`SELECT 1 AS one FROM closed_pulls WHERE owner = $1 AND repo = $2 AND number = $3`, [
+          owner,
+          repo,
+          number,
+        ])
+      );
+      return rows.length > 0;
     } catch (err) {
       wrapSqlError(err);
     }
