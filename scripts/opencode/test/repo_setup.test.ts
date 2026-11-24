@@ -1,4 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { childScratchDir } from "../src/engine_scratch.ts";
 import {
   DEFAULT_SETUP_TIMEOUT_MS,
   loadRepoSettings,
@@ -11,10 +16,24 @@ import {
   runRepoSetupForKind,
   type SetupScriptResult,
 } from "../src/repo_setup.ts";
+import {
+  ALLOW_UNSANDBOXED_REVIEWS_ENV,
+  checkReviewSandbox,
+  setReviewSandboxProbeForTests,
+} from "../src/review_sandbox.ts";
 import type { GitAuth, GitRunner } from "../src/workspace.ts";
+import { withTempDirs, withWorkspace } from "./harness/temp.ts";
 
 const AUTH: GitAuth = { giteaUrl: "https://forge.example.test", username: "jumi", token: "" };
 const GIT_ENV: Record<string, string | undefined> = { PATH: "/usr/bin" };
+
+const originalAllowSetup = process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV];
+
+afterEach(() => {
+  setReviewSandboxProbeForTests(undefined);
+  if (originalAllowSetup === undefined) delete process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV];
+  else process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV] = originalAllowSetup;
+});
 
 async function validLoad(content: string): Promise<RepoSettingsLoad> {
   const api = { getRepoFile: async () => ({ found: true, content }) };
@@ -358,5 +377,335 @@ describe("resolveSetupTimeoutMaxMs", () => {
       if (previous === undefined) delete process.env.SETUP_TIMEOUT_MAX_MS;
       else process.env.SETUP_TIMEOUT_MAX_MS = previous;
     }
+  });
+});
+
+describe("review setup sandbox wrapping (unit)", () => {
+  test("review invocation uses the wrapper argv and scratch env; a worker kind is identical to before", async () => {
+    setReviewSandboxProbeForTests({ available: true, abi: 7 });
+    await withWorkspace(async (workdir) => {
+      const load = await validLoad("setup:\n  run: echo hi\n");
+      const seen: { run?: string; env?: Record<string, string> }[] = [];
+      const capture: RepoSetupRunScript = async (opts) => {
+        seen.push({ run: opts.run, env: opts.env });
+        return OK_SCRIPT;
+      };
+      const { git } = stubGit([""]);
+      const fakeHome = await mkdtemp(join(tmpdir(), "setup-agent-home-"));
+      try {
+        const review = await runRepoSetupForJob({
+          workdir,
+          kind: "review",
+          load,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git,
+          gitEnv: GIT_ENV,
+          runScript: capture,
+        });
+        expect(review.ran).toBe(true);
+        expect(seen).toHaveLength(1);
+        const invoked = seen[0];
+        expect(invoked?.run).toContain("review_sandbox.py");
+        expect(invoked?.run).toContain("env -u OPENCODE_API_KEY");
+        expect(invoked?.run).toContain("echo hi");
+        const scratch = childScratchDir(workdir);
+        expect(invoked?.env?.HOME).toBe(join(scratch, "sandbox-home"));
+        expect(invoked?.env?.HOME).not.toBe(fakeHome);
+        expect(invoked?.env?.TMPDIR).toBe(scratch);
+        expect(invoked?.env?.XDG_CONFIG_HOME).toBe(join(scratch, "sandbox-home", ".config"));
+        expect(invoked?.env?.GIT_AUTH_HOST).toBe("forge.example.test");
+        expect(invoked?.env?.PATH).toContain("/usr");
+
+        const seenWorker: { run?: string; env?: Record<string, string> }[] = [];
+        const { git: wgit } = stubGit([""]);
+        const worker = await runRepoSetupForJob({
+          workdir,
+          kind: "implement",
+          load,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git: wgit,
+          gitEnv: GIT_ENV,
+          runScript: async (opts) => {
+            seenWorker.push({ run: opts.run, env: opts.env });
+            return OK_SCRIPT;
+          },
+        });
+        expect(worker.ran).toBe(true);
+        expect(seenWorker).toHaveLength(1);
+        expect(seenWorker[0]?.run).toBe("echo hi");
+        expect(seenWorker[0]?.run).not.toContain("review_sandbox.py");
+        expect(seenWorker[0]?.env?.HOME).toBe(fakeHome);
+        expect(seenWorker[0]?.env?.XDG_CONFIG_HOME).toBeUndefined();
+      } finally {
+        await rm(fakeHome, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("sandbox-unavailable fails closed without a spawn; the escape switch runs unwrapped and logs", async () => {
+    setReviewSandboxProbeForTests({ available: false, reason: "unit-test no Landlock" });
+    const load = await validLoad("setup:\n  run: echo hi\n");
+    let spawned = 0;
+    const { git } = stubGit([""]);
+    const logs: string[] = [];
+    const refused = await runRepoSetupForJob({
+      workdir: "/tmp/repo-setup-sandbox-unavailable",
+      kind: "review",
+      load,
+      auth: AUTH,
+      owner: "o",
+      repo: "r",
+      log: (message) => logs.push(message),
+      git,
+      gitEnv: GIT_ENV,
+      runScript: async () => {
+        spawned++;
+        return OK_SCRIPT;
+      },
+    });
+    expect(refused.ran).toBe(true);
+    if (!refused.ran) return;
+    expect(refused.state).toBe("failed");
+    expect(refused.failureReason).toContain("Landlock sandbox unavailable");
+    expect(refused.failureReason).toContain(ALLOW_UNSANDBOXED_REVIEWS_ENV);
+    expect(spawned).toBe(0);
+
+    process.env[ALLOW_UNSANDBOXED_REVIEWS_ENV] = "1";
+    const bypassLogs: string[] = [];
+    const { git: bgit } = stubGit([""]);
+    const bypassed = await runRepoSetupForJob({
+      workdir: "/tmp/repo-setup-sandbox-bypass",
+      kind: "review",
+      load,
+      auth: AUTH,
+      owner: "o",
+      repo: "r",
+      log: (message) => bypassLogs.push(message),
+      git: bgit,
+      gitEnv: GIT_ENV,
+      runScript: async (opts) => {
+        spawned++;
+        expect(opts.run).toBe("echo hi");
+        return OK_SCRIPT;
+      },
+    });
+    expect(bypassed.ran).toBe(true);
+    if (!bypassed.ran) return;
+    expect(bypassed.state).toBe("ok");
+    expect(spawned).toBe(1);
+    expect(bypassLogs.some((line) => line.includes("UNSANDBOXED"))).toBe(true);
+  });
+
+  test("sandbox-unavailable follows onFailure: continue hides the reason, fail surfaces it", async () => {
+    setReviewSandboxProbeForTests({ available: false, reason: "unit-test no Landlock" });
+    const api = (content: string) => ({ getRepoFile: async () => ({ found: true, content }) });
+    const { git: cgit } = stubGit([""]);
+    const continued = await runRepoSetupForKind({
+      api: api("setup:\n  run: echo hi\n"),
+      kind: "review",
+      workdir: "/tmp/repo-setup-sandbox-continue",
+      defaultBranch: "main",
+      auth: AUTH,
+      owner: "o",
+      repo: "r",
+      timeoutMaxMs: 600_000,
+      git: cgit,
+      gitEnv: GIT_ENV,
+    });
+    expect(continued.ran).toBe(true);
+    expect(continued.promptBlock).toContain('state="failed"');
+    expect(continued.failureReason).toBeUndefined();
+
+    const { git: fgit } = stubGit([""]);
+    const failed = await runRepoSetupForKind({
+      api: api("setup:\n  run: echo hi\n  on_failure: fail\n"),
+      kind: "review",
+      workdir: "/tmp/repo-setup-sandbox-fail",
+      defaultBranch: "main",
+      auth: AUTH,
+      owner: "o",
+      repo: "r",
+      timeoutMaxMs: 600_000,
+      git: fgit,
+      gitEnv: GIT_ENV,
+    });
+    expect(failed.ran).toBe(true);
+    expect(failed.failureReason).toContain("Landlock sandbox unavailable");
+  });
+});
+
+function realGitRunner(): GitRunner {
+  return (async (args, opts: { cwd: string; env: Record<string, string | undefined> }) => {
+    const proc = Bun.spawnSync(["git", ...args], {
+      cwd: opts.cwd,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode !== 0) throw new Error(String(proc.stderr ?? `git ${args[0]} failed`));
+    return String(proc.stdout ?? "");
+  }) as GitRunner;
+}
+
+async function initCleanRepo(dir: string): Promise<void> {
+  const git = realGitRunner();
+  const env = { PATH: process.env.PATH };
+  Bun.spawnSync(["git", "init", "-q", dir], { stdout: "ignore", stderr: "ignore" });
+  Bun.spawnSync(["git", "-C", dir, "config", "user.email", "test@test"], { stdout: "ignore", stderr: "ignore" });
+  Bun.spawnSync(["git", "-C", dir, "config", "user.name", "test"], { stdout: "ignore", stderr: "ignore" });
+  await git(["add", "-A"], { cwd: dir, env });
+  await git(["-c", "user.email=test@test", "-c", "user.name=test", "commit", "-qm", "init"], {
+    cwd: dir,
+    env,
+  }).catch(() => undefined);
+}
+
+describe("review setup sandbox red-team (real wrapper)", () => {
+  test("canary under a fake agent HOME is unreadable; an outside write is denied; benign setup succeeds", async () => {
+    const live = checkReviewSandbox();
+    if (!live.available) {
+      expect(live.reason ?? "").toMatch(/Landlock|executable/);
+      return;
+    }
+    await withWorkspace(async (checkout) => {
+      await initCleanRepo(checkout);
+      const git = realGitRunner();
+      const gitEnv = { PATH: process.env.PATH };
+      await withTempDirs(["setup-fake-home-", "setup-outside-"], async (fakeHome, outside) => {
+        const canary = join(fakeHome, "secret");
+        await writeFile(canary, "parent-secret-value", { mode: 0o600 });
+        const outsideFile = join(outside, "evil");
+
+        const readLoad = await validLoad(`setup:\n  run: cat ${canary}\n`);
+        const read = await runRepoSetupForJob({
+          workdir: checkout,
+          kind: "review",
+          load: readLoad,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git,
+          gitEnv,
+        });
+        expect(read.ran).toBe(true);
+        if (!read.ran) return;
+        expect(read.state).toBe("failed");
+        expect(read.tail).toMatch(/Permission denied/);
+        expect(read.tail).not.toContain("parent-secret-value");
+
+        const writeLoad = await validLoad(`setup:\n  run: echo evil > ${outsideFile}\n`);
+        const wrote = await runRepoSetupForJob({
+          workdir: checkout,
+          kind: "review",
+          load: writeLoad,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git,
+          gitEnv,
+        });
+        expect(wrote.ran).toBe(true);
+        if (!wrote.ran) return;
+        expect(wrote.state).toBe("failed");
+        expect(existsSync(outsideFile)).toBe(false);
+
+        const benignLoad = await validLoad(
+          'setup:\n  run: |\n    echo hello > ./benign-tmp.txt\n    cat ./benign-tmp.txt\n    rm ./benign-tmp.txt\n    mkdir -p "$HOME/.cache"\n    echo data > "$HOME/.cache/x"\n    echo done\n'
+        );
+        const benign = await runRepoSetupForJob({
+          workdir: checkout,
+          kind: "review",
+          load: benignLoad,
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          git,
+          gitEnv,
+        });
+        expect(benign.ran).toBe(true);
+        if (!benign.ran) return;
+        expect(benign.state).toBe("ok");
+        const scratch = childScratchDir(checkout);
+        expect(existsSync(join(scratch, "sandbox-home", ".cache", "x"))).toBe(true);
+        expect(existsSync(join(checkout, "benign-tmp.txt"))).toBe(false);
+        expect(existsSync(join(fakeHome, ".cache", "x"))).toBe(false);
+      });
+    });
+  });
+
+  test("adversarial fixture: committed script plus lifecycle hook both fail; outcome follows onFailure", async () => {
+    const live = checkReviewSandbox();
+    if (!live.available) {
+      expect(live.reason ?? "").toMatch(/Landlock|executable/);
+      return;
+    }
+    await withWorkspace(async (checkout) => {
+      await withTempDirs(["setup-fake-home-", "setup-outside-"], async (fakeHome, outside) => {
+        const canary = join(fakeHome, "secret");
+        await writeFile(canary, "parent-secret-value", { mode: 0o600 });
+        const outsideFile = join(outside, "evil");
+        const evilSh = `cat ${canary}\necho evil > ${outsideFile}\n`;
+        await writeFile(join(checkout, "evil.sh"), evilSh, { mode: 0o755 });
+        await writeFile(
+          join(checkout, "package.json"),
+          `${JSON.stringify({ name: "evil-fixture", version: "0.0.0", scripts: { preinstall: `cat ${canary}` } }, null, 2)}\n`
+        );
+        await initCleanRepo(checkout);
+        const git = realGitRunner();
+        const gitEnv = { PATH: process.env.PATH };
+        const run = `set +e\nsh ./evil.sh\nrc1=$?\nnpm install --package-lock=false --ignore-scripts=false --no-audit --no-fund\nrc2=$?\necho "script=$rc1 npm=$rc2"\nexit 1`;
+        const api = (onFailure: string) => ({
+          getRepoFile: async () => ({
+            found: true,
+            content: `setup:\n  run: |\n    ${run.split("\n").join("\n    ")}\n  on_failure: ${onFailure}\n`,
+          }),
+        });
+        const continued = await runRepoSetupForKind({
+          api: api("continue"),
+          kind: "review",
+          workdir: checkout,
+          defaultBranch: "main",
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          timeoutMaxMs: 600_000,
+          git,
+          gitEnv,
+        });
+        expect(continued.ran).toBe(true);
+        expect(continued.promptBlock).toContain('state="failed"');
+        expect(continued.promptBlock).toMatch(/Permission denied/);
+        expect(continued.promptBlock).toContain("script=");
+        expect(continued.promptBlock).not.toContain("parent-secret-value");
+        expect(continued.failureReason).toBeUndefined();
+        expect(existsSync(outsideFile)).toBe(false);
+
+        const failed = await runRepoSetupForKind({
+          api: api("fail"),
+          kind: "review",
+          workdir: checkout,
+          defaultBranch: "main",
+          auth: AUTH,
+          owner: "o",
+          repo: "r",
+          home: fakeHome,
+          timeoutMaxMs: 600_000,
+          git,
+          gitEnv,
+        });
+        expect(failed.ran).toBe(true);
+        expect(failed.failureReason).toContain("exit code");
+      });
+    });
   });
 });

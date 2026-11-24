@@ -21,11 +21,20 @@ import {
   resolveSetupTimeoutMaxMs,
   setupForKind,
 } from "./repo_settings.ts";
+import {
+  ALLOW_UNSANDBOXED_REVIEWS_ENV,
+  allowUnsandboxedReviews,
+  checkReviewSandbox,
+  ensureSandboxedShellHome,
+  resolveWorktreeGitDirsSync,
+  reviewSandboxWrapperPath,
+  reviewShellSandboxRules,
+  sandboxedShellEnv,
+  wrapShellCommand,
+} from "./review_sandbox.ts";
 import { errorMessage } from "./util/error.ts";
 import type { GitAuth, GitRunner } from "./workspace.ts";
 import { redactGitSecrets } from "./workspace.ts";
-
-const SETUP_TIMEOUT_MAX_ENV = "SETUP_TIMEOUT_MAX_MS";
 
 /** Last bytes of setup output kept for the job log and the agent prompt. */
 const SETUP_OUTPUT_TAIL_BYTES = 4 * 1024;
@@ -397,8 +406,49 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
   }
   const env = buildRepoSetupEnv(opts.auth, opts.workdir, { home: opts.home, proxyUrl });
   try {
+    let run = setup.run;
+    if (opts.kind === "review") {
+      const failFast = (failureReason: string): RepoSetupOutcome => {
+        logDiagnostic(log, "repo_setup", { kind: opts.kind, state: "failed", exit_code: null, duration_ms: 0 });
+        log(`[repo setup] ${failureReason}`);
+        return {
+          ran: true,
+          state: "failed",
+          exitCode: null,
+          durationMs: 0,
+          tail: "",
+          promptBlock: formatRepoSetupPromptBlock("failed", { exitCode: null, tail: "" }),
+          failureReason,
+        };
+      };
+      if (allowUnsandboxedReviews(process.env)) {
+        log(
+          `WARNING: ${ALLOW_UNSANDBOXED_REVIEWS_ENV}=1: running review setup UNSANDBOXED without Landlock confinement`
+        );
+      } else {
+        const probe = checkReviewSandbox();
+        if (!probe.available) {
+          return failFast(
+            `repository setup failed: Landlock sandbox unavailable (${probe.reason ?? "unknown"}). Set ${ALLOW_UNSANDBOXED_REVIEWS_ENV}=1 to run unsandboxed reviews (not recommended).`
+          );
+        }
+        const scratch = childScratchDir(opts.workdir);
+        try {
+          await ensureSandboxedShellHome(scratch);
+        } catch (err) {
+          return failFast(`repository setup failed: cannot create sandbox HOME (${errorMessage(err)})`);
+        }
+        const rules = reviewShellSandboxRules({
+          workdir: opts.workdir,
+          scratchDir: scratch,
+          gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
+        });
+        Object.assign(env, sandboxedShellEnv(scratch));
+        run = wrapShellCommand(setup.run, rules, { wrapperPath: reviewSandboxWrapperPath(), scratchDir: scratch });
+      }
+    }
     const runScript = opts.runScript ?? runRepoSetupScript;
-    const result = await runScript({ workdir: opts.workdir, run: setup.run, timeoutMs, env });
+    const result = await runScript({ workdir: opts.workdir, run, timeoutMs, env });
     const tail = tailBytes(result.output, SETUP_OUTPUT_TAIL_BYTES);
     const reportFailed = (failureReason: string): RepoSetupOutcome => {
       logDiagnostic(log, "repo_setup", {
