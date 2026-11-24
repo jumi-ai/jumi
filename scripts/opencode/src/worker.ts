@@ -21,6 +21,7 @@ import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
 import { pickupPolicyForForge } from "./github_webhook.ts";
 import { type HandoffStore, handoffsFor } from "./handoff.ts";
+import { settleHeldCancelThroughGate } from "./hold_cancel.ts";
 import { cancelIssueWork, implementIssue, issueJobKey } from "./implement.ts";
 import { decideInfraRetry, type InfraCircuitBreaker, isInfraFailure } from "./infra.ts";
 import { conflictJobIfUnmergeable, pushedPrNumber } from "./pickup.ts";
@@ -50,12 +51,7 @@ import { releaseLeaseOnShutdown } from "./shutdown.ts";
 import { type SkipLatchStore, skipLatchesFor } from "./skip_latches.ts";
 import { MERGE_DEFAULT_STUCK_TEXT } from "./skip_why_texts.ts";
 import { describeTriedRunnersSuffix } from "./sticky_failure.ts";
-import {
-  type HoldStatusPort,
-  postSuggestionHoldSuccess,
-  readSuggestionHold,
-  suggestionHoldSkippedDescription,
-} from "./suggestion_hold.ts";
+import type { HoldStatusPort } from "./suggestion_hold.ts";
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -391,21 +387,24 @@ export async function handleIssueCancel(
   const handoffStore = handoffs ?? store?.handoffs ?? handoffsFor({ home: config.home });
   // A held suggestion `pending` must resolve before the latch wipe below
   // destroys the only record of it: no follow-up job survives the cancel to
-  // clear it, so the merge would wait forever. Best-effort, never throws.
-  try {
-    const hold = await readSuggestionHold(latches, { owner, repo, issueNumber });
-    if (hold.consumed && hold.count && hold.headSha) {
-      await postSuggestionHoldSuccess(
-        api,
-        owner,
-        repo,
-        hold.headSha,
-        suggestionHoldSkippedDescription(hold.count, "unassigned")
-      );
-    }
-  } catch {
-    // Best-effort: never fail the cancel on a status post.
-  }
+  // clear it, so the merge would wait forever. Routes through the shared
+  // hold-settlement gate with fresh evidence, so an unanswered maintainer
+  // hold stays pending and unknown evidence never becomes success.
+  // Best-effort, never throws.
+  await settleHeldCancelThroughGate({
+    api,
+    owner,
+    repo,
+    issueNumber,
+    latches,
+    latchKey: { owner, repo, issueNumber },
+    botUsername: config.botUsername,
+    deploymentTrusted: config.trustedSenderLogins,
+    deploymentIgnore: config.followupIgnoreLogins,
+    deploymentBlocking: config.blockingQuestionAuthors,
+    log: (message) => log(message),
+    reason: "unassigned",
+  });
   const latch = store ? await store.clearIssueSkipLatch(owner, repo, issueNumber) : undefined;
   if (!store || latches !== store.skipLatches) {
     // Worker cancel clears only worker cells; review stuck lives in

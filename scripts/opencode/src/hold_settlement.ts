@@ -427,7 +427,7 @@ export async function settleFollowUpHold(opts: SettleFollowUpHoldOpts): Promise<
     }
     if (hold?.headSha && hold.headSha.toLowerCase() !== currentHeadSha.toLowerCase()) {
       log(
-        `hold settlement kept for ${opts.owner}/${opts.repo}#${opts.prNumber}: head-mismatch (held ${hold.headSha} vs ${currentHeadSha})`
+        `hold settlement kept for ${opts.owner}/${opts.repo}#${opts.prNumber}: unknown (head-mismatch held ${hold.headSha} vs ${currentHeadSha})`
       );
       return;
     }

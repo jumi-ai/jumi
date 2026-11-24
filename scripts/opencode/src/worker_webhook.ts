@@ -14,6 +14,7 @@ import {
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import { extractClosingIssueNumbers, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
+import { settleHeldCancelThroughGate } from "./hold_cancel.ts";
 import {
   blockedIssueJobsToEnqueue,
   isDependencyWakeAction,
@@ -30,12 +31,7 @@ import { resolveRepoPolicy } from "./repo_policy.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
-import {
-  type HoldStatusApi,
-  postSuggestionHoldSuccess,
-  readSuggestionHold,
-  suggestionHoldSkippedDescription,
-} from "./suggestion_hold.ts";
+import type { HoldStatusApi } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
@@ -427,35 +423,42 @@ async function wakeJobsFromPull(
 
 export async function cancelLedgerWorkerJobs(opts: {
   store: Pick<ReviewJobStore, "cancelQueuedForIssue" | "clearIssueSkipLatch" | "skipLatches">;
-  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> & Partial<HoldStatusApi>;
+  // biome-ignore lint/suspicious/noExplicitAny: fresh-evidence reads need the full forge; fakes vary.
+  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> &
+    Partial<HoldStatusApi> &
+    Record<string, any>;
   owner: string;
   repo: string;
   issueNumber: number;
   botUsername: string;
   logger?: (message: string) => void;
+  defaultBranch?: string;
+  deploymentTrusted?: readonly string[];
+  deploymentIgnore?: readonly string[];
+  deploymentBlocking?: readonly string[];
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
   // A held suggestion `pending` must resolve before the latch wipe below
   // destroys the only record of it: the cancelled rows never run, so no
-  // follow-up job survives to clear it. Best-effort, never throws.
-  try {
-    const hold = await readSuggestionHold(opts.store.skipLatches, {
-      owner: opts.owner,
-      repo: opts.repo,
-      issueNumber: opts.issueNumber,
-    });
-    if (hold.consumed && hold.count && hold.headSha) {
-      await postSuggestionHoldSuccess(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        hold.headSha,
-        suggestionHoldSkippedDescription(hold.count, "unassigned")
-      );
-    }
-  } catch {
-    // Best-effort: never fail the cancel on a status post.
-  }
+  // follow-up job survives to clear it. Routes through the shared
+  // hold-settlement gate with fresh evidence, so an unanswered maintainer
+  // hold stays pending and unknown evidence never becomes success.
+  // Best-effort, never throws.
+  await settleHeldCancelThroughGate({
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+    latches: opts.store.skipLatches,
+    latchKey: { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber },
+    botUsername: opts.botUsername,
+    ...(opts.defaultBranch !== undefined ? { defaultBranch: opts.defaultBranch } : {}),
+    ...(opts.deploymentTrusted !== undefined ? { deploymentTrusted: opts.deploymentTrusted } : {}),
+    ...(opts.deploymentIgnore !== undefined ? { deploymentIgnore: opts.deploymentIgnore } : {}),
+    ...(opts.deploymentBlocking !== undefined ? { deploymentBlocking: opts.deploymentBlocking } : {}),
+    log: (message) => opts.logger?.(message),
+    reason: "unassigned",
+  });
   await opts.store.clearIssueSkipLatch(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
   // Queued rows settle here, so the router posts `stopped` for them. Leased
