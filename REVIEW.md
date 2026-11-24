@@ -18,6 +18,7 @@ Report a CI gap only when this change weakens a check, or when a check stops exe
 - A change that grows a file already over about 1,500 lines says why the code belongs there.
 - Redaction: child-written text and engine output are redacted before they reach the forge or a log, and exception text stays out of HTTP bodies (#25, #74, #138).
 - Docs: `README.md`, `AGENTS.md`, and `deploy/contract.md` stay true in the same PR. A new user-visible contract is documented, and a sentence the diff makes false is a finding (#21, #199).
+- Suppression guards: a change that skips a push, run, job, or comment (no-changes, "only X", dedupe, budget) has a test where real work sits next to the suppressed case and still goes through. Its predicate must not use a proxy that also counts that work, such as a commit count or a non-empty list. A fake that returns a constant for that value cannot exercise both sides (#799).
 
 ## Not a finding
 
