@@ -287,7 +287,7 @@ describe("worker image consumes the full pinned reference", () => {
 
   test("postgres service pinning and Dockerfile digest defaults remain enabled", () => {
     const checksWorkflow = readFileSync(join(repoRoot, ".github/workflows/opencode-checks.yml"), "utf8");
-    expect(checksWorkflow).toContain("image: postgres:18-alpine");
+    expect(checksWorkflow).toContain("image: postgres:19-alpine");
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS tools/);
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/debian:bookworm-slim@sha256:[0-9a-f]+ AS runtime/);
     expect(toolVersions).toMatch(/^TEMURIN_TAG=21\./m);
