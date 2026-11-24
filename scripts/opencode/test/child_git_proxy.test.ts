@@ -3,11 +3,13 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type ChildGitProxyAccess,
   childProxyGitConfigEnv,
   childProxyRequestFrom,
   extraEnvHasGitToken,
   isChildStrippedKey,
   isGitPathAllowed,
+  isGitRequestAllowed,
   startChildGitProxy,
 } from "../src/child_git_proxy.ts";
 import { workerOpenCodeChildEnv } from "../src/workspace.ts";
@@ -304,6 +306,463 @@ describe("proxy forwards git, blocks the forge API", () => {
     } finally {
       await rm(workdir, { recursive: true, force: true });
       await rm(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("child git proxy access mode", () => {
+  test("defaults to read-write, exposes the granted access, and rejects anything else", async () => {
+    const def = await startChildGitProxy({
+      forgeUrl: AUTH.giteaUrl,
+      username: AUTH.username,
+      token: AUTH.token,
+      owner: "o",
+      repo: "r",
+    });
+    try {
+      expect(def.access).toBe("read-write");
+    } finally {
+      await def.close();
+    }
+    const explicit = await startChildGitProxy({
+      forgeUrl: AUTH.giteaUrl,
+      username: AUTH.username,
+      token: AUTH.token,
+      owner: "o",
+      repo: "r",
+      access: "read-write",
+    });
+    try {
+      expect(explicit.access).toBe("read-write");
+    } finally {
+      await explicit.close();
+    }
+    const ro = await startChildGitProxy({
+      forgeUrl: AUTH.giteaUrl,
+      username: AUTH.username,
+      token: AUTH.token,
+      owner: "o",
+      repo: "r",
+      access: "read-only",
+    });
+    try {
+      expect(ro.access).toBe("read-only");
+    } finally {
+      await ro.close();
+    }
+    await expect(
+      startChildGitProxy({
+        forgeUrl: AUTH.giteaUrl,
+        username: AUTH.username,
+        token: AUTH.token,
+        owner: "o",
+        repo: "r",
+        access: "bogus" as never,
+      })
+    ).rejects.toThrow(/access/);
+    await expect(
+      startChildGitProxy({
+        forgeUrl: AUTH.giteaUrl,
+        username: AUTH.username,
+        token: AUTH.token,
+        owner: "o",
+        repo: "r",
+        access: "" as never,
+      })
+    ).rejects.toThrow(/access/);
+  });
+
+  test("read-write keeps the path-only behavior for every method", () => {
+    const allowedPaths = [
+      "/o/r.git/info/refs",
+      "/o/r.git/HEAD",
+      "/o/r.git/git-upload-pack",
+      "/o/r.git/git-receive-pack",
+      "/o/r.git/objects/info/packs",
+      "/o/r.git/objects/ab/cdef0123456789",
+      "/o/r/info/refs",
+      "/o/r/HEAD",
+      "/o/r/git-upload-pack",
+      "/o/r/git-receive-pack",
+      "/o/r/objects/info/packs",
+    ];
+    for (const path of allowedPaths) {
+      for (const method of ["GET", "HEAD", "POST"]) {
+        expect(isGitRequestAllowed(path, "", method, "o", "r", "read-write")).toBe(true);
+        expect(isGitRequestAllowed(path, "?service=git-upload-pack", method, "o", "r", "read-write")).toBe(true);
+      }
+      // The default access is read-write.
+      expect(isGitRequestAllowed(path, "", "GET", "o", "r")).toBe(true);
+    }
+    // Read-write still refuses non-git paths for every method.
+    const deniedPaths = [
+      "/o/r",
+      "/o/r/",
+      "/o/r.git",
+      "/o/r.git/",
+      "/o/r/issues",
+      "/o/r/pulls/1",
+      "/o/r.git/issues",
+      "/api/v1/repos/o/r",
+      "/attachments/uuid",
+      "/other/r.git/info/refs",
+    ];
+    for (const path of deniedPaths) {
+      for (const method of ["GET", "HEAD", "POST"]) {
+        expect(isGitRequestAllowed(path, "", method, "o", "r", "read-write")).toBe(false);
+      }
+    }
+    // Receive-pack stays reachable in read-write, including its advertisement.
+    expect(isGitRequestAllowed("/o/r.git/git-receive-pack", "", "POST", "o", "r", "read-write")).toBe(true);
+    expect(isGitRequestAllowed("/o/r.git/info/refs", "?service=git-receive-pack", "GET", "o", "r", "read-write")).toBe(
+      true
+    );
+  });
+
+  test("read-only matrix over path x query x method", () => {
+    const access: ChildGitProxyAccess = "read-only";
+    const cases: Array<[string, string, string, boolean]> = [
+      // Upload-pack advertisement: the only allowed info/refs service.
+      ["/o/r.git/info/refs", "?service=git-upload-pack", "GET", true],
+      ["/o/r.git/info/refs", "?service=git-upload-pack", "HEAD", true],
+      ["/o/r.git/info/refs", "", "GET", true],
+      ["/o/r.git/info/refs", "", "HEAD", true],
+      ["/o/r/info/refs", "?service=git-upload-pack", "GET", true],
+      // Receive-pack advertisement is refused, as is any second/ambiguous value.
+      ["/o/r.git/info/refs", "?service=git-receive-pack", "GET", false],
+      ["/o/r.git/info/refs", "?service=git-receive-pack", "HEAD", false],
+      ["/o/r.git/info/refs", "?service=git-upload-pack&service=git-receive-pack", "GET", false],
+      ["/o/r.git/info/refs", "?service=git-upload-pack&service=git-upload-pack", "GET", false],
+      ["/o/r.git/info/refs", "?service=", "GET", false],
+      ["/o/r.git/info/refs", "?service=git-upload-pack", "POST", false],
+      ["/o/r.git/info/refs", "", "POST", false],
+      ["/o/r.git/info/refs", "?service=git-upload-pack", "PUT", false],
+      // Upload-pack: POST only.
+      ["/o/r.git/git-upload-pack", "", "POST", true],
+      ["/o/r.git/git-upload-pack", "?service=git-upload-pack", "POST", true],
+      ["/o/r.git/git-upload-pack", "", "GET", false],
+      ["/o/r.git/git-upload-pack", "", "HEAD", false],
+      ["/o/r.git/git-upload-pack", "", "PUT", false],
+      ["/o/r/git-upload-pack", "", "POST", true],
+      ["/o/r/git-upload-pack", "", "GET", false],
+      // Receive-pack: refused for every method.
+      ["/o/r.git/git-receive-pack", "", "POST", false],
+      ["/o/r.git/git-receive-pack", "", "GET", false],
+      ["/o/r.git/git-receive-pack", "", "HEAD", false],
+      ["/o/r/git-receive-pack", "", "POST", false],
+      // HEAD and dumb-HTTP object reads: GET/HEAD only.
+      ["/o/r.git/HEAD", "", "GET", true],
+      ["/o/r.git/HEAD", "", "HEAD", true],
+      ["/o/r.git/HEAD", "", "POST", false],
+      ["/o/r/HEAD", "", "GET", true],
+      ["/o/r/HEAD", "", "POST", false],
+      ["/o/r.git/objects/info/packs", "", "GET", true],
+      ["/o/r.git/objects/info/packs", "", "HEAD", true],
+      ["/o/r.git/objects/info/packs", "", "POST", false],
+      ["/o/r.git/objects/ab/cdef0123456789", "", "GET", true],
+      ["/o/r.git/objects/ab/cdef0123456789", "", "POST", false],
+      // Everything else stays denied.
+      ["/o/r", "", "GET", false],
+      ["/o/r.git/", "", "GET", false],
+      ["/o/r/issues", "", "GET", false],
+      ["/api/v1/repos/o/r", "", "GET", false],
+      ["/attachments/uuid", "", "GET", false],
+      ["/other/r.git/info/refs", "?service=git-upload-pack", "GET", false],
+    ];
+    for (const [path, search, method, expected] of cases) {
+      expect(isGitRequestAllowed(path, search, method, "o", "r", access)).toBe(expected);
+    }
+    // Unscoped read-only serves nothing.
+    expect(
+      isGitRequestAllowed("/o/r.git/info/refs", "?service=git-upload-pack", "GET", undefined, undefined, access)
+    ).toBe(false);
+  });
+
+  test("read-only proxy refuses push endpoints without contacting upstream or sending the credential", async () => {
+    type Seen = { method: string; path: string; search: string; auth: string };
+    const seen: Seen[] = [];
+    const expectedAuth = `Basic ${Buffer.from(`${AUTH.username}:${AUTH.token}`).toString("base64")}`;
+    const forge = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req: Request): Promise<Response> {
+        const url = new URL(req.url);
+        const auth = req.headers.get("authorization") ?? "";
+        seen.push({ method: req.method, path: url.pathname, search: url.search, auth });
+        if (auth !== expectedAuth) return new Response("unauthorized", { status: 401 });
+        return new Response("git-ok", { status: 200 });
+      },
+    });
+    const forgeBase = `http://127.0.0.1:${forge.port}/`;
+    try {
+      const proxy = await startChildGitProxy({
+        forgeUrl: forgeBase,
+        username: AUTH.username,
+        token: AUTH.token,
+        owner: "o",
+        repo: "r",
+        access: "read-only",
+      });
+      try {
+        expect(proxy.access).toBe("read-only");
+        // Allowed reads are forwarded with the credential.
+        const adv = await fetch(`${proxy.url}o/r.git/info/refs?service=git-upload-pack`);
+        expect(adv.status).toBe(200);
+        expect(await adv.text()).toBe("git-ok");
+        expect(seen.at(-1)).toMatchObject({ method: "GET", path: "/o/r.git/info/refs" });
+        expect(seen.at(-1)?.auth).toBe(expectedAuth);
+
+        const upload = await fetch(`${proxy.url}o/r.git/git-upload-pack`, { method: "POST", body: "want" });
+        expect(upload.status).toBe(200);
+        expect(seen.at(-1)).toMatchObject({ method: "POST", path: "/o/r.git/git-upload-pack" });
+        expect(seen.at(-1)?.auth).toBe(expectedAuth);
+
+        const head = await fetch(`${proxy.url}o/r.git/HEAD`);
+        expect(head.status).toBe(200);
+        const hitsAfterAllowed = seen.length;
+
+        // Denied combinations return 404 and never reach upstream.
+        const denied: Array<[string, RequestInit?]> = [
+          ["o/r.git/info/refs?service=git-receive-pack"],
+          ["o/r.git/info/refs?service=git-upload-pack&service=git-receive-pack"],
+          ["o/r.git/info/refs", { method: "POST" }],
+          ["o/r.git/git-receive-pack", { method: "POST", body: "push" }],
+          ["o/r.git/git-receive-pack"],
+          ["o/r.git/git-upload-pack"],
+          ["o/r.git/HEAD", { method: "POST", body: "x" }],
+          ["o/r.git/objects/info/packs", { method: "POST", body: "x" }],
+          ["api/v1/repos/o/r"],
+        ];
+        for (const [path, init] of denied) {
+          const res = await fetch(`${proxy.url}${path}`, init);
+          expect(res.status).toBe(404);
+          await res.text().catch(() => undefined);
+        }
+        expect(seen.length).toBe(hitsAfterAllowed);
+        expect(seen.every((s) => s.auth === expectedAuth)).toBe(true);
+      } finally {
+        await proxy.close();
+      }
+    } finally {
+      forge.stop();
+    }
+  });
+});
+
+describe("read-only git fixture over a credential-required upstream", () => {
+  async function gitExecPath(): Promise<string> {
+    const proc = Bun.spawn(["git", "--exec-path"], { stdout: "pipe", stderr: "pipe" });
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (code !== 0) throw new Error("git --exec-path failed");
+    return out.trim();
+  }
+
+  function startCredentialedGitUpstream(
+    projectRoot: string,
+    username: string,
+    token: string,
+    hits: { count: number }
+  ): { base: string; stop(): void } {
+    const expected = `Basic ${Buffer.from(`${username}:${token}`).toString("base64")}`;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(req: Request): Promise<Response> {
+        const url = new URL(req.url);
+        if ((req.headers.get("authorization") ?? "") !== expected) {
+          return new Response("unauthorized", { status: 401 });
+        }
+        const body =
+          req.method !== "GET" && req.method !== "HEAD" ? new Uint8Array(await req.arrayBuffer()) : new Uint8Array(0);
+        const env: Record<string, string> = {
+          ...(process.env as Record<string, string>),
+          GIT_PROJECT_ROOT: projectRoot,
+          PATH_INFO: url.pathname,
+          QUERY_STRING: url.search.slice(1),
+          REQUEST_METHOD: req.method,
+          CONTENT_TYPE: req.headers.get("content-type") ?? "",
+          CONTENT_LENGTH: String(body.length),
+          GIT_HTTP_EXPORT_ALL: "1",
+          REMOTE_USER: username,
+          GIT_CONFIG_NOSYSTEM: "1",
+        };
+        const protocol = req.headers.get("git-protocol");
+        if (protocol) env.HTTP_GIT_PROTOCOL = protocol;
+        const proc = Bun.spawn(["git", "http-backend"], {
+          stdin: body,
+          stdout: "pipe",
+          stderr: "pipe",
+          env,
+        });
+        const [out, errText, code] = await Promise.all([
+          new Response(proc.stdout).arrayBuffer(),
+          new Response(proc.stderr).arrayBuffer(),
+          proc.exited,
+        ]);
+        if (code !== 0) return new Response(Buffer.from(errText).toString(), { status: 500 });
+        hits.count += 1;
+        const raw = Buffer.from(out);
+        const text = raw.toString("binary");
+        const split = text.search(/\r?\n\r?\n/);
+        if (split === -1) return new Response(raw as unknown as BodyInit, { status: 200 });
+        const head = text.slice(0, split);
+        const bstart = split + (text.slice(split, split + 4) === "\r\n\r\n" ? 4 : 2);
+        const headers = new Headers();
+        let status = 200;
+        for (const line of head.split(/\r?\n/)) {
+          const m = line.match(/^([^:]+):\s*(.*)$/);
+          if (!m) continue;
+          if (m[1].toLowerCase() === "status") {
+            status = Number.parseInt(m[2].slice(0, 3), 10) || 200;
+            continue;
+          }
+          headers.set(m[1], m[2]);
+        }
+        return new Response(raw.subarray(bstart) as unknown as BodyInit, { status, headers });
+      },
+    });
+    return { base: `http://127.0.0.1:${server.port}/`, stop: () => server.stop() };
+  }
+
+  test("clone/fetch succeed read-only with the credential; push fails without moving refs; read-write push succeeds", async () => {
+    await gitExecPath();
+    const root = await mkdtemp(join(tmpdir(), "jumi-git-http-root-"));
+    const seed = await mkdtemp(join(tmpdir(), "jumi-git-http-seed-"));
+    const hits = { count: 0 };
+    const upstream = startCredentialedGitUpstream(root, AUTH.username, AUTH.token, hits);
+    try {
+      const plainEnv: Record<string, string> = {
+        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        HOME: process.env.HOME ?? seed,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_AUTHOR_NAME: "jumi",
+        GIT_AUTHOR_EMAIL: "jumi@example.com",
+        GIT_COMMITTER_NAME: "jumi",
+        GIT_COMMITTER_EMAIL: "jumi@example.com",
+      };
+      const seedGit = async (args: string[], cwd: string) => {
+        const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: plainEnv });
+        const [out, errText, code] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${errText}`);
+        return out.trim();
+      };
+      await Bun.spawn(["mkdir", "-p", join(root, "o")]).exited;
+      await seedGit(["init", "--bare", "-b", "main", join(root, "o", "r.git")], seed);
+      await seedGit(["init", "-b", "main", "work"], seed);
+      const seedWork = join(seed, "work");
+      await Bun.write(join(seedWork, "file.txt"), "hello\n");
+      await seedGit(["add", "file.txt"], seedWork);
+      await seedGit(["commit", "-m", "seed"], seedWork);
+      await seedGit(["remote", "add", "origin", join(root, "o", "r.git")], seedWork);
+      await seedGit(["push", "-u", "origin", "main"], seedWork);
+      const revParse = async () => {
+        const proc = Bun.spawn(["git", "--git-dir", join(root, "o", "r.git"), "rev-parse", "refs/heads/main"], {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: plainEnv,
+        });
+        const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+        if (code !== 0) throw new Error("rev-parse failed");
+        return out.trim();
+      };
+
+      const runChildGit = (childEnv: Record<string, string>) => {
+        return async (args: string[], cwd: string) => {
+          const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe", env: childEnv });
+          const [out, errText, code] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          return { out: out.trim(), err: errText, code };
+        };
+      };
+      const childEnvFor = async (access: ChildGitProxyAccess) => {
+        const proxy = await startChildGitProxy({
+          forgeUrl: upstream.base,
+          username: AUTH.username,
+          token: AUTH.token,
+          owner: "o",
+          repo: "r",
+          access,
+        });
+        const proxyEnv = childProxyGitConfigEnv(proxy.url, {
+          forgeUrl: upstream.base,
+          forgeHost: new URL(upstream.base).host,
+        });
+        const childEnv: Record<string, string> = { ...plainEnv, ...proxyEnv };
+        return { proxy, childEnv };
+      };
+
+      // Read-only: clone and fetch succeed against the credential-required upstream.
+      {
+        const { proxy, childEnv } = await childEnvFor("read-only");
+        try {
+          expect(proxy.access).toBe("read-only");
+          const git = runChildGit(childEnv);
+          const work = await mkdtemp(join(tmpdir(), "jumi-git-ro-"));
+          try {
+            const clone = await git(["clone", `${upstream.base}o/r.git`, "c"], work);
+            expect(clone.code).toBe(0);
+            const log = await git(["log", "--oneline", "-1"], join(work, "c"));
+            expect(log.code).toBe(0);
+            expect(log.out).toContain("seed");
+            const fetchRes = await git(["fetch", "origin"], join(work, "c"));
+            expect(fetchRes.code).toBe(0);
+            expect(JSON.stringify(childEnv)).not.toContain(AUTH.token);
+
+            // Push fails through the read-only proxy and the upstream ref does not move.
+            const before = await revParse();
+            await Bun.write(join(work, "c", "ro.txt"), "read-only\n");
+            await git(["add", "ro.txt"], join(work, "c"));
+            await git(["commit", "-m", "read-only change"], join(work, "c"));
+            const pushHits = hits.count;
+            const push = await git(["push", "origin", "main"], join(work, "c"));
+            expect(push.code).not.toBe(0);
+            expect(await revParse()).toBe(before);
+            // The refused push never reached the credential-required upstream.
+            expect(hits.count).toBe(pushHits);
+          } finally {
+            await rm(work, { recursive: true, force: true });
+          }
+        } finally {
+          await proxy.close();
+        }
+      }
+
+      // Read-write: the same push still succeeds and moves the ref.
+      {
+        const { proxy, childEnv } = await childEnvFor("read-write");
+        try {
+          const git = runChildGit(childEnv);
+          const work = await mkdtemp(join(tmpdir(), "jumi-git-rw-"));
+          try {
+            const clone = await git(["clone", `${upstream.base}o/r.git`, "c"], work);
+            expect(clone.code).toBe(0);
+            const before = await revParse();
+            await Bun.write(join(work, "c", "rw.txt"), "read-write\n");
+            await git(["add", "rw.txt"], join(work, "c"));
+            await git(["commit", "-m", "read-write change"], join(work, "c"));
+            const push = await git(["push", "origin", "main"], join(work, "c"));
+            expect(push.code).toBe(0);
+            expect(await revParse()).not.toBe(before);
+          } finally {
+            await rm(work, { recursive: true, force: true });
+          }
+        } finally {
+          await proxy.close();
+        }
+      }
+    } finally {
+      upstream.stop();
+      await rm(root, { recursive: true, force: true });
+      await rm(seed, { recursive: true, force: true });
     }
   });
 });
