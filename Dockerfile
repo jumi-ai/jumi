@@ -501,7 +501,7 @@ COPY .gitea/opencode-implement.json /app/.gitea/opencode-implement.json
 RUN set -eu; \
   export JAVA_HOME=/opt/java/openjdk; \
   export PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${JAVA_HOME}/bin:${PATH}"; \
-  printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt;
+  printf 'java %s\n' "$(/opt/java/openjdk/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   printf 'java25 %s\n' "$(/opt/java/temurin-25/bin/java -version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   printf 'sdkmanager %s\n' "$(sdkmanager --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
   printf 'adb %s\n' "$(adb --version 2>&1 | head -n 1)" >> /app/installed-tools.txt; \
