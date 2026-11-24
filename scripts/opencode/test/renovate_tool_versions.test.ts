@@ -392,9 +392,11 @@ describe("worker image consumes the full pinned reference", () => {
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/eclipse-temurin:\$\{TEMURIN_TAG\} AS jdk/);
   });
 
-  test("Dockerfile adds a no-default Temurin 25 ARG, a jdk25 stage, and a second JDK copy", () => {
-    expect(dockerfile).toMatch(/^ARG TEMURIN_25_TAG$/m);
-    expect(dockerfile).not.toMatch(/^ARG TEMURIN_25_TAG=/m);
+  test("Dockerfile adds a digest-pinned Temurin 25 default, a jdk25 stage, and a second JDK copy", () => {
+    // Mirrors the TEMURIN_TAG pattern above: the default is a parse fallback so
+    // `target: runtime` (reviewer) builds, which pass no JDK args, still parse.
+    // Worker builds always pass the explicit pin from tool-versions.env.
+    expect(dockerfile).toMatch(/^ARG TEMURIN_25_TAG=25\.[^\s]*@sha256:[0-9a-f]+$/m);
     expect(dockerfile).toMatch(/FROM docker\.io\/library\/eclipse-temurin:\$\{TEMURIN_25_TAG\} AS jdk25/);
     expect(dockerfile).toContain("COPY --from=jdk25 /opt/java/openjdk /opt/java/temurin-25");
     expect(dockerfile).toContain(
