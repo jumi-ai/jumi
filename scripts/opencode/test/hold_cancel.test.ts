@@ -280,6 +280,64 @@ describe("cancel paths reuse the shared gate", () => {
     expect(statuses[0]?.description).toBe("1 suggestion (follow-up skipped: unassigned)");
   });
 
+  test("ledger cancel honors deployment blocking authors", async () => {
+    const blockingBody = [
+      "<!-- jumi-review:kirmanak/demo#127 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      "- \u2753 [`src/foo.ts:10`](https://example.test): what should this do?",
+      "<!-- jumi-check: success; 1 question -->",
+    ].join("\n");
+    const blockingReview = {
+      id: 4110,
+      body: blockingBody,
+      user: makeUser({ login: "jumi" }),
+      commit_id: HEAD,
+      submitted_at: "2026-11-19T18:29:20Z",
+      updated_at: "2026-11-19T18:29:20Z",
+    };
+    // Without the deployer blocking list the generic question is not
+    // blocking, so the gate posts the unchanged success note.
+    {
+      const store = new MemoryReviewJobStore();
+      await markSuggestionHoldConsumed(store.skipLatches, key, HEAD, 1);
+      const statuses: Array<{ sha?: string; state: string; description?: string }> = [];
+      const api = baseForge(statuses, { reviews: [blockingReview], inlines: [] });
+      await cancelLedgerWorkerJobs({
+        store,
+        api: api as never,
+        owner: key.owner,
+        repo: key.repo,
+        issueNumber: key.issueNumber,
+        botUsername: "jumi",
+      });
+      expect(statuses).toHaveLength(1);
+    }
+    // With the PR author on the deployer blocking list the same review
+    // keeps pending: no write.
+    {
+      const store = new MemoryReviewJobStore();
+      await markSuggestionHoldConsumed(store.skipLatches, key, HEAD, 1);
+      const statuses: Array<{ sha?: string; state: string; description?: string }> = [];
+      const api = baseForge(statuses, { reviews: [blockingReview], inlines: [] });
+      const logs: string[] = [];
+      await cancelLedgerWorkerJobs({
+        store,
+        api: api as never,
+        owner: key.owner,
+        repo: key.repo,
+        issueNumber: key.issueNumber,
+        botUsername: "jumi",
+        logger: (msg) => logs.push(msg),
+        deploymentBlocking: ["jumi"],
+      });
+      expect(statuses).toHaveLength(0);
+      expect(logs.some((line) => line.includes("blocking-questions"))).toBe(true);
+    }
+  });
+
   test("review lookup failure: no write, one unknown log", async () => {
     const store = new MemoryReviewJobStore();
     await markSuggestionHoldConsumed(store.skipLatches, key, HEAD, 1);
