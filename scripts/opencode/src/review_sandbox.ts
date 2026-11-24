@@ -780,8 +780,8 @@ function agyReviewHookMatcher(): string {
  * so a plugin that loads but drops a hook fails the case instead of running
  * half-wrapped).
  *
- * Wrapping lives only in `create.before` (exactly once per shell): the pinned
- * binary (2.2.7) ships the shell tool as `shell` and every shell creation
+ * Wrapping lives only in `create.before` (exactly once per shell): the observed
+ * binary (2.3.2, hash unverified) ships the shell tool as `shell` and every shell creation
  * passes through this hook, so a second rewrite in `execute.before` would
  * only double-wrap — execing the wrapper inside its own Landlock domain,
  * where the wrapper path itself is denied unless it sits in the allow-list.
