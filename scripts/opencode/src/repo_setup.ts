@@ -7,7 +7,7 @@
  * skipped before any engine would start never runs setup.
  */
 
-import { childProxyGitConfigEnv } from "./child_git_proxy.ts";
+import { type ChildGitProxyAccess, childProxyGitConfigEnv } from "./child_git_proxy.ts";
 import { withoutEngineTempPorcelain } from "./claimed_worktree.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { childScratchDir } from "./engine_scratch.ts";
@@ -58,6 +58,16 @@ interface RepoSetupOutcome {
 }
 
 export type RepoSetupResult = { ran: false } | RepoSetupOutcome;
+
+/**
+ * Git proxy access per setup kind: `review` fetches through a read-only
+ * proxy (push endpoints refused without contacting upstream or sending the
+ * credential); every worker kind keeps the read-write proxy. One mapping,
+ * not a framework.
+ */
+export function setupGitProxyAccess(kind: string): ChildGitProxyAccess {
+  return kind === "review" ? "read-only" : "read-write";
+}
 
 /** Escape `<`, `>`, `&` for the prompt block. */
 function escapeXml(value: string): string {
@@ -367,10 +377,31 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
 
   // The agent's own sandbox, never the parent: start the loopback git proxy
   // the engine child gets so setup git reads the same paths, then build the
-  // sanitized env without forge or provider credentials.
+  // sanitized env without forge or provider credentials. Reviews get the
+  // read-only proxy (`setupGitProxyAccess`); workers keep read-write.
+  const proxyAccess = setupGitProxyAccess(opts.kind);
   let proxyUrl: string | undefined;
   let closeProxy: (() => Promise<void>) | undefined;
-  if (opts.auth.token?.trim()) {
+  if (!opts.auth.token?.trim()) {
+    if (opts.kind === "review") {
+      // Fail closed: a review setup without a credential cannot service a
+      // private fetch, so it ends `failed` under the `onFailure` policy. It
+      // never starts a read-write proxy, a direct-credential path, or a
+      // no-auth fallback. Worker behavior without a credential is unchanged.
+      const failureReason = `repository setup failed: missing git credential for read-only proxy`;
+      logDiagnostic(log, "repo_setup", { kind: opts.kind, state: "failed", exit_code: null, duration_ms: 0 });
+      log(`[repo setup] ${failureReason}`);
+      return {
+        ran: true,
+        state: "failed",
+        exitCode: null,
+        durationMs: 0,
+        tail: "",
+        promptBlock: formatRepoSetupPromptBlock("failed", { exitCode: null, tail: "" }),
+        failureReason,
+      };
+    }
+  } else {
     try {
       const { startChildGitProxy } = await import("./child_git_proxy.ts");
       const proxy = await startChildGitProxy({
@@ -379,9 +410,11 @@ export async function runRepoSetupForJob(opts: RunRepoSetupOpts): Promise<RepoSe
         token: opts.auth.token,
         owner: opts.owner,
         repo: opts.repo,
+        access: proxyAccess,
       });
       proxyUrl = proxy.url;
       closeProxy = () => proxy.close();
+      log(`[repo setup] git proxy access=${proxy.access}`);
     } catch (err) {
       const durationMs = 0;
       const tail = tailBytes(redactSetupOutput(errorMessage(err)), SETUP_OUTPUT_TAIL_BYTES);
