@@ -24,8 +24,8 @@ import {
   abortIssueQueue,
   createIssueQueue,
   handleIssueCancel,
-  processWorkerTick,
-  reclaimExpiredWorkerJobs,
+  isWorkerTickOwner,
+  runPersistentWorkerTick,
   type WorkerQueueLike,
 } from "./worker.ts";
 import type { WorkerConfig } from "./worker_config.ts";
@@ -266,7 +266,7 @@ async function main() {
         if (!store) return false;
         try {
           const rows = await store.listInflight(50);
-          return rows.some((row) => row.state === "leased" && row.leasedBy === workerLeasedBy);
+          return rows.some((row) => row.state === "leased" && isWorkerTickOwner(row.leasedBy, workerLeasedBy));
         } catch {
           return false;
         }
@@ -293,24 +293,19 @@ async function main() {
   }
 
   if (store) {
-    const leasedBy = workerLeasedBy;
     const run = async () => {
       while (!shutdown.signal.aborted) {
         try {
-          await reclaimExpiredWorkerJobs(store, config.maxJobAttempts, log, {
-            api,
-            botUsername: config.botUsername,
-          });
-          const result = await processWorkerTick(
+          const { result } = await runPersistentWorkerTick({
             store,
             config,
             api,
-            leasedBy,
-            { abortSignal: shutdown.signal },
-            log,
+            workerId: workerLeasedBy,
+            extras: { abortSignal: shutdown.signal },
+            logger: log,
             aborts,
-            pids
-          );
+            pids,
+          });
           if (result === "idle") await sleep(QUEUE_POLL_MS, shutdown.signal);
         } catch (err) {
           if (shutdown.signal.aborted) return;
