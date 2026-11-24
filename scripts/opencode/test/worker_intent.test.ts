@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { CheckPayload } from "../src/ports.ts";
 import { MemoryReviewJobStore } from "../src/review_jobs.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import type { IssueJob } from "../src/types.ts";
@@ -15,20 +16,17 @@ import { makeComment, makeIssueJob, makeWorkerConfig } from "./fixtures.ts";
 
 function apiWithStatusLog() {
   const statuses: Array<{ sha: string; state: string; description?: string }> = [];
-  const api = makeIssueApi({
-    findStickyIssueComment: async () => ({ id: 9 }),
-    createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
-    updateIssueComment: async (_owner, _repo, id, body) => makeComment({ id, body }),
-    createCommitStatus: (async (
-      _owner: string,
-      _repo: string,
-      sha: string,
-      status: { state: string; description?: string }
-    ) => {
+  const api = {
+    ...makeIssueApi({
+      findStickyIssueComment: async () => ({ id: 9 }),
+      createIssueComment: async (_owner, _repo, _index, body) => makeComment({ body }),
+      updateIssueComment: async (_owner, _repo, id, body) => makeComment({ id, body }),
+    }),
+    createCommitStatus: async (_owner: string, _repo: string, sha: string, status: CheckPayload) => {
       statuses.push({ sha, state: status.state, description: status.description });
       return status;
-    }) as never,
-  });
+    },
+  };
   return { api, statuses };
 }
 
@@ -145,8 +143,8 @@ describe("decodeWorkerJobIntent", () => {
     const store = new MemoryReviewJobStore();
     await store.enqueueIssue(makeIssueJob({ delivery: "d-legacy", mode: "follow-up", prNumber: 7, headSha: "sha" }));
     const row = store.rows[0]!;
-    const { generation: _dropped, ...legacy } = row.payload as Record<string, unknown>;
-    row.payload = legacy as typeof row.payload;
+    const { generation: _dropped, ...legacy } = row.payload as unknown as Record<string, unknown>;
+    row.payload = legacy as unknown as NonNullable<typeof row.payload>;
     expect(decodeWorkerJobIntent(row)).toEqual({ kind: "follow-up" });
   });
 
@@ -238,7 +236,7 @@ describe("processWorkerTick invalid job intent", () => {
     store.rows[0]!.cancelRequested = true;
     expect(await tick).toBe("processed");
     expect(runs).toBe(0);
-    expect(store.rows[0]?.state).toBe("cancelled");
+    expect(store.rows[0]?.state as string).toBe("cancelled");
     expect(statuses).toHaveLength(0);
   });
 
@@ -270,7 +268,7 @@ describe("processWorkerTick invalid job intent", () => {
     store.rows[0]!.leasedUntil = null;
     expect(await processWorkerTick(store, makeWorkerConfig(), api, "worker-1")).toBe("processed");
     expect(runs).toBe(0);
-    expect(store.rows[0]?.state).toBe("failed");
+    expect(store.rows[0]?.state as string).toBe("failed");
     expect(store.rows[0]?.resultReason?.startsWith(INVALID_JOB_INTENT_PREFIX)).toBe(true);
   });
 });
