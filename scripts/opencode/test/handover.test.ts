@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildBoardGroups } from "../src/board.ts";
+import { readFollowUpLatch } from "../src/followup.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import {
   isMaintainerOnlyTrailer,
@@ -71,6 +72,23 @@ async function seedSucceededFollowUps(store: MemoryReviewJobStore, count: number
     const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
     await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
   }
+}
+
+async function seedFollowUpRound(store: MemoryReviewJobStore, round: number, issueNumber = 12): Promise<void> {
+  await store.skipLatches.put(
+    { owner: "kirmanak", repo: "demo", issueNumber },
+    {
+      followup: {
+        prNumber: 7,
+        round,
+        lastHeadSha: "headsha",
+        handledCommentIds: [],
+        handledReviewIds: [],
+        handledReviewFindings: [],
+        updatedAt: new Date().toISOString(),
+      },
+    }
+  );
 }
 
 describe("shouldHandoverFollowUp", () => {
@@ -308,7 +326,8 @@ describe("enqueueFollowUpFromReview", () => {
 
   test("failure trailer at follow-up cap posts stuck and does not enqueue", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(0);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const api = handoverApi();
@@ -328,9 +347,29 @@ describe("enqueueFollowUpFromReview", () => {
     expect(logs).toEqual(["persist-insert skipped: round cap"]);
   });
 
+  test("succeeded merge-only rows without latch rounds do not cap", async () => {
+    const store = new MemoryReviewJobStore();
+    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 0);
+    await store.enqueue(makeJob());
+    const review = await store.lease("engine-1", 60_000);
+    const api = handoverApi();
+    const result = await enqueueFollowUpFromReview({
+      store,
+      api,
+      row: review!,
+      botUsername: "jumi",
+      published: { status: "posted", commentId: 1 },
+      markdown: "blocking\n<!-- jumi-check: failure -->",
+    });
+    expect(result).toEqual({ key: "follow-up:kirmanak/demo#7:headsha", queued: true });
+    expect(api.comments).toEqual([]);
+  });
+
   test("failure trailer below maxFollowupRounds enqueues and does not post stuck", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 2);
+    await seedFollowUpRound(store, 2);
+    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(0);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const api = handoverApi();
@@ -348,7 +387,7 @@ describe("enqueueFollowUpFromReview", () => {
 
   test("follow-up cap sticks at configured maxFollowupRounds, not only 3", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const blockedApi = handoverApi();
@@ -609,7 +648,7 @@ describe("enqueueFollowUpFromReview", () => {
 
   test("assigned foreign PR failure trailer at cap posts stuck and does not enqueue", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3, 7);
+    await seedFollowUpRound(store, 3, 7);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const api = handoverApi({ getPR: async () => makeAssignedForeignPR() });
@@ -696,12 +735,14 @@ describe("enqueueFollowUpFromReview", () => {
 
   test("cancel after the lifetime cap lets a later failing review handover again", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
-    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(3);
-    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(3);
+    await seedFollowUpRound(store, 3);
+    expect(
+      (await readFollowUpLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 })).round
+    ).toBe(3);
     await store.clearIssueSkipLatch("kirmanak", "demo", 12);
-    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(0);
-    expect(store.rows.filter((row) => row.kind === "follow-up" && row.state === "succeeded")).toHaveLength(3);
+    expect(
+      (await readFollowUpLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 })).round
+    ).toBe(0);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const api = handoverApi();
@@ -721,20 +762,23 @@ describe("enqueueFollowUpFromReview", () => {
   test("human-comment follow-ups in the current generation still count toward the cap", async () => {
     const store = new MemoryReviewJobStore();
     await store.clearIssueSkipLatch("kirmanak", "demo", 12);
-    await seedSucceededFollowUps(store, 2);
-    await store.enqueueIssue(
-      makeIssueJob({
-        mode: "follow-up",
-        issueNumber: 12,
-        prNumber: 7,
-        headSha: "comment-sha",
-        delivery: "comment-follow",
-        trigger: { event: "issue_comment", commentId: 55, sender: "alice" },
-      })
+    await store.skipLatches.put(
+      { owner: "kirmanak", repo: "demo", issueNumber: 12 },
+      {
+        followup: {
+          prNumber: 7,
+          round: 3,
+          lastHeadSha: "comment-sha",
+          handledCommentIds: [55],
+          handledReviewIds: [],
+          handledReviewFindings: [],
+          updatedAt: new Date().toISOString(),
+        },
+      }
     );
-    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
-    await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
-    expect(await store.countSucceeded("follow-up", "kirmanak", "demo", 12)).toBe(3);
+    expect(
+      (await readFollowUpLatch(store.skipLatches, { owner: "kirmanak", repo: "demo", issueNumber: 12 })).round
+    ).toBe(3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const api = handoverApi();
@@ -756,7 +800,7 @@ describe("enqueueFollowUpFromReview", () => {
 
   test("round cap does not unassign the issue", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
     await store.enqueue(makeJob());
     const review = await store.lease("engine-1", 60_000);
     const issue = makeIssue();
@@ -845,7 +889,7 @@ describe("enqueueFollowUpFromReview", () => {
 describe("suggestion hold fallback", () => {
   test("round cap resolves a held pending to success with a note", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
     await markSuggestionHoldConsumed(
@@ -877,7 +921,7 @@ describe("suggestion hold fallback", () => {
 
   test("mixed review at round cap keeps the maintainer pending (legacy markdown)", async () => {
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
     await markSuggestionHoldConsumed(
@@ -929,7 +973,7 @@ describe("suggestion hold fallback", () => {
     const markdown = verdict.toMarkdown();
     const record = verdict.toRecord();
     const store = new MemoryReviewJobStore();
-    await seedSucceededFollowUps(store, 3);
+    await seedFollowUpRound(store, 3);
     await store.enqueue(makeJob());
     const leased = await store.lease("engine-1", 60_000);
     await markSuggestionHoldConsumed(
