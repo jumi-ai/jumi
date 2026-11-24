@@ -23,7 +23,6 @@ import {
   splitFlakeBudget,
 } from "./ci.ts";
 import { attributableToPr, baseForMarkdown } from "./ci_base.ts";
-import { followUpStatePath } from "./claim.ts";
 import {
   beginClaimedWorktree,
   commitIfDirty,
@@ -73,6 +72,7 @@ import { isJumiInternalBody, isJumiWorkerBody, loginInList } from "./followup_we
 import type { IssueApi } from "./gitea_issues.ts";
 import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } from "./gitea_issues.ts";
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
+import { settleFollowUpHold } from "./hold_settlement.ts";
 import {
   buildPullRequestBody,
   buildTaskMarkdown,
@@ -115,14 +115,13 @@ import {
   effectiveTrustedSenderLogins,
   failOpenLoadFromSnapshot,
   isAutoRerunFlakesEnabled,
-  isMaintainerQuestionsHoldEnabled,
   isSuggestionFollowupEnabled,
   loadRepoSettings,
   type SettingsSnapshot,
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
-import { inlinesForReviewGroup, reviewGroupIds } from "./review_groups.ts";
+import { inlinesForReviewGroup } from "./review_groups.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -416,7 +415,7 @@ export function isJumiPullReviewWriteup(review: PullReview, botUsername: string)
   return lastCheckTrailer(body) !== undefined;
 }
 
-function isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
+function _isJumiFailurePullReview(review: PullReview, botUsername: string): boolean {
   if (!isJumiPullReviewWriteup(review, botUsername)) return false;
   return lastCheckTrailer(pullReviewBody(review))?.state === "failure";
 }
@@ -573,7 +572,7 @@ export function openQuestionsForReview(
   const body = reviewBody ?? "";
   if (!body.trim()) return 0;
   const trailer = lastCheckTrailer(body);
-  if (!trailer || trailer.state !== "success") return 0;
+  if (trailer?.state !== "success") return 0;
   const parsed = parseReviewOutput(body);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
   const bodyCount = countQuestionFindings(parsed.comment);
@@ -602,7 +601,7 @@ export function openMaintainerQuestionsForReview(
   const body = reviewBody ?? "";
   if (!body.trim()) return 0;
   const trailer = lastCheckTrailer(body);
-  if (!trailer || trailer.state !== "success") return 0;
+  if (trailer?.state !== "success") return 0;
   const parsed = parseReviewOutput(body);
   if (parsed.verdict.incomplete || parsed.verdict.state !== "success") return 0;
   const bodyCount = countMaintainerQuestionFindings(parsed.comment);
@@ -652,7 +651,7 @@ export function openRisksForReview(
 }
 
 /** Open blocking-question inlines among the given Jumi inlines. */
-function blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
+function _blockingQuestionInlines(inlines: readonly InlineComment[], botUsername?: string): InlineComment[] {
   return inlines.filter((inline) => isBlockingQuestionInline(inline, botUsername));
 }
 
@@ -1388,7 +1387,7 @@ export function buildFeedbackMarkdown(opts: {
   let omissionBytes = dropped.size > 0 ? encoder.encode(omissionNote).byteLength : 0;
   while (fit.length > 0 && totalFor(fit.length, keptSum) + omissionBytes > FEEDBACK_MAX_BYTES) {
     const pos = fit.findIndex((item) => !isJumiReviewText(item));
-    const at = pos >= 0 ? pos : 0;
+    const at = Math.max(pos, 0);
     const removed = fit[at]!;
     const orig = extras.indexOf(removed);
     if (orig >= 0) {
@@ -1956,28 +1955,26 @@ export async function implementFollowUp(
     return mergeOnlyResult;
   }
   const state = await readFollowUpLatch(latches, latchKey);
-  // Resolve a held suggestion `pending` to `success` when this round will not
-  // push. The review consumed the one-hold flag; any terminal no-push outcome
-  // must flip the held head back so the merge never waits forever. Pushed
-  // rounds do nothing: the next review posts `success` itself. Never throws.
+  // Terminal no-push outcomes settle through the shared hold-settlement gate,
+  // which re-reads the head, policy, review and status fresh. Never throws.
   const resolveHeld = async (kind: "completed" | "skipped", reason?: string): Promise<void> => {
-    try {
-      const hold = state.suggestionHold;
-      if (!hold?.consumed) return;
-      const count = hold.count ?? 0;
-      if (!count) return;
-      const sha =
-        hold.headSha && hold.headSha.toLowerCase() === pr.head.sha.toLowerCase()
-          ? pr.head.sha
-          : (hold.headSha ?? pr.head.sha);
-      const description =
-        kind === "completed"
-          ? suggestionHoldCompletedDescription(count)
-          : suggestionHoldSkippedDescription(count, reason ?? "follow-up skipped");
-      await postSuggestionHoldSuccess(opts.api, owner, repo, sha, description, pr.html_url);
-    } catch {
-      // Best-effort.
-    }
+    await settleFollowUpHold({
+      api: opts.api,
+      owner,
+      repo,
+      prNumber: pr.number,
+      latches,
+      latchKey,
+      intent: kind === "completed" ? { kind: "completed" } : { kind: "skipped", reason: reason ?? "follow-up skipped" },
+      trigger: opts.job.trigger,
+      botUsername: opts.botUsername,
+      defaultBranch: opts.job.defaultBranch,
+      deploymentTrusted: opts.trustedSenderLogins,
+      deploymentIgnore: opts.followupIgnoreLogins,
+      deploymentBlocking: opts.blockingQuestionAuthors,
+      log,
+      targetUrl: pr.html_url,
+    });
   };
 
   const branch = pr.head.ref;
@@ -3230,69 +3227,12 @@ export async function implementFollowUp(
   ) {
     await deleteCheckpointForIssueViaForge(opts.api, owner, repo, issueNumber, { log });
   }
-  // The held `pending` turns `success` once the replies land (no-changes) or
-  // whenever this round cannot push. Pushed rounds do nothing: the next review
-  // posts `success` itself. Never throws.
+  // Terminal no-push outcomes settle through the shared hold-settlement gate,
+  // which re-reads the head, policy, review and status fresh. Pushed rounds do
+  // nothing: the next review posts `success` itself. Never throws.
   if (typeof followUpResult === "object" && followUpResult !== null && "status" in followUpResult) {
     if (followUpResult.status === "no-changes") {
       await resolveHeld("completed");
-      // Maintainer hold release: a trusted reply enqueued this round and the
-      // worker made no push, so the answer settles the head without a code
-      // change. The last review on this head still carries open `❓
-      // maintainer:` questions (the review never re-runs on its own), so flip
-      // the held `pending` back to `success` here. Only a complete `success`
-      // review with zero actionable blocking findings and zero blocking
-      // questions releases: a failure (open 🔴/🟡 or blocking ❓) that also
-      // carries a `❓ maintainer:` line must stay failed so blocking findings
-      // still gate the merge. Pushed rounds do nothing: the next review posts
-      // the status itself. Skipped/cancelled rounds keep the hold so the merge
-      // still waits on the maintainer.
-      try {
-        const trigger = opts.job.trigger;
-        const triggeredByReply = trigger != null && (trigger.commentId !== undefined || trigger.reviewId !== undefined);
-        if (triggeredByReply && pendingLastReview?.body) {
-          const reviewBody = pendingLastReview.body ?? "";
-          // Body + inline view: the published body keeps only the
-          // findings-list line for posted findings (parsers skip that
-          // section), so an inline-only ❓/🔴/🟡 would read zero from the
-          // body alone. Count the open Jumi inlines for the review pair
-          // the reviewer actually publishes (summary plus its empty-body
-          // companion), the same way `isMaintainerOnlyPullReview` does.
-          const allForGroup = pendingItems.allReviews ?? pendingItems.jumiReviews;
-          const summaryReview = allForGroup.find((entry) => entry.id === pendingLastReview.id);
-          const reviewInlines =
-            summaryReview != null
-              ? inlinesForReviewGroup(summaryReview, allForGroup, pendingItems.jumiInlines, opts.botUsername)
-              : [];
-          const groupIds = summaryReview != null ? reviewGroupIds(summaryReview, allForGroup, opts.botUsername) : [];
-          const assessment = assessMaintainerHoldRelease({
-            reviewBody,
-            inlines: reviewInlines,
-            prAuthorLogin: pr.user?.login,
-            blockingAuthors: snapshot.lists.blockingAuthors,
-            botUsername: opts.botUsername,
-            holdEnabled: isMaintainerQuestionsHoldEnabled(failOpenLoadFromSnapshot(settingsSnapshot)),
-          });
-          if (assessment.releasable) {
-            await postSuggestionHoldSuccess(opts.api, owner, repo, pr.head.sha, assessment.description, pr.html_url);
-            log(`maintainer hold released for ${owner}/${repo}#${pr.number}: ${assessment.openMaintainers} answered`);
-          } else {
-            const trailer = lastCheckTrailer(reviewBody);
-            const trailerMentionsMaintainer = (trailer?.reason ?? "").toLowerCase().includes("maintainer");
-            if (assessment.completeSuccess && (assessment.openMaintainers > 0 || trailerMentionsMaintainer)) {
-              const keepReason = assessment.keepReason ?? "no open maintainer questions";
-              log(
-                `maintainer hold kept for ${owner}/${repo}#${pr.number}: ${keepReason} ` +
-                  `(maintainers=${assessment.openMaintainers} bugs=${assessment.openBugs} risks=${assessment.openRisks} ` +
-                  `blocking=${assessment.openBlockingQuestions} completeSuccess=${assessment.completeSuccess} ` +
-                  `reviews=[${groupIds.join(",")}])`
-              );
-            }
-          }
-        }
-      } catch {
-        // Best-effort: never fail the follow-up on a status post.
-      }
       // Refused-schedule retry: fresh labels/base inside the helper so a
       // mid-round label change is visible. Best-effort, never changes result.
       try {
