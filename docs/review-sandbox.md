@@ -117,21 +117,32 @@ blocked reads, so these fixtures fail that probe instead of passing
 unwrapped. SAFE is scoped to that scenario and binary build, not a universal
 containment guarantee.
 
-Scope note for the follow-on work: a bootstrap guard can enforce setup
-completion (the ready marker) at spawn, but that is narrower than every
-possible binary-side plugin rejection — a missing directory, an invalid file,
-or a mid-setup throw are binary-side rejections no spawn-time marker check
-can rescue. The diagnostic proves the gap; the guard only closes the
-bootstrap slice.
+Scope note for the follow-on work (jumi#831, implemented): the parent now
+refuses before spawn when the generated plugin file is missing, when the
+global config's `plugins` list does not reference it, or when its contents do
+not parse (transpile check) — and the plugin's own bootstrap never throws,
+never resolves on failure, and never permits model/tool dispatch: a caught
+import/hook/marker failure writes the per-spawn startup-failed marker
+(`review-shell-plugin.startup-failed` in the harness temp root) and then
+awaits a promise that never settles, while the parent watches for that marker
+(local-file check, 100 ms, cleared on every exit) and kills the owned child as
+an engine failure. That closes the bootstrap slice only — a missing
+directory, an invalid file, or a mid-setup throw no longer falls through when
+the bootstrap runs, but a binary-side rejection of a syntactically valid
+plugin before its factory runs produces no failure marker and is not covered
+by this slice. Neither the existing eventual-wrapping image probe nor these
+selected local scenarios proves that every such rejection fails closed.
 
 ## Per-runner wiring
 
 All wiring is Jumi-owned (never from the checkout). The agent spawns
 unsandboxed; its shells are wrapped separately:
 
-- OpenCode: Jumi-owned V2 plugin (`Plugin.define` with
-  `ctx.tool.hook("execute.before")` denying reads plus
-  `ctx.shell.hook("create.before")` wrapping every shell creation,
+- OpenCode: Jumi-owned V2 plugin (plain `{ id, setup }` default export, no
+  static `@opencode/plugin` import; `setup` dynamically imports the plugin API
+  inside a non-throwing bootstrap, with `ctx.tool.hook("execute.before")`
+  denying reads plus `ctx.shell.hook("create.before")` wrapping every shell
+  creation,
   generated per spawn as `<outside-temp>/xdg-config/opencode/plugin/jumi-review-shell-sandbox/index.js`
   and registered as a directory under the V2 `plugins` key of the Jumi-owned
   global `opencode.json`). The tool hook denies reads of the harness temp /
@@ -145,7 +156,17 @@ unsandboxed; its shells are wrapped separately:
   a second wrap would exec the wrapper inside its own Landlock domain) and pins
   HOME/XDG/TMPDIR at scratch while scrubbing provider keys. The plugin's
   setup writes a ready marker after both registrations so the image probe can
-  prove the load instead of running half-wrapped.
+  prove the load instead of running half-wrapped. A caught import/hook/marker
+  failure instead writes the per-spawn startup-failed marker
+  (`review-shell-plugin.startup-failed` in the harness temp root) and awaits a
+  promise that never settles, so the child stays parked before its first model
+  request; the parent refuses before spawn when the plugin file is missing,
+  unregistered, or unparsable, watches for the startup-failed marker while the
+  child runs (100 ms poll, cleared on every exit, skipped only under
+  `JUMI_ALLOW_UNSANDBOXED_REVIEWS=1`), and kills the owned child as an engine
+  failure on sight. A binary-side rejection of a syntactically valid plugin
+  before its factory runs produces no failure marker and is not covered by
+  this slice.
 - Claude: Jumi-owned `PreToolUse` hook (`updatedInput` rewrite) in a
   `--plugin-dir` plugin under the outside harness temp. Same rewrite, and the
   deny covers `Read`/`Edit`/`Write`/`Grep`/`Glob` so the token is not reachable
