@@ -25,8 +25,14 @@
  * credentials and gets 401/403/404 from the forge itself.
  */
 
+import { type ChildGitProxyAccess, isGitRequestAllowed, normalizedScope } from "./child_git_proxy_access.ts";
+
+export type { ChildGitProxyAccess } from "./child_git_proxy_access.ts";
+export { isGitPathAllowed, isGitRequestAllowed } from "./child_git_proxy_access.ts";
+
 export interface ChildGitProxy {
   url: string;
+  access: ChildGitProxyAccess;
   close(): Promise<void>;
 }
 
@@ -36,6 +42,15 @@ export interface ChildGitProxyOptions {
   token: string;
   owner?: string;
   repo?: string;
+  /**
+   * `read-write` (default) preserves the current behavior: every git
+   * smart-HTTP path scoped to the claimed repo is forwarded with the
+   * parent-held credential. `read-only` serves authenticated fetch/clone
+   * (GET/HEAD on read paths plus POST to `git-upload-pack`) and refuses
+   * every push endpoint with 404 without contacting upstream. Nothing
+   * selects read-only yet; workers keep the default.
+   */
+  access?: ChildGitProxyAccess;
 }
 
 function normalizedBase(value: string): string {
@@ -54,70 +69,6 @@ function stripTrailingSlash(value: string): string {
   return value.endsWith("/") && value.length > 1 ? value.slice(0, -1) : value;
 }
 
-function normalizedScope(owner?: string, repo?: string): { o: string; r: string } | undefined {
-  const o = owner?.trim();
-  const r = repo?.trim().replace(/\.git$/, "");
-  if (!o || !r || o.includes("/") || r.includes("/") || o === "." || r === "." || o === ".." || r === "..") {
-    return undefined;
-  }
-  return { o, r };
-}
-
-/**
- * Git smart-HTTP suffixes the proxy forwards, scoped to the claimed repo.
- * Both the `.git` and the bare (`/owner/repo/...`, which Gitea also serves)
- * bases require the same suffix: `info/refs` (ref advertisement),
- * `HEAD`, `objects/...` (dumb-HTTP object reads), and the two RPC endpoints.
- * Anything else — the repo root, `/issues`, `/pulls/...`, `/raw/...`,
- * `/archive/...` — is the forge web UI, not git, and gets 404 without ever
- * seeing the token.
- */
-function gitSuffixAllowed(remainder: string): boolean {
-  if (remainder === "info/refs") return true;
-  if (remainder === "HEAD") return true;
-  if (remainder === "git-upload-pack" || remainder === "git-receive-pack") return true;
-  if (remainder.startsWith("objects/") && remainder.length > "objects/".length) return true;
-  return false;
-}
-
-function pathAllowed(pathname: string, owner?: string, repo?: string): boolean {
-  if (pathname.includes("\0") || pathname.includes("..")) return false;
-  // Explicit forge-API denials first so an unknown-scope proxy still refuses them.
-  if (
-    pathname === "/api" ||
-    pathname.startsWith("/api/") ||
-    pathname === "/attachments" ||
-    pathname.startsWith("/attachments/")
-  ) {
-    return false;
-  }
-  const scope = normalizedScope(owner, repo);
-  // Fail closed without a valid scope: an unscoped proxy serves nothing, so a
-  // missing owner/repo can never turn the parent token into a forge-wide git
-  // reader. `startChildGitProxy` also refuses to start unscoped.
-  if (!scope) return false;
-  const { o, r } = scope;
-  const gitBase = `/${o}/${r}.git/`;
-  const bareBase = `/${o}/${r}/`;
-  let remainder: string | undefined;
-  if (pathname.startsWith(gitBase)) {
-    remainder = pathname.slice(gitBase.length);
-  } else if (pathname.startsWith(bareBase)) {
-    remainder = pathname.slice(bareBase.length);
-    // `/o/r/.git/...` is not a git smart-HTTP endpoint (the endpoint is
-    // `/o/r/HEAD`, not `/o/r/.git/HEAD`), so it stays denied.
-    if (remainder === ".git" || remainder.startsWith(".git/")) return false;
-  } else {
-    return false;
-  }
-  if (!remainder) return false;
-  return gitSuffixAllowed(remainder);
-}
-
-export function isGitPathAllowed(pathname: string, owner?: string, repo?: string): boolean {
-  return pathAllowed(pathname, owner, repo);
-}
-
 const HOP_HEADERS = new Set(["connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length"]);
 
 export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<ChildGitProxy> {
@@ -125,6 +76,10 @@ export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<Ch
   const forgeOrigin = new URL(forgeBase).origin;
   const forgePath = new URL(forgeBase).pathname.replace(/\/$/, "");
   const basic = `Basic ${Buffer.from(`${opts.username}:${opts.token}`).toString("base64")}`;
+  const access = opts.access ?? "read-write";
+  if (access !== "read-write" && access !== "read-only") {
+    throw new Error(`child git proxy refused: invalid access ${JSON.stringify(opts.access)}`);
+  }
   // Fail closed without a valid scope: serving any repo's git paths with the
   // parent token is exactly the forge-wide reader this proxy exists to prevent.
   const scope = normalizedScope(opts.owner, opts.repo);
@@ -138,7 +93,7 @@ export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<Ch
       let targetPath: string;
       try {
         const incoming = new URL(req.url);
-        if (!pathAllowed(incoming.pathname, owner, repo)) {
+        if (!isGitRequestAllowed(incoming.pathname, incoming.search, req.method, owner, repo, access)) {
           return new Response("not found", { status: 404 });
         }
         targetPath = `${forgePath}${incoming.pathname}${incoming.search}`;
@@ -180,6 +135,7 @@ export async function startChildGitProxy(opts: ChildGitProxyOptions): Promise<Ch
   const url = `http://127.0.0.1:${server.port}/`;
   return {
     url,
+    access,
     async close(): Promise<void> {
       server.stop();
     },

@@ -17,6 +17,7 @@
   "checkpoint.ts": 712,
   "child_env.ts": 108,
   "child_git_proxy.ts": 282,
+  "child_git_proxy_access.ts": 129,
   "ci.ts": 1291,
   "ci_base.ts": 145,
   "ci_webhook.ts": 364,
