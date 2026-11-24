@@ -163,5 +163,6 @@
   "ci_refresh.ts": 82,
   "followup_ci_refresh.ts": 107,
   "reclaim_publish.ts": 113,
-  "requeue_gate.ts": 103
+  "requeue_gate.ts": 103,
+  "followup_wake_causes.ts": 666
 }
