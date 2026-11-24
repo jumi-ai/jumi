@@ -170,6 +170,21 @@ A runner with no Jumi-owned hook refuses instead of running unsandboxed
 <runner> runner cannot be sandboxed ...`). All four pinned runners have hooks;
 unknown types refuse.
 
+Repository setup for reviews runs in the same sandbox: `setup.run` with
+`kind === "review"` executes through the shell wrapper with the shell policy
+(checkout plus scratch read-write, system paths read-only, no agent HOME) and
+a scratch `HOME`/XDG/`TMPDIR` created before spawn. Its git goes through the
+loopback credential proxy in read-only mode (fetch/clone served with the
+parent-held credential, every push endpoint refused with 404 without contacting
+the forge; the sandbox is filesystem-only, so the loopback proxy stays
+reachable), and a review setup without a credential, or whose read-only proxy
+cannot start, ends `failed` under the repository's `onFailure` policy instead
+of falling back to read-write, direct credentials, or no auth. Worker setup
+kinds keep today's env and spawn. Fail-closed matches the spawn gate below: an
+unavailable sandbox yields a setup `failed` outcome under the repository's
+`onFailure` policy, never an unwrapped run, unless
+`JUMI_ALLOW_UNSANDBOXED_REVIEWS=1` is set (logged).
+
 Fail-closed: if Landlock is unavailable or below ABI 6, review jobs fail
 with one clear status (`review spawn refused: Landlock sandbox
 unavailable ...`) instead of running unsandboxed. `JUMI_ALLOW_UNSANDBOXED_REVIEWS=1`

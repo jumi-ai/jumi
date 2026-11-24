@@ -208,6 +208,12 @@ export interface ShellWrapperPrefixInput {
   wrapperPath?: string;
   sandboxHome?: string;
   scratchDir?: string;
+  /**
+   * Preserve `sh -e` (errexit) on the inner shell. Review setup runs its
+   * script as `sh -e -c`, so the sandboxed inner shell must keep `-e`;
+   * model shells keep the default `sh -c` shape.
+   */
+  errexit?: boolean;
 }
 
 /**
@@ -245,7 +251,9 @@ function reviewShellWrapperPrefix(
 
 /**
  * Wrap one shell command string so it runs inside the shell Landlock domain
- * with a scrubbed env. `original` is the model's `Bash` command text.
+ * with a scrubbed env. `original` is the model's `Bash` command text. The
+ * inner shell defaults to `sh -c`; pass `errexit: true` to preserve `sh -e`
+ * semantics for callers (such as review setup) that run `sh -e -c`.
  */
 export function wrapShellCommand(
   original: string,
@@ -253,7 +261,8 @@ export function wrapShellCommand(
   input: ShellWrapperPrefixInput = {},
   env: Record<string, string | undefined> = process.env
 ): string {
-  return `${reviewShellWrapperPrefix(rules, input, env)} sh -c ${shellEscape(original)}`;
+  const innerShell = input.errexit ? "sh -e -c" : "sh -c";
+  return `${reviewShellWrapperPrefix(rules, input, env)} ${innerShell} ${shellEscape(original)}`;
 }
 
 /** Absolute path of the wrapper script; overridable for tests. Never a value, only a path. */
