@@ -164,8 +164,9 @@ function toolCall(state: RunState): { name: string; arguments: string } {
 }
 
 /**
- * Scripted calls for the review-plugin case. The pinned binary (2.2.7) ships
- * the shell tool as `shell` (a `bash` call aliases to it before hooks run),
+ * Scripted calls for the review-plugin case. The observed binary (2.3.2,
+ * hash unverified: the image installs the release tarball without a checksum)
+ * ships the shell tool as `shell` (a `bash` call aliases to it before hooks run),
  * `read` takes `path`, `list` takes `path`:
  * - `shell` runs `printenv HOME` until HOME comes back as the sandbox home
  *   (bounded retries: the plugin loads asynchronously with the first `run`,
