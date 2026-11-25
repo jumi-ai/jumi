@@ -73,7 +73,9 @@ describePg("handover follow-up latch round cap against real postgres", () => {
     if (!pgDatabaseUrl) return;
     sql = openTestSqlClient(pgDatabaseUrl);
     store = new PgReviewJobStore(sql);
-    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
+    await sql.unsafe(
+      `DROP TABLE IF EXISTS review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage, role_gates`
+    );
     await store.migrate();
   });
 
@@ -83,7 +85,9 @@ describePg("handover follow-up latch round cap against real postgres", () => {
 
   beforeEach(async () => {
     if (!pgDatabaseUrl) return;
-    await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
+    await sql.unsafe(
+      `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage RESTART IDENTITY`
+    );
     await store.migrate();
   });
 

@@ -36,7 +36,7 @@ describePg("review handover pending against real postgres", () => {
 
   beforeEach(async () => {
     if (!pgDatabaseUrl) return;
-    await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
     await sql.unsafe(`DROP TABLE IF EXISTS review_handover_pending`);
     await store.migrate();
   });

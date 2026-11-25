@@ -27,7 +27,7 @@ describePg("PgReviewJobStore reclaim fallback and kick gate (#810)", () => {
 
   beforeEach(async () => {
     if (!pgDatabaseUrl) return;
-    await sql.unsafe(`TRUNCATE review_jobs, review_kicks RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes, review_kicks RESTART IDENTITY`);
     await store.migrate();
   });
 

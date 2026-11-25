@@ -118,7 +118,9 @@ describePg("PgReviewJobStore against real postgres", () => {
     store = new PgReviewJobStore(sql);
     // Start from an empty database so `migrate()` is exercised from scratch, not against
     // whatever a previous run left behind.
-    await sql.unsafe(`DROP TABLE IF EXISTS review_jobs, issue_skip_latches, jumi_run_usage, role_gates`);
+    await sql.unsafe(
+      `DROP TABLE IF EXISTS review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage, role_gates`
+    );
     await store.migrate();
   });
 
@@ -128,7 +130,9 @@ describePg("PgReviewJobStore against real postgres", () => {
 
   beforeEach(async () => {
     if (!pgDatabaseUrl) return;
-    await sql.unsafe(`TRUNCATE review_jobs, issue_skip_latches, jumi_run_usage RESTART IDENTITY`);
+    await sql.unsafe(
+      `TRUNCATE review_jobs, follow_up_wake_causes, issue_skip_latches, jumi_run_usage RESTART IDENTITY`
+    );
     await sql.unsafe(`TRUNCATE role_gates`);
     // Re-assert the schema: the migrate test drops an index on purpose.
     await store.migrate();
@@ -982,7 +986,7 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect((await store.get(leased!.id))?.state).toBe("cancelled");
 
     // Reclaim first, then cancel: the requeued row is cancelled by the late cancel.
-    await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
     await store.enqueueIssue(makeIssueJob({ delivery: "d-second" }));
     const relased = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
     expect(await store.expireLease(relased!.id, "worker-1", new Date(2_000))).toBe(true);
@@ -998,7 +1002,7 @@ describePg("PgReviewJobStore against real postgres", () => {
     // scan skips it and the row stays leased with the cancel flag set; the
     // next reclaim tick settles it to cancelled. Settle here so the test
     // asserts the converged state instead of the race winner.
-    await sql.unsafe(`TRUNCATE review_jobs RESTART IDENTITY`);
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
     await store.enqueueIssue(makeIssueJob({ delivery: "d-third" }));
     const raced = await store.lease("worker-1", 1, new Date(1_000), WORKER_JOB_KINDS);
     expect(await store.expireLease(raced!.id, "worker-1", new Date(2_000))).toBe(true);
