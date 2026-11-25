@@ -4,13 +4,9 @@ import { resolveWorkerHeld } from "./exhausted_hold.ts";
 import type { IssueApi } from "./gitea_issues.ts";
 import { cancelIssueWork } from "./implement.ts";
 import type { ReviewJobStore } from "./review_jobs.ts";
-import {
-  LatchFenceRejected,
-  LatchFenceUnsupported,
-  type SkipLatchStore,
-} from "./skip_latches.ts";
-import type { WorkerConfig } from "./worker_config.ts";
+import { LatchFenceRejected, LatchFenceUnsupported, type SkipLatchStore } from "./skip_latches.ts";
 import { errorMessage } from "./util/error.ts";
+import type { WorkerConfig } from "./worker_config.ts";
 
 export type WorkerLatchFenceFailure = { kind: "rejected" | "unsupported"; error: Error };
 

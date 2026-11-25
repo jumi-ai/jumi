@@ -16,6 +16,7 @@ import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
 import { resolveWorkerHeld } from "./exhausted_hold.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
+import { payloadGenerationOf } from "./followup_wake_causes.ts";
 import { createForge } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -42,12 +43,6 @@ import {
   resolveRepoMode,
 } from "./repo_settings.ts";
 import { HEARTBEAT_MS, issueJobFromRecord, type ReviewJobStore, WORKER_JOB_KINDS } from "./review_jobs.ts";
-import { payloadGenerationOf } from "./followup_wake_causes.ts";
-import {
-  fencedSkipLatchesForWorkerJob,
-  settleWorkerLatchFenceFailure,
-  type WorkerLatchFenceFailure,
-} from "./worker_latch_fence.ts";
 import { clearSitBestEffort, rememberSitBestEffort } from "./router_sits.ts";
 import { setActiveRunUsageRecording } from "./run_usage.ts";
 import { runnerAuthFingerprints } from "./runner_cooldown.ts";
@@ -62,6 +57,11 @@ import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { decodeWorkerJobIntent, settleInvalidWorkerJobIntent } from "./worker_intent.ts";
+import {
+  fencedSkipLatchesForWorkerJob,
+  settleWorkerLatchFenceFailure,
+  type WorkerLatchFenceFailure,
+} from "./worker_latch_fence.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
