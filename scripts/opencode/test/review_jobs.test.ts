@@ -766,6 +766,13 @@ describe("follow-up wake admission (#841)", () => {
     expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: false });
     expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
     expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+    // Settle A: B promotes, and a later replay of the now-promoted B still
+    // creates nothing.
+    const settled = await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    expect(settled).toMatchObject({ promoted: 1, parked: 0 });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(0);
+    expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(1);
   });
 
   test("queued normal + merge-only B, and queued merge-only A + normal B, each run with their own intent", async () => {
@@ -857,6 +864,12 @@ describe("follow-up wake admission (#841)", () => {
     expect(parked).toHaveLength(1);
     expect(parked[0]?.parkReason).toBe("generation-reset");
     expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(0);
+    // A replay of the parked cause still creates nothing.
+    expect(await store.enqueueIssue(followUpJob({ delivery: "delivery-b" }))).toEqual({
+      key: wakeKey,
+      queued: false,
+    });
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
   });
 
   test("concurrent B and C both persist; concurrent identical B persists once", async () => {
