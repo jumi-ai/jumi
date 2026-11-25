@@ -50,6 +50,7 @@ import { suggestionsHoldMergeSetting } from "./repo_settings_keys/suggestions_ho
 import { takeoverAuthorsSetting } from "./repo_settings_keys/takeover_authors.ts";
 import { timeoutsSetting } from "./repo_settings_keys/timeouts.ts";
 import { trustedSendersSetting } from "./repo_settings_keys/trusted_senders.ts";
+import { workerReviewRulesSetting } from "./repo_settings_keys/worker_review_rules.ts";
 import {
   type CiGateWait,
   DEFAULT_BRANCH_PREFIX,
@@ -165,6 +166,7 @@ export const REPO_SETTINGS_REGISTRY = [
   takeoverAuthorsSetting,
   timeoutsSetting,
   trustedSendersSetting,
+  workerReviewRulesSetting,
 ];
 
 /**
@@ -274,6 +276,9 @@ function defaultRepoSettingsFromRegistry(): RepoSettings {
  * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`. Absent
  * `strict_branch_refresh` (or `false`) means no Gitea opt-in, as today;
  * `true` lets Gitea strict refresh run when branch protection is unreadable.
+ * Absent `worker_review_rules` (or `true`) means implement and follow-up
+ * workers receive the base-branch REVIEW.md rules; `false` keeps workers on
+ * today's prompts.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -772,6 +777,17 @@ export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
 export function isAutoRerunFlakesEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;
   return load.autoRerunFlakes !== false;
+}
+
+/**
+ * Whether implement and follow-up workers receive the base-branch REVIEW.md
+ * rules. Default on: missing, invalid, or unreadable files behave as today
+ * (on when the repo has a REVIEW.md, nothing new when it does not). The
+ * repository opts out with `worker_review_rules: false`.
+ */
+export function isWorkerReviewRulesEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return load.workerReviewRules !== false;
 }
 
 /**

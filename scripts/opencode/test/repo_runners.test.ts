@@ -44,6 +44,7 @@ describe("allowed_runners parsing", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       },
     });
   });
@@ -67,6 +68,7 @@ describe("allowed_runners parsing", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       },
     });
   });

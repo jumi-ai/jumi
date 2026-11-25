@@ -137,7 +137,7 @@ function buildPreamble(runner: PromptRunner): string {
 </rules>`;
 }
 
-const REVIEW_RUBRIC = `Write findings with \`<file>:<line>:\` (or \`L<line>:\` for a single-file review), the problem, and a concrete fix. Exact symbol/function/variable names in backticks. Include the why when the fix is not obvious. Keep each finding self-contained starting on its own line; indent any sub-points, lists, or wrapped paragraphs under that finding line so they publish with it. Only the finding line and its indented or list continuation publish, so do not rely on surrounding prose.
+export const REVIEW_RUBRIC = `Write findings with \`<file>:<line>:\` (or \`L<line>:\` for a single-file review), the problem, and a concrete fix. Exact symbol/function/variable names in backticks. Include the why when the fix is not obvious. Keep each finding self-contained starting on its own line; indent any sub-points, lists, or wrapped paragraphs under that finding line so they publish with it. Only the finding line and its indented or list continuation publish, so do not rely on surrounding prose.
 
 Severity:
 - 🔴 bug: — broken behavior, will cause incident. Trailer failure.

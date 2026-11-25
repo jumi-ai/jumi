@@ -33,11 +33,11 @@ export interface ReviewMdSelection {
   matchedPathSections: number;
 }
 
-interface Section {
+export interface ReviewMdSection {
   heading?: string;
   globs?: RegExp[];
   lines: string[];
-  children: Section[];
+  children: ReviewMdSection[];
   level: number;
 }
 
@@ -115,9 +115,9 @@ export function headingGlobs(heading: string): string[] | undefined {
   return tokens;
 }
 
-function parseSections(text: string): Section {
-  const root: Section = { lines: [], children: [], level: 0 };
-  const stack: Section[] = [root];
+export function parseReviewMdSections(text: string): ReviewMdSection {
+  const root: ReviewMdSection = { lines: [], children: [], level: 0 };
+  const stack: ReviewMdSection[] = [root];
   let fence: string | undefined;
   for (const line of text.split(/\r?\n/)) {
     const top = stack[stack.length - 1];
@@ -151,7 +151,7 @@ function parseSections(text: string): Section {
     } catch {
       compiled = undefined;
     }
-    const section: Section = {
+    const section: ReviewMdSection = {
       heading: line,
       globs: compiled,
       lines: [],
@@ -165,7 +165,7 @@ function parseSections(text: string): Section {
 }
 
 function renderSections(
-  section: Section,
+  section: ReviewMdSection,
   files: string[],
   counts: { path: number; matched: number },
   out: string[]
@@ -180,7 +180,7 @@ function renderSections(
   for (const child of section.children) renderSections(child, files, counts, out);
 }
 
-function truncateUtf8(text: string, maxBytes: number): string {
+export function truncateUtf8(text: string, maxBytes: number): string {
   const cut = Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
   return cut.replace(/�$/, "");
 }
@@ -194,7 +194,7 @@ export function selectReviewMdSections(
   const paths = files.map((file) => file.filename.replaceAll("\\", "/").replace(/^\/+/, ""));
   const counts = { path: 0, matched: 0 };
   const out: string[] = [];
-  renderSections(parseSections(text), paths, counts, out);
+  renderSections(parseReviewMdSections(text), paths, counts, out);
   const selected = out
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
