@@ -591,6 +591,7 @@ export async function attachPrWorktree(
     await loop.runConfiguredGit(["worktree", "add", "-B", opts.branch, loop.worktree, `origin/${opts.branch}`], {
       cwd: loop.barePath,
       env: loop.env,
+      signal: opts.abortSignal,
     });
   } else {
     await loop.runConfiguredGit(["checkout", opts.branch], { cwd: loop.worktree, env: loop.env });
