@@ -45,8 +45,5 @@ export const IGNORE_CONFLICTS_PREFIX = "conflicted, left to author";
 /** Hold/short text for a round-capped follow-up. Never a sit. */
 export const ROUND_CAP_HOLD_TEXT = "round cap";
 
-/** Family prefix for infra-flake skips: `CI infra flake: <reasons>`. */
-export const FLAKE_PREFIX = "CI infra flake:";
-
 /** Placeholder canonical text for the `stuck-other` catch-all row. Never emitted by `decide()`. */
 export const STUCK_OTHER_TEXT = "stuck: other";

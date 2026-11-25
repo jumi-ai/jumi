@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyInfraFlake, infraFlakeReason, readCiLatch } from "../src/ci.ts";
+import { readCiLatch } from "../src/ci.ts";
 import { isCiRefreshSpent, splitCiRefreshBudget } from "../src/ci_refresh.ts";
 import { ciStatePath } from "../src/claim.ts";
 import { implementFollowUp } from "../src/followup.ts";
@@ -8,119 +8,11 @@ import { forEachForge, makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 import { withDirs } from "./harness/temp.ts";
 
-const OVERLAY_LOG =
-  "Error: kernel does not support overlay fs: 'overlay' is not supported over <unknown> at \"/var/lib/containers/storage/overlay\": exit status 125";
-
 function stripGitConfigArgs(args: string[]): string[] {
   const result = [...args];
   while (result[0] === "-c") result.splice(0, 2);
   return result;
 }
-
-describe("overlay fs infra flake", () => {
-  test("infraFlakeReason classifies the Buildah overlay line", () => {
-    expect(infraFlakeReason(OVERLAY_LOG)).toContain("overlay");
-  });
-
-  test("classifyInfraFlake treats the overlay line plus footer as a flake", () => {
-    const log = [OVERLAY_LOG, "##[error]Process completed with exit code 1."].join("\n");
-    expect(classifyInfraFlake(log)).toContain("overlay");
-  });
-
-  test("splitCiRefreshBudget is keyed by base SHA and check", async () => {
-    const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
-    const { mkdtemp } = await import("node:fs/promises");
-    const { tmpdir } = await import("node:os");
-    const { rm } = await import("node:fs/promises");
-    const home = await mkdtemp(`${tmpdir()}/jumi-ci-refresh-`);
-    try {
-      const store = memorySkipLatchesFor(home);
-      const key = { owner: "o", repo: "r", issueNumber: 1 };
-      let state = await readCiLatch(store, key);
-      expect(isCiRefreshSpent(state, "BASE", "build")).toBe(false);
-      const { recordCiRefreshes } = await import("../src/ci_refresh.ts");
-      await recordCiRefreshes({
-        home,
-        owner: "o",
-        repo: "r",
-        issueNumber: 1,
-        prNumber: 2,
-        baseSha: "BASE",
-        checkNames: ["build"],
-        skipLatches: store,
-      });
-      state = await readCiLatch(store, key);
-      expect(isCiRefreshSpent(state, "base", "build")).toBe(true);
-      expect(isCiRefreshSpent(state, "base", "lint")).toBe(false);
-      expect(isCiRefreshSpent(state, "other", "build")).toBe(false);
-      const split = splitCiRefreshBudget(state, "base", [{ name: "build" }, { name: "lint" }]);
-      expect(split.toRefresh.map((c) => c.name)).toEqual(["lint"]);
-      expect(split.exhausted.map((c) => c.name)).toEqual(["build"]);
-    } finally {
-      await rm(home, { recursive: true, force: true });
-    }
-  });
-});
-
-forEachForge("overlay-fs log gets the single automatic rerun", (preset) => {
-  return withDirs(async (home, workdir) => {
-    const rerunCalls: number[] = [];
-    const api = makeIssueApi({
-      capabilities: preset.capabilities,
-      getIssue: async () => makeIssue(),
-      listOpenPulls: async () => [
-        makePR({
-          number: 127,
-          title: "Fix the thing",
-          body: "Fixes #12",
-          user: makeUser({ login: "jumi" }),
-          html_url: "https://gitea.kirmanak.stream/kirmanak/demo/pulls/127",
-          head: {
-            label: "kirmanak:jumi/issue-12-fix-the-thing",
-            ref: "jumi/issue-12-fix-the-thing",
-            sha: "headsha",
-            repo: makeRepo(),
-            repo_id: 10,
-          },
-        }),
-      ],
-      listIssueComments: async () => [],
-      listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
-      listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
-      getActionJobLogs: async () => `${OVERLAY_LOG}\n##[error]Process completed with exit code 1.\n`,
-      rerunActionJob: async (_owner: string, _repo: string, jobId: number) => {
-        rerunCalls.push(jobId);
-      },
-    } as never);
-    let openCode = 0;
-    const result = await implementFollowUp({
-      api: api as never,
-      job: makeIssueJob({
-        mode: "follow-up",
-        prNumber: 127,
-        trigger: { event: "workflow_job", sender: "alice" },
-      }),
-      giteaUrl: "https://gitea.kirmanak.stream",
-      giteaToken: "bot-token",
-      botUsername: "jumi",
-      model: "openai/gpt-5.5",
-      home,
-      workdir,
-      heartbeatIntervalMs: 0,
-      gitRunner: async () => {
-        throw new Error("git should not run");
-      },
-      openCodeRunner: async () => {
-        openCode++;
-        return { status: "ok" };
-      },
-      logger: () => undefined,
-    });
-    expect(openCode).toBe(0);
-    expect(rerunCalls).toHaveLength(1);
-    expect(String((result as { reason?: unknown }).reason ?? "")).toContain("overlay");
-  });
-});
 
 function renovatePr(headSha: string) {
   const repo = makeRepo();

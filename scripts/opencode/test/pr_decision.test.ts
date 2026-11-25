@@ -57,10 +57,6 @@ interface RowCase {
   expectHasFeedback?: boolean;
 }
 
-function flakeCheck(name: string, flake: string) {
-  return { name, flake };
-}
-
 const ACTION_A = hash("action-a");
 const ACTION_B = hash("action-b");
 const ERROR_E = hash("error-e");
@@ -183,7 +179,7 @@ function cases(): RowCase[] {
       stateRound: 3,
       maxFollowupRounds: 3,
       ciWake: true,
-      ciUnhandled: [{ name: "lint", flake: undefined }],
+      ciUnhandled: [{ name: "lint" }],
       ciHash: hash("ci-lint"),
     },
     expectWhy: "run",
@@ -226,68 +222,43 @@ function cases(): RowCase[] {
     expectHasFeedback: false,
   });
   out.push({
-    name: "flake single check",
+    name: "red CI single check runs the worker",
     snapshot: {
       ...base(),
       hasFeedback: false,
       ciPending: false,
       ciWake: true,
       mergeable: true,
-      ciUnhandled: [flakeCheck("build", "GitHub 140.82 timeout or unreachable")],
+      ciUnhandled: [{ name: "build" }],
+      ciHash: hash("ci-build"),
     },
-    expectWhy: "flake",
-    expectReason: "CI infra flake: GitHub 140.82 timeout or unreachable",
+    expectWhy: "run",
+    expectHasFeedback: false,
   });
   out.push({
-    name: "flake multiple checks shared reason",
+    name: "red CI multiple checks run the worker",
     snapshot: {
       ...base(),
       hasFeedback: false,
       ciPending: false,
       ciWake: true,
       mergeable: true,
-      ciUnhandled: [flakeCheck("build", "tofu S3 state lock"), flakeCheck("test", "tofu S3 state lock")],
+      ciUnhandled: [{ name: "build" }, { name: "test" }],
+      ciHash: hash("ci-both"),
     },
-    expectWhy: "flake",
-    expectReason: "CI infra flake: tofu S3 state lock",
+    expectWhy: "run",
+    expectHasFeedback: false,
   });
   out.push({
-    name: "flake multiple distinct reasons",
-    snapshot: {
-      ...base(),
-      hasFeedback: false,
-      ciPending: false,
-      ciWake: true,
-      mergeable: true,
-      ciUnhandled: [flakeCheck("build", "reason-a"), flakeCheck("test", "reason-b")],
-    },
-    expectWhy: "flake",
-    expectReason: "CI infra flake: reason-a; reason-b",
-  });
-  out.push({
-    name: "flake with mergeable false continues",
+    name: "red CI with mergeable false runs the worker",
     snapshot: {
       ...base(),
       hasFeedback: false,
       ciPending: false,
       ciWake: true,
       mergeable: false,
-      ciUnhandled: [flakeCheck("build", "reason-a")],
-      leftToAuthor: left({ leftToAuthor: false, leftReason: "", conflictedLeftToAuthor: false }),
-    },
-    expectWhy: "run",
-    expectHasFeedback: false,
-  });
-  out.push({
-    name: "flake mixed flake and real failure continues",
-    snapshot: {
-      ...base(),
-      hasFeedback: false,
-      ciPending: false,
-      ciWake: true,
-      mergeable: true,
-      ciUnhandled: [flakeCheck("build", "reason-a"), { name: "test" }],
-      ciHash: hash("ci-mixed"),
+      ciUnhandled: [{ name: "build" }],
+      ciHash: hash("ci-build"),
       leftToAuthor: left({ leftToAuthor: false, leftReason: "", conflictedLeftToAuthor: false }),
     },
     expectWhy: "run",
@@ -570,8 +541,8 @@ function cases(): RowCase[] {
 
 describe("pr_decision table", () => {
   const rows = cases();
-  test(`has at least 40 rows (has ${rows.length})`, () => {
-    expect(rows.length).toBeGreaterThanOrEqual(40);
+  test(`has at least 35 rows (has ${rows.length})`, () => {
+    expect(rows.length).toBeGreaterThanOrEqual(35);
   });
   for (const row of rows) {
     test(row.name, () => {
@@ -592,8 +563,6 @@ describe("pr_decision table", () => {
       const kinds = decision.effects.map((effect) => effect.kind);
       if (row.expectWhy === "same-finding") {
         expect(kinds).toEqual(["log", "sticky", "resolveHeld", "forgetClaim"]);
-      } else if (row.expectWhy === "flake") {
-        expect(kinds).toEqual(["sticky", "recordCiHandled", "resolveHeld", "forgetClaim"]);
       } else if (
         row.expectWhy === "conflict-cap" ||
         row.expectWhy === "round-cap" ||
@@ -621,7 +590,6 @@ describe("pr_decision table", () => {
       "round-cap": {},
       "ci-pending": {},
       "no-unhandled-feedback": {},
-      flake: { checks: [{ name: "build", flake: "reason-a" }] },
       "shared-failure": {
         firstPr: 7,
         check: "build",

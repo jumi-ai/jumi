@@ -38,7 +38,7 @@ export function isCleanBaseMergeOnlyResult(
 export async function maybeRunCiRefreshBeforeWorker(deps: {
   opts: Record<string, unknown>;
   pr: Pull;
-  ci: { unhandled: Array<{ name: string; flake?: string }> };
+  ci: { unhandled: Array<{ name: string }> };
   ciWake: boolean;
   snapshotMergeable: boolean | null | undefined;
   leftToAuthor: boolean;
@@ -63,7 +63,7 @@ export async function maybeRunCiRefreshBeforeWorker(deps: {
   if (!deps.preRunIsRun || deps.preRunHasFeedback || !deps.ciWake) return undefined;
   if (deps.isMergeOnlyJob || deps.isStrictRefreshJob) return undefined;
   const refreshBaseSha = (deps.pr.base.sha ?? "").trim();
-  const refreshChecks = deps.ci.unhandled.filter((check) => !check.flake);
+  const refreshChecks = deps.ci.unhandled;
   if (!refreshBaseSha || refreshChecks.length === 0) return undefined;
   if (deps.leftToAuthor || deps.snapshotMergeable === false) return undefined;
   try {

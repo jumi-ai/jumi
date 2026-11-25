@@ -12,16 +12,6 @@ describe("skip why round trip", () => {
     { why: "round-cap", params: {} as never },
     { why: "ci-pending", params: {} as never },
     { why: "no-unhandled-feedback", params: {} as never },
-    { why: "flake", params: { checks: [{ name: "build", flake: "reason-a" }] } as never },
-    {
-      why: "flake",
-      params: {
-        checks: [
-          { name: "a", flake: "x" },
-          { name: "b", flake: "y" },
-        ],
-      } as never,
-    },
     { why: "left-to-author", params: { leftReason: "conflicted, left to author (label `ignore-conflicts`)" } as never },
     { why: "left-to-author", params: { leftReason: "conflicted, left to author (author `alice`)" } as never },
     { why: "quota", params: { quotaReason: "stuck: usage limit exceeded" } as never },
@@ -95,7 +85,7 @@ describe("skip why matrix", () => {
       kickKind: "follow-up",
       sit: undefined,
     },
-    { input: "CI infra flake: reason-a", why: "flake", latches: false, kickKind: "follow-up", sit: undefined },
+    { input: "CI infra flake: reason-a", why: undefined, latches: false, kickKind: "follow-up", sit: undefined },
     {
       input: "conflicted, left to author (label `ignore-conflicts`)",
       why: "left-to-author",

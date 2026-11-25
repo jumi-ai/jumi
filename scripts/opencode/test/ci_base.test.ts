@@ -104,6 +104,18 @@ describe("attributableToPr", () => {
     const base = { sha: "basesha", results: [{ name: "checks / build (pull_request)", conclusion: "success" }] };
     expect(attributableToPr([{ name: "build" }], base)).toEqual(["build"]);
   });
+
+  test("push vs pull_request event suffix still attributes to the PR", () => {
+    const base = { sha: "basesha", results: [{ name: "CI / checks (push)", conclusion: "success" }] };
+    expect(attributableToPr([{ name: "CI / checks (pull_request)" }], base)).toEqual(["CI / checks (pull_request)"]);
+    expect(isBaseGreen(base.results, "CI / checks (pull_request)")).toBe(true);
+  });
+
+  test("matrix legs in parens are not an event suffix", () => {
+    const base = { sha: "basesha", results: [{ name: "CI / build (arm)", conclusion: "success" }] };
+    expect(isBaseGreen(base.results, "CI / build (x64)")).toBe(false);
+    expect(attributableToPr([{ name: "CI / build (x64)" }], base)).toEqual([]);
+  });
 });
 
 describe("buildCiMarkdown base evidence", () => {
@@ -188,12 +200,17 @@ function redHeadApi(baseState: CheckState) {
       (filter as { headSha?: string } | undefined)?.headSha === "headsha"
         ? [{ id: 9, name: "checks", head_sha: "headsha", status: "completed", conclusion: "failure" }]
         : [],
-    getActionJobLogs: async () =>
-      [
-        ...Array.from({ length: 2500 }, (_, i) => `setup padding line ${i} xxxxxxxxxxxxxxxxxxxxxxxxxx`),
-        "##[error]boom",
-        ...Array.from({ length: 2500 }, (_, i) => `teardown padding line ${i} yyyyyyyyyyyyyyyyyyyyyyyyyy`),
-      ].join("\n"),
+    getActionJobLogs: (() => {
+      let calls = 0;
+      return async () => {
+        calls++;
+        return [
+          ...Array.from({ length: 2500 }, (_, i) => `setup padding line ${i} xxxxxxxxxxxxxxxxxxxxxxxxxx`),
+          `##[error]boom run ${calls}`,
+          ...Array.from({ length: 2500 }, (_, i) => `teardown padding line ${i} yyyyyyyyyyyyyyyyyyyyyyyyyy`),
+        ].join("\n");
+      };
+    })(),
   });
   return Object.assign(fake, { comments });
 }
@@ -213,43 +230,56 @@ function stripGitConfigArgs(args: string[]): string[] {
 }
 
 describe("red-CI follow-up with a green base", () => {
-  test("blocks no-changes, records nothing handled, and stays actionable", async () => {
+  test("first no_changes reruns even when green on base; second blocks as stuck", async () => {
     await withDirs(async (home, workdir) => {
-      const api = redHeadApi("success");
-      let ciMarkdown = "";
-      const result = await implementFollowUp({
-        api,
-        job: followUpJob(),
-        giteaUrl: "https://gitea.kirmanak.stream",
-        giteaToken: "bot-token",
-        botUsername: "jumi",
-        model: "openai/gpt-5.5",
-        home,
-        workdir,
-        heartbeatIntervalMs: 0,
-        gitRunner: async (args) => {
-          const gitArgs = stripGitConfigArgs(args);
-          if (gitArgs[0] === "rev-parse") return "abc123";
-          if (gitArgs[0] === "status") return "";
-          if (gitArgs[0] === "rev-list") return "0";
-          return "";
+      const baseApi = redHeadApi("success");
+      const rerunCalls: number[] = [];
+      const api = Object.assign(baseApi, {
+        rerunActionJob: async (_o: string, _r: string, jobId: number) => {
+          rerunCalls.push(jobId);
         },
-        openCodeRunner: async () => {
-          ciMarkdown = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
-          return { status: "ok" };
-        },
-        logger: () => undefined,
       });
-      expect(result.status).toBe("skipped");
-      expect(String((result as { reason?: unknown }).reason)).toMatch(/^stuck: /);
-      expect(String((result as { reason?: unknown }).reason)).toContain("attributable to");
+      let ciMarkdown = "";
+      const cleanGitRunner = async (args: string[]) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
+      const runOnce = () =>
+        implementFollowUp({
+          api: api as never,
+          job: followUpJob(),
+          giteaUrl: "https://gitea.kirmanak.stream",
+          giteaToken: "bot-token",
+          botUsername: "jumi",
+          model: "openai/gpt-5.5",
+          home,
+          workdir,
+          heartbeatIntervalMs: 0,
+          gitRunner: cleanGitRunner as never,
+          openCodeRunner: async () => {
+            ciMarkdown = await readFile(join(workdir, "kirmanak/demo/12/JUMI_CI.md"), "utf8");
+            return { status: "ok" };
+          },
+          logger: () => undefined,
+        });
+      const first = await runOnce();
+      expect(first.status).toBe("no-changes");
+      expect(rerunCalls).toHaveLength(1);
+      expect(api.comments.some((body) => body.includes("Reran `checks`"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("Automatic rerun 1/1"))).toBe(true);
       // The worker saw "green on main" directly, including the truncation flag.
       expect(ciMarkdown).toContain("Base (basesha): success");
       expect(ciMarkdown).toContain("no-change disposition is not acceptable");
       expect(ciMarkdown).toContain("reproduce the full failing command locally");
-      // Not recorded as handled, so a later wake re-runs the CI follow-up.
-      expect((await readCiState(ciStatePath(home, "kirmanak", "demo", 12))).handled).toEqual([]);
-      expect(api.comments.some((body) => body.includes("no follow-up changes"))).toBe(false);
+      const second = await runOnce();
+      expect(second.status).toBe("skipped");
+      expect(String((second as { reason?: unknown }).reason)).toMatch(/^stuck: /);
+      expect(String((second as { reason?: unknown }).reason)).toContain("attributable to");
+      expect(rerunCalls).toHaveLength(1);
+      expect(api.comments.some((body) => body.includes("already happened"))).toBe(true);
     });
   });
 

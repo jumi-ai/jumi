@@ -13,34 +13,31 @@ import {
   CI_LOOKUP_MAX_ATTEMPTS,
   capFailedJobLog,
   checkDurationMs,
-  classifyInfraFlake,
   decideCiLookupRetry,
   dropUnpackNoise,
   encodeCiAbsentWait,
   encodeCiLookupMarker,
   encodeCiPendingWait,
   failureLines,
-  flakeExhaustedComment,
-  flakeRerunCommentFor,
-  flakeRerunFailedComment,
-  flakeRerunsCommentFor,
-  flakeSkipReason,
   formatCheckDuration,
   hashText,
-  infraFlakeReason,
   inspectCi,
   isCheckHandled,
-  isFlakeRerunSpent,
+  isRerunSpent,
   jobMatchesCheck,
   latestStatuses,
   parseCiState,
   needsCiFollowUp as realNeedsCiFollowUp,
   recordCiHandled,
-  recordFlakeReruns,
+  recordReruns,
+  rerunCommentFor,
+  rerunExhaustedComment,
+  rerunFailedComment,
+  rerunsCommentFor,
   resolveCiGate,
   resolveRequiredCiContexts,
   reviewSkipReasonForCi,
-  splitFlakeBudget,
+  splitRerunBudget,
   summarizeCiChecks,
 } from "../src/ci.ts";
 import { traced } from "./golden/trace.ts";
@@ -93,178 +90,7 @@ describe("capFailedJobLog", () => {
   });
 });
 
-describe("infraFlakeReason", () => {
-  test("detects GitHub checkout cache unreachable", () => {
-    expect(infraFlakeReason("Failed to connect to 140.82.112.4 port 443: Connection timed out")).toContain("140.82");
-  });
-
-  test("detects Helm chart schema rate limiting", () => {
-    expect(infraFlakeReason("helm: values.schema.json remote schema 429 Too Many Requests")).toContain("Helm");
-  });
-
-  test("helm install waiting condition is not a flake", () => {
-    expect(
-      infraFlakeReason("helm install my-release --timeout 5m\nError: timed out waiting for the condition")
-    ).toBeUndefined();
-  });
-
-  test("detects GARM package unpack device mismatch", () => {
-    expect(infraFlakeReason("dpkg: error processing archive: Invalid cross-device link")).toContain("GARM");
-  });
-
-  test("detects tofu remote state contention", () => {
-    expect(infraFlakeReason("tofu Error acquiring the state lock on s3")).toContain("S3");
-  });
-
-  test("detects Docker Hub anonymous pull throttling", () => {
-    expect(
-      infraFlakeReason(
-        "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit"
-      )
-    ).toContain("Docker Hub");
-  });
-
-  test("unknown red is not a flake", () => {
-    expect(infraFlakeReason("##[error]Failed to find package 'platforms;android-37'")).toBeUndefined();
-  });
-
-  test("bun failing test with rate-limit only in fixture text is not a flake", () => {
-    const log = [
-      "bun test v1.2.3",
-      "fixture: values.schema.json remote schema 429 Too Many Requests",
-      "(pass) detects Helm remote-schema 429",
-      "error: expect(received).toBe(expected)",
-      "  Expected: 2",
-      "  Received: 1",
-      "(fail) adds numbers [0.03ms]",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-    expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
-  });
-
-  test("timestamped bun failing test with rate-limit only in fixture text is not a flake", () => {
-    const log = [
-      "2026-09-12T10:59:26.0000000Z bun test v1.2.3",
-      "2026-09-12T10:59:26.0000000Z fixture: values.schema.json remote schema 429 Too Many Requests",
-      "2026-09-12T10:59:26.0000000Z (pass) detects Helm remote-schema 429",
-      "2026-09-12T10:59:26.0000000Z error: expect(received).toBe(expected)",
-      "2026-09-12T10:59:26.0000000Z   Expected: 2",
-      "2026-09-12T10:59:26.0000000Z   Received: 1",
-      "2026-09-12T10:59:26.0000000Z (fail) adds numbers [0.03ms]",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-    expect(classifyInfraFlake(capFailedJobLog(log))).toBeUndefined();
-  });
-
-  test("pass line with schema tokens is ignored", () => {
-    expect(classifyInfraFlake("(pass) detects Helm remote-schema 429")).toBeUndefined();
-    expect(
-      classifyInfraFlake(
-        [
-          "bun test v1.2.3",
-          "fixture: values.schema.json remote schema 429 Too Many Requests",
-          "(pass) detects Helm remote-schema 429 [0.03ms]",
-        ].join("\n")
-      )
-    ).toBeUndefined();
-  });
-
-  test("pass title mentioning fail does not hide a later job step flake", () => {
-    const log = [
-      "(pass) bun fail log with rate-limit only in fixture text is not a flake",
-      "helm: values.schema.json remote schema 429 Too Many Requests",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toContain("Helm");
-  });
-
-  test("failing bun test takes precedence over a later job step flake", () => {
-    const log = [
-      "(fail) adds numbers [0.03ms]",
-      "helm: values.schema.json remote schema 429 Too Many Requests",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("split schema and timeout across fail lines is not a flake", () => {
-    const log = ["(fail) loads values.schema.json defaults", "(fail) retry gives up after timeout"].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("real test failure next to GitHub 140.82 timeout is not a flake", () => {
-    const log = [
-      "(fail) adds numbers",
-      "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("failing test title carrying an infra signature is not a flake", () => {
-    const log = [
-      "error: expect(received).toBe(expected)",
-      "(fail) infraFlakeReason > detects Helm remote-schema 429",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("true positives still match from unprefixed signatures plus actions error", () => {
-    const processCompleted = "##[error]Process completed with exit code 1.";
-    expect(
-      classifyInfraFlake(
-        ["Failed to connect to 140.82.112.4 port 443: Connection timed out", processCompleted].join("\n")
-      )
-    ).toContain("140.82");
-    expect(
-      classifyInfraFlake(["helm: values.schema.json remote schema 429 Too Many Requests", processCompleted].join("\n"))
-    ).toContain("Helm");
-    expect(
-      classifyInfraFlake(["dpkg: error processing archive: Invalid cross-device link", processCompleted].join("\n"))
-    ).toContain("GARM");
-    expect(classifyInfraFlake(["tofu Error acquiring the state lock on s3", processCompleted].join("\n"))).toContain(
-      "S3"
-    );
-    expect(
-      classifyInfraFlake(
-        [
-          "reading manifest bookworm-slim in docker.io/library/debian: toomanyrequests: You have reached your unauthenticated pull rate limit. https://www.docker.com/increase-rate-limit",
-          processCompleted,
-        ].join("\n")
-      )
-    ).toContain("Docker Hub");
-    expect(
-      classifyInfraFlake(
-        [
-          "Error response from daemon: toomanyrequests: You have reached your unauthenticated pull rate limit",
-          processCompleted,
-        ].join("\n")
-      )
-    ).toContain("Docker Hub");
-    expect(
-      classifyInfraFlake(
-        [
-          "ERROR: failed to solve: toomanyrequests: You have reached your unauthenticated pull rate limit",
-          processCompleted,
-        ].join("\n")
-      )
-    ).toContain("Docker Hub");
-  });
-
-  test("skip reason includes the matcher class", () => {
-    expect(
-      flakeSkipReason([
-        {
-          name: "build",
-          state: "failure",
-          description: "",
-          capped: "",
-          logHash: "x",
-          flake: "Helm remote-schema timeout/429",
-        },
-      ])
-    ).toBe("CI infra flake: Helm remote-schema timeout/429");
-  });
-
+describe("post-no_changes rerun budget", () => {
   test("rerun budget is one per head and check, without the log hash", async () => {
     const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
     const home = await mkdtemp(join(tmpdir(), "jumi-ci-budget-"));
@@ -273,8 +99,8 @@ describe("infraFlakeReason", () => {
       const key = { owner: "o", repo: "r", issueNumber: 1 };
       const { readCiLatch } = await import("../src/ci.ts");
       let state = await readCiLatch(store, key);
-      expect(isFlakeRerunSpent(state, "HEAD", "build")).toBe(false);
-      await recordFlakeReruns({
+      expect(isRerunSpent(state, "HEAD", "build")).toBe(false);
+      await recordReruns({
         home,
         owner: "o",
         repo: "r",
@@ -285,11 +111,11 @@ describe("infraFlakeReason", () => {
         skipLatches: store,
       });
       state = await readCiLatch(store, key);
-      expect(isFlakeRerunSpent(state, "HEAD", "build")).toBe(true);
-      expect(isFlakeRerunSpent(state, "head", "build")).toBe(true);
-      expect(isFlakeRerunSpent(state, "HEAD", "lint")).toBe(false);
-      expect(isFlakeRerunSpent(state, "OTHER", "build")).toBe(false);
-      const split = splitFlakeBudget(state, "HEAD", [
+      expect(isRerunSpent(state, "HEAD", "build")).toBe(true);
+      expect(isRerunSpent(state, "head", "build")).toBe(true);
+      expect(isRerunSpent(state, "HEAD", "lint")).toBe(false);
+      expect(isRerunSpent(state, "OTHER", "build")).toBe(false);
+      const split = splitRerunBudget(state, "HEAD", [
         { name: "build", state: "failure", description: "", capped: "", logHash: "a" },
         { name: "lint", state: "failure", description: "", capped: "", logHash: "b" },
       ]);
@@ -301,48 +127,39 @@ describe("infraFlakeReason", () => {
     }
   });
 
-  test("rerun comments name the check, reason, link, and budget", () => {
+  test("rerun comments name the check, link, and budget", () => {
+    expect(rerunCommentFor({ name: "helm-lint", targetUrl: "https://ci/job/9" })).toBe(
+      "Reran `helm-lint` — [job](https://ci/job/9). Automatic rerun 1/1."
+    );
+    expect(rerunsCommentFor([{ name: "build" }])).toContain("Automatic rerun 1/1");
     expect(
-      flakeRerunCommentFor({ name: "helm-lint", flake: "GitHub 140.82 timeout", targetUrl: "https://ci/job/9" })
-    ).toBe("Reran `helm-lint` (GitHub 140.82 timeout) — [rerun](https://ci/job/9). Automatic rerun 1/1.");
-    expect(flakeRerunsCommentFor([{ name: "build" }])).toContain("Automatic rerun 1/1");
+      rerunExhaustedComment([{ name: "build", state: "failure", description: "", capped: "", logHash: "x" }])
+    ).toContain("already happened");
     expect(
-      flakeExhaustedComment([
-        { name: "build", state: "failure", description: "", capped: "", logHash: "x", flake: "r" },
-      ])
-    ).toContain("already failed");
-    expect(
-      flakeRerunFailedComment(
-        [{ name: "build", state: "failure", description: "", capped: "", logHash: "x", flake: "r" }],
+      rerunFailedComment(
+        [{ name: "build", state: "failure", description: "", capped: "", logHash: "x" }],
         "403 missing"
       )
-    ).toContain("Automatic rerun failed: 403 missing");
+    ).toContain("Automatic rerun failed");
   });
 
-  test("unittest FAIL header blocks a flake classification", () => {
-    const log = [
-      "FAIL: test_add (calc.CalcTest)",
-      "helm: values.schema.json remote schema 429 Too Many Requests",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("pytest FAILED line blocks a flake classification", () => {
-    const log = [
-      "FAILED chart/tests/test_plan.py::test_talos - AssertionError: dry-run failed",
-      "helm: values.schema.json remote schema 429 Too Many Requests",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toBeUndefined();
-  });
-
-  test("error-command infra text classifies as a flake", () => {
-    const log = [
-      "::error::helm values.schema.json remote schema 429 Too Many Requests",
-      "##[error]Process completed with exit code 1.",
-    ].join("\n");
-    expect(classifyInfraFlake(log)).toContain("Helm");
+  test("a checkout timeout log is red and unhandled without a flake label", async () => {
+    await withWorkspace(async (home) => {
+      const inspection = await inspectCi({
+        api: ciApi({
+          listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+          listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", conclusion: "failure" }],
+          getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        }),
+        owner: "kirmanak",
+        repo: "demo",
+        sha: "headsha",
+        home,
+        issueNumber: 12,
+      });
+      expect(inspection.unhandled).toHaveLength(1);
+      expect(inspection.unhandled[0]).not.toHaveProperty("flake");
+    });
   });
 });
 
@@ -719,7 +536,7 @@ describe("inspectCi", () => {
     });
   });
 
-  test("classifies Helm schema rate limiting in the capped window as a flake", async () => {
+  test("keeps a Helm schema rate-limit log as red without a flake label", async () => {
     await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
@@ -734,11 +551,12 @@ describe("inspectCi", () => {
         home,
         issueNumber: 12,
       });
-      expect(inspection.unhandled[0]?.flake).toContain("Helm");
+      expect(inspection.unhandled).toHaveLength(1);
+      expect(inspection.unhandled[0]).not.toHaveProperty("flake");
     });
   });
 
-  test("does not treat bun fixture rate-limit text as an infra flake", async () => {
+  test("keeps a bun fixture log as red without a flake label", async () => {
     await withWorkspace(async (home) => {
       const inspection = await inspectCi({
         api: ciApi({
@@ -760,7 +578,7 @@ describe("inspectCi", () => {
         issueNumber: 12,
       });
       expect(inspection.unhandled).toHaveLength(1);
-      expect(inspection.unhandled[0]?.flake).toBeUndefined();
+      expect(inspection.unhandled[0]).not.toHaveProperty("flake");
     });
   });
 
@@ -781,7 +599,7 @@ describe("inspectCi", () => {
       expect(inspection.pending).toBe(false);
       expect(inspection.unhandled).toHaveLength(1);
       expect(inspection.unhandled[0]?.capped).toContain("platforms;android-37");
-      expect(inspection.unhandled[0]?.flake).toBeUndefined();
+      expect(inspection.unhandled[0]).not.toHaveProperty("flake");
       expect(
         await needsCiFollowUp({
           api: ciApi({
