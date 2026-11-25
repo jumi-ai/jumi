@@ -176,7 +176,7 @@
   "worker_intent.ts": 97,
   "followup_wake_causes.ts": 666,
   "worker_latch_fence.ts": 205,
-  "push_confirm.ts": 953,
+  "push_confirm.ts": 1012,
   "push_confirm_drain.ts": 277,
   "codex_home.ts": 165
 }

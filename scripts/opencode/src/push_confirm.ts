@@ -335,6 +335,7 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
         });
         return { status: "created", generation };
       }
+      const superseded = row.generation;
       if (row.state === "exhausted") {
         row.generation = generation;
         row.expectedSha = expectedSha;
@@ -346,6 +347,7 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
         row.leasedUntilMs = null;
         row.lastError = null;
         row.updatedAtMs = nowMs;
+        this.deleteCausesForGeneration(owner, repo, prNumber, superseded);
         return { status: "revived", generation };
       }
       row.generation = generation;
@@ -354,6 +356,7 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
       row.retryMarker = null;
       row.nextAttemptAtMs = nowMs + PUSH_CONFIRM_DELAY_MS;
       row.updatedAtMs = nowMs;
+      this.deleteCausesForGeneration(owner, repo, prNumber, superseded);
       return { status: "bumped", generation };
     });
   }
@@ -678,6 +681,10 @@ export class PgPushConfirmStore implements PushConfirmStore {
            WHERE owner = $1 AND repo = $2 AND pr_number = $3`,
           [owner, repo, prNumber, generation, expectedSha, branch, dueIso, nowIso]
         );
+        await tx.unsafe(
+          `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+          [owner, repo, prNumber, num(row.generation)]
+        );
         return { status: "revived", generation };
       }
       await tx.unsafe(
@@ -686,6 +693,10 @@ export class PgPushConfirmStore implements PushConfirmStore {
              next_attempt_at = $7::timestamptz, updated_at = $8::timestamptz
          WHERE owner = $1 AND repo = $2 AND pr_number = $3`,
         [owner, repo, prNumber, generation, expectedSha, branch, dueIso, nowIso]
+      );
+      await tx.unsafe(
+        `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+        [owner, repo, prNumber, num(row.generation)]
       );
       return { status: "bumped", generation };
     });

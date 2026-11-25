@@ -11,23 +11,32 @@ function freshStore(): PushConfirmStore {
 }
 
 describe("MemoryPushConfirmStore contract", () => {
-  test("duplicate cause returns the original generation and never revives", async () => {
+  test("superseded causes are pruned on bump so the cause table stays bounded", async () => {
     const store = freshStore();
-    const a = await store.request("o", "r", 7, "sha-a", "branch", "sha-a", 1_000);
+    const a = await store.request("o", "r", 7, "sha-a", "branch", "cause-a", 1_000);
     expect(a.status).toBe("created");
-    const b = await store.request("o", "r", 7, "sha-b", "branch", "sha-b", 2_000);
+    const b = await store.request("o", "r", 7, "sha-b", "branch", "cause-b", 2_000);
     expect(b.status).toBe("bumped");
     expect(b.generation).toBeGreaterThan(a.generation);
 
-    const replayA = await store.request("o", "r", 7, "sha-a", "branch", "sha-a", 3_000);
-    expect(replayA.status).toBe("duplicate");
-    expect(replayA.generation).toBe(a.generation);
+    // The current cause still dedupes.
+    const replayB = await store.request("o", "r", 7, "sha-b", "branch", "cause-b", 3_000);
+    expect(replayB.status).toBe("duplicate");
+    expect(replayB.generation).toBe(b.generation);
 
-    expect(await store.settle("o", "r", 7, replayA.generation)).toBe("stale");
-    const claimed = await store.claimDue("tok-live", 60_000, 10, 3_000 + 180_000 + 1);
+    // The superseded cause was pruned with its generation, so a replay
+    // admits a new generation instead of returning a duplicate. Production
+    // cause ids are fresh UUIDs per push and never replay, so this path
+    // only matters for boundedness.
+    const replayA = await store.request("o", "r", 7, "sha-a", "branch", "cause-a", 4_000);
+    expect(replayA.status).toBe("bumped");
+    expect(replayA.generation).toBeGreaterThan(b.generation);
+
+    expect(await store.settle("o", "r", 7, a.generation)).toBe("stale");
+    const claimed = await store.claimDue("tok-live", 60_000, 10, 4_000 + 180_000 + 1);
     expect(claimed.length).toBe(1);
-    expect(claimed[0]?.generation).toBe(b.generation);
-    expect(claimed[0]?.expectedSha).toBe("sha-b");
+    expect(claimed[0]?.generation).toBe(replayA.generation);
+    expect(claimed[0]?.expectedSha).toBe("sha-a");
   });
 
   test("confirm deletes on matching head and reports mismatch otherwise", async () => {
