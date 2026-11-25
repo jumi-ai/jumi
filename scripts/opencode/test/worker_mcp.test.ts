@@ -9,6 +9,8 @@ import {
   MAX_WORKER_BLOCKED_REASON_CHARS,
   MAX_WORKER_NO_CHANGES_REASON_CHARS,
   MAX_WORKER_PR_BODY_CHARS,
+  MAX_WORKER_PR_REMAINING_ITEM_CHARS,
+  MAX_WORKER_PR_REMAINING_ITEMS,
   MAX_WORKER_SKIP_REASON_CHARS,
   openCodeWorkerMcpEntry,
   parseBlockedOnRef,
@@ -20,6 +22,7 @@ import {
   validateHandoffNotes,
   validateNoChangesReason,
   validatePrBody,
+  validatePrRemaining,
   validateSkipReason,
   WORKER_HANDOFF_MAX_BYTES,
   WORKER_MCP_SERVER_NAME,
@@ -179,6 +182,43 @@ describe("worker MCP server", () => {
       const second = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", { markdown: "Second body." });
       expect(second.ok).toBe(true);
       expect(store.getPrBody()).toBe("Second body.");
+    } finally {
+      server.close();
+    }
+  });
+
+  test("set_pr_body remaining list round-trips, validates, and aliases", async () => {
+    expect(validatePrRemaining(undefined)).toEqual({ ok: true, remaining: undefined });
+    expect(validatePrRemaining(null)).toEqual({ ok: true, remaining: undefined });
+    expect(validatePrRemaining([])).toEqual({ ok: true, remaining: [] });
+    expect(validatePrRemaining(["  ", "backfill x  "])).toEqual({ ok: true, remaining: ["backfill x"] });
+    expect(validatePrRemaining("nope").ok).toBe(false);
+    expect(validatePrRemaining([42]).ok).toBe(false);
+    expect(validatePrRemaining(new Array(MAX_WORKER_PR_REMAINING_ITEMS + 1).fill("x")).ok).toBe(false);
+    expect(validatePrRemaining(["x".repeat(MAX_WORKER_PR_REMAINING_ITEM_CHARS + 1)]).ok).toBe(false);
+    const store = new WorkerResultStore();
+    expect(store.setPrBody({ markdown: "Done.\n\nFixes #12", remaining: [] }).ok).toBe(true);
+    expect(store.getPrRemaining()).toEqual([]);
+    const aliased = new WorkerResultStore();
+    expect(aliased.setPrBody({ markdown: "Part.", remaining_items: ["one more"] }).ok).toBe(true);
+    expect(aliased.getPrRemaining()).toEqual(["one more"]);
+    const camel = new WorkerResultStore();
+    expect(camel.setPrBody({ markdown: "Part.", remainingItems: ["other"] }).ok).toBe(true);
+    expect(camel.getPrRemaining()).toEqual(["other"]);
+    const serverStore = new WorkerResultStore();
+    const server = await startWorkerMcpServer({ store: serverStore, token: "tok" });
+    try {
+      const out = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", {
+        markdown: "Part.\n\nRefs #12",
+        remaining: ["one more case"],
+      });
+      expect(out.ok).toBe(true);
+      expect(serverStore.getPrRemaining()).toEqual(["one more case"]);
+      const cleared = await probeWorkerMcpServer(server.url, "tok", "set_pr_body", {
+        markdown: "Done.\n\nFixes #12",
+      });
+      expect(cleared.ok).toBe(true);
+      expect(serverStore.getPrRemaining()).toBeUndefined();
     } finally {
       server.close();
     }
