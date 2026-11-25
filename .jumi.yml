@@ -1,1 +1,4 @@
 automerge: true
+conflict_regenerate:
+  - file: file-size-baseline.json
+    run: bun run ./regenerate_file_size_baseline.ts
