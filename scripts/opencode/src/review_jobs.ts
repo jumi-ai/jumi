@@ -11,6 +11,7 @@ import {
   MemoryFollowUpWakeCauseStore,
   PgFollowUpWakeCauseStore,
   payloadGenerationOf,
+  resolveFollowUpWakeCauseId,
 } from "./followup_wake_causes.ts";
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
@@ -1561,6 +1562,134 @@ export class MemoryReviewJobStore implements ReviewJobStore {
       const key = workerJobKey(job);
       const kind = workerJobKind(job);
       const now = Date.now();
+      if (isFollowUpKind(kind)) {
+        const latchGen =
+          this.issueSkipLatches.get(issueSkipLatchKey(job.owner, job.repo, job.issueNumber))?.generation ?? 0;
+        const payload = issueJobPayloadAt(job, latchGen);
+        const causeId = resolveFollowUpWakeCauseId({ delivery: job.delivery, payload });
+        // (a) Ledger replay in any state: no write, no extra wake.
+        if (await this.wakeCauses.get(key, causeId)) return { key, queued: false };
+        const sameKey = this.rows.filter((row) => row.jobKey === key);
+        const inflight = sameKey.filter((row) => row.state === "queued" || row.state === "leased");
+        if (inflight.length > 0) {
+          // Legacy ordinary retry with the same genuine delivery: same
+          // effect, not a distinct cause. Keeps the repo-mutex sit only.
+          if (job.delivery && inflight.some((row) => row.delivery === job.delivery)) {
+            await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
+            return { key, queued: false };
+          }
+          // (c) Distinct cause behind the same key: record pending, keep
+          // the old row's payload untouched. A persistence failure throws
+          // so ingress answers retryable before any accepted response.
+          const outcome = await this.wakeCauses.record({
+            jobKey: key,
+            owner: job.owner,
+            repo: job.repo,
+            issueNumber: job.issueNumber,
+            prNumber: job.prNumber ?? 0,
+            headSha: job.headSha ?? "",
+            delivery: job.delivery,
+            payload,
+          });
+          if (outcome === "duplicate") return { key, queued: false };
+          await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
+          return { key, queued: false, deferred: true };
+        }
+        // (b) Legacy genuine-delivery guard for ordinary rows without a
+        // ledger cause yet.
+        if (job.delivery && sameKey.some((row) => row.delivery === job.delivery)) {
+          return { key, queued: false };
+        }
+        // (d) No in-flight row: insert the ordinary row and promote its
+        // cause identity in the same locked step, never a standalone
+        // pending cause.
+        const newRow: ReviewJobRecord = {
+          id: this.nextId++,
+          jobKey: key,
+          kind,
+          owner: job.owner,
+          repo: job.repo,
+          prNumber: job.prNumber ?? 0,
+          headSha: job.headSha ?? "",
+          issueNumber: job.issueNumber,
+          payload,
+          delivery: job.delivery,
+          state: "queued",
+          attempt: 0,
+          leasedBy: null,
+          leasedUntil: null,
+          resultMarkdown: null,
+          resultRunner: null,
+          resultReason: null,
+          error: null,
+          pendingStatusAt: null,
+          publishedAt: null,
+          prUpdatedAt: null,
+          cancelRequested: false,
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.rows.push(newRow);
+        try {
+          const recorded = await this.wakeCauses.record({
+            jobKey: key,
+            owner: job.owner,
+            repo: job.repo,
+            issueNumber: job.issueNumber,
+            prNumber: job.prNumber ?? 0,
+            headSha: job.headSha ?? "",
+            delivery: job.delivery,
+            payload,
+          });
+          if (recorded === "duplicate") {
+            const idx = this.rows.findIndex((row) => row.id === newRow.id);
+            if (idx >= 0) this.rows.splice(idx, 1);
+            return { key, queued: false };
+          }
+          const cause = await this.wakeCauses.get(key, causeId);
+          if (!cause || !(await this.wakeCauses.markPromoted(cause.id, newRow.id))) {
+            const idx = this.rows.findIndex((row) => row.id === newRow.id);
+            if (idx >= 0) this.rows.splice(idx, 1);
+            return { key, queued: false };
+          }
+        } catch (err) {
+          const idx = this.rows.findIndex((row) => row.id === newRow.id);
+          if (idx >= 0) this.rows.splice(idx, 1);
+          throw err;
+        }
+        if (job.prNumber) {
+          const superseded: Array<{ key: string; generation: number }> = [];
+          for (const row of this.rows) {
+            if (
+              rowKind(row) === kind &&
+              isSamePullRequest(row, { owner: job.owner, repo: job.repo, prNumber: job.prNumber }) &&
+              row.state === "queued" &&
+              row.jobKey !== key
+            ) {
+              superseded.push({ key: row.jobKey, generation: payloadGeneration(row.payload) });
+            }
+          }
+          superseded.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+          for (const row of this.rows) {
+            if (
+              rowKind(row) === kind &&
+              isSamePullRequest(row, { owner: job.owner, repo: job.repo, prNumber: job.prNumber }) &&
+              row.state === "queued" &&
+              row.jobKey !== key
+            ) {
+              row.state = "cancelled";
+              row.updatedAt = now;
+            }
+          }
+          for (const entry of superseded) {
+            await this.wakeCauses.parkPendingForKey(entry.key, WAKE_PARK_OBSOLETE_HEAD, {
+              generation: entry.generation + 1,
+            });
+          }
+        }
+        await this.sits.clear(job.owner, job.repo, job.issueNumber);
+        return { key, queued: true };
+      }
       const sameKey = this.rows.filter((row) => row.jobKey === key);
       if (sameKey.some((row) => row.state === "queued" || row.state === "leased")) {
         await this.sits.remember(job.owner, job.repo, job.issueNumber, "repo-mutex");
@@ -4309,6 +4438,166 @@ export class PgReviewJobStore implements ReviewJobStore {
         } else {
           await pgLockWakeKeys(tx, [key]);
         }
+        const latchRows = asRows<{ generation: unknown }>(
+          await tx.unsafe(
+            `SELECT generation FROM issue_skip_latches WHERE owner = $1 AND repo = $2 AND issue_number = $3`,
+            [job.owner, job.repo, job.issueNumber]
+          )
+        );
+        const latchGen = latchRows[0] ? num(latchRows[0].generation) : 0;
+        const payload = issueJobPayloadAt(job, latchGen);
+        const causeId = resolveFollowUpWakeCauseId({ delivery: job.delivery, payload });
+        // (a) Ledger replay in any state: no write, no extra wake.
+        const ledgerHit = asRows<{ one: unknown }>(
+          await tx.unsafe(`SELECT 1 AS one FROM follow_up_wake_causes WHERE job_key = $1 AND cause_id = $2 LIMIT 1`, [
+            key,
+            causeId,
+          ])
+        );
+        if (ledgerHit.length > 0) return { key, queued: false };
+        const inflight = asRows<{ job_key: unknown; delivery: unknown }>(
+          await tx.unsafe(
+            `SELECT job_key, delivery FROM review_jobs
+             WHERE job_key = $1 AND state IN ('queued', 'leased')
+             ORDER BY id
+             FOR UPDATE`,
+            [key]
+          )
+        );
+        if (inflight.length > 0) {
+          // Legacy ordinary retry with the same genuine delivery: same
+          // effect, not a distinct cause.
+          if (job.delivery && inflight.some((row) => str(row.delivery) === job.delivery)) {
+            await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+            return { key, queued: false };
+          }
+          // (c) Distinct cause behind the same key: record pending, keep
+          // the old row's payload untouched. A persistence failure throws
+          // so the transaction rolls back and ingress answers retryable.
+          const outcome = await this.wakeCauses.record(
+            {
+              jobKey: key,
+              owner: job.owner,
+              repo: job.repo,
+              issueNumber: job.issueNumber,
+              prNumber: job.prNumber ?? 0,
+              headSha: job.headSha ?? "",
+              delivery: job.delivery,
+              payload,
+            },
+            { tx }
+          );
+          if (outcome === "duplicate") return { key, queued: false };
+          await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+          return { key, queued: false, deferred: true };
+        }
+        // (b) Legacy genuine-delivery guard for ordinary rows without a
+        // ledger cause yet.
+        if (job.delivery) {
+          const settled = asRows<{ one: unknown }>(
+            await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE delivery = $1 AND job_key = $2 LIMIT 1`, [
+              job.delivery,
+              key,
+            ])
+          );
+          if (settled.length > 0) return { key, queued: false };
+        }
+        const inserted = asRows<{ id: unknown }>(
+          await tx.unsafe(
+            `INSERT INTO review_jobs (
+               job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, 'queued', 0)
+             ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
+             DO NOTHING
+             RETURNING id`,
+            [
+              key,
+              kind,
+              job.owner,
+              job.repo,
+              job.prNumber ?? 0,
+              job.headSha ?? "",
+              job.issueNumber,
+              JSON.stringify(payload),
+              job.delivery,
+            ]
+          )
+        );
+        if (inserted.length === 0) {
+          // Lost the insert race after the lock: a successor row now owns
+          // the key, so record pending instead of dropping the cause.
+          const outcome = await this.wakeCauses.record(
+            {
+              jobKey: key,
+              owner: job.owner,
+              repo: job.repo,
+              issueNumber: job.issueNumber,
+              prNumber: job.prNumber ?? 0,
+              headSha: job.headSha ?? "",
+              delivery: job.delivery,
+              payload,
+            },
+            { tx }
+          );
+          if (outcome === "duplicate") return { key, queued: false };
+          await this.rememberSitTx(tx, job.owner, job.repo, job.issueNumber, "repo-mutex");
+          return { key, queued: false, deferred: true };
+        }
+        // (d) Record the initial cause as promoted to the new row in the
+        // same transaction: never a standalone pending cause.
+        const newId = num(inserted[0]?.id);
+        const recorded = await this.wakeCauses.record(
+          {
+            jobKey: key,
+            owner: job.owner,
+            repo: job.repo,
+            issueNumber: job.issueNumber,
+            prNumber: job.prNumber ?? 0,
+            headSha: job.headSha ?? "",
+            delivery: job.delivery,
+            payload,
+          },
+          { tx }
+        );
+        if (recorded === "duplicate") {
+          await tx.unsafe(`DELETE FROM review_jobs WHERE id = $1`, [newId]);
+          return { key, queued: false };
+        }
+        const causeRows = asRows<{ id: unknown }>(
+          await tx.unsafe(`SELECT id FROM follow_up_wake_causes WHERE job_key = $1 AND cause_id = $2`, [key, causeId])
+        );
+        const causeRowId = causeRows[0] ? num(causeRows[0].id) : 0;
+        const promoted = causeRowId > 0 ? await this.wakeCauses.markPromoted(causeRowId, newId, tx) : false;
+        if (!promoted) {
+          await tx.unsafe(`DELETE FROM review_jobs WHERE id = $1`, [newId]);
+          return { key, queued: false };
+        }
+        if (job.prNumber) {
+          const superseded = asRows<{ job_key: unknown; payload: unknown }>(
+            await tx.unsafe(
+              `UPDATE review_jobs
+               SET state = 'cancelled', updated_at = NOW()
+               WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state = 'queued' AND job_key <> $5
+               RETURNING job_key, payload`,
+              [job.owner, job.repo, job.prNumber, kind, key]
+            )
+          );
+          if (superseded.length > 0) {
+            const sorted = [...superseded].sort((a, b) => {
+              const ka = str(a.job_key);
+              const kb = str(b.job_key);
+              return ka < kb ? -1 : ka > kb ? 1 : 0;
+            });
+            for (const old of sorted) {
+              await this.wakeCauses.parkPendingForKey(str(old.job_key), WAKE_PARK_OBSOLETE_HEAD, {
+                generation: pgPayloadGeneration(old.payload) + 1,
+                tx,
+              });
+            }
+          }
+        }
+        await this.clearSitTx(tx, job.owner, job.repo, job.issueNumber);
+        return { key, queued: true };
       }
       const inflight = asRows<{ job_key: unknown }>(
         await tx.unsafe(

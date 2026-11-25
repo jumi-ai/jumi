@@ -5,6 +5,8 @@ import { errorMessage } from "./util/error.ts";
 export interface EnqueueResult {
   key: string;
   queued: boolean;
+  /** Follow-up wake recorded as pending behind a queued/leased row. 202, repo-mutex, no new row. */
+  deferred?: boolean;
 }
 
 export class ReviewQueue<T = ReviewJob> {

@@ -1362,6 +1362,13 @@ describe("PgReviewJobStore.enqueueIssue generation", () => {
       async unsafe(query: string, params?: unknown[]) {
         captured.push({ query, params });
         if (query.includes("SELECT generation FROM issue_skip_latches")) return [{ generation: 2 }];
+        if (query.includes("SELECT 1 AS one FROM follow_up_wake_causes")) return [];
+        if (query.includes("SELECT job_key, delivery FROM review_jobs")) return [];
+        if (query.includes("SELECT 1 AS one FROM review_jobs WHERE delivery")) return [];
+        if (query.includes("INSERT INTO review_jobs")) return [{ id: 1 }];
+        if (query.includes("INSERT INTO follow_up_wake_causes")) return [{ id: 10 }];
+        if (query.includes("SELECT id FROM follow_up_wake_causes")) return [{ id: 10 }];
+        if (query.includes("UPDATE follow_up_wake_causes")) return [{ id: 10 }];
         if (query.includes("INSERT")) return [{ id: 1 }];
         return [];
       },

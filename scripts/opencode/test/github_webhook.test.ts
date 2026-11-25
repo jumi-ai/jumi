@@ -1320,6 +1320,7 @@ describe("POST /webhooks/github", () => {
     expect(await responseJson(duplicate)).toEqual({
       key: "follow-up:kirmanak/demo#102:headsha:11",
       queued: false,
+      deferred: true,
     });
     const sibling = await handler(await signedGithubRequest(jobPayload(12, "Analyze"), { event: "workflow_job" }));
     expect(await responseJson(sibling)).toEqual({

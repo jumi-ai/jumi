@@ -6,6 +6,7 @@ import {
   shouldEnqueueWorkflowJobFollowUp,
   shouldEnqueueWorkflowJobReview,
 } from "./ci_webhook.ts";
+import { webhookWakeDeliveryFallback } from "./followup_wake_causes.ts";
 import {
   parseIssueCommentPayload,
   parsePullRejectedPayload,
@@ -379,6 +380,27 @@ function cancelKey(owner: string, repo: string, issueNumber: number): string {
   return `${owner}/${repo}#${issueNumber}`;
 }
 
+/** Stable follow-up delivery: the original forge header when present, else a raw-body digest. */
+function stableFollowUpDelivery(
+  delivery: string,
+  rawBody: Uint8Array,
+  eventFamily: string,
+  opts?: { forgeDeliveryId?: string | null }
+): string {
+  const header = opts ? (opts.forgeDeliveryId ?? null) : delivery;
+  if (header) return header;
+  return webhookWakeDeliveryFallback(eventFamily, rawBody);
+}
+
+function isFollowUpJob(job: Pick<IssueJob, "mode">): boolean {
+  return (job as { mode?: string }).mode === "follow-up";
+}
+
+function enqueueLogLine(result: EnqueueResult, key: string, delivery: string): string {
+  const verb = result.queued ? "queued" : result.deferred ? "deferred" : "deduped";
+  return `${verb} ${result.deferred ? `${key} deferred` : key} delivery=${delivery}`;
+}
+
 async function enqueueJobList(
   jobs: IssueJob[],
   queue: WorkerWebhookQueue,
@@ -390,7 +412,7 @@ async function enqueueJobList(
     const job = jobs[0];
     if (!job) return skipped("no waiting issues to wake", logger);
     const result: EnqueueResult = await queue.enqueue(job);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    logger(enqueueLogLine(result, result.key, job.delivery));
     if (result.queued && sits) {
       const cleared = await clearSitForEnqueue(sits, job.owner, job.repo, job.issueNumber, logger);
       if (cleared) return cleared;
@@ -401,7 +423,7 @@ async function enqueueJobList(
   for (const job of jobs) {
     const result: EnqueueResult = await queue.enqueue(job);
     keys.push(result.key);
-    logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+    logger(enqueueLogLine(result, result.key, job.delivery));
     if (result.queued && sits) {
       const cleared = await clearSitForEnqueue(sits, job.owner, job.repo, job.issueNumber, logger);
       if (cleared) return cleared;
@@ -488,6 +510,7 @@ export async function handleWorkerWebhookEvent(
   opts?: { forgeDeliveryId?: string | null }
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
+  const followupDelivery = stableFollowUpDelivery(delivery, rawBody, event ?? eventType ?? "webhook", opts);
   if (event === "ping" || eventType === "ping") return json(200, { ok: true });
   // Per-PR auto-merge override labels on a Jumi PR schedule or cancel without
   // enqueueing worker work. GitHub sends labeled/unlabeled; Gitea sends
@@ -561,9 +584,10 @@ export async function handleWorkerWebhookEvent(
           log: (message) => logger(message),
         });
         if (decision.type === "skip") return skipped(decision.reason, logger);
-        const job = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const jobDelivery = isFollowUpJob(decision.job) ? followupDelivery : delivery;
+        const job = { ...decision.job, delivery: jobDelivery, receivedAt: new Date().toISOString() };
         const result = await deps.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        logger(enqueueLogLine(result, result.key, job.delivery));
         if (result.queued && deps.sits) {
           const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
           if (cleared) return cleared;
@@ -706,11 +730,11 @@ export async function handleWorkerWebhookEvent(
       }
       const job: IssueJob = {
         ...decision.job,
-        delivery,
+        delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
         receivedAt: new Date().toISOString(),
       };
       const result: EnqueueResult = await deps.queue.enqueue(job);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      logger(enqueueLogLine(result, result.key, job.delivery));
       if (result.queued && deps.sits) {
         const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
         if (cleared) return cleared;
@@ -783,10 +807,14 @@ export async function handleWorkerWebhookEvent(
       const keys: string[] = [];
       if (decision.type === "enqueue") {
         for (const partial of decision.jobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           const result: EnqueueResult = await deps.queue.enqueue(job);
           keys.push(result.key);
-          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          logger(enqueueLogLine(result, result.key, job.delivery));
           if (result.queued && deps.sits) {
             const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
             if (cleared) return cleared;
@@ -859,10 +887,14 @@ export async function handleWorkerWebhookEvent(
       const keys: string[] = [];
       if (decision.type === "enqueue") {
         for (const partial of decision.jobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           const result: EnqueueResult = await deps.queue.enqueue(job);
           keys.push(result.key);
-          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+          logger(enqueueLogLine(result, result.key, job.delivery));
         }
       }
       // Wake shared-failure waiters whose first just merged: merge-only jobs
@@ -878,10 +910,14 @@ export async function handleWorkerWebhookEvent(
           logger
         );
         for (const partial of waiterJobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           const result: EnqueueResult = await deps.queue.enqueue(job);
           keys.push(result.key);
-          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery} merge-only`);
+          logger(`${enqueueLogLine(result, result.key, job.delivery)} merge-only`);
         }
       } catch (err) {
         logger(`shared waiter merge wake failed: ${errorMessage(err)}`);
@@ -897,10 +933,14 @@ export async function handleWorkerWebhookEvent(
         const strictSlots = strictSlotsFor(deps);
         const strict = await shouldEnqueueStrictRefreshOnPush(payload, policy as never, deps.api, logger, strictSlots);
         for (const partial of strict.jobs) {
-          const job: IssueJob = { ...partial, delivery, receivedAt };
+          const job: IssueJob = {
+            ...partial,
+            delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
+            receivedAt,
+          };
           const result: EnqueueResult = await deps.queue.enqueue(job);
           keys.push(result.key);
-          logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery} strict-refresh`);
+          logger(`${enqueueLogLine(result, result.key, job.delivery)} strict-refresh`);
         }
       } catch (err) {
         logger(`strict refresh wake failed: ${errorMessage(err)}`);
@@ -1018,11 +1058,11 @@ export async function handleWorkerWebhookEvent(
       }
       const job: IssueJob = {
         ...decision.job,
-        delivery,
+        delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
         receivedAt: new Date().toISOString(),
       };
       const result: EnqueueResult = await deps.queue.enqueue(job);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      logger(enqueueLogLine(result, result.key, job.delivery));
       if (result.queued && deps.sits) {
         const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
         if (cleared) return cleared;
@@ -1166,7 +1206,7 @@ export async function handleWorkerWebhookEvent(
       const job = jobs[0];
       if (!job) return skipped("no blocked issues to wake", logger);
       const result: EnqueueResult = await deps.queue.enqueue(job);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      logger(enqueueLogLine(result, result.key, job.delivery));
       if (result.queued && deps.sits) {
         const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
         if (cleared) return cleared;
@@ -1178,7 +1218,7 @@ export async function handleWorkerWebhookEvent(
     for (const job of jobs) {
       const result: EnqueueResult = await deps.queue.enqueue(job);
       keys.push(result.key);
-      logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+      logger(enqueueLogLine(result, result.key, job.delivery));
       if (result.queued && deps.sits) {
         const cleared = await clearSitForEnqueue(deps.sits, job.owner, job.repo, job.issueNumber, logger);
         if (cleared) return cleared;
