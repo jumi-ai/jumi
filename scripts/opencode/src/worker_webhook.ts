@@ -444,12 +444,9 @@ export async function cancelLedgerWorkerJobs(opts: {
   deploymentBlocking?: readonly string[];
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
-  // A held suggestion `pending` must resolve before the latch wipe below
-  // destroys the only record of it: the cancelled rows never run, so no
-  // follow-up job survives to clear it. Routes through the shared
-  // hold-settlement gate with fresh evidence, so an unanswered maintainer
-  // hold stays pending and unknown evidence never becomes success.
-  // Best-effort, never throws.
+  // A held suggestion `pending` must resolve before the latch wipe below destroys the only record of it.
+  // Routes through the shared hold-settlement gate with fresh evidence: an unanswered maintainer hold stays
+  // pending and unknown evidence never becomes success. Best-effort, never throws.
   await settleHeldCancelThroughGate({
     api: opts.api,
     owner: opts.owner,
@@ -458,10 +455,10 @@ export async function cancelLedgerWorkerJobs(opts: {
     latches: opts.store.skipLatches,
     latchKey: { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber },
     botUsername: opts.botUsername,
-    ...(opts.defaultBranch !== undefined ? { defaultBranch: opts.defaultBranch } : {}),
-    ...(opts.deploymentTrusted !== undefined ? { deploymentTrusted: opts.deploymentTrusted } : {}),
-    ...(opts.deploymentIgnore !== undefined ? { deploymentIgnore: opts.deploymentIgnore } : {}),
-    ...(opts.deploymentBlocking !== undefined ? { deploymentBlocking: opts.deploymentBlocking } : {}),
+    defaultBranch: opts.defaultBranch,
+    deploymentTrusted: opts.deploymentTrusted,
+    deploymentIgnore: opts.deploymentIgnore,
+    deploymentBlocking: opts.deploymentBlocking,
     log: (message) => opts.logger?.(message),
     reason: "unassigned",
   });
