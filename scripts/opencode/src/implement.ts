@@ -82,11 +82,21 @@ import {
   DEFAULT_COMMIT_MESSAGE_TEMPLATE,
   DEFAULT_PR_TITLE_TEMPLATE,
   defaultRepoConventions,
+  loadDefaultBranchSettings,
   loadRepoConventions,
   type RepoConventions,
   renderIssueTemplate,
 } from "./repo_settings.ts";
 import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
+import {
+  DEFAULT_VERIFY_ATTEMPTS,
+  DEFAULT_VERIFY_TIMEOUT_MS,
+  effectiveVerifyAttempts,
+  effectiveVerifyTimeoutMs,
+  runVerifyToPush,
+  verifyForKind,
+  verifyTaskNote,
+} from "./repo_verify.ts";
 import { appendRunnerStamp, formatRunnerStamp, type NamedRunner, type RunnerStamp } from "./runners.ts";
 import { type StandingPodRuntime, standingPodRuntime } from "./runtime.ts";
 import { JUMI_SENTINEL_FILES, sentinelTrackedReason, tipAddedSentinels } from "./sentinels.ts";
@@ -421,6 +431,12 @@ export interface ImplementOptions extends PickupPolicy {
   setupTimeoutMaxMs?: number;
   /** Injectable setup script runner (tests stub the shell). Defaults to spawning `sh -e`. */
   repoSetupRunScript?: RepoSetupRunScript;
+  /** Verify kill switch and ceilings. Unset keeps deployment defaults (on, 10m, 2 attempts). */
+  verifyEnabled?: boolean;
+  verifyTimeoutMaxMs?: number;
+  verifyAttemptsMax?: number;
+  /** Injectable verify script runner (tests stub the shell). Defaults to spawning `sh -e`. */
+  verifyRunScript?: import("./repo_verify.ts").RepoVerifyRunScript;
   maxFollowupRounds?: number;
   maxConflictRounds?: number;
   maxOutputBytes?: number;
@@ -1440,6 +1456,21 @@ export async function implementIssue(
     opts.job.defaultBranch,
     log
   );
+  const { load: verifyLoad } = await loadDefaultBranchSettings(
+    opts.api,
+    opts.job.owner,
+    opts.job.repo,
+    opts.job.defaultBranch || undefined,
+    log
+  );
+  const verifyEnabled = opts.verifyEnabled ?? true;
+  const activeVerify = verifyEnabled ? verifyForKind(verifyLoad, "implement") : undefined;
+  const verifyTimeoutMs = activeVerify
+    ? effectiveVerifyTimeoutMs(activeVerify, opts.verifyTimeoutMaxMs ?? DEFAULT_VERIFY_TIMEOUT_MS)
+    : 0;
+  const verifyAttempts = activeVerify
+    ? effectiveVerifyAttempts(activeVerify, opts.verifyAttemptsMax ?? DEFAULT_VERIFY_ATTEMPTS)
+    : 0;
   const branch = issueBranchName(activeOpts.job.issueNumber, activeOpts.job.title, conventions.branchPrefix);
   const claimed = await beginClaimedWorktree({
     ...activeOpts,
@@ -1640,9 +1671,10 @@ export async function implementIssue(
           await writeHandoffToWorktree(worktree, injectedHandoff);
         };
         const writeTaskFiles = async (job: IssueJob) => {
+          const verifyNote = activeVerify ? `${verifyTaskNote(activeVerify)}\n` : "";
           const taskMarkdown = repoSetupBlock
-            ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n`
-            : buildTaskMarkdown(job);
+            ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n${verifyNote}`
+            : `${buildTaskMarkdown(job)}${verifyNote ? `\n${verifyNote}` : ""}`;
           await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
           if (queue.length > 0) {
             await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
@@ -2097,6 +2129,38 @@ export async function implementIssue(
             return { status: "skipped", reason };
           }
         }
+        let verifyNote: string | undefined;
+        if (activeVerify) {
+          const verified = await runVerifyToPush({
+            workdir: worktree,
+            verify: activeVerify,
+            timeoutMs: verifyTimeoutMs,
+            attempts: verifyAttempts,
+            log,
+            runScript: opts.verifyRunScript,
+            resume: async (prompt) => {
+              const resumed = await runEngine(
+                `Re-running OpenCode after verify failure for ${owner}/${repo}#${issueNumber}`,
+                "implement",
+                prompt,
+                { continueSession: true }
+              );
+              if (resumed && resumed.status === "skipped") return resumed;
+              return undefined;
+            },
+            recommit: async () => {
+              const next = await worktreePorcelain(loop);
+              await commitIfDirty(
+                loop,
+                next,
+                renderCommitMessage(conventions.commitMessage, liveJob.title, issueNumber)
+              );
+            },
+          });
+          if (verified.quotaSkip) return verified.quotaSkip;
+          verifyNote = verified.note;
+          log(`verify ${verified.status}: ${verifyNote}`);
+        }
         try {
           await pushClaimedBranch(loop, branch);
         } catch (err) {
@@ -2110,12 +2174,13 @@ export async function implementIssue(
 
         let pr: Pull;
         try {
+          const bodyWithVerify = verifyNote != null ? `${prFileContents ?? ""}\n\n${verifyNote}\n` : prFileContents;
           pr = await opts.api.createPullRequest(owner, repo, {
             title: renderPrTitle(conventions.prTitle, liveJob.title, issueNumber),
             body: wrapJumiPrBody(
               buildPullRequestBody(
                 issueNumber,
-                prFileContents,
+                bodyWithVerify,
                 runner,
                 workerPublishSecrets(loop.auth.token, jobChain),
                 conventions.closingKeyword,

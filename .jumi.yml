@@ -1,1 +1,6 @@
 automerge: true
+verify:
+  run: cd scripts/opencode && bun install --frozen-lockfile && bun run lint && bun run typecheck && bun run knip
+  timeout: 10
+  attempts: 2
+  kinds: [implement, followup]

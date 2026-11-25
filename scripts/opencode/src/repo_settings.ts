@@ -11,6 +11,7 @@
 
 import { logDiagnostic } from "./diagnostics.ts";
 import { isNotFoundError } from "./forge_errors.ts";
+import { parseVerifyValue, type RepoVerify } from "./repo_verify.ts";
 import { globToRegExp } from "./review_md.ts";
 import { errorMessage } from "./util/error.ts";
 
@@ -600,6 +601,16 @@ export const REPO_SETTINGS_REGISTRY = [
       const parsed = parseSetupValue(raw);
       if (!parsed.ok) return parsed;
       return { ok: true, value: parsed.setup };
+    },
+  }),
+  optionalSetting({
+    key: "verify",
+    field: "verify",
+    doc: "Repository verify command run after the worker with commits and before the push.",
+    parse: (raw): RepoSettingResult<RepoVerify | undefined> => {
+      const parsed = parseVerifyValue(raw);
+      if (!parsed.ok) return parsed;
+      return { ok: true, value: parsed.verify };
     },
   }),
   requiredSetting({
