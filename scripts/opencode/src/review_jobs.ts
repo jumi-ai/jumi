@@ -302,7 +302,8 @@ export interface ReviewJobStore {
   /**
    * Atomic settle plus handover obligation: the same fenced `markPublished`
    * transition and the `review_handover_pending` insert in one transaction
-   * (one locked step in memory). No production caller yet.
+   * (one locked step in memory). Review completion paths use this so a
+   * pending-insert failure cannot leave a terminal review with no obligation.
    */
   markPublishedWithHandover(
     id: number,
