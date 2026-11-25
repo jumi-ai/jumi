@@ -287,4 +287,95 @@ describe("automerge admission", () => {
     expect(automergeCauseId(body, "gitea", null)).toBe(gitea);
     expect(automergeCauseId(body, "gitea", undefined)).toBe(gitea);
   });
+
+  test("unreadable policy with a custom label name still requests the row", async () => {
+    const { handleWorkerWebhookEvent } = await import("../src/worker_webhook.ts");
+    const store = new MemoryAutomergeReconcileStore();
+    const order: string[] = [];
+    const api = labelApi(order, { prLabels: [] });
+    api.getRepoFile = (async () => {
+      order.push("getRepoFile");
+      throw new Error("settings unreadable");
+    }) as never;
+    // A custom label matches neither default, and the policy cannot be read
+    // to prove it unrelated: the obligation must still be requested.
+    await handleWorkerWebhookEvent(
+      labelBody("labeled", "my-custom"),
+      "pull_request",
+      null,
+      "dc",
+      policy() as never,
+      {
+        queue: { enqueue: async () => ({ queued: true, key: "k" }) },
+        api,
+        automergeReconcile: store,
+      } as never
+    );
+    expect(await store.claimDue("tok", 60000, 10, Date.now())).toHaveLength(1);
+  });
+
+  test("github route defers the cancel and answers 503 when admission fails", async () => {
+    const { handleGithubWebhookEvent } = await import("../src/github_webhook.ts");
+    const store = new MemoryAutomergeReconcileStore();
+    const order: string[] = [];
+    const githubBody = (action: string, label: string) =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          action,
+          repository: {
+            full_name: "kirmanak/demo",
+            default_branch: "main",
+            html_url: "https://github.com/kirmanak/demo",
+            clone_url: "https://github.com/kirmanak/demo.git",
+          },
+          label: { name: label },
+          sender: { login: "alice", type: "User" },
+          pull_request: { number: 3 },
+        })
+      );
+    const githubPolicy = () =>
+      ({
+        giteaUrl: "https://github.com",
+        allowedOrgs: ["kirmanak"],
+        allowedRepos: [] as string[],
+        botUsername: "jumi",
+        forgeKind: "github",
+      }) as never;
+    const workerDeps = {
+      queue: { enqueue: async () => ({ queued: true, key: "k" }) },
+      api: labelApi(order, { prLabels: [] }),
+      automergeReconcile: store,
+    } as never;
+    const deferred = await handleGithubWebhookEvent(
+      githubBody("labeled", "no-automerge"),
+      "pull_request",
+      "gh-1",
+      githubPolicy(),
+      {
+        worker: workerDeps,
+      } as never
+    );
+    expect(deferred.status).toBe(202);
+    expect(String((await deferred.json()).reason)).toContain("cancel-deferred");
+    expect(order).not.toContain("cancelAutoMerge");
+    expect(await store.claimDue("tok", 60000, 10, Date.now())).toHaveLength(1);
+    const failing = new MemoryAutomergeReconcileStore();
+    failing.request = (async () => {
+      throw new Error("ledger down");
+    }) as never;
+    const refused = await handleGithubWebhookEvent(
+      githubBody("labeled", "no-automerge"),
+      "pull_request",
+      "gh-2",
+      githubPolicy(),
+      {
+        worker: {
+          queue: { enqueue: async () => ({ queued: true, key: "k" }) },
+          api: labelApi(order, { prLabels: [] }),
+          automergeReconcile: failing,
+        },
+      } as never
+    );
+    expect(refused.status).toBe(503);
+  });
 });
