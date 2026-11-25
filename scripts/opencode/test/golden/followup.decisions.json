@@ -4920,7 +4920,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -5112,7 +5112,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -7959,7 +7959,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -9195,7 +9195,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -9347,7 +9347,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `checks`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -9499,7 +9499,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -10633,7 +10633,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -10924,7 +10924,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -11215,7 +11215,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · provider-a/spark_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · provider-a/spark_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -11426,7 +11426,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -11712,7 +11712,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",
@@ -11849,6 +11849,17 @@
     "claimExists": false,
     "effects": [
       {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nJumi is addressing CI failure."
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 0
+      },
+      {
         "key": {
           "issueNumber": 12,
           "owner": "kirmanak",
@@ -11858,7 +11869,89 @@
         "patch": {
           "ci": {
             "ciRefreshes": [],
-            "flakeReruns": [],
+            "flakeReruns": [
+              {
+                "checkName": "build",
+                "sha": "headsha"
+              }
+            ],
+            "handled": [],
+            "prNumber": 127,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 1
+      },
+      {
+        "args": [
+          "kirmanak",
+          "demo",
+          127,
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nReran `build`. Automatic rerun 1/1.\n\n_Jumi · opencode · openai/gpt-5.5_"
+        ],
+        "method": "createIssueComment",
+        "seam": "forge",
+        "seq": 2
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "followup": {
+            "handledCommentIds": [],
+            "handledReviewFindings": [],
+            "handledReviewIds": [],
+            "lastHeadSha": "abc123",
+            "prNumber": 127,
+            "round": 0,
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 3
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "stuck": {
+            "fingerprints": [
+              {
+                "hash": "1399fe05ec4b3d5c00aede41acf1b61d728483456cb3edd4331c0d3547f4cabe",
+                "kind": "ci"
+              }
+            ],
+            "updatedAt": "<iso>"
+          }
+        },
+        "seam": "latch",
+        "seq": 4
+      },
+      {
+        "key": {
+          "issueNumber": 12,
+          "owner": "kirmanak",
+          "repo": "demo"
+        },
+        "op": "put",
+        "patch": {
+          "ci": {
+            "ciRefreshes": [],
+            "flakeReruns": [
+              {
+                "checkName": "build",
+                "sha": "headsha"
+              }
+            ],
             "handled": [
               {
                 "checkName": "build",
@@ -11871,18 +11964,7 @@
           }
         },
         "seam": "latch",
-        "seq": 0
-      },
-      {
-        "args": [
-          "kirmanak",
-          "demo",
-          127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nCI looks like an infra flake (GitHub 140.82 checkout/cache timeout or unreachable) on build. A human needs to rerun. Automatic rerun failed: rerun not supported by forge client"
-        ],
-        "method": "createIssueComment",
-        "seam": "forge",
-        "seq": 1
+        "seq": 5
       }
     ],
     "input": {
@@ -11900,7 +11982,12 @@
     "latchAfter": {
       "ci": {
         "ciRefreshes": [],
-        "flakeReruns": [],
+        "flakeReruns": [
+          {
+            "checkName": "build",
+            "sha": "headsha"
+          }
+        ],
         "handled": [
           {
             "checkName": "build",
@@ -11912,9 +11999,25 @@
         "updatedAt": "<iso>"
       },
       "conflict": {},
-      "followup": {},
+      "followup": {
+        "handledCommentIds": [],
+        "handledReviewFindings": [],
+        "handledReviewIds": [],
+        "lastHeadSha": "abc123",
+        "prNumber": 127,
+        "round": 0,
+        "updatedAt": "<iso>"
+      },
       "reviewStuck": {},
-      "stuck": {}
+      "stuck": {
+        "fingerprints": [
+          {
+            "hash": "1399fe05ec4b3d5c00aede41acf1b61d728483456cb3edd4331c0d3547f4cabe",
+            "kind": "ci"
+          }
+        ],
+        "updatedAt": "<iso>"
+      }
     },
     "latchBefore": {
       "ci": {},
@@ -11925,8 +12028,7 @@
     },
     "name": "implementFollowUp",
     "result": {
-      "reason": "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
-      "status": "skipped"
+      "status": "no-changes"
     }
   },
   "followup.test.ts::92": {
@@ -11948,7 +12050,7 @@
           "kirmanak",
           "demo",
           127,
-          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\n_Jumi · opencode · openai/gpt-5.5_"
+          "<!-- jumi-worker:kirmanak/demo#12 -->\nno follow-up changes (no reason given)\n\nAutomatic rerun failed for `build`: rerun not supported by forge client\n\n_Jumi · opencode · openai/gpt-5.5_"
         ],
         "method": "createIssueComment",
         "seam": "forge",

@@ -45,7 +45,15 @@ import {
 import type { Engine } from "../src/engine.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { makeIssueApi } from "./fakes/forge.ts";
-import { makeComment, makeIssueJob, makePR, makeRepo, makeWorkerConfig, stripGitConfigArgs } from "./fixtures.ts";
+import {
+  makeComment,
+  makeIssueJob,
+  makePR,
+  makeRepo,
+  makeUser,
+  makeWorkerConfig,
+  stripGitConfigArgs,
+} from "./fixtures.ts";
 import { withDirs, withWorkspace } from "./harness/temp.ts";
 
 function waitUntilAborted(signal?: AbortSignal): Promise<void> {
@@ -193,16 +201,57 @@ describe("handleIssueCancel", () => {
 
   test("resolves a held pending to success before wiping the latch", async () => {
     await withWorkspace(async (home) => {
+      const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       const store = new MemoryReviewJobStore();
       await markSuggestionHoldConsumed(
         store.skipLatches,
         { owner: "kirmanak", repo: "demo", issueNumber: 12 },
-        "headsha",
+        HEAD,
         2
       );
+      const suggestionBody = [
+        "<!-- jumi-review:kirmanak/demo#12 -->",
+        "### Jumi review",
+        "",
+        `Reviewed commit: \`${HEAD}\``,
+        "",
+        "src/foo.ts:12: 💡 suggestion: extract a helper",
+        "<!-- jumi-check: success; 1 suggestion -->",
+      ].join("\n");
+      const pr = {
+        ...makePR({
+          number: 127,
+          title: "Fix the thing",
+          body: "Fixes #12",
+          user: makeUser({ login: "jumi" }),
+        }),
+        head: {
+          label: "kirmanak:jumi/issue-12-fix-the-thing",
+          ref: "jumi/issue-12-fix-the-thing",
+          sha: HEAD,
+          repo: makeRepo(),
+          repo_id: 10,
+        },
+      };
       const statuses: Array<{ sha: string; state: string; description?: string }> = [];
       const api = {
-        ...workerApi(),
+        ...workerApi({
+          listOpenPulls: async () => [pr],
+          getPR: async () => pr,
+          listPullReviews: async () => [
+            {
+              id: 4110,
+              body: suggestionBody,
+              user: makeUser({ login: "jumi" }),
+              commit_id: HEAD,
+              submitted_at: "2026-11-19T18:29:20Z",
+              updated_at: "2026-11-19T18:29:20Z",
+            },
+          ],
+          listIssueComments: async () => [],
+          listPullReviewComments: async () => [],
+          listCommitStatuses: async () => [],
+        }),
         createCommitStatus: async (
           _owner: string,
           _repo: string,
@@ -215,7 +264,7 @@ describe("handleIssueCancel", () => {
       };
       await handleIssueCancel(makeWorkerConfig({ home }), api, "kirmanak", "demo", 12, undefined, store);
       expect(statuses).toHaveLength(1);
-      expect(statuses[0]).toMatchObject({ sha: "headsha", state: "success" });
+      expect(statuses[0]).toMatchObject({ sha: HEAD, state: "success" });
       expect(statuses[0]?.description).toContain("unassigned");
       expect(await store.readIssueSkipLatch("kirmanak", "demo", 12)).toEqual({ generation: 1, skipReason: null });
     });

@@ -49,12 +49,16 @@ import {
   type QuotaHit,
 } from "./quota.ts";
 import {
+  allowUnsandboxedReviews,
+  assertOpenCodeReviewPluginReady,
   assertReviewRunnerSandboxable,
   ensureSandboxedShellHome,
   makeReviewHarnessTempRoot,
+  REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS,
   resolveReviewSpawnSandbox,
   resolveWorktreeGitDirsSync,
   reviewSandboxWrapperPath,
+  reviewShellPluginFailedPath,
   writeOpenCodeReviewShellPlugin,
 } from "./review_sandbox.ts";
 import {
@@ -180,6 +184,7 @@ export function buildFollowupPrompt(runnerType?: string, opts?: { prBodyFenced?:
   const addendumLine = opts?.prBodyFenced === false ? `\n${UNFENCED_PR_BODY_ADDENDUM_NOTE}` : "";
   return `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
+A transient or infrastructure failure is something to fix when the repo can reasonably make it robust: a retry or wait around a flaky network step, a pinned mirror or version, a cache. Do not rerun CI yourself and do not ask for a rerun; you hold no forge credentials and cannot trigger one. Call \`no_changes\` only for causes outside the repo that are already gone, and say what was checked in the reason.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
 A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).
@@ -946,18 +951,25 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       // checkout). V2 requires the `plugins` (plural) key and a directory:
       // a single-file path is skipped. The checkout cannot shadow it:
       // project config is disabled for reviews.
+      const reviewGlobalPath = join(tempRoot, "xdg-config", "opencode", "opencode.json");
       try {
-        const globalPath = join(tempRoot, "xdg-config", "opencode", "opencode.json");
-        const raw = await readFile(globalPath, "utf8");
+        const raw = await readFile(reviewGlobalPath, "utf8");
         const parsed = JSON.parse(raw) as Record<string, unknown>;
         const existing = Array.isArray(parsed.plugins) ? (parsed.plugins as unknown[]) : [];
         if (!existing.includes(pluginDir)) parsed.plugins = [...existing, pluginDir];
-        await writeFile(globalPath, JSON.stringify(parsed), { mode: 0o600 });
+        await writeFile(reviewGlobalPath, JSON.stringify(parsed), { mode: 0o600 });
       } catch (err) {
         throw new EngineFailedError(
           `opencode review spawn refused: cannot register shell sandbox plugin: ${errorMessage(err)}`,
           false
         );
+      }
+      // Fail-closed startup guard (jumi#831): refuse before spawn when the
+      // generated plugin is missing, unregistered, or unparsable, so a broken
+      // write cannot fall through into an unwrapped model/tool run. Skipped
+      // only under the existing unsandboxed escape hatch.
+      if (!allowUnsandboxedReviews()) {
+        await assertOpenCodeReviewPluginReady(pluginDir, reviewGlobalPath);
       }
       log(`opencode review shell sandbox: shells wrapped via ${pluginDir}/index.js`);
     }
@@ -1057,6 +1069,38 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
     if (quotaTimer && typeof quotaTimer === "object" && "unref" in quotaTimer) {
       (quotaTimer as { unref: () => void }).unref();
     }
+    // Fail-closed startup watch (jumi#831): while the child runs, poll for
+    // the per-spawn startup-failed marker the plugin bootstrap writes when
+    // its import/hook/marker setup throws. The harness temp root is fresh per
+    // spawn, so an old run's marker can never cancel a new spawn. On sight,
+    // kill the owned child via the existing cancellation path; the outcome
+    // below is an engine failure (never healthy, never unsandboxed fallback,
+    // though normal runner hopping may recover). Skipped only under
+    // JUMI_ALLOW_UNSANDBOXED_REVIEWS. The watcher is cleared on every exit.
+    let startupFailed = false;
+    const watchStartupFailed = isReview && !allowUnsandboxedReviews();
+    const startupFailedPath = watchStartupFailed ? reviewShellPluginFailedPath(tempRoot) : "";
+    const startupWatcher = watchStartupFailed
+      ? setInterval(() => {
+          if (startupFailed || timedOut || opts.abortSignal?.aborted) return;
+          let present = false;
+          try {
+            present = existsSync(startupFailedPath);
+          } catch {
+            present = false;
+          }
+          if (!present) return;
+          startupFailed = true;
+          try {
+            proc.kill();
+          } catch {
+            return;
+          }
+        }, REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS)
+      : undefined;
+    if (startupWatcher && typeof startupWatcher === "object" && "unref" in startupWatcher) {
+      (startupWatcher as { unref: () => void }).unref();
+    }
 
     // Consume stdout, stderr, and the exit code concurrently.
     // Reading stderr in parallel is required to prevent a deadlock when the
@@ -1079,7 +1123,34 @@ export async function runOpenCode(opts: OpenCodeRunOptions): Promise<EngineResul
       opts.abortSignal?.removeEventListener("abort", onAbort);
       if (timeout) clearTimeout(timeout);
       if (quotaTimer) clearInterval(quotaTimer);
+      if (startupWatcher) clearInterval(startupWatcher);
       finalSample = await finalizeMemoryTracker(tracker, childPid);
+    }
+    // A startup-failed marker wins over every other outcome: the plugin never
+    // finished setup, so no model/tool dispatch under it can be trusted as
+    // wrapped. Report an engine failure (hopping may recover) and never fall
+    // back to unsandboxed. The direct file check covers a marker that landed
+    // after the last poll tick.
+    if (watchStartupFailed) {
+      let markerPresent = startupFailed;
+      if (!markerPresent) {
+        try {
+          markerPresent = existsSync(startupFailedPath);
+        } catch {
+          markerPresent = false;
+        }
+      }
+      if (markerPresent) {
+        const durationMs = Date.now() - tracker.startedAtMs;
+        const message =
+          "opencode review shell sandbox failed to start (startup marker present): refusing to run unwrapped";
+        logDiagnostic(log, "opencode_plugin_startup_failed", {
+          review: opts.reviewLabel,
+          duration_ms: durationMs,
+        });
+        observeEngineRun(opts, { status: "exit", infra: false, durationMs, message });
+        throw new EngineFailedError(message, false);
+      }
     }
 
     // The OpenCode 2 CLI exits 130 on SIGTERM. Everything past this engine

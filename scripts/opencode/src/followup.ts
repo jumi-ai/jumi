@@ -14,13 +14,13 @@ import {
 import {
   buildCiMarkdown,
   CI_LOG_FILE,
-  flakeExhaustedComment,
-  flakeRerunFailedComment,
-  flakeRerunsCommentFor,
   readCiLatch,
   recordCiHandled,
-  recordFlakeReruns,
-  splitFlakeBudget,
+  recordReruns,
+  rerunExhaustedComment,
+  rerunFailedComment,
+  rerunsCommentFor,
+  splitRerunBudget,
 } from "./ci.ts";
 import { attributableToPr, baseForMarkdown } from "./ci_base.ts";
 import {
@@ -256,7 +256,9 @@ async function writeFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey, stat
 /**
  * Early-exit settlement before a `pr` snapshot exists. Routes through the
  * shared hold-settlement gate once a PR number is known (job or latch);
- * keeps without posting when the PR cannot be re-read fresh. Never throws.
+ * resolves the PR for the held head through the existing closing-PR
+ * resolution when no number is known; keeps with one `unknown` log and no
+ * write when no PR or review can be found. Never throws.
  */
 async function resolveHeldEarlyThroughGate(
   api: HoldStatusPort,
@@ -286,7 +288,27 @@ async function resolveHeldEarlyThroughGate(
         prNumber = 0;
       }
     }
-    if (!prNumber) return;
+    if (!prNumber) {
+      try {
+        const resolved =
+          typeof (api as { listOpenPulls?: unknown }).listOpenPulls === "function"
+            ? await resolveWorkerPullRequest(
+                api as Parameters<typeof resolveWorkerPullRequest>[0],
+                opts.owner,
+                opts.repo,
+                latchKey.issueNumber,
+                opts.botUsername
+              )
+            : undefined;
+        if (resolved) prNumber = resolved.number ?? 0;
+      } catch {
+        prNumber = 0;
+      }
+    }
+    if (!prNumber) {
+      opts.log(`hold settlement kept for ${opts.owner}/${opts.repo}#${latchKey.issueNumber}: unknown (no closing PR)`);
+      return;
+    }
     await settleFollowUpHold({
       api,
       owner: opts.owner,
@@ -1700,7 +1722,7 @@ async function resolveSharedFailureForWake(opts: {
   repo: string;
   prNumber: number;
   headSha: string;
-  ciUnhandled: Array<{ name: string; fingerprint?: string; logHash?: string; flake?: string }>;
+  ciUnhandled: Array<{ name: string; fingerprint?: string; logHash?: string }>;
   defaultBranch: string;
   nowMs: number;
   log?: (message: string) => void;
@@ -1713,7 +1735,7 @@ async function resolveSharedFailureForWake(opts: {
   // Require every unhandled check to carry one, otherwise a distinct real
   // failure would be silenced by waiting on the shared subset.
   const fingerprinted = opts.ciUnhandled.filter(
-    (check): check is { name: string; fingerprint: string; logHash?: string; flake?: string } =>
+    (check): check is { name: string; fingerprint: string; logHash?: string } =>
       typeof check.fingerprint === "string" && check.fingerprint.length > 0
   );
   if (fingerprinted.length !== opts.ciUnhandled.length) return undefined;
@@ -1831,7 +1853,6 @@ async function resolveSharedFailureForWake(opts: {
       name: item.name,
       ...(item.fingerprint !== undefined ? { fingerprint: item.fingerprint } : {}),
       ...(item.logHash !== undefined ? { logHash: item.logHash } : {}),
-      ...(item.flake !== undefined ? { flake: item.flake } : {}),
     })),
   };
 }
@@ -2184,102 +2205,7 @@ export async function implementFollowUp(
       diffHashResolved = { value: await snapshot.getPrDiffHash() };
     }
   }
-  const handleFlakeSkipWithRerun = async (flake: {
-    reason: string;
-    checks: import("./pr_decision.ts").CiCheckRef[];
-  }): Promise<{ status: "skipped"; reason: string } | undefined> => {
-    const sha = pr.head.sha;
-    // Opt-out in `.jumi.yml`, on by default. Fail-open: missing/invalid/unreadable reruns.
-    if (!isAutoRerunFlakesEnabled(failOpenLoadFromSnapshot(settingsSnapshot))) {
-      return undefined;
-    }
-    const fullByName = new Map(ci.unhandled.map((check) => [check.name, check]));
-    const fullChecks = flake.checks
-      .map((ref) => fullByName.get(ref.name))
-      .filter((check): check is (typeof ci.unhandled)[number] => check !== undefined);
-    const targets = fullChecks.length > 0 ? fullChecks : ci.unhandled.filter((check) => check.flake);
-    if (targets.length === 0) return undefined;
-    let ciState: Awaited<ReturnType<typeof readCiLatch>>;
-    try {
-      ciState = await readCiLatch(latches, latchKey);
-    } catch {
-      // Fail closed: a latch-read error is distinct from an empty budget, so
-      // fall through to the normal flake human-note effects instead of rerunning.
-      return undefined;
-    }
-    const { toRerun, exhausted } = splitFlakeBudget(ciState, sha, targets);
-    if (toRerun.length === 0) {
-      await decisionDeps.sticky(flakeExhaustedComment(targets));
-      await decisionDeps.recordCiHandled(flake.checks);
-      await decisionDeps.resolveHeld("skipped", "flake");
-      await decisionDeps.forgetClaim();
-      return { status: "skipped", reason: flake.reason };
-    }
-    const rerunFn = (
-      opts.api as unknown as {
-        rerunActionJob?: (owner: string, repo: string, jobId: number, runId?: number) => Promise<void>;
-      }
-    ).rerunActionJob;
-    const successes: typeof toRerun = [];
-    const failures: Array<{ check: (typeof toRerun)[number]; error: string }> = [];
-    for (const check of toRerun) {
-      if (typeof rerunFn !== "function") {
-        const why = "rerun not supported by forge client";
-        failures.push({ check, error: why });
-        log(`flake rerun skipped for ${check.name}: ${why}`);
-        continue;
-      }
-      if (check.jobId === undefined) {
-        const why = `missing job id for \`${check.name}\``;
-        failures.push({ check, error: why });
-        log(`flake rerun skipped for ${check.name}: ${why}`);
-        continue;
-      }
-      try {
-        await rerunFn.call(opts.api, owner, repo, check.jobId, check.runId);
-        successes.push(check);
-        log(`flake rerun started for ${check.name} job ${check.jobId}`);
-      } catch (err) {
-        const message = errorMessage(err);
-        failures.push({ check, error: message });
-        log(`flake rerun failed for ${check.name}: ${message}`);
-      }
-    }
-    if (successes.length > 0) {
-      await recordFlakeReruns({
-        home: opts.home,
-        owner,
-        repo,
-        issueNumber,
-        prNumber: pr.number,
-        sha,
-        checkNames: successes.map((check) => check.name),
-        now,
-        skipLatches: latches,
-      });
-    }
-    // Mark the flake logs handled so the same log never reruns again; the
-    // rerun's fresh logs re-enter the normal flow (green continues, a real
-    // failure runs the CI-fix path). A failed API call spends no budget.
-    await decisionDeps.recordCiHandled(flake.checks);
-    const parts: string[] = [];
-    if (successes.length > 0) parts.push(flakeRerunsCommentFor(successes));
-    if (exhausted.length > 0) parts.push(flakeExhaustedComment(exhausted));
-    for (const failure of failures) parts.push(flakeRerunFailedComment([failure.check], failure.error));
-    await decisionDeps.sticky(parts.join("\n"));
-    await decisionDeps.resolveHeld("skipped", "flake");
-    await decisionDeps.forgetClaim();
-    return { status: "skipped", reason: flake.reason };
-  };
   const preRunDecision = preDecision;
-  if (preRunDecision.kind === "skip" && preRunDecision.why === "flake") {
-    const flakeParams = preRunDecision.params as import("./pr_decision.ts").SkipParamsMap["flake"];
-    const flakeResult = await handleFlakeSkipWithRerun({
-      reason: preRunDecision.reason,
-      checks: flakeParams.checks,
-    });
-    if (flakeResult) return flakeResult;
-  }
   if (preRunDecision.kind === "skip") {
     await applyEffects(preRunDecision.effects, decisionDeps);
     return { status: "skipped", reason: preRunDecision.reason };
@@ -3076,6 +3002,117 @@ export async function implementFollowUp(
           if (isCleanBaseMergeOnly) {
             log(CLEAN_BASE_MERGE_ONLY_REASON);
           }
+          const noChangesReason = workerStore.getNoChangesReason();
+          if (noChangesReason) log("worker result: no_changes from tool");
+          else if (!isCleanBaseMergeOnly) log("worker result: no_changes missing (fail-open)");
+          const cleanMergeReason = isCleanBaseMergeOnly ? CLEAN_BASE_MERGE_ONLY_REASON : undefined;
+          const redactedReason = noChangesReason
+            ? redactGitSecrets(noChangesReason, workerPublishSecrets(loop.auth.token, jobChain))
+            : undefined;
+          const noChangesSticky = buildNoChangesSticky(redactedReason ?? cleanMergeReason);
+          // Post-`no_changes` automatic rerun: when the worker leaves a red
+          // head untouched, rerun each still-failed check once per
+          // (head SHA, check name). The first `no_changes` reruns even when
+          // the check is green on the base; once the budget is spent today's
+          // green-on-base guard applies. A failed rerun API call spends no
+          // budget and falls back to today's sit with an error note.
+          const redChecks = ci.unhandled;
+          const rerunEnabled =
+            redChecks.length > 0 &&
+            !isCleanBaseMergeOnly &&
+            isAutoRerunFlakesEnabled(failOpenLoadFromSnapshot(settingsSnapshot));
+          if (rerunEnabled) {
+            let budget: { toRerun: typeof redChecks; exhausted: typeof redChecks } | undefined;
+            try {
+              const ciState = await readCiLatch(latches, latchKey);
+              budget = splitRerunBudget(ciState, pr.head.sha, redChecks);
+            } catch {
+              budget = undefined;
+            }
+            if (budget && budget.toRerun.length > 0) {
+              const rerunFn = (
+                opts.api as unknown as {
+                  rerunActionJob?: (owner: string, repo: string, jobId: number, runId?: number) => Promise<void>;
+                }
+              ).rerunActionJob;
+              const successes: typeof budget.toRerun = [];
+              const failures: Array<{ check: (typeof budget.toRerun)[number]; error: string }> = [];
+              for (const check of budget.toRerun) {
+                if (typeof rerunFn !== "function") {
+                  const why = "rerun not supported by forge client";
+                  failures.push({ check, error: why });
+                  log(`rerun skipped for ${check.name}: ${why}`);
+                  continue;
+                }
+                if (check.jobId === undefined) {
+                  const why = `missing job id for \`${check.name}\``;
+                  failures.push({ check, error: why });
+                  log(`rerun skipped for ${check.name}: ${why}`);
+                  continue;
+                }
+                try {
+                  await rerunFn.call(opts.api, owner, repo, check.jobId, check.runId);
+                  successes.push(check);
+                  log(`rerun started for ${check.name} job ${check.jobId}`);
+                } catch (err) {
+                  const message = errorMessage(err);
+                  failures.push({ check, error: message });
+                  log(`rerun failed for ${check.name}: ${message}`);
+                }
+              }
+              if (successes.length > 0) {
+                try {
+                  await recordReruns({
+                    home: opts.home,
+                    owner,
+                    repo,
+                    issueNumber,
+                    prNumber: pr.number,
+                    sha: pr.head.sha,
+                    checkNames: successes.map((check) => check.name),
+                    now,
+                    skipLatches: latches,
+                  });
+                } catch {
+                  // Fail open: a latch-write error never fails the round.
+                }
+              }
+              const parts: string[] = [noChangesSticky];
+              if (successes.length > 0) parts.push(rerunsCommentFor(successes));
+              if (budget.exhausted.length > 0) parts.push(rerunExhaustedComment(budget.exhausted));
+              for (const failure of failures) parts.push(rerunFailedComment([failure.check], failure.error));
+              const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+              await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
+              await sticky(parts.join("\n\n"), pr.number);
+              await recordAttempt(sha || pr.head.sha);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "no-changes" };
+            }
+            if (budget && budget.toRerun.length === 0 && budget.exhausted.length > 0) {
+              // Budget spent: today's behaviour applies (green on base latches
+              // stuck, otherwise the no-changes sit), with a note that the
+              // automatic rerun already happened.
+              const prAttributed = attributableToPr(ci.unhandled, baseForMarkdown(ci));
+              if (prAttributed.length > 0) {
+                const baseRef = pr.base.ref || opts.job.defaultBranch;
+                const listed = prAttributed.map((name) => `\`${name}\``).join(", ");
+                const reason =
+                  `stuck: CI ${listed} failed on this head but passed on the base ` +
+                  `(${baseRef}@${(ci.baseSha ?? pr.base.sha).slice(0, 12)}): the failure is attributable to ` +
+                  `this PR, not pre-existing. Fix the failure instead of reporting no changes.`;
+                log(`blocked no-changes: ${listed} green on base`);
+                await sticky(`${reason}\n\n${rerunExhaustedComment(budget.exhausted)}`, pr.number);
+                await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+                return { status: "skipped", reason };
+              }
+              const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+              await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
+              await sticky(`${noChangesSticky}\n\n${rerunExhaustedComment(budget.exhausted)}`, pr.number);
+              await recordAttempt(sha || pr.head.sha);
+              await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
+              return { status: "no-changes" };
+            }
+          }
           // A red-CI follow-up must not end with no pushed change by calling
           // the failure pre-existing: when the same check passed on the base
           // commit, the failure is attributable to this PR. Block the
@@ -3097,18 +3134,7 @@ export async function implementFollowUp(
           }
           const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
-          const noChangesReason = workerStore.getNoChangesReason();
-          if (noChangesReason) log("worker result: no_changes from tool");
-          else if (!isCleanBaseMergeOnly) log("worker result: no_changes missing (fail-open)");
-          const cleanMergeReason = isCleanBaseMergeOnly ? CLEAN_BASE_MERGE_ONLY_REASON : undefined;
-          await sticky(
-            buildNoChangesSticky(
-              noChangesReason
-                ? redactGitSecrets(noChangesReason, workerPublishSecrets(loop.auth.token, jobChain))
-                : cleanMergeReason
-            ),
-            pr.number
-          );
+          await sticky(noChangesSticky, pr.number);
           await recordAttempt(sha || pr.head.sha);
           await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
           return { status: "no-changes" };
