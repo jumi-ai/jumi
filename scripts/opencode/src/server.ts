@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { drainAutomergeReconcile } from "./automerge_reconcile_drain.ts";
 import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
 import {
   CI_ABSENT_NOTE,
@@ -725,7 +726,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               automergeEnabled: config.automergeEnabled,
               forgeKind: config.forge,
             },
-            { ...deps.worker, logger: deps.worker.logger ?? logger }
+            { ...deps.worker, logger: deps.worker.logger ?? logger },
+            { forgeDeliveryId: deliveryHeader }
           )
         );
       }
@@ -786,6 +788,7 @@ export async function reclaimExpiredJobs(
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
+  await drainAutomergeReconcile(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);
@@ -1535,6 +1538,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
           logger,
           sits: store.sits,
           strictSlots: store.strictSlots,
+          automergeReconcile: store.automergeReconcile,
         },
       }),
       logger,
