@@ -195,7 +195,7 @@ export function isStrictRefreshTerminalEvidence(
   prNumber: number,
   headSha: string,
   baseSha: string,
-  terminal: StrictRefreshTerminal | undefined | null
+  terminal: Pick<StrictRefreshTerminal, "prNumber" | "headSha" | "baseSha"> | undefined | null
 ): boolean {
   if (!terminal) return false;
   return (
