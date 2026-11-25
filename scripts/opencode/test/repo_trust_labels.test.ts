@@ -124,6 +124,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      workerReviewRules: true,
     });
     expect(narrowed).toEqual(["Alice"]);
     const widened = effectiveTrustedSenderLogins(["alice"], {
@@ -143,6 +144,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      workerReviewRules: true,
     });
     expect(widened).toEqual(["alice"]);
   });
@@ -165,6 +167,7 @@ describe("effectiveTrustedSenderLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      workerReviewRules: true,
     });
     expect(effective).toEqual(["carol"]);
     // Listing is the admit: no forge lookup, case-insensitive whole login.
@@ -191,6 +194,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       })
     ).toBeUndefined();
   });
@@ -228,6 +232,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       };
     }
     // Absent: neither deployment nor repository configures senders.
@@ -284,6 +289,7 @@ describe("effectiveTrustedSenderLogins", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       };
     }
     // Blank deployment entries are ignored: blank-only plus a valid repo list admits the repo list.
@@ -322,6 +328,7 @@ describe("effectiveFollowupIgnoreLogins", () => {
       reviewDrafts: false,
       reviewBudget: {},
       strictBranchRefresh: false,
+      workerReviewRules: true,
     });
     expect(merged).toEqual(["deployer-bot", "repo-bot"]);
     const missing = repoFileApi(undefined);
@@ -361,6 +368,7 @@ describe("effectiveIgnoreConflictsLabel", () => {
         reviewDrafts: false,
         reviewBudget: {},
         strictBranchRefresh: false,
+        workerReviewRules: true,
       })
     ).toBe("skip-me");
   });
