@@ -14,7 +14,7 @@ import { implementConflict } from "./conflict.ts";
 import { recordJobCompleted } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
-import { resolveExhaustedFollowUpHold } from "./exhausted_hold.ts";
+import { resolveWorkerHeld } from "./exhausted_hold.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
 import { createForge } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
@@ -59,6 +59,7 @@ import {
 import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
+import { decodeWorkerJobIntent, settleInvalidWorkerJobIntent } from "./worker_intent.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
@@ -578,34 +579,6 @@ export async function reclaimExpiredWorkerJobs(
   return { requeued: requeued.length, published: publish.length };
 }
 
-/**
- * Resolve a held suggestion `pending` when the follow-up cannot push from the
- * worker tick (mode gate, cancel, terminal failure). Follow-up's own returns
- * already resolve the common paths; this is the backstop for paths that never
- * reach it. One shared decision with the router reclaim path
- * (`resolveExhaustedFollowUpHold`): suggestion-origin holds resolve with the
- * same disposition, maintainer and other holds stay pending. Never throws.
- */
-async function resolveWorkerHeld(
-  api: HoldStatusPort & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
-  store: ReviewJobStore,
-  owner: string,
-  repo: string,
-  issueNumber: number,
-  headSha: string,
-  kind: "completed" | "skipped",
-  reason?: string,
-  prNumber?: number | null
-): Promise<void> {
-  await resolveExhaustedFollowUpHold({
-    api,
-    store,
-    row: { kind: "follow-up", owner, repo, issueNumber, headSha, prNumber },
-    kind,
-    ...(reason !== undefined ? { reason } : {}),
-  });
-}
-
 export async function processWorkerTick(
   store: ReviewJobStore,
   config: WorkerConfig,
@@ -873,7 +846,13 @@ export async function processWorkerTick(
   }
 
   try {
-    const job = issueJobFromRecord(row);
+    let job: IssueJob;
+    try {
+      decodeWorkerJobIntent(row);
+      job = issueJobFromRecord(row);
+    } catch (err) {
+      return await settleInvalidWorkerJobIntent({ store, api, row, leasedBy, error: err, stopHeartbeat, logger });
+    }
     const latch = await store.readIssueSkipLatch(job.owner, job.repo, job.issueNumber);
     await syncHomeSkipLatch(config.home, job.owner, job.repo, job.issueNumber, latch.generation);
     // A follow-up round-cap latch must not refuse a later conflict wake: the
