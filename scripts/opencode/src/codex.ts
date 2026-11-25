@@ -14,6 +14,7 @@ import { ensureCodexPublishedAuth } from "./codex_auth.ts";
 import {
   ensureCodexRetainedHome,
   makeCodexSpawnRoot,
+  relinkCodexAuth,
   resolveCodexResumeThreadId,
   writeCodexHomeKind,
 } from "./codex_home.ts";
@@ -425,24 +426,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       // when present so the review keeps the parent's credential.
       reviewHome = await ensureCodexRetainedHome(opts.workdir, "review");
       await writeCodexReviewHome(reviewHome, opts.workdir);
-      try {
-        const home = opts.home ?? process.env.HOME ?? opts.workdir;
-        const authSrc = join(home, ".codex", "auth.json");
-        const authDst = join(reviewHome, "auth.json");
-        const { readlink, rm, symlink } = await import("node:fs/promises");
-        // The home is retained: drop the previous spawn's link first so a
-        // resume never runs on a stale target.
-        await rm(authDst, { force: true }).catch(() => undefined);
-        const target = await readlink(authSrc).catch(() => undefined);
-        if (target) await symlink(target, authDst).catch(() => undefined);
-        else {
-          const { readFile, writeFile } = await import("node:fs/promises");
-          const raw = await readFile(authSrc, "utf8").catch(() => undefined);
-          if (raw) await writeFile(authDst, raw, { mode: 0o600 }).catch(() => undefined);
-        }
-      } catch {
-        // Best-effort: API-key and local modes have no HOME auth file.
-      }
+      // The home is retained: relink the current credential every spawn so a
+      // resume never runs on a stale target.
+      await relinkCodexAuth(opts.home ?? process.env.HOME ?? opts.workdir, reviewHome);
       // Parent-owned review verdict server, wired for Codex (part-2): the
       // HTTP MCP lives in the Jumi-owned CODEX_HOME config, outside the
       // checkout, so a checkout `.codex` cannot shadow it.
@@ -487,28 +473,13 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       // only the MCP entry is Jumi-owned, rewritten on every spawn, so a
       // resume never runs on a stale token. Only session state carries over.
       workerHome = await ensureCodexRetainedHome(opts.workdir, "worker");
-      const { mkdir, writeFile } = await import("node:fs/promises");
-      await mkdir(workerHome, { recursive: true });
+      const { writeFile } = await import("node:fs/promises");
       await writeFile(join(workerHome, "config.toml"), "# Worker-only home: Jumi-owned MCP entry below.\n").catch(
         () => undefined
       );
-      try {
-        const home = opts.home ?? process.env.HOME ?? opts.workdir;
-        const authSrc = join(home, ".codex", "auth.json");
-        const authDst = join(workerHome, "auth.json");
-        const { readlink, rm, symlink } = await import("node:fs/promises");
-        // Retained home: drop the previous spawn's link before relinking.
-        await rm(authDst, { force: true }).catch(() => undefined);
-        const target = await readlink(authSrc).catch(() => undefined);
-        if (target) await symlink(target, authDst).catch(() => undefined);
-        else {
-          const { readFile } = await import("node:fs/promises");
-          const raw = await readFile(authSrc, "utf8").catch(() => undefined);
-          if (raw) await writeFile(authDst, raw, { mode: 0o600 }).catch(() => undefined);
-        }
-      } catch {
-        // Best-effort: API-key and local modes have no HOME auth file.
-      }
+      // Retained home: relink the current credential before every spawn so a
+      // resume never runs on a stale target.
+      await relinkCodexAuth(opts.home ?? process.env.HOME ?? opts.workdir, workerHome);
       if (opts.workerMcp && workerHome) {
         const { codexWorkerMcpTomlEntry } = await import("./worker_mcp.ts");
         const { appendFile } = await import("node:fs/promises");

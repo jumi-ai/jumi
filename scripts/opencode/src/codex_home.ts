@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 /**
@@ -68,7 +68,10 @@ export async function writeCodexHomeKind(workdir: string, kind: CodexHomeKind | 
 
 export async function ensureCodexRetainedHome(workdir: string, kind: CodexHomeKind): Promise<string> {
   const dir = codexRetainedHome(workdir, kind);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  // Best-effort: a pre-existing dir keeps its old mode without this, and it
+  // holds config.toml with the review/worker MCP bearer token.
+  await chmod(dir, 0o700).catch(() => undefined);
   return dir;
 }
 
@@ -83,7 +86,10 @@ export async function makeCodexSpawnRoot(
   kind: CodexHomeKind
 ): Promise<{ jobDir: string; spawnRoot: string }> {
   const jobDir = codexJobDir(workdir);
-  await mkdir(jobDir, { recursive: true });
+  await mkdir(jobDir, { recursive: true, mode: 0o700 });
+  // Best-effort: the job dir holds config.toml with the review/worker MCP
+  // bearer token, and a pre-existing dir keeps its old mode without this.
+  await chmod(jobDir, 0o700).catch(() => undefined);
   const spawnRoot = await mkdtemp(join(jobDir, `codex-${kind}-spawn-`));
   return { jobDir, spawnRoot };
 }
@@ -99,6 +105,30 @@ export async function cleanupCodexJobHomes(workdir: string): Promise<void> {
 export async function cleanupJobHarnessTemp(workdir: string): Promise<void> {
   await rm(join(workdir, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
   await cleanupCodexJobHomes(workdir);
+}
+
+/**
+ * Link the parent HOME's `auth.json` into a retained Codex home before a
+ * spawn. The home is retained across spawns, so the previous spawn's link is
+ * dropped first and the current credential is relinked (symlink when the
+ * source is itself a link, file copy otherwise) — a resume never runs on a
+ * stale target. Best-effort: API-key and local modes have no HOME auth file.
+ */
+export async function relinkCodexAuth(homeDir: string, retainedHome: string): Promise<void> {
+  try {
+    const authSrc = join(homeDir, ".codex", "auth.json");
+    const authDst = join(retainedHome, "auth.json");
+    await rm(authDst, { force: true }).catch(() => undefined);
+    const target = await readlink(authSrc).catch(() => undefined);
+    if (target) {
+      await symlink(target, authDst).catch(() => undefined);
+      return;
+    }
+    const raw = await readFile(authSrc, "utf8").catch(() => undefined);
+    if (raw) await writeFile(authDst, raw, { mode: 0o600 }).catch(() => undefined);
+  } catch {
+    // Best-effort: API-key and local modes have no HOME auth file.
+  }
 }
 
 /**
