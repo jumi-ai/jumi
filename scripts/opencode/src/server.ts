@@ -521,6 +521,19 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
           }
 
           const job = { ...validation, delivery };
+          try {
+            const { confirmPushFromPrRead } = await import("./push_confirm.ts");
+            await confirmPushFromPrRead(
+              deps.queue as unknown as { pushConfirm?: import("./push_confirm.ts").PushConfirmStore },
+              job.owner,
+              job.repo,
+              job.prNumber,
+              job.headSha,
+              logger
+            );
+          } catch {
+            // Best-effort: the drain re-reads the PR when the webhook is lost.
+          }
           if (deps.getPR) {
             try {
               const pr = await deps.getPR(job.owner, job.repo, job.prNumber);
@@ -796,6 +809,8 @@ export async function reclaimExpiredJobs(
 ): Promise<ReclaimResultSummary> {
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
   await drainAutomergeReconcile(store, api, config, logger).catch(() => undefined);
+  const { drainPushConfirm } = await import("./push_confirm_drain.ts");
+  await drainPushConfirm(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);

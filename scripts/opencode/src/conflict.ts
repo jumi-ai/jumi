@@ -66,6 +66,7 @@ import { gateShipAfterOpenCode, jobWithIssue, type ShipGate, snapshotFromJob } f
 import { withIssueAuthorPermission } from "./permissions.ts";
 import type { Pull } from "./ports.ts";
 import { ProvenanceCollector } from "./provenance.ts";
+import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { throwIfQuotaWait } from "./quota_wait.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
@@ -1636,6 +1637,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             issueNumber: opts.job.issueNumber,
             botUsername: opts.botUsername,
             log,
+            pushConfirm: pushConfirmForJobOpts(opts as never),
           });
         } catch (err) {
           if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {
