@@ -612,6 +612,16 @@ export const REPO_SETTINGS_REGISTRY = [
       return { ok: true, value: raw };
     },
   }),
+  requiredSetting({
+    key: "review_carry",
+    field: "reviewCarry",
+    doc: "Carry a green review across a clean target-branch merge without running a model.",
+    defaultValue: true,
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"review_carry" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
 ];
 
 /**
@@ -1252,6 +1262,16 @@ export function isStrictBranchRefreshEnabled(load: RepoSettingsLoad): boolean {
 export function isReviewDraftsEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return false;
   return load.reviewDrafts === true;
+}
+
+/**
+ * Whether a green review is carried across a clean target-branch merge
+ * without running a model. Default on: missing, invalid, or unreadable files
+ * behave as `true`. The repository opts out with `review_carry: false`.
+ */
+export function isReviewCarryEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return (load as { reviewCarry?: boolean }).reviewCarry !== false;
 }
 
 /**

@@ -80,6 +80,7 @@ import {
   effectiveSuggestionCap,
   effectiveTrustedSenderLogins,
   isMaintainerQuestionsHoldEnabled,
+  isReviewCarryEnabled,
   isReviewDraftsEnabled,
   isSuggestionFollowupEnabled,
   isSuggestionHoldEnabled,
@@ -91,6 +92,7 @@ import {
 } from "./repo_settings.ts";
 import { type RepoSetupRunScript, runRepoSetupForKind } from "./repo_setup.ts";
 import { readStagedBaseFile, stageBaseReviewInstructions } from "./review_base.ts";
+import { attachCarryNote, tryCarryReview } from "./review_carry.ts";
 import { DEFAULT_MAX_THREAD_BYTES, fitReviewThread, mapReviewThread } from "./review_context.ts";
 import { findPreviousReview, isJumiReviewComment, loadReviewDelta, type ReviewDelta } from "./review_delta.ts";
 import { collectRecentHistory } from "./review_history.ts";
@@ -1801,11 +1803,12 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
   // so it publishes exactly once with the canonical names/count even when the
   // child omitted it or wrote its own disclosure line; it is not a finding.
   const excludedNote = formatReviewExcludedNote(opts.excludedFiles ?? [], { allExcluded: opts.allExcluded });
-  const comment = excludedNote
+  const baseComment = excludedNote
     ? capped.comment
       ? `${capped.comment.trimEnd()}\n\n${excludedNote}`
       : excludedNote
     : capped.comment;
+  const comment = attachCarryNote(baseComment, parsed.comment);
   let suggestionAddressed = 0;
   if (opts.previousFindings && opts.previousFindings.length > 0) {
     try {
@@ -2594,6 +2597,52 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       LC_ALL: process.env.LC_ALL,
       GIT_TERMINAL_PROMPT: "0",
     };
+
+    // Green-review carry: a clean target-branch merge into a green head
+    // publishes without a model. Required CI already gated above. Refusals
+    // fall through to today's delta review.
+    {
+      const carried = await tryCarryReview({
+        settingsEnabled: isReviewCarryEnabled(repoBudgetLoad ?? { state: "missing" }),
+        comments: prCommentResult.comments,
+        reviews: prReviews ?? [],
+        inlines: prInlines,
+        botUsername: opts.botUsername,
+        marker: markerFor(opts.owner, opts.repo, pr.number),
+        headSha: reviewedHeadSha,
+        targetBranch: pr.base.ref,
+        pullFilenames: prFiles.map((file) => file.filename),
+        git,
+        cwd: opts.workspace,
+        env: gitCmdEnv,
+        log,
+        reviewLabel,
+        persist: (markdown) => persistOutcome({ kind: "markdown", markdown }),
+        publish: (markdown, previousSha, findings) =>
+          publishReviewResult({
+            api: forgeApi,
+            forge: forgeApi,
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: pr.number,
+            expectedHeadSha: reviewedHeadSha,
+            botUsername: opts.botUsername,
+            blockingQuestionAuthors: opts.blockingQuestionAuthors,
+            automergeRepos: opts.automergeRepos,
+            ...(opts.skipLatches ? { skipLatches: opts.skipLatches } : {}),
+            ...(opts.automergeEnabled !== undefined ? { automergeEnabled: opts.automergeEnabled } : {}),
+            ...(opts.trustedSenderLogins !== undefined ? { trustedSenderLogins: opts.trustedSenderLogins } : {}),
+            resultMarkdown: markdown,
+            logger: log,
+            forgeKind: opts.forgeKind,
+            previousFindings: findings,
+            recordSuggestions: opts.recordSuggestions,
+            changedFiles: prFiles,
+            ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
+          }),
+      });
+      if (carried) return carried;
+    }
 
     // Repository preparation step (`.jumi.yml` `setup`, default branch only).
     // Once per job, after the checkout is ready and before the first engine
