@@ -1107,6 +1107,10 @@ export async function processWorkerTick(
     if (latchReason) {
       await store.setIssueSkipReason(job.owner, job.repo, job.issueNumber, latchReason);
     }
+    // A head-moved skip parks (never promotes) pending wakes: the pass ran
+    // on a head that no longer exists. Set where the existing re-enqueue
+    // condition holds, and passed to `markPublished` below.
+    let parkWakesReason: string | undefined;
     if (result.status === "skipped" && job.mode === "follow-up" && reason) {
       const moved = parsePrHeadChangedReason(reason);
       if (moved?.to && moved.to !== job.headSha) {
@@ -1117,10 +1121,25 @@ export async function processWorkerTick(
           receivedAt: new Date().toISOString(),
         });
         logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after PR head changed`);
+        // A cause accepted on the old head must not promote afterwards: a
+        // pass on a head that moved would run stale. Park it instead; the
+        // new-head row above is the wake. The re-enqueue is unchanged.
+        parkWakesReason = "head-changed";
       }
     }
     const state = workerPublishedState(result.status);
-    const published = await store.markPublished(row.id, leasedBy, { state, reason });
+    const published = await store.markPublished(
+      row.id,
+      leasedBy,
+      parkWakesReason ? { state, reason, parkWakesReason } : { state, reason }
+    );
+    if (published.promoted > 0) {
+      logger(`promoted ${published.promoted} pending wake(s) for ${issueJobKey(job)}`);
+    }
+    if (published.parked > 0) {
+      const parkReason = parkWakesReason ?? (published.cancelled ? "cancelled" : "generation-reset");
+      logger(`parked ${published.parked} pending wake(s) for ${issueJobKey(job)}: ${parkReason}`);
+    }
     if (result.status === "skipped") {
       const { settleStrictSlotForWorkerOutcome } = await import("./strict_refresh_terminal.ts");
       await settleStrictSlotForWorkerOutcome({
@@ -1163,7 +1182,12 @@ export async function processWorkerTick(
     }
     recordJobCompleted(row.kind, state);
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
-    if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
+    if (published.promoted > 0) {
+      // The promoted row is the live board state now: clear the finished
+      // pass's reason instead of remembering it next to a queued successor.
+      // `enqueueIssue` only clears on insert, and promotion inserts directly.
+      await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
+    } else if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
       await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, reason, logger);
     } else if (result.status === "pr" || result.status === "pushed" || state === "succeeded") {
       await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
