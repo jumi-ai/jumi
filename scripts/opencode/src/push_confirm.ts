@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SqlClient } from "./sql_client.ts";
 
 /**
@@ -178,7 +179,14 @@ export interface PushObligationLoop {
   env: Record<string, string | undefined>;
 }
 
-/** Record the push obligation before pushing. Returns the generation, or undefined when skipped. */
+/** Record the push obligation before pushing. Returns the generation, or undefined when skipped.
+ *
+ * The cause is a fresh UUID per push attempt (not the head SHA): re-pushing
+ * the same HEAD after a confirm/settle delete or after a failed-push discard
+ * must admit a new generation, otherwise the retry would run with no
+ * confirmation. Dedupe across concurrent records for the same PR still holds
+ * because the latest request bumps the single per-PR row; a late duplicate
+ * for an older generation settles as stale via the generation fence. */
 export async function recordPushObligationBeforePush(
   loop: PushObligationLoop,
   store: PushConfirmStore | undefined,
@@ -192,7 +200,8 @@ export async function recordPushObligationBeforePush(
   try {
     const head = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: loop.worktree, env: loop.env })).trim();
     if (!head || /^0+$/.test(head)) return undefined;
-    const admitted = await store.request(owner, repo, prNumber, head, branch, head, Date.now());
+    const causeId = randomUUID();
+    const admitted = await store.request(owner, repo, prNumber, head, branch, causeId, Date.now());
     log?.(`push confirm recorded ${owner}/${repo}#${prNumber}@${head.slice(0, 12)} generation=${admitted.generation}`);
     return admitted.generation;
   } catch (err) {
@@ -273,6 +282,10 @@ function tokenMatches(row: MemoryObligation, token: string, nowMs: number): bool
   return row.leaseToken === token && leaseLive(row.leasedUntilMs, nowMs);
 }
 
+function causePrefix(owner: string, repo: string, prNumber: number): string {
+  return `${obligationKey(owner, repo, prNumber)}\0`;
+}
+
 export class MemoryPushConfirmStore implements PushConfirmStore {
   private readonly obligations = new Map<string, MemoryObligation>();
   private readonly causes = new Map<string, { admittedGeneration: number; seenAtMs: number }>();
@@ -350,7 +363,9 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
       const row = this.obligations.get(obligationKey(owner, repo, prNumber));
       if (!row || row.state !== "pending") return "unknown";
       if (row.expectedSha !== headSha) return "mismatch";
+      const generation = row.generation;
       this.obligations.delete(obligationKey(owner, repo, prNumber));
+      this.deleteCausesForGeneration(owner, repo, prNumber, generation);
       return "confirmed";
     });
   }
@@ -360,6 +375,7 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
       const row = this.obligations.get(obligationKey(owner, repo, prNumber));
       if (!row || row.generation !== generation) return "stale";
       this.obligations.delete(obligationKey(owner, repo, prNumber));
+      this.deleteCausesForGeneration(owner, repo, prNumber, generation);
       return "deleted";
     });
   }
@@ -438,8 +454,16 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
         return "rearmed";
       }
       this.obligations.delete(obligationKey(owner, repo, prNumber));
+      this.deleteCausesForGeneration(owner, repo, prNumber, generation);
       return "deleted";
     });
+  }
+
+  private deleteCausesForGeneration(owner: string, repo: string, prNumber: number, generation: number): void {
+    const prefix = causePrefix(owner, repo, prNumber);
+    for (const [key, value] of this.causes) {
+      if (key.startsWith(prefix) && value.admittedGeneration === generation) this.causes.delete(key);
+    }
   }
 
   private failLocked(row: MemoryObligation, error: string, nowMs: number): PushConfirmFailResult {
@@ -537,7 +561,9 @@ export class MemoryPushConfirmStore implements PushConfirmStore {
       const key = obligationKey(owner, repo, prNumber);
       const row = this.obligations.get(key);
       if (!row || row.state !== "exhausted") return false;
+      const generation = row.generation;
       this.obligations.delete(key);
+      this.deleteCausesForGeneration(owner, repo, prNumber, generation);
       return true;
     });
   }
@@ -666,15 +692,22 @@ export class PgPushConfirmStore implements PushConfirmStore {
   }
 
   async confirm(owner: string, repo: string, prNumber: number, headSha: string): Promise<PushConfirmConfirmResult> {
-    const deleted = asRows<{ expected_sha: unknown }>(
+    const deleted = asRows<{ expected_sha: unknown; generation: unknown }>(
       await this.sql.unsafe(
         `DELETE FROM push_confirm
          WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state = 'pending' AND expected_sha = $4
-         RETURNING expected_sha`,
+         RETURNING expected_sha, generation`,
         [owner, repo, prNumber, headSha]
       )
     );
-    if (deleted.length > 0) return "confirmed";
+    if (deleted.length > 0) {
+      const generation = num((deleted[0] as { generation: unknown }).generation);
+      await this.sql.unsafe(
+        `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+        [owner, repo, prNumber, generation]
+      );
+      return "confirmed";
+    }
     const existing = asRows<{ one: unknown }>(
       await this.sql.unsafe(
         `SELECT 1 AS one FROM push_confirm WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state = 'pending' LIMIT 1`,
@@ -691,7 +724,12 @@ export class PgPushConfirmStore implements PushConfirmStore {
         [owner, repo, prNumber, generation]
       )
     );
-    return deleted.length > 0 ? "deleted" : "stale";
+    if (deleted.length === 0) return "stale";
+    await this.sql.unsafe(
+      `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+      [owner, repo, prNumber, generation]
+    );
+    return "deleted";
   }
 
   async claimDue(token: string, leaseMs: number, limit: number, nowMs: number): Promise<PushConfirmClaimedRow[]> {
@@ -804,6 +842,10 @@ export class PgPushConfirmStore implements PushConfirmStore {
         repo,
         prNumber,
       ]);
+      await tx.unsafe(
+        `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+        [owner, repo, prNumber, generation]
+      );
       return "deleted";
     });
   }
@@ -942,12 +984,18 @@ export class PgPushConfirmStore implements PushConfirmStore {
   }
 
   async dismiss(owner: string, repo: string, prNumber: number): Promise<boolean> {
-    const deleted = asRows<{ pr_number: unknown }>(
+    const deleted = asRows<{ pr_number: unknown; generation: unknown }>(
       await this.sql.unsafe(
-        `DELETE FROM push_confirm WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state = 'exhausted' RETURNING pr_number`,
+        `DELETE FROM push_confirm WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND state = 'exhausted' RETURNING pr_number, generation`,
         [owner, repo, prNumber]
       )
     );
-    return deleted.length > 0;
+    if (deleted.length === 0) return false;
+    const generation = num((deleted[0] as { generation: unknown }).generation);
+    await this.sql.unsafe(
+      `DELETE FROM push_confirm_cause WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND admitted_generation = $4`,
+      [owner, repo, prNumber, generation]
+    );
+    return true;
   }
 }

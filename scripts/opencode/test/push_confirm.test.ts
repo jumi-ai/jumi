@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryPushConfirmStore, type PushConfirmStore } from "../src/push_confirm.ts";
+import {
+  discardPushObligationAfterFailedPush,
+  MemoryPushConfirmStore,
+  type PushConfirmStore,
+  recordPushObligationBeforePush,
+} from "../src/push_confirm.ts";
 
 function freshStore(): PushConfirmStore {
   return new MemoryPushConfirmStore();
@@ -64,5 +69,37 @@ describe("MemoryPushConfirmStore contract", () => {
     expect(b.status).toBe("bumped");
     expect(await store.confirm("o", "r", 7, "sha-a")).toBe("mismatch");
     expect(await store.confirm("o", "r", 7, "sha-b")).toBe("confirmed");
+  });
+
+  test("same-SHA re-record after settle admits a new obligation", async () => {
+    const store = freshStore();
+    const loop = {
+      worktree: "/tmp",
+      env: {},
+      runConfiguredGit: async () => "sha-same\n",
+    };
+    const first = await recordPushObligationBeforePush(loop, store, "o", "r", 7, "branch");
+    expect(first).toBeDefined();
+    await discardPushObligationAfterFailedPush(store, "o", "r", 7, first);
+    const second = await recordPushObligationBeforePush(loop, store, "o", "r", 7, "branch");
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(await store.confirm("o", "r", 7, "sha-same")).toBe("confirmed");
+  });
+
+  test("same-SHA re-record after confirm admits a new obligation", async () => {
+    const store = freshStore();
+    const loop = {
+      worktree: "/tmp",
+      env: {},
+      runConfiguredGit: async () => "sha-same\n",
+    };
+    const first = await recordPushObligationBeforePush(loop, store, "o", "r", 7, "branch");
+    expect(first).toBeDefined();
+    expect(await store.confirm("o", "r", 7, "sha-same")).toBe("confirmed");
+    const second = await recordPushObligationBeforePush(loop, store, "o", "r", 7, "branch");
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(await store.confirm("o", "r", 7, "sha-same")).toBe("confirmed");
   });
 });
