@@ -48,6 +48,7 @@ export interface CheckoutPullRequestWorkspaceOptions {
   authorEmail?: string;
   gitRunner?: GitRunner;
   logger?: (message: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -772,9 +773,10 @@ async function ensureReviewMirror(opts: {
 
 export async function checkoutPullRequestWorkspace(opts: CheckoutPullRequestWorkspaceOptions): Promise<void> {
   const git = opts.gitRunner ?? runGit;
+  const signal = opts.abortSignal;
   const configArgs = gitConfigArgs();
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
-    git([...configArgs, ...args], runOpts);
+    signal ? git([...configArgs, ...args], { ...runOpts, signal }) : git([...configArgs, ...args], runOpts);
   const auth: GitAuth = {
     giteaUrl: opts.giteaUrl,
     username: opts.username,
