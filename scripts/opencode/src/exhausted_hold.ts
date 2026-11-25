@@ -1,5 +1,6 @@
 import { isJumiReviewContext } from "./ci.ts";
 import type { Check } from "./ports.ts";
+import type { ReviewJobStore } from "./review_jobs.ts";
 import type { SkipLatchStore } from "./skip_latches.ts";
 import {
   type HoldStatusPort,
@@ -137,18 +138,35 @@ export async function resolveExhaustedFollowUpHoldOrThrow(opts: {
   return { resolved: true, sha, description };
 }
 
-/** Best-effort form of the shared exhausted-hold decision. Never throws. */
-export async function resolveExhaustedFollowUpHold(opts: {
-  api: ExhaustedFollowUpHoldApi;
-  store: ExhaustedFollowUpHoldStore;
-  row: ExhaustedFollowUpHoldRow;
-  ownerToken?: string | null;
-  kind?: "completed" | "skipped";
-  reason?: string;
-}): Promise<ExhaustedFollowUpHoldOutcome> {
+/**
+ * Resolve a held suggestion `pending` when the follow-up cannot push from the
+ * worker tick (mode gate, cancel, terminal failure). Follow-up's own returns
+ * already resolve the common paths; this is the backstop for paths that never
+ * reach it. One shared decision with the router reclaim path
+ * (`resolveExhaustedFollowUpHoldOrThrow`): suggestion-origin holds resolve
+ * with the same disposition, maintainer and other holds stay pending.
+ * Best-effort: never throws, so a forge outage here cannot fail the tick.
+ */
+export async function resolveWorkerHeld(
+  api: HoldStatusPort & { getPR?: (owner: string, repo: string, index: number) => Promise<{ html_url?: string }> },
+  store: ReviewJobStore,
+  owner: string,
+  repo: string,
+  issueNumber: number,
+  headSha: string,
+  kind: "completed" | "skipped",
+  reason?: string,
+  prNumber?: number | null
+): Promise<void> {
   try {
-    return await resolveExhaustedFollowUpHoldOrThrow(opts);
+    await resolveExhaustedFollowUpHoldOrThrow({
+      api,
+      store,
+      row: { kind: "follow-up", owner, repo, issueNumber, headSha, prNumber },
+      kind,
+      ...(reason !== undefined ? { reason } : {}),
+    });
   } catch {
-    return { resolved: false, reason: "post-failed" };
+    // Best-effort backstop: a forge outage here must not fail the tick.
   }
 }

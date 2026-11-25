@@ -215,7 +215,7 @@ LABEL org.opencontainers.image.source="https://gitea.kirmanak.stream/personal/ju
       org.opencontainers.image.revision="${REVISION}"
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl file findutils git jq libatomic1 libstdc++6 procps python3 python-is-python3 python3-yaml ripgrep shellcheck unzip \
+  && apt-get install -y --no-install-recommends ca-certificates curl file findutils git jq libatomic1 libstdc++6 procps python3 python-is-python3 python3-yaml ripgrep shellcheck unzip util-linux \
   && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     : "${YQ_VERSION:?YQ_VERSION build-arg is required}"; \
@@ -408,6 +408,8 @@ RUN git --version \
   && tofu version \
   && kubectl version --client \
   && ps --version \
+  && command -v setsid \
+  && setsid --version \
   && unzip -v \
   && shellcheck --version \
   && UV_OFFLINE=1 uv run --no-project --python 3.13 python -V

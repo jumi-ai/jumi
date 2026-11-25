@@ -86,7 +86,7 @@ describe("repo policy fail-closed sites on unreadable settings", () => {
     expect(notes).toEqual([]);
   });
 
-  test("handleAutomergeLabelChange returns none on unreadable", async () => {
+  test("handleAutomergeLabelChange returns unreadable on unreadable", async () => {
     const { api } = throwingFileApi();
     const logs: string[] = [];
     const result = await handleAutomergeLabelChange({
@@ -100,7 +100,7 @@ describe("repo policy fail-closed sites on unreadable settings", () => {
       botUsername: "jumi",
       log: (m) => logs.push(m),
     });
-    expect(result).toEqual({ action: "none" });
+    expect(result).toEqual({ action: "unreadable" });
     expect(logs.some((m) => m.includes("unreadable"))).toBe(true);
   });
 

@@ -1,3 +1,4 @@
+import { automergeAdmissionFor, isAutomergeAdmissionError } from "./automerge_admission.ts";
 import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   parseWorkflowJobPayload,
@@ -150,6 +151,11 @@ export interface HandleWorkerWebhookDeps {
   review?: WorkerReviewQueue;
   /** Single-slot strict-refresh store; preferred over the cast on `review`. */
   strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
+  /**
+   * Durable automerge-cancel verification store (issue #839). Optional like
+   * `strictSlots`; absent preserves today's inline webhook behavior exactly.
+   */
+  automergeReconcile?: import("./automerge_reconcile.ts").AutomergeReconcileStore;
   api?: WorkerWebhookApi;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
@@ -481,7 +487,8 @@ export async function handleWorkerWebhookEvent(
   eventType: string | null,
   delivery: string,
   policy: WorkerWebhookPolicy,
-  deps: HandleWorkerWebhookDeps
+  deps: HandleWorkerWebhookDeps,
+  opts?: { forgeDeliveryId?: string | null }
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
   if (event === "ping" || eventType === "ping") return json(200, { ok: true });
@@ -493,19 +500,25 @@ export async function handleWorkerWebhookEvent(
   {
     const action = peekWebhookAction(rawBody);
     if (action === "labeled" || action === "unlabeled" || action === "label_updated" || action === "label_cleared") {
+      const forgeKind = (policy as { forgeKind?: string }).forgeKind ?? "gitea";
+      const admission = automergeAdmissionFor(deps, rawBody, forgeKind, delivery, opts);
       try {
         const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
         const handled = await tryHandleAutomergeLabelEvent({
           rawBody,
-          policy: {
-            ...policy,
-            forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
-          },
+          policy: { ...policy, forgeKind },
           api: deps.api,
           log: logger,
+          ...(admission ? { ...admission } : {}),
         });
         if (handled.handled) return json(202, { queued: false, reason: handled.reason });
       } catch (err) {
+        // A failed admission write bypasses the fall-through: the 503 keeps
+        // the delivery unmarked so the forge retry is processed, not deduped.
+        if (isAutomergeAdmissionError(err)) {
+          logger(`automerge admission failed: ${errorMessage(err)}`);
+          return json(503, { error: "queue unavailable" });
+        }
         logger(`automerge label webhook failed: ${errorMessage(err)}`);
       }
     }
