@@ -46,6 +46,7 @@ conflict_regenerate:
   - file: package-lock.json
     run: npm install --package-lock-only --ignore-scripts
 mode: full
+worker_review_rules: true
 branch_prefix: bot/jumi
 pr_title: "feat: {title}"
 commit_message: "chore: {title} (#{issue})"
@@ -90,6 +91,7 @@ const expectedNoneKeys = [
   "reviewDrafts",
   "reviewBudget",
   "strictBranchRefresh",
+  "workerReviewRules",
 ];
 
 const expectedFullKeys = [
@@ -125,6 +127,7 @@ const expectedFullKeys = [
   "setup",
   "verify",
   "strictBranchRefresh",
+  "workerReviewRules",
   "suggestionsHoldMerge",
   "maintainerQuestionsHoldMerge",
 ];
@@ -184,6 +187,7 @@ const invalidPerKey: Array<[string, string, string]> = [
   ["setup", "setup: {}\n", '"setup.run" must be a non-blank string'],
   ["verify", "verify: {}\n", '"verify.run" must be a non-blank string'],
   ["strict_branch_refresh", 'strict_branch_refresh: "yes"\n', '"strict_branch_refresh" must be a boolean'],
+  ["worker_review_rules", 'worker_review_rules: "yes"\n', '"worker_review_rules" must be a boolean'],
 ];
 
 describe("repo_settings registry", () => {

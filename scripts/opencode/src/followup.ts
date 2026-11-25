@@ -170,6 +170,7 @@ import {
   trailerSuggestionCount,
 } from "./verdict.ts";
 import { buildNoChangesSticky, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { loadFollowupReviewRules, withTaskBlocks } from "./worker_review_rules.ts";
 import { redactGitSecrets, workerOpenCodeChildEnvWithGradleSeed } from "./workspace.ts";
 
 export const FOLLOWUP_TIMEOUT_MS = 60 * 60 * 1000;
@@ -2030,6 +2031,22 @@ export async function implementFollowUp(
   if (opts.job.headSha && pr.head.sha && opts.job.headSha !== pr.head.sha) {
     log(`PR head moved from ${opts.job.headSha} to ${pr.head.sha}; continuing on current head`);
   }
+  // Worker review rules come from the base branch the PR targets, selected by
+  // the PR's changed files. Loaded once up front; every JUMI_TASK.md write
+  // below reuses it. Fail-open to today's task file when there is nothing to
+  // inject (switch off, no REVIEW.md, no matching section, read failure).
+  const followupReviewRules = await loadFollowupReviewRules({
+    api: opts.api as never,
+    owner,
+    repo,
+    ref: pr.base?.ref?.trim() ? pr.base.ref : opts.job.defaultBranch,
+    settings: failOpenUpFront,
+    prNumber: pr.number,
+    log,
+  });
+  if (followupReviewRules) {
+    log(`worker review rules injected for ${owner}/${repo}#${issueNumber} PR ${pr.number}`);
+  }
   // Merge-only waiter wake after its first merged: bring the branch up to
   // date with the default branch, push, and stop. Never calls the feedback
   // engine unless the merge itself conflicts (handled inside the merge).
@@ -2742,10 +2759,11 @@ export async function implementFollowUp(
         }
 
         throwIfAborted(opts.abortSignal);
-        const followupVerifyNote = followupVerify ? `${verifyTaskNote(followupVerify)}\n` : "";
-        const followupTaskMarkdown = followupSetupBlock
-          ? `${buildTaskMarkdown(taskJob)}\n${followupSetupBlock}\n${followupVerifyNote}`
-          : `${buildTaskMarkdown(taskJob)}${followupVerifyNote ? `\n${followupVerifyNote}` : ""}`;
+        const followupTaskMarkdown =
+          withTaskBlocks(buildTaskMarkdown(taskJob), {
+            ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
+            ...(followupReviewRules ? { workerReviewRules: followupReviewRules } : {}),
+          }) + (followupVerify ? `\n${verifyTaskNote(followupVerify)}\n` : "");
         await writeFile(join(worktree, "JUMI_TASK.md"), followupTaskMarkdown);
         // Parent-staged inputs for the follow-up child: the issue's attachments
         // as well as any on the PR. Parent credentials only; the child has no
@@ -2961,7 +2979,13 @@ export async function implementFollowUp(
             continueOpenCode: async (issue) => {
               await writeFile(
                 join(worktree, "JUMI_TASK.md"),
-                buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api))
+                withTaskBlocks(
+                  buildTaskMarkdown(await withIssueAuthorPermission(jobWithIssue(taskJob, issue), opts.api)),
+                  {
+                    ...(followupSetupBlock ? { repoSetupBlock: followupSetupBlock } : {}),
+                    ...(followupReviewRules ? { workerReviewRules: followupReviewRules } : {}),
+                  }
+                )
               );
               await stageIssueAttachments({
                 api: opts.api,

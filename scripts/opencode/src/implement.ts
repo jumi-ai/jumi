@@ -124,6 +124,7 @@ import {
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { preferWorkerTool, rotateResultScope, startWorkerMcpServer, WorkerResultStore } from "./worker_mcp.ts";
+import { loadImplementReviewRules, withTaskBlocks } from "./worker_review_rules.ts";
 import {
   type GitAuthResolver,
   type GitRunner,
@@ -1210,9 +1211,17 @@ async function implementExternalIssue(
             }
           }
         }
-        const externalTaskMarkdown = repoSetupBlock
-          ? `${buildTaskMarkdown(effectiveJob)}\n${repoSetupBlock}\n`
-          : buildTaskMarkdown(effectiveJob);
+        const externalReviewRules = await loadImplementReviewRules({
+          api: forge,
+          owner,
+          repo,
+          defaultBranch: effectiveJob.defaultBranch,
+          log,
+        });
+        const externalTaskMarkdown = withTaskBlocks(buildTaskMarkdown(effectiveJob), {
+          ...(repoSetupBlock ? { repoSetupBlock } : {}),
+          ...(externalReviewRules ? { workerReviewRules: externalReviewRules } : {}),
+        });
         await writeFile(join(worktree, "JUMI_TASK.md"), externalTaskMarkdown);
         await rm(join(worktree, SKIP_FILE), { force: true }).catch(() => undefined);
         await rm(join(worktree, PR_DESCRIPTION_FILE), { force: true }).catch(() => undefined);
@@ -1670,11 +1679,19 @@ export async function implementIssue(
           // the hop must not inherit the failed run's partial file.
           await writeHandoffToWorktree(worktree, injectedHandoff);
         };
+        const implementReviewRules = await loadImplementReviewRules({
+          api: opts.api,
+          owner,
+          repo,
+          defaultBranch: opts.job.defaultBranch,
+          log,
+        });
         const writeTaskFiles = async (job: IssueJob) => {
-          const verifyNote = activeVerify ? `${verifyTaskNote(activeVerify)}\n` : "";
-          const taskMarkdown = repoSetupBlock
-            ? `${buildTaskMarkdown(job)}\n${repoSetupBlock}\n${verifyNote}`
-            : `${buildTaskMarkdown(job)}${verifyNote ? `\n${verifyNote}` : ""}`;
+          const taskMarkdown =
+            withTaskBlocks(buildTaskMarkdown(job), {
+              ...(repoSetupBlock ? { repoSetupBlock } : {}),
+              ...(implementReviewRules ? { workerReviewRules: implementReviewRules } : {}),
+            }) + (activeVerify ? `\n${verifyTaskNote(activeVerify)}\n` : "");
           await writeFile(join(worktree, "JUMI_TASK.md"), taskMarkdown);
           if (queue.length > 0) {
             await writeFile(join(worktree, QUEUE_FILE), formatQueueMarkdown(queue, owner, repo));
