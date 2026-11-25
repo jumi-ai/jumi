@@ -157,7 +157,7 @@
   "webfetch_probe.ts": 1005,
   "webhook.ts": 154,
   "webhook_delivery.ts": 58,
-  "worker.ts": 1296,
+  "worker.ts": 1370,
   "worker_config.ts": 217,
   "worker_mcp.ts": 552,
   "worker_server.ts": 327,
@@ -174,5 +174,6 @@
   "automerge_decision.ts": 392,
   "automerge_reconcile_drain.ts": 309,
   "worker_intent.ts": 97,
-  "followup_wake_causes.ts": 666
+  "followup_wake_causes.ts": 666,
+  "worker_latch_fence.ts": 205
 }
