@@ -87,12 +87,33 @@ export interface StrictRefreshSlotStore {
    * the same candidate is not immediately reselected on unchanged evidence.
    * Releasing an empty slot still records the terminal (timeout bookkeeping).
    */
+  /**
+   * Release the held slot. When `terminal` is set, remember its evidence so
+   * the same candidate is not immediately reselected on unchanged evidence.
+   * Releasing an empty slot still records the terminal (timeout bookkeeping).
+   */
   release(
     owner: string,
     repo: string,
     baseBranch: string,
     opts?: { terminal?: Omit<StrictRefreshTerminal, "atMs">; nowMs?: number }
   ): Promise<void>;
+  /**
+   * Release the held slot only when it still names `prNumber` with head
+   * `headSha` (case-insensitive). A late result for an older admission never
+   * frees a newer holder. Fenced like `tryAdmit`/`touch` under `withSlotLock`
+   * (memory: the same serialized chain). Returns true when released.
+   */
+  releaseIfHolder(
+    owner: string,
+    repo: string,
+    baseBranch: string,
+    prNumber: number,
+    headSha: string,
+    opts?: { terminal?: Omit<StrictRefreshTerminal, "atMs">; nowMs?: number }
+  ): Promise<boolean>;
+  /** Every currently held slot, oldest first. Powers the engine-tick expiry. */
+  listHeldSlots(): Promise<StrictRefreshSlot[]>;
 }
 
 function slotKey(owner: string, repo: string, baseBranch: string): string {
@@ -257,6 +278,33 @@ export class MemoryStrictRefreshSlotStore implements StrictRefreshSlotStore {
         this.terminals.set(key, { ...opts.terminal, atMs: opts.nowMs ?? Date.now() });
       }
     });
+  }
+
+  async releaseIfHolder(
+    owner: string,
+    repo: string,
+    baseBranch: string,
+    prNumber: number,
+    headSha: string,
+    opts?: { terminal?: Omit<StrictRefreshTerminal, "atMs">; nowMs?: number }
+  ): Promise<boolean> {
+    return this.locked(() => {
+      const key = slotKey(owner, repo, baseBranch);
+      const slot = this.slots.get(key);
+      if (!slot || slot.prNumber !== prNumber) return false;
+      if ((slot.headSha ?? "").toLowerCase() !== (headSha ?? "").toLowerCase()) return false;
+      this.slots.delete(key);
+      if (opts?.terminal) {
+        this.terminals.set(key, { ...opts.terminal, atMs: opts.nowMs ?? Date.now() });
+      }
+      return true;
+    });
+  }
+
+  async listHeldSlots(): Promise<StrictRefreshSlot[]> {
+    const held = [...this.slots.values()].map((slot) => ({ ...slot, laps: slot.laps ?? 0 }));
+    held.sort((a, b) => a.admittedAtMs - b.admittedAtMs);
+    return held;
   }
 }
 
@@ -458,6 +506,102 @@ export class PgStrictRefreshSlotStore implements StrictRefreshSlotStore {
             [owner, repo, baseBranch, nowIso]
           );
         }
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async releaseIfHolder(
+    owner: string,
+    repo: string,
+    baseBranch: string,
+    prNumber: number,
+    headSha: string,
+    opts?: { terminal?: Omit<StrictRefreshTerminal, "atMs">; nowMs?: number }
+  ): Promise<boolean> {
+    try {
+      return await this.withSlotLock(owner, repo, baseBranch, async (tx) => {
+        const rows = asRows<{ pr_number: unknown; head_sha: unknown }>(
+          await tx.unsafe(
+            `SELECT pr_number, head_sha FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE owner = $1 AND repo = $2 AND base_branch = $3`,
+            [owner, repo, baseBranch]
+          )
+        );
+        const row = rows[0];
+        if (row?.pr_number == null || Number(row.pr_number) !== prNumber) return false;
+        if (String(row.head_sha ?? "").toLowerCase() !== (headSha ?? "").toLowerCase()) return false;
+        const nowIso = new Date(opts?.nowMs ?? Date.now()).toISOString();
+        if (opts?.terminal) {
+          await tx.unsafe(
+            `INSERT INTO ${STRICT_REFRESH_SLOT_TABLE} (owner, repo, base_branch, pr_number, head_sha, base_sha, admitted_at, updated_at, laps,
+               last_terminal_pr, last_terminal_head, last_terminal_base, last_terminal_reason, last_terminal_at)
+              VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4::timestamptz, 0, $5, $6, $7, $8, $4::timestamptz)
+              ON CONFLICT (owner, repo, base_branch)
+              DO UPDATE SET pr_number = NULL, head_sha = NULL, base_sha = NULL, admitted_at = NULL,
+                updated_at = EXCLUDED.updated_at, laps = 0,
+                last_terminal_pr = EXCLUDED.last_terminal_pr, last_terminal_head = EXCLUDED.last_terminal_head,
+                last_terminal_base = EXCLUDED.last_terminal_base, last_terminal_reason = EXCLUDED.last_terminal_reason,
+                last_terminal_at = EXCLUDED.last_terminal_at`,
+            [
+              owner,
+              repo,
+              baseBranch,
+              nowIso,
+              opts.terminal.prNumber,
+              opts.terminal.headSha,
+              opts.terminal.baseSha,
+              opts.terminal.reason,
+            ]
+          );
+        } else {
+          await tx.unsafe(
+            `UPDATE ${STRICT_REFRESH_SLOT_TABLE}
+              SET pr_number = NULL, head_sha = NULL, base_sha = NULL, admitted_at = NULL, updated_at = $4::timestamptz, laps = 0
+              WHERE owner = $1 AND repo = $2 AND base_branch = $3`,
+            [owner, repo, baseBranch, nowIso]
+          );
+        }
+        return true;
+      });
+    } catch (err) {
+      wrapSqlError(err);
+    }
+  }
+
+  async listHeldSlots(): Promise<StrictRefreshSlot[]> {
+    try {
+      const rows = asRows<{
+        owner: unknown;
+        repo: unknown;
+        base_branch: unknown;
+        pr_number: unknown;
+        head_sha: unknown;
+        base_sha: unknown;
+        admitted_at: unknown;
+        updated_at: unknown;
+        laps: unknown;
+      }>(
+        await this.sql.unsafe(
+          `SELECT owner, repo, base_branch, pr_number, head_sha, base_sha, admitted_at, updated_at, laps FROM ${STRICT_REFRESH_SLOT_TABLE} WHERE pr_number IS NOT NULL ORDER BY admitted_at ASC NULLS LAST`
+        )
+      );
+      const now = Date.now();
+      return rows.flatMap((row) => {
+        if (row.pr_number == null) return [];
+        return [
+          {
+            owner: String(row.owner ?? ""),
+            repo: String(row.repo ?? ""),
+            baseBranch: String(row.base_branch ?? ""),
+            prNumber: Number(row.pr_number),
+            headSha: String(row.head_sha ?? ""),
+            baseSha: String(row.base_sha ?? ""),
+            admittedAtMs: epochMs(row.admitted_at, now),
+            updatedAtMs: epochMs(row.updated_at, now),
+            laps: Number(row.laps ?? 0),
+          },
+        ];
       });
     } catch (err) {
       wrapSqlError(err);
