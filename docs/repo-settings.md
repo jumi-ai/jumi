@@ -72,6 +72,7 @@ file. "Deployer setting" is the environment / deployment value the key combines 
 | `review_budget.max_files` | positive integer, at least 1 | `MAX_FILES` | How many changed files are sent to OpenCode for reviews in this repository | Ceiling: `MAX_FILES_MAX` (unset defaults to `MAX_FILES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
 | `review_budget.max_patch_bytes` | positive integer, at least 1 | `MAX_PATCH_BYTES` | How many patch bytes are sent to OpenCode for reviews in this repository | Ceiling: `MAX_PATCH_BYTES_MAX` (unset defaults to `MAX_PATCH_BYTES`, so a repository can only lower the budget out of the box); a value above the maximum applies as the maximum |
 | `strict_branch_refresh` | boolean | `false` (off) | Gitea-only fallback for strict branch refresh: `true` lets Jumi refresh an outdated head with a merge-only update when the base branch protection cannot be read (write-level token gets 403 on the admin route). The readable forge rule always wins (rule off plus this on means off); on GitHub this key has no effect. Exactly one spelling: `strict-branch-refresh` or `strictBranchRefresh` is an unknown key rejected with the usual "did you mean" error. A non-boolean value makes the whole file invalid | No deployer setting. Read from the default branch only |
+| `worker_review_rules` | boolean | `true` (on) | Shares the base-branch `REVIEW.md` rules with implement and follow-up workers: the severity bar and pre-write questions plus the sections that apply (implement gets repo-wide plus all path sections, follow-up gets the sections matching the PR's changed files; the reviewer-only `Not a finding` section is left out). `false` keeps workers on today's prompts. Exactly one spelling: `worker-review-rules` or `workerReviewRules` is an unknown key rejected with the usual "did you mean" error. A non-boolean value makes the whole file invalid | No deployer setting. Read from the default branch only |
 
 ## Complete example
 
@@ -152,6 +153,7 @@ setup: # preparation command run once per job before the first engine spawn
   kinds: [review, implement, followup, conflict] # default: all four
 
 strict_branch_refresh: false # Gitea-only fallback when branch protection is unreadable (default false); GitHub ignores it
+worker_review_rules: true # false keeps implement/follow-up workers off the REVIEW.md rules (default shares them)
 ```
 
 ## Recipes
@@ -236,6 +238,7 @@ everywhere except auto-merge, which stays silent only for missing/`false`.
 | Review budget (`review_budget`) | Deployment values (`MAX_FILES`, `MAX_PATCH_BYTES`) | Deployment values still apply — but like any other runner job, no runner job starts while the default-branch file is invalid (see Runners row) | Deployment values (fail-open, logged) |
 | CI gate (`ci_gate.wait`) | Wait for required checks (today's behaviour) | Whole file invalid, so the gate behaves as `required` (nothing ever falls back to `none`) | Wait for required checks (fail-open, logged); nothing ever falls back to `none` |
 | Strict branch refresh (`strict_branch_refresh`, Gitea only; GitHub ignores it) | No opt-in: unreadable protection means `unknown`, no refresh | No opt-in (the whole file is invalid, so no entry applies) | No opt-in (fail-open, logged); unreadable protection means `unknown`, no refresh |
+| Worker review rules (`worker_review_rules`) | Share base-branch `REVIEW.md` rules with workers when the repo has one (nothing new when it does not) | Share when the file is valid; an invalid file starts no runner job, so nothing is shared (see Runners row) | Share (fail-open, logged); nothing new when the repo has no `REVIEW.md` |
 | Runners (`allowed_runners`) | Full chain (unrestricted) | No runner job starts: a review ends with a `failure` status naming the parser's error, and a worker job says so once where it was started | Full chain (fail-open, logged). An explicitly empty list is not "missing": it makes the whole file invalid (`"allowed_runners" is empty, so no runner could work ...; use mode: off or mode: review-only`), so no runner job starts like the Invalid column. A non-empty list that matches no runner fails closed with a `failure`/note saying the settings left no eligible runner. Unknown names are only logged |
 | Setup (`setup`) | No setup: the job runs as today, with no extra log line and no prompt change | Whole file invalid, so like any other runner job, no runner job starts (a review posts `failure` naming the parser's error; a worker job comments once where it was started) | No setup, logged; the job otherwise runs as today |
 

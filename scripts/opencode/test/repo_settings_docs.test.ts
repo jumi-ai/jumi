@@ -42,6 +42,7 @@ describe("repo-settings docs", () => {
     expect(parsed.settings.maxFollowupRounds).toBeDefined();
     expect(parsed.settings.maxConflictRounds).toBeDefined();
     expect(parsed.settings.reviewDrafts).toBe(true);
+    expect(parsed.settings.workerReviewRules).toBe(true);
     expect(parsed.settings.maxSuggestions).toBe(2);
     expect(parsed.settings.reviewBudget.maxFiles).toBeDefined();
     expect(parsed.settings.reviewBudget.maxPatchBytes).toBeDefined();
