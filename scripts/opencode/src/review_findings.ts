@@ -188,6 +188,55 @@ export interface FindingResponseInput {
 
 export const MAX_FINDING_RESPONSE_REASON_CHARS = 2000;
 
+export interface FindingResponseSelector {
+  fingerprint: string;
+  path?: string;
+  line?: number;
+}
+
+/** Split a worker `finding` answer into a ledger selector (path:line prefix, else bare fingerprint). */
+export function parseFindingResponseSelector(finding: string): FindingResponseSelector {
+  const raw = finding.trim();
+  const match = /^\s*([^:\s][^:]*?)\s*:\s*(\d+)\s*:/.exec(raw);
+  if (!match) return { fingerprint: raw };
+  const path = match[1]?.trim() ?? "";
+  const line = Number.parseInt(match[2] ?? "", 10);
+  if (!path || !Number.isFinite(line)) return { fingerprint: raw };
+  return { fingerprint: raw, path, line };
+}
+
+/** Ledger surface for persisting worker pushback (the full store satisfies this). */
+export type FindingResponseLedger = Pick<import("./review_jobs.ts").ReviewJobStore, "recordFindingResponse">;
+
+/** Persist buffered worker `finding_response` answers (fail-open per answer); returns the number recorded. */
+export async function persistFindingResponses(
+  responses: readonly { finding: string; status: string; reason: string }[],
+  target: { owner: string; repo: string; prNumber: number },
+  ledger: FindingResponseLedger | undefined,
+  log?: (message: string) => void
+): Promise<number> {
+  if (!ledger || responses.length === 0) return 0;
+  let recorded = 0;
+  for (const response of responses) {
+    const selector = parseFindingResponseSelector(response.finding);
+    try {
+      const ok = await ledger.recordFindingResponse({
+        ...target,
+        fingerprint: selector.fingerprint,
+        ...(selector.path !== undefined ? { path: selector.path } : {}),
+        ...(selector.line !== undefined ? { line: selector.line } : {}),
+        status: response.status,
+        reason: response.reason,
+      });
+      if (ok) recorded++;
+      else log?.(`finding response unmatched: ${response.finding.slice(0, 120)}`);
+    } catch (err) {
+      log?.(`finding response unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return recorded;
+}
+
 export function validateFindingResponse(
   input: FindingResponseInput
 ): { ok: true; finding: string; status: FindingResponseStatus; reason: string } | { ok: false; error: string } {

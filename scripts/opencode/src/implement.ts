@@ -474,7 +474,11 @@ export interface ImplementOptions extends PickupPolicy {
    */
   ledger?: Pick<
     import("./review_jobs.ts").ReviewJobStore,
-    "electSharedFailure" | "listSharedFailures" | "listWaitersForFirst" | "recordSharedFailures"
+    | "electSharedFailure"
+    | "listSharedFailures"
+    | "listWaitersForFirst"
+    | "recordSharedFailures"
+    | "recordFindingResponse"
   >;
 }
 

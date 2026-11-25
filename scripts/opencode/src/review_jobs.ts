@@ -2319,6 +2319,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     reason: string;
   }): Promise<boolean> {
     return this.locked(() => {
+      // Same match as the Pg store: fingerprint match OR path(+line) match.
+      // Empty strings count as absent; with neither selector there is no
+      // match (updating the PR's latest row would clobber an unrelated row).
+      const fingerprint = typeof opts.fingerprint === "string" && opts.fingerprint !== "" ? opts.fingerprint : null;
+      const path = typeof opts.path === "string" && opts.path !== "" ? opts.path : null;
+      const line = typeof opts.line === "number" && Number.isFinite(opts.line) ? opts.line : null;
+      if (fingerprint == null && path == null) return false;
       const match = [...this.reviewFindings]
         .reverse()
         .find(
@@ -2326,8 +2333,8 @@ export class MemoryReviewJobStore implements ReviewJobStore {
             row.owner === opts.owner &&
             row.repo === opts.repo &&
             row.prNumber === opts.prNumber &&
-            ((opts.fingerprint && row.fingerprint === opts.fingerprint) ||
-              (opts.path != null && row.path === opts.path && (opts.line == null || row.line === opts.line)))
+            ((fingerprint != null && row.fingerprint === fingerprint) ||
+              (path != null && row.path === path && (line == null || row.line === line)))
         );
       if (!match) return false;
       match.workerStatus = opts.status;
@@ -5738,6 +5745,13 @@ export class PgReviewJobStore implements ReviewJobStore {
     status: string;
     reason: string;
   }): Promise<boolean> {
+    // Same match as the Memory store: fingerprint match OR path(+line) match.
+    // Empty strings count as absent; with neither selector there is no match
+    // (updating the PR's latest row would clobber an unrelated finding).
+    const fingerprint = typeof opts.fingerprint === "string" && opts.fingerprint !== "" ? opts.fingerprint : null;
+    const path = typeof opts.path === "string" && opts.path !== "" ? opts.path : null;
+    const line = typeof opts.line === "number" && Number.isFinite(opts.line) ? opts.line : null;
+    if (fingerprint == null && path == null) return false;
     try {
       const rows = asRows<{ id: unknown }>(
         await this.sql.unsafe(
@@ -5745,22 +5759,12 @@ export class PgReviewJobStore implements ReviewJobStore {
            WHERE id = (
              SELECT id FROM jumi_review_findings
              WHERE owner = $1 AND repo = $2 AND pr_number = $3
-               AND ($6 = '' OR fingerprint = $6)
-               AND ($7 = '' OR path = $7)
-               AND ($8 IS NULL OR line = $8)
+               AND (($6 IS NOT NULL AND fingerprint = $6)
+                 OR ($7 IS NOT NULL AND path = $7 AND ($8 IS NULL OR line = $8)))
              ORDER BY id DESC LIMIT 1
            )
            RETURNING id`,
-          [
-            opts.owner,
-            opts.repo,
-            opts.prNumber,
-            opts.status,
-            opts.reason,
-            opts.fingerprint ?? "",
-            opts.path ?? "",
-            opts.line ?? null,
-          ]
+          [opts.owner, opts.repo, opts.prNumber, opts.status, opts.reason, fingerprint, path, line]
         )
       );
       return rows.length > 0;

@@ -122,6 +122,7 @@ import {
 } from "./repo_settings.ts";
 import { runRepoSetupForKind } from "./repo_setup.ts";
 import { BODY_ONLY_REVIEW_ACTION } from "./review.ts";
+import { persistFindingResponses } from "./review_findings.ts";
 import { inlinesForReviewGroup } from "./review_groups.ts";
 import { appendRunnerStamp, type RunnerStamp } from "./runners.ts";
 import { standingPodRuntime } from "./runtime.ts";
@@ -2990,6 +2991,16 @@ export async function implementFollowUp(
           log,
           injectedHandoff ?? null
         );
+        // Structured finding answers leave the spawn-local store here: without
+        // this the worker is told its pushback was recorded while the ledger
+        // never sees it. Fail-open per answer, like the metrics writes.
+        const recordedResponses = await persistFindingResponses(
+          workerStore.getFindingResponses(),
+          { owner, repo, prNumber: pr.number },
+          opts.ledger,
+          log
+        );
+        if (recordedResponses > 0) log(`worker result: ${recordedResponses} finding_response(s) recorded`);
         await stripSentinels(worktree, [...JUMI_SENTINEL_FILES]);
         const porcelain = await worktreePorcelain(loop);
         // A clean base merge is not a fix: no tree change with only the
