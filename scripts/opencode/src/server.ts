@@ -584,6 +584,13 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
                     const followupDelivery = deliveryHeader ?? webhookWakeDeliveryFallback("pull_request", rawBody);
                     const workerJob = { ...strictJob, delivery: followupDelivery, receivedAt };
                     const workerResult = await deps.worker.queue.enqueue(workerJob);
+                    if (strictSlots && strictJob.prNumber && strictJob.headSha) {
+                      const baseBranch = fullPr.base?.ref?.trim() ? fullPr.base.ref.trim() : "";
+                      if (baseBranch)
+                        await strictSlots
+                          .clearPending(strictOwner, strictRepo, baseBranch, strictJob.prNumber, strictJob.headSha)
+                          .catch(() => undefined);
+                    }
                     logger(
                       `${workerResult.queued ? "queued" : "deduped"} ${workerResult.key} delivery=${delivery} strict-refresh`
                     );

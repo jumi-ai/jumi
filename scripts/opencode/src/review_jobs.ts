@@ -4237,6 +4237,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
         await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
         await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS laps INTEGER NOT NULL DEFAULT 0`);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS pending_job JSONB`);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
         await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
       });
