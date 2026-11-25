@@ -16,6 +16,7 @@ import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
 import { resolveWorkerHeld } from "./exhausted_hold.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
+import { payloadGenerationOf } from "./followup_wake_causes.ts";
 import { createForge } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -56,6 +57,11 @@ import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { decodeWorkerJobIntent, settleInvalidWorkerJobIntent } from "./worker_intent.ts";
+import {
+  fencedSkipLatchesForWorkerJob,
+  settleWorkerLatchFenceFailure,
+  type WorkerLatchFenceFailure,
+} from "./worker_latch_fence.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
@@ -850,6 +856,15 @@ export async function processWorkerTick(
     return true;
   }
 
+  // Runner-local latch fence: the wrapper records the first rejection and
+  // aborts the job; the flag (not the runner return/throw) is authoritative.
+  // Already-issued forge calls are not rolled back.
+  let latchFenceFailure: WorkerLatchFenceFailure | undefined;
+  const recordModelReached = (): void | Promise<void> => {
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else return store.recordRoleSuccess("worker");
+  };
+
   try {
     let job: IssueJob;
     try {
@@ -942,7 +957,18 @@ export async function processWorkerTick(
       },
       extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
       home: effectiveConfig.home,
-      skipLatches: store.skipLatches,
+      // Runner-local: runners see the fenced wrapper; operator kick/cancel
+      // and settleObservedCancel keep the original unfenced store.
+      skipLatches: fencedSkipLatchesForWorkerJob({
+        skipLatches: store.skipLatches,
+        jobId: rowId,
+        leasedBy,
+        generation: payloadGenerationOf(row.payload),
+        abort,
+        record: (failure) => {
+          if (!latchFenceFailure) latchFenceFailure = failure;
+        },
+      }),
       ledger: store,
       handoffs: store.handoffs,
       workdir: effectiveConfig.workdir,
@@ -1049,6 +1075,31 @@ export async function processWorkerTick(
       }
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
+    }
+    // Cancel, lost-owner, and external-shutdown above win. A recorded fence
+    // failure overrides any runner return before ordinary settlement.
+    if (latchFenceFailure) {
+      const fenced = await settleWorkerLatchFenceFailure({
+        failure: latchFenceFailure,
+        store,
+        api,
+        config,
+        rowId,
+        leasedBy,
+        target: {
+          owner: job.owner,
+          repo: job.repo,
+          issueNumber: job.issueNumber,
+          headSha: job.headSha ?? "",
+          ...(job.prNumber !== undefined ? { prNumber: job.prNumber } : {}),
+          ...(job.mode !== undefined ? { mode: job.mode } : {}),
+          jobKey: issueJobKey(job),
+          jobKind: row.kind,
+        },
+        logger,
+        recordModelReached,
+      });
+      if (fenced) return fenced;
     }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
@@ -1187,6 +1238,30 @@ export async function processWorkerTick(
       logger(`worker job ${row.jobKey} interrupted`);
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
+    }
+    // A swallowed fence rejection settles before the per-job-aborted return.
+    if (latchFenceFailure) {
+      const fenced = await settleWorkerLatchFenceFailure({
+        failure: latchFenceFailure,
+        store,
+        api,
+        config,
+        rowId,
+        leasedBy,
+        target: {
+          owner: row.owner,
+          repo: row.repo,
+          issueNumber: row.issueNumber ?? 0,
+          headSha: row.headSha ?? "",
+          ...(row.prNumber != null ? { prNumber: row.prNumber } : {}),
+          mode: row.kind,
+          jobKey: row.jobKey,
+          jobKind: row.kind,
+        },
+        logger,
+        recordModelReached,
+      });
+      if (fenced) return fenced;
     }
     if (abort.signal.aborted) {
       logger(`${row.jobKey} cancelled`);
