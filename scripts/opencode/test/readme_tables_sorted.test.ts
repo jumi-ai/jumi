@@ -5,9 +5,10 @@ import { join } from "node:path";
 const readme = readFileSync(join(process.cwd(), "..", "..", "README.md"), "utf8");
 
 /**
- * Configuration tables (header first cell `Name`): rows stay sorted by name
- * so parallel additions land in different hunks instead of conflicting at the
- * same spot. See `docs/repo-settings.md` ("Adding a setting").
+ * Configuration tables (header first cell `Name`, plus headerless
+ * continuations of those tables): rows stay sorted by name so parallel
+ * additions land in different hunks instead of conflicting at the same spot.
+ * See `docs/repo-settings.md` ("Adding a setting").
  */
 function nameTables(text: string): Array<{ start: number; keys: string[] }> {
   const tables: Array<{ start: number; keys: string[] }> = [];
@@ -29,6 +30,17 @@ function nameTables(text: string): Array<{ start: number; keys: string[] }> {
         if (match?.[1]) keys.push(match[1]);
       }
       tables.push({ start: i + 1, keys });
+    } else if (line.startsWith("| `")) {
+      // Headerless continuation of a configuration table: only env-style
+      // UPPER_SNAKE names count (the Role table is deliberately unordered).
+      const keys: string[] = [];
+      for (const row of lines.slice(i, j)) {
+        const match = /\| `([^`]+)`/.exec(row);
+        if (match?.[1]) keys.push(match[1]);
+      }
+      if (keys.length > 0 && keys.every((key) => /^[A-Z0-9_]+$/.test(key))) {
+        tables.push({ start: i + 1, keys });
+      }
     }
     i = j;
   }
