@@ -294,8 +294,8 @@ export interface ReviewJobStore {
   markPublished(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<{ cancelled: boolean }>;
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string }
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }>;
   /**
    * Atomic settle plus handover obligation: the same fenced `markPublished`
    * transition and the `review_handover_pending` insert in one transaction
@@ -304,9 +304,9 @@ export interface ReviewJobStore {
   markPublishedWithHandover(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string },
     publishedStatus: "posted" | "updated" | "skipped"
-  ): Promise<{ cancelled: boolean }>;
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }>;
   /**
    * Durable per-run usage: one row per (runner spawn, model). Called by the
    * engine wrapper before the job completes, so a pod that exits after one
@@ -996,7 +996,11 @@ function isHandoverPendingStatus(status: string): boolean {
   return status === "posted" || status === "updated";
 }
 
-type MarkPublishedOutcome = { state: "succeeded" | "skipped" | "failed"; reason?: string };
+type MarkPublishedOutcome = {
+  state: "succeeded" | "skipped" | "failed";
+  reason?: string;
+  parkWakesReason?: string;
+};
 
 // Shared memory terminal transition so `markPublished` and
 // `markPublishedWithHandover` cannot drift. Returns whether the row settled to
@@ -1045,6 +1049,32 @@ function memoryHandoverPendings(
   };
   if (!holder.__reviewHandoverPending) holder.__reviewHandoverPending = new Map();
   return holder.__reviewHandoverPending;
+}
+
+/** Follow-up wake-cause park reasons (issue #838). */
+const WAKE_PARK_CANCELLED = "cancelled";
+const WAKE_PARK_DROPPED = "dropped";
+const WAKE_PARK_OBSOLETE_HEAD = "obsolete-head";
+const WAKE_PARK_GENERATION_RESET = "generation-reset";
+
+function wakePayloadGeneration(payload: unknown): number {
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const generation = (payload as { generation?: unknown }).generation;
+    if (typeof generation === "number" && Number.isFinite(generation)) return Math.trunc(generation);
+  }
+  return 0;
+}
+
+function isFollowUpKind(kind: JobKind | string | null | undefined): boolean {
+  return kind === "follow-up";
+}
+
+/** Per-key advisory serialization for follow-up wake handling (Postgres). */
+async function pgLockWakeKeys(tx: SqlClient, keys: readonly string[]): Promise<void> {
+  const sorted = [...new Set(keys)].sort();
+  for (const key of sorted) {
+    await tx.unsafe(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [key]);
+  }
 }
 
 function jobPrUpdatedAtMs(job: ReviewJob): number | null {
@@ -1320,6 +1350,78 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return run;
   }
 
+  private latchGenerationFor(owner: string, repo: string, issueNumber: number | null): number {
+    if (issueNumber == null) return 0;
+    return this.issueSkipLatches.get(issueSkipLatchKey(owner, repo, issueNumber))?.generation ?? 0;
+  }
+
+  /** Insert one ordinary queued follow-up from the oldest pending cause. Caller holds the store lock. */
+  private async promoteOldestPendingForKeyLocked(key: string): Promise<number> {
+    const pending = await this.wakeCauses.peekOldestPending(key);
+    if (!pending) return 0;
+    if (this.rows.some((row) => row.jobKey === key && (row.state === "queued" || row.state === "leased"))) {
+      return 0;
+    }
+    const now = Date.now();
+    const newRow: ReviewJobRecord = {
+      id: this.nextId++,
+      jobKey: pending.jobKey,
+      kind: "follow-up",
+      owner: pending.owner,
+      repo: pending.repo,
+      prNumber: pending.prNumber,
+      headSha: pending.headSha,
+      issueNumber: pending.issueNumber,
+      payload: structuredClone(pending.payload) as ReviewJobRecord["payload"],
+      delivery: pending.delivery,
+      state: "queued",
+      attempt: 0,
+      leasedBy: null,
+      leasedUntil: null,
+      resultMarkdown: null,
+      resultRunner: null,
+      resultReason: null,
+      error: null,
+      pendingStatusAt: null,
+      publishedAt: null,
+      prUpdatedAt: null,
+      cancelRequested: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.rows.push(newRow);
+    const ok = await this.wakeCauses.markPromoted(pending.id, newRow.id);
+    if (!ok) {
+      const idx = this.rows.findIndex((row) => row.id === newRow.id);
+      if (idx >= 0) this.rows.splice(idx, 1);
+      return 0;
+    }
+    return 1;
+  }
+
+  /** Park obsolete generations then promote the oldest still-valid cause. Caller holds the store lock. */
+  private async settleFollowUpPendingLocked(
+    key: string,
+    owner: string,
+    repo: string,
+    issueNumber: number | null,
+    opts?: { parkAllReason?: string }
+  ): Promise<{ promoted: number; parked: number }> {
+    if (opts?.parkAllReason) {
+      const parked = await this.wakeCauses.parkPendingForKey(key, opts.parkAllReason);
+      return { promoted: 0, parked };
+    }
+    const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+    let parked = 0;
+    if (latchGen > 0) {
+      parked += await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, {
+        generation: latchGen,
+      });
+    }
+    const promoted = await this.promoteOldestPendingForKeyLocked(key);
+    return { promoted, parked };
+  }
+
   async migrate(): Promise<void> {
     await this.sits.migrate();
   }
@@ -1472,6 +1574,18 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         return { key, queued: false };
       }
       if (kind !== "implement" && job.prNumber) {
+        const superseded: Array<{ key: string; generation: number }> = [];
+        for (const row of this.rows) {
+          if (
+            rowKind(row) === kind &&
+            isSamePullRequest(row, { owner: job.owner, repo: job.repo, prNumber: job.prNumber }) &&
+            row.state === "queued" &&
+            row.jobKey !== key
+          ) {
+            superseded.push({ key: row.jobKey, generation: payloadGeneration(row.payload) });
+          }
+        }
+        superseded.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
         for (const row of this.rows) {
           if (
             rowKind(row) === kind &&
@@ -1481,6 +1595,13 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           ) {
             row.state = "cancelled";
             row.updatedAt = now;
+          }
+        }
+        if (isFollowUpKind(kind)) {
+          for (const entry of superseded) {
+            await this.wakeCauses.parkPendingForKey(entry.key, WAKE_PARK_OBSOLETE_HEAD, {
+              generation: entry.generation + 1,
+            });
           }
         }
       }
@@ -1518,11 +1639,23 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   drop(key: string): Promise<boolean> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const row = this.rows.find((item) => item.jobKey === key && item.state === "queued");
       if (!row) return false;
+      const kind = rowKind(row);
+      const settlingGen = payloadGeneration(row.payload);
+      const owner = row.owner;
+      const repo = row.repo;
+      const issueNumber = row.issueNumber;
       row.state = "cancelled";
       row.updatedAt = Date.now();
+      if (!isFollowUpKind(kind)) return true;
+      const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+      if (latchGen > 0) {
+        await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, { generation: latchGen });
+      }
+      await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_DROPPED, { generation: settlingGen + 1 });
+      await this.promoteOldestPendingForKeyLocked(key);
       return true;
     });
   }
@@ -1747,38 +1880,93 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   markPublished(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<{ cancelled: boolean }> {
-    return this.locked(() => {
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string }
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }> {
+    return this.locked(async () => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
+      const kind = rowKind(row);
+      const key = row.jobKey;
+      const settlingGen = payloadGeneration(row.payload);
+      const owner = row.owner;
+      const repo = row.repo;
+      const issueNumber = row.issueNumber;
       // A cancel that lands after the tick's final `isCancelRequested` poll
       // must not publish a normal result: settle atomically like the rewake
       // branch so the late mark wins and the caller posts `stopped`.
-      return { cancelled: applyMarkPublishedRow(row, outcome, Date.now()).cancelled };
+      const settled = applyMarkPublishedRow(row, outcome, Date.now());
+      if (!isFollowUpKind(kind) || settled.requeued) {
+        return { cancelled: settled.cancelled, promoted: 0, parked: 0 };
+      }
+      if (settled.cancelled) {
+        let parked = 0;
+        const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+        if (latchGen > 0) {
+          parked += await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+          });
+        }
+        parked += await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, {
+          generation: settlingGen + 1,
+        });
+        const promoted = await this.promoteOldestPendingForKeyLocked(key);
+        return { cancelled: true, promoted, parked };
+      }
+      const parkAll = outcome.parkWakesReason?.trim();
+      if (parkAll) {
+        const parked = await this.wakeCauses.parkPendingForKey(key, parkAll);
+        return { cancelled: false, promoted: 0, parked };
+      }
+      const wake = await this.settleFollowUpPendingLocked(key, owner, repo, issueNumber);
+      return { cancelled: false, promoted: wake.promoted, parked: wake.parked };
     });
   }
 
   markPublishedWithHandover(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string },
     publishedStatus: "posted" | "updated" | "skipped"
-  ): Promise<{ cancelled: boolean }> {
-    return this.locked(() => {
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }> {
+    return this.locked(async () => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark published for job ${id}`);
+      const kind = rowKind(row);
+      const key = row.jobKey;
+      const settlingGen = payloadGeneration(row.payload);
+      const owner = row.owner;
+      const repo = row.repo;
+      const issueNumber = row.issueNumber;
       const settled = applyMarkPublishedRow(row, outcome, Date.now());
       const pendings = memoryHandoverPendings(this);
       if (settled.cancelled) {
         pendings.delete(id);
-        return { cancelled: true };
+        if (!isFollowUpKind(kind)) return { cancelled: true, promoted: 0, parked: 0 };
+        let parked = 0;
+        const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+        if (latchGen > 0) {
+          parked += await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+          });
+        }
+        parked += await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, {
+          generation: settlingGen + 1,
+        });
+        const promoted = await this.promoteOldestPendingForKeyLocked(key);
+        return { cancelled: true, promoted, parked };
       }
-      if (settled.requeued) return { cancelled: false };
+      if (settled.requeued) return { cancelled: false, promoted: 0, parked: 0 };
       if (isHandoverPendingStatus(publishedStatus) && !pendings.has(id)) {
         pendings.set(id, { reviewJobId: id, publishedStatus, createdAt: Date.now() });
       }
-      return { cancelled: false };
+      if (!isFollowUpKind(kind)) return { cancelled: false, promoted: 0, parked: 0 };
+      const parkAll = outcome.parkWakesReason?.trim();
+      if (parkAll) {
+        const parked = await this.wakeCauses.parkPendingForKey(key, parkAll);
+        return { cancelled: false, promoted: 0, parked };
+      }
+      const wake = await this.settleFollowUpPendingLocked(key, owner, repo, issueNumber);
+      return { cancelled: false, promoted: wake.promoted, parked: wake.parked };
     });
   }
 
@@ -1788,7 +1976,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     leaseMs = HEARTBEAT_MS,
     kinds?: readonly JobKind[]
   ): Promise<ReclaimResult> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const allowed = kindsOrReview(kinds);
       const ts = now.getTime();
       const claimedUntil = ts + leaseMs;
@@ -1799,11 +1987,29 @@ export class MemoryReviewJobStore implements ReviewJobStore {
         if (!allowed.includes(rowKind(row))) continue;
         // A recorded cancel wins over reclaim: settle to `cancelled`.
         if (row.cancelRequested) {
+          const kind = rowKind(row);
+          const key = row.jobKey;
+          const settlingGen = payloadGeneration(row.payload);
+          const owner = row.owner;
+          const repo = row.repo;
+          const issueNumber = row.issueNumber;
           row.state = "cancelled";
           row.leasedBy = null;
           row.leasedUntil = null;
           row.cancelRequested = false;
           row.updatedAt = ts;
+          if (isFollowUpKind(kind)) {
+            const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+            if (latchGen > 0) {
+              await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, {
+                generation: latchGen,
+              });
+            }
+            await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, {
+              generation: settlingGen + 1,
+            });
+            await this.promoteOldestPendingForKeyLocked(key);
+          }
           continue;
         }
         if (hasPersistedResult(row)) {
@@ -2813,6 +3019,29 @@ export class MemoryReviewJobStore implements ReviewJobStore {
     return this.locked(async () => {
       const now = Date.now();
       let n = 0;
+      type Affected = { key: string; generation: number; state: "queued" | "leased"; kind: JobKind };
+      const affected: Affected[] = [];
+      for (const row of this.rows) {
+        if (row.owner !== owner || row.repo !== repo || row.issueNumber !== issueNumber) continue;
+        if (!WORKER_JOB_KINDS.includes(rowKind(row))) continue;
+        if (row.state === "queued") {
+          affected.push({
+            key: row.jobKey,
+            generation: payloadGeneration(row.payload),
+            state: "queued",
+            kind: rowKind(row),
+          });
+        } else if (row.state === "leased") {
+          affected.push({
+            key: row.jobKey,
+            generation: payloadGeneration(row.payload),
+            state: "leased",
+            kind: rowKind(row),
+          });
+        }
+      }
+      // Deterministic key order preserves the same lock-before-row ordering as Postgres.
+      affected.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
       for (const row of this.rows) {
         if (row.owner !== owner || row.repo !== repo || row.issueNumber !== issueNumber) continue;
         if (!WORKER_JOB_KINDS.includes(rowKind(row))) continue;
@@ -2830,6 +3059,25 @@ export class MemoryReviewJobStore implements ReviewJobStore {
           // here; the job posts it when it settles.
           row.cancelRequested = true;
           row.updatedAt = now;
+        }
+      }
+      const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+      // Park causes already present for both queued (settled) and leased
+      // (flagged) rows, scoped to the invalidated generation. Promotion only
+      // for queued rows that left no active successor; leased rows keep their
+      // active row until the worker settles.
+      for (const entry of affected) {
+        if (!isFollowUpKind(entry.kind)) continue;
+        if (latchGen > 0) {
+          await this.wakeCauses.parkPendingForKey(entry.key, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+          });
+        }
+        await this.wakeCauses.parkPendingForKey(entry.key, WAKE_PARK_CANCELLED, {
+          generation: entry.generation + 1,
+        });
+        if (entry.state === "queued") {
+          await this.promoteOldestPendingForKeyLocked(entry.key);
         }
       }
       await this.handoffs.deleteForIssue(owner, repo, issueNumber);
@@ -2865,14 +3113,27 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   }
 
   markCancelled(id: number, leasedBy: string): Promise<void> {
-    return this.locked(() => {
+    return this.locked(async () => {
       const row = this.rows.find((item) => item.id === id);
       if (row?.state !== "leased" || row.leasedBy !== leasedBy) throw new Error(`cannot mark cancelled for job ${id}`);
+      const kind = rowKind(row);
+      const key = row.jobKey;
+      const settlingGen = payloadGeneration(row.payload);
+      const owner = row.owner;
+      const repo = row.repo;
+      const issueNumber = row.issueNumber;
       row.state = "cancelled";
       row.leasedBy = null;
       row.leasedUntil = null;
       row.cancelRequested = false;
       row.updatedAt = Date.now();
+      if (!isFollowUpKind(kind)) return;
+      const latchGen = this.latchGenerationFor(owner, repo, issueNumber);
+      if (latchGen > 0) {
+        await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, { generation: latchGen });
+      }
+      await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, { generation: settlingGen + 1 });
+      await this.promoteOldestPendingForKeyLocked(key);
     });
   }
 
@@ -3652,17 +3913,33 @@ export async function assertLedgerSchema(sql: SqlClient): Promise<void> {
 /**
  * Single fenced terminal transition shared by `markPublished` and
  * `markPublishedWithHandover` so semantics cannot drift. Returns the settled
- * state; throws `cannot mark published for job <id>` when nothing matched.
+ * row; throws `cannot mark published for job <id>` when nothing matched.
  */
 async function pgMarkPublishedUpdate(
   sql: SqlClient,
   id: number,
   leasedBy: string,
   outcome: MarkPublishedOutcome
-): Promise<string> {
+): Promise<{
+  state: string;
+  jobKey: string;
+  kind: string;
+  owner: string;
+  repo: string;
+  issueNumber: number | null;
+  payload: unknown;
+}> {
   // Cancel wins atomically like the rewake branch: a mark that lands after
   // the tick's final poll settles to `cancelled` instead of publishing.
-  const rows = asRows<{ state: unknown }>(
+  const rows = asRows<{
+    state: unknown;
+    job_key: unknown;
+    kind: unknown;
+    owner: unknown;
+    repo: unknown;
+    issue_number: unknown;
+    payload: unknown;
+  }>(
     await sql.unsafe(
       `UPDATE review_jobs
        SET state = CASE WHEN cancel_requested THEN 'cancelled' WHEN $5::boolean AND rewake_requested THEN 'queued' ELSE $3 END,
@@ -3674,12 +3951,113 @@ async function pgMarkPublishedUpdate(
            leased_until = NULL,
            updated_at = NOW()
        WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-       RETURNING state`,
+       RETURNING state, job_key, kind, owner, repo, issue_number, payload`,
       [id, leasedBy, outcome.state, outcome.reason ?? null, isCiRewakeOutcome(outcome)]
     )
   );
   if (rows.length === 0) throw new Error(`cannot mark published for job ${id}`);
-  return str(rows[0].state);
+  const row = rows[0];
+  return {
+    state: str(row.state),
+    jobKey: str(row.job_key),
+    kind: str(row.kind) || REVIEW_KIND,
+    owner: str(row.owner),
+    repo: str(row.repo),
+    issueNumber: row.issue_number == null || row.issue_number === "" ? null : num(row.issue_number),
+    payload: row.payload,
+  };
+}
+
+function pgPayloadGeneration(payload: unknown): number {
+  let parsed: unknown = payload;
+  if (typeof payload === "string") {
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return 0;
+    }
+  }
+  return wakePayloadGeneration(parsed);
+}
+
+async function pgLatchGenerationTx(
+  tx: SqlClient,
+  owner: string,
+  repo: string,
+  issueNumber: number | null
+): Promise<number> {
+  if (issueNumber == null) return 0;
+  const rows = asRows<{ generation: unknown }>(
+    await tx.unsafe(`SELECT generation FROM issue_skip_latches WHERE owner = $1 AND repo = $2 AND issue_number = $3`, [
+      owner,
+      repo,
+      issueNumber,
+    ])
+  );
+  return rows[0] ? num(rows[0].generation) : 0;
+}
+
+/**
+ * Promote the oldest still-valid pending cause for `key` into an ordinary
+ * queued follow-up row. Must run inside the caller's transaction while the
+ * caller holds `pg_advisory_xact_lock(hashtext(key))`, so a racing admission
+ * (lock, recheck active row, then record pending or insert ordinary) cannot
+ * slip between the settle and the promotion. Returns 1 when a row was
+ * promoted, 0 otherwise. An in-flight insert conflict leaves the cause
+ * pending only behind an actual queued/leased successor.
+ */
+async function pgPromoteOldestPendingTx(
+  tx: SqlClient,
+  wakeCauses: PgFollowUpWakeCauseStore,
+  key: string
+): Promise<number> {
+  const pending = await wakeCauses.peekOldestPending(key, tx);
+  if (!pending) return 0;
+  const inflight = asRows<{ one: unknown }>(
+    await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE job_key = $1 AND state IN ('queued', 'leased') LIMIT 1`, [
+      key,
+    ])
+  );
+  if (inflight.length > 0) return 0;
+  const inserted = asRows<{ id: unknown }>(
+    await tx.unsafe(
+      `INSERT INTO review_jobs (
+         job_key, kind, owner, repo, pr_number, head_sha, issue_number, payload, delivery, state, attempt
+       ) VALUES ($1, 'follow-up', $2, $3, $4, $5, $6, $7::jsonb, $8, 'queued', 0)
+       ON CONFLICT (job_key) WHERE state IN ('queued', 'leased')
+       DO NOTHING
+       RETURNING id`,
+      [
+        pending.jobKey,
+        pending.owner,
+        pending.repo,
+        pending.prNumber,
+        pending.headSha,
+        pending.issueNumber,
+        JSON.stringify(pending.payload),
+        pending.delivery,
+      ]
+    )
+  );
+  if (inserted.length === 0) {
+    const recheck = asRows<{ one: unknown }>(
+      await tx.unsafe(`SELECT 1 AS one FROM review_jobs WHERE job_key = $1 AND state IN ('queued', 'leased') LIMIT 1`, [
+        key,
+      ])
+    );
+    // Conflict behind a real successor: leave pending for the next settle.
+    // No successor means the conflict came from nowhere; leave pending rather
+    // than strand with a silent drop (the next settle re-attempts).
+    void recheck;
+    return 0;
+  }
+  const newId = num(inserted[0].id);
+  const ok = await wakeCauses.markPromoted(pending.id, newId, tx);
+  if (!ok) {
+    await tx.unsafe(`DELETE FROM review_jobs WHERE id = $1`, [newId]);
+    return 0;
+  }
+  return 1;
 }
 
 export class PgReviewJobStore implements ReviewJobStore {
@@ -3907,6 +4285,21 @@ export class PgReviewJobStore implements ReviewJobStore {
     const key = workerJobKey(job);
     const kind = workerJobKind(job);
     return this.sql.begin(async (tx) => {
+      if (isFollowUpKind(kind)) {
+        if (job.prNumber) {
+          const oldKeys = asRows<{ job_key: unknown }>(
+            await tx.unsafe(
+              `SELECT job_key FROM review_jobs
+               WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state = 'queued' AND job_key <> $5`,
+              [job.owner, job.repo, job.prNumber, kind, key]
+            )
+          );
+          const lockKeys = [...new Set([key, ...oldKeys.map((r) => str(r.job_key))])].sort();
+          await pgLockWakeKeys(tx, lockKeys);
+        } else {
+          await pgLockWakeKeys(tx, [key]);
+        }
+      }
       const inflight = asRows<{ job_key: unknown }>(
         await tx.unsafe(
           `SELECT job_key FROM review_jobs
@@ -3996,12 +4389,28 @@ export class PgReviewJobStore implements ReviewJobStore {
       }
 
       if (kind !== "implement" && job.prNumber) {
-        await tx.unsafe(
-          `UPDATE review_jobs
-           SET state = 'cancelled', updated_at = NOW()
-           WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state = 'queued' AND job_key <> $5`,
-          [job.owner, job.repo, job.prNumber, kind, key]
+        const superseded = asRows<{ job_key: unknown; payload: unknown }>(
+          await tx.unsafe(
+            `UPDATE review_jobs
+             SET state = 'cancelled', updated_at = NOW()
+             WHERE owner = $1 AND repo = $2 AND pr_number = $3 AND kind = $4 AND state = 'queued' AND job_key <> $5
+             RETURNING job_key, payload`,
+            [job.owner, job.repo, job.prNumber, kind, key]
+          )
         );
+        if (isFollowUpKind(kind) && superseded.length > 0) {
+          const sorted = [...superseded].sort((a, b) => {
+            const ka = str(a.job_key);
+            const kb = str(b.job_key);
+            return ka < kb ? -1 : ka > kb ? 1 : 0;
+          });
+          for (const old of sorted) {
+            await this.wakeCauses.parkPendingForKey(str(old.job_key), WAKE_PARK_OBSOLETE_HEAD, {
+              generation: pgPayloadGeneration(old.payload) + 1,
+              tx,
+            });
+          }
+        }
       }
       await this.clearSitTx(tx, job.owner, job.repo, job.issueNumber);
       return { key, queued: true };
@@ -4009,15 +4418,47 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async drop(key: string): Promise<boolean> {
-    const rows = asRows<{ id: unknown }>(
-      await this.sql.unsafe(
-        `UPDATE review_jobs SET state = 'cancelled', updated_at = NOW()
-         WHERE job_key = $1 AND state = 'queued'
-         RETURNING id`,
-        [key]
-      )
-    );
-    return rows.length > 0;
+    return this.sql.begin(async (tx) => {
+      const kindRows = asRows<{ kind: unknown }>(
+        await tx.unsafe(`SELECT kind FROM review_jobs WHERE job_key = $1 AND state = 'queued' LIMIT 1`, [key])
+      );
+      const kindHint = kindRows[0] ? str(kindRows[0].kind) || REVIEW_KIND : REVIEW_KIND;
+      if (isFollowUpKind(kindHint)) {
+        await pgLockWakeKeys(tx, [key]);
+      }
+      const rows = asRows<{
+        id: unknown;
+        job_key: unknown;
+        kind: unknown;
+        owner: unknown;
+        repo: unknown;
+        issue_number: unknown;
+        payload: unknown;
+      }>(
+        await tx.unsafe(
+          `UPDATE review_jobs SET state = 'cancelled', updated_at = NOW()
+           WHERE job_key = $1 AND state = 'queued'
+           RETURNING id, job_key, kind, owner, repo, issue_number, payload`,
+          [key]
+        )
+      );
+      if (rows.length === 0) return false;
+      const row = rows[0];
+      if (!isFollowUpKind(str(row.kind))) return true;
+      const owner = str(row.owner);
+      const repo = str(row.repo);
+      const issueNumber = row.issue_number == null || row.issue_number === "" ? null : num(row.issue_number);
+      const latchGen = await pgLatchGenerationTx(tx, owner, repo, issueNumber);
+      if (latchGen > 0) {
+        await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, { generation: latchGen, tx });
+      }
+      await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_DROPPED, {
+        generation: pgPayloadGeneration(row.payload) + 1,
+        tx,
+      });
+      await pgPromoteOldestPendingTx(tx, this.wakeCauses, key);
+      return true;
+    });
   }
 
   async lease(
@@ -4370,25 +4811,90 @@ export class PgReviewJobStore implements ReviewJobStore {
   async markPublished(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string }
-  ): Promise<{ cancelled: boolean }> {
-    const state = await pgMarkPublishedUpdate(this.sql, id, leasedBy, outcome);
-    return { cancelled: state === "cancelled" };
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string }
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }> {
+    return this.sql.begin(async (tx) => {
+      const keyRows = asRows<{ job_key: unknown; kind: unknown }>(
+        await tx.unsafe(`SELECT job_key, kind FROM review_jobs WHERE id = $1`, [id])
+      );
+      const jobKey = keyRows[0] ? str(keyRows[0].job_key) : "";
+      const kindHint = keyRows[0] ? str(keyRows[0].kind) || REVIEW_KIND : REVIEW_KIND;
+      if (jobKey && isFollowUpKind(kindHint)) {
+        await pgLockWakeKeys(tx, [jobKey]);
+      }
+      const settled = await pgMarkPublishedUpdate(tx, id, leasedBy, outcome);
+      if (!isFollowUpKind(settled.kind) || settled.state === "queued") {
+        return { cancelled: settled.state === "cancelled", promoted: 0, parked: 0 };
+      }
+      if (settled.state === "cancelled") {
+        let parked = 0;
+        const latchGen = await pgLatchGenerationTx(tx, settled.owner, settled.repo, settled.issueNumber);
+        if (latchGen > 0) {
+          parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+            tx,
+          });
+        }
+        parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_CANCELLED, {
+          generation: pgPayloadGeneration(settled.payload) + 1,
+          tx,
+        });
+        const promoted = await pgPromoteOldestPendingTx(tx, this.wakeCauses, settled.jobKey);
+        return { cancelled: true, promoted, parked };
+      }
+      const parkAll = outcome.parkWakesReason?.trim();
+      if (parkAll) {
+        const parked = await this.wakeCauses.parkPendingForKey(settled.jobKey, parkAll, { tx });
+        return { cancelled: false, promoted: 0, parked };
+      }
+      let parked = 0;
+      const latchGen = await pgLatchGenerationTx(tx, settled.owner, settled.repo, settled.issueNumber);
+      if (latchGen > 0) {
+        parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_GENERATION_RESET, {
+          generation: latchGen,
+          tx,
+        });
+      }
+      const promoted = await pgPromoteOldestPendingTx(tx, this.wakeCauses, settled.jobKey);
+      return { cancelled: false, promoted, parked };
+    });
   }
 
   async markPublishedWithHandover(
     id: number,
     leasedBy: string,
-    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string },
+    outcome: { state: "succeeded" | "skipped" | "failed"; reason?: string; parkWakesReason?: string },
     publishedStatus: "posted" | "updated" | "skipped"
-  ): Promise<{ cancelled: boolean }> {
+  ): Promise<{ cancelled: boolean; promoted: number; parked: number }> {
     return this.sql.begin(async (tx) => {
-      const state = await pgMarkPublishedUpdate(tx, id, leasedBy, outcome);
-      if (state === "cancelled") {
-        await tx.unsafe(`DELETE FROM review_handover_pending WHERE review_job_id = $1`, [id]);
-        return { cancelled: true };
+      const keyRows = asRows<{ job_key: unknown; kind: unknown }>(
+        await tx.unsafe(`SELECT job_key, kind FROM review_jobs WHERE id = $1`, [id])
+      );
+      const jobKey = keyRows[0] ? str(keyRows[0].job_key) : "";
+      const kindHint = keyRows[0] ? str(keyRows[0].kind) || REVIEW_KIND : REVIEW_KIND;
+      if (jobKey && isFollowUpKind(kindHint)) {
+        await pgLockWakeKeys(tx, [jobKey]);
       }
-      if (state === "queued") return { cancelled: false };
+      const settled = await pgMarkPublishedUpdate(tx, id, leasedBy, outcome);
+      if (settled.state === "cancelled") {
+        await tx.unsafe(`DELETE FROM review_handover_pending WHERE review_job_id = $1`, [id]);
+        if (!isFollowUpKind(settled.kind)) return { cancelled: true, promoted: 0, parked: 0 };
+        let parked = 0;
+        const latchGen = await pgLatchGenerationTx(tx, settled.owner, settled.repo, settled.issueNumber);
+        if (latchGen > 0) {
+          parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+            tx,
+          });
+        }
+        parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_CANCELLED, {
+          generation: pgPayloadGeneration(settled.payload) + 1,
+          tx,
+        });
+        const promoted = await pgPromoteOldestPendingTx(tx, this.wakeCauses, settled.jobKey);
+        return { cancelled: true, promoted, parked };
+      }
+      if (settled.state === "queued") return { cancelled: false, promoted: 0, parked: 0 };
       if (isHandoverPendingStatus(publishedStatus)) {
         await tx.unsafe(
           `INSERT INTO review_handover_pending (review_job_id, published_status)
@@ -4397,7 +4903,22 @@ export class PgReviewJobStore implements ReviewJobStore {
           [id, publishedStatus]
         );
       }
-      return { cancelled: false };
+      if (!isFollowUpKind(settled.kind)) return { cancelled: false, promoted: 0, parked: 0 };
+      const parkAll = outcome.parkWakesReason?.trim();
+      if (parkAll) {
+        const parked = await this.wakeCauses.parkPendingForKey(settled.jobKey, parkAll, { tx });
+        return { cancelled: false, promoted: 0, parked };
+      }
+      let parked = 0;
+      const latchGen = await pgLatchGenerationTx(tx, settled.owner, settled.repo, settled.issueNumber);
+      if (latchGen > 0) {
+        parked += await this.wakeCauses.parkPendingForKey(settled.jobKey, WAKE_PARK_GENERATION_RESET, {
+          generation: latchGen,
+          tx,
+        });
+      }
+      const promoted = await pgPromoteOldestPendingTx(tx, this.wakeCauses, settled.jobKey);
+      return { cancelled: false, promoted, parked };
     });
   }
 
@@ -4411,6 +4932,22 @@ export class PgReviewJobStore implements ReviewJobStore {
       const allowed = kindsOrReview(kinds);
       const ts = now.toISOString();
       const claimedUntil = new Date(now.getTime() + leaseMs).toISOString();
+      // Lock-before-row: discover candidate follow-up keys without row locks,
+      // take per-key advisory locks in deterministic order, then take row
+      // locks. This preserves the same advisory-then-row ordering as settle.
+      const candidates = asRows<{ job_key: unknown; kind: unknown }>(
+        await tx.unsafe(
+          `SELECT job_key, kind FROM review_jobs
+           WHERE state = 'leased' AND leased_until < $1::timestamptz AND kind = ANY($2::text[])`,
+          [ts, pgTextArrayLiteral(allowed)]
+        )
+      );
+      const followKeys = [
+        ...new Set(candidates.filter((r) => isFollowUpKind(str(r.kind))).map((r) => str(r.job_key))),
+      ].sort();
+      if (followKeys.length > 0) {
+        await pgLockWakeKeys(tx, followKeys);
+      }
       const expired = asRows<ReviewJobRow>(
         await tx.unsafe(
           `SELECT * FROM review_jobs
@@ -4424,7 +4961,12 @@ export class PgReviewJobStore implements ReviewJobStore {
       const requeued: ReviewJobRecord[] = [];
       const publish: ReviewJobRecord[] = [];
 
-      for (const raw of expired) {
+      const sortedExpired = [...expired].sort((a, b) => {
+        const ka = str(a.job_key);
+        const kb = str(b.job_key);
+        return ka < kb ? -1 : ka > kb ? 1 : num(a.id) - num(b.id);
+      });
+      for (const raw of sortedExpired) {
         const row = mapRow(raw);
         // A recorded cancel wins over reclaim: settle to `cancelled`
         // instead of requeueing, claiming, or counting an attempt.
@@ -4433,6 +4975,20 @@ export class PgReviewJobStore implements ReviewJobStore {
             `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL, cancel_requested = FALSE, updated_at = NOW() WHERE id = $1 AND state = 'leased' RETURNING *`,
             [row.id]
           );
+          if (isFollowUpKind(rowKind(row))) {
+            const latchGen = await pgLatchGenerationTx(tx, row.owner, row.repo, row.issueNumber);
+            if (latchGen > 0) {
+              await this.wakeCauses.parkPendingForKey(row.jobKey, WAKE_PARK_GENERATION_RESET, {
+                generation: latchGen,
+                tx,
+              });
+            }
+            await this.wakeCauses.parkPendingForKey(row.jobKey, WAKE_PARK_CANCELLED, {
+              generation: payloadGeneration(row.payload) + 1,
+              tx,
+            });
+            await pgPromoteOldestPendingTx(tx, this.wakeCauses, row.jobKey);
+          }
           continue;
         }
         if (hasPersistedResult(row)) {
@@ -4605,21 +5161,68 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async cancelQueuedForIssue(owner: string, repo: string, issueNumber: number): Promise<number> {
-    // Single state-aware statement: queued rows settle, leased rows flag.
-    const cancelled = asRows<{ id: unknown; state: unknown }>(
-      await this.sql.unsafe(
-        `UPDATE review_jobs
-          SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END,
-            leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
-            updated_at = NOW()
-          WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
-          RETURNING id, state`,
-        [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
-      )
-    );
+    const result = await this.sql.begin(async (tx) => {
+      // Lock-before-row: discover affected follow-up keys without row locks,
+      // then take per-key advisory locks in deterministic order.
+      const affectedKeys = asRows<{ job_key: unknown; kind: unknown }>(
+        await tx.unsafe(
+          `SELECT job_key, kind FROM review_jobs
+           WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')`,
+          [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
+        )
+      );
+      const followKeys = [
+        ...new Set(affectedKeys.filter((r) => isFollowUpKind(str(r.kind))).map((r) => str(r.job_key))),
+      ].sort();
+      if (followKeys.length > 0) {
+        await pgLockWakeKeys(tx, followKeys);
+      }
+      // Single state-aware statement: queued rows settle, leased rows flag.
+      const cancelled = asRows<{ id: unknown; state: unknown; job_key: unknown; kind: unknown; payload: unknown }>(
+        await tx.unsafe(
+          `UPDATE review_jobs
+            SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END, leased_by = CASE WHEN state = 'queued' THEN NULL ELSE leased_by END,
+              leased_until = CASE WHEN state = 'queued' THEN NULL ELSE leased_until END, cancel_requested = CASE WHEN state = 'leased' THEN TRUE WHEN state = 'queued' THEN FALSE ELSE cancel_requested END,
+              updated_at = NOW()
+            WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND kind = ANY($4::text[]) AND state IN ('queued', 'leased')
+            RETURNING id, state, job_key, kind, payload`,
+          [owner, repo, issueNumber, pgTextArrayLiteral(WORKER_JOB_KINDS)]
+        )
+      );
+      const latchGen = await pgLatchGenerationTx(tx, owner, repo, issueNumber);
+      // Deterministic order preserves lock-before-row across multi-key cancels.
+      const sorted = [...cancelled].sort((a, b) => {
+        const ka = str(a.job_key);
+        const kb = str(b.job_key);
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      });
+      for (const row of sorted) {
+        if (!isFollowUpKind(str(row.kind))) continue;
+        const key = str(row.job_key);
+        const state = str(row.state);
+        const settlingGen = pgPayloadGeneration(row.payload);
+        if (latchGen > 0) {
+          await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, {
+            generation: latchGen,
+            tx,
+          });
+        }
+        await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, {
+          generation: settlingGen + 1,
+          tx,
+        });
+        // Queued rows left no active successor: promote the oldest
+        // still-valid pending. Leased rows stay active (flagged) until the
+        // worker settles, so their newer pending waits for that settle.
+        if (state === "cancelled") {
+          await pgPromoteOldestPendingTx(tx, this.wakeCauses, key);
+        }
+      }
+      return cancelled.filter((row) => str(row.state) === "cancelled").length;
+    });
     await this.handoffs.deleteForIssue(owner, repo, issueNumber);
     await this.sits.clear(owner, repo, issueNumber);
-    return cancelled.filter((row) => str(row.state) === "cancelled").length;
+    return result;
   }
 
   async cancelQueuedForPull(owner: string, repo: string, prNumber: number): Promise<number> {
@@ -4641,16 +5244,49 @@ export class PgReviewJobStore implements ReviewJobStore {
   }
 
   async markCancelled(id: number, leasedBy: string): Promise<void> {
-    const rows = asRows<{ id: unknown }>(
-      await this.sql.unsafe(
-        `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
-           cancel_requested = FALSE, updated_at = NOW()
-         WHERE id = $1 AND leased_by = $2 AND state = 'leased'
-         RETURNING id`,
-        [id, leasedBy]
-      )
-    );
-    if (rows.length === 0) throw new Error(`cannot mark cancelled for job ${id}`);
+    await this.sql.begin(async (tx) => {
+      const keyRows = asRows<{ job_key: unknown; kind: unknown }>(
+        await tx.unsafe(`SELECT job_key, kind FROM review_jobs WHERE id = $1`, [id])
+      );
+      const jobKey = keyRows[0] ? str(keyRows[0].job_key) : "";
+      const kindHint = keyRows[0] ? str(keyRows[0].kind) || REVIEW_KIND : REVIEW_KIND;
+      if (jobKey && isFollowUpKind(kindHint)) {
+        await pgLockWakeKeys(tx, [jobKey]);
+      }
+      const rows = asRows<{
+        id: unknown;
+        job_key: unknown;
+        kind: unknown;
+        owner: unknown;
+        repo: unknown;
+        issue_number: unknown;
+        payload: unknown;
+      }>(
+        await tx.unsafe(
+          `UPDATE review_jobs SET state = 'cancelled', leased_by = NULL, leased_until = NULL,
+             cancel_requested = FALSE, updated_at = NOW()
+           WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+           RETURNING id, job_key, kind, owner, repo, issue_number, payload`,
+          [id, leasedBy]
+        )
+      );
+      if (rows.length === 0) throw new Error(`cannot mark cancelled for job ${id}`);
+      const row = rows[0];
+      if (!isFollowUpKind(str(row.kind))) return;
+      const key = str(row.job_key);
+      const owner = str(row.owner);
+      const repo = str(row.repo);
+      const issueNumber = row.issue_number == null || row.issue_number === "" ? null : num(row.issue_number);
+      const latchGen = await pgLatchGenerationTx(tx, owner, repo, issueNumber);
+      if (latchGen > 0) {
+        await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_GENERATION_RESET, { generation: latchGen, tx });
+      }
+      await this.wakeCauses.parkPendingForKey(key, WAKE_PARK_CANCELLED, {
+        generation: pgPayloadGeneration(row.payload) + 1,
+        tx,
+      });
+      await pgPromoteOldestPendingTx(tx, this.wakeCauses, key);
+    });
   }
 
   async countSucceeded(kind: JobKind, owner: string, repo: string, issueNumber: number): Promise<number> {
