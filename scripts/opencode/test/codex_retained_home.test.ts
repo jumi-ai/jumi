@@ -129,8 +129,9 @@ describe("codex retained home", () => {
         // Auth was relinked/copied fresh for the second spawn, not left stale.
         expect(await readFile(join(retained, "auth.json"), "utf8")).toBe("auth-two");
         // The first spawn's session file carried over.
-        expect(await readFile(join(retained, "sessions", "2026", "11", "25", "rollout-thread-9.jsonl"), "utf8"))
-          .toContain("thread-9");
+        expect(
+          await readFile(join(retained, "sessions", "2026", "11", "25", "rollout-thread-9.jsonl"), "utf8")
+        ).toContain("thread-9");
         expect(await readCodexHomeKind(workdir)).toBe("review");
         expect(await hasCodexSessionState(workdir, "review", "thread-9")).toBe(true);
         expect(await hasResumableSession(workdir)).toBe(true);

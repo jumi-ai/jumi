@@ -78,7 +78,10 @@ export async function ensureCodexRetainedHome(workdir: string, kind: CodexHomeKi
  * survive until job cleanup. Denying the job dir for file tools therefore
  * covers both the spawn files and the retained session state.
  */
-export async function makeCodexSpawnRoot(workdir: string, kind: CodexHomeKind): Promise<{ jobDir: string; spawnRoot: string }> {
+export async function makeCodexSpawnRoot(
+  workdir: string,
+  kind: CodexHomeKind
+): Promise<{ jobDir: string; spawnRoot: string }> {
   const jobDir = codexJobDir(workdir);
   await mkdir(jobDir, { recursive: true });
   const spawnRoot = await mkdtemp(join(jobDir, `codex-${kind}-spawn-`));
@@ -143,11 +146,7 @@ async function dirTreeContains(root: string, needle: string, seen: { count: numb
  * rollout, or an index line. Only this state carries between spawns; the
  * per-spawn `config.toml` / `hooks.json` / `auth.json` never count.
  */
-export async function hasCodexSessionState(
-  workdir: string,
-  kind: CodexHomeKind,
-  threadId: string
-): Promise<boolean> {
+export async function hasCodexSessionState(workdir: string, kind: CodexHomeKind, threadId: string): Promise<boolean> {
   const id = threadId.trim();
   if (!id) return false;
   const home = codexRetainedHome(workdir, kind);
