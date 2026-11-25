@@ -1,3 +1,9 @@
+import {
+  AUTOMERGE_RECONCILE_SCHEMA_SQL,
+  type AutomergeReconcileStore,
+  MemoryAutomergeReconcileStore,
+  PgAutomergeReconcileStore,
+} from "./automerge_reconcile.ts";
 import { CI_PENDING_REASON, isCiLookupRetryMarker, isCiWaitMarker, isCiWaitSkipReason } from "./ci.ts";
 import {
   FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL,
@@ -432,6 +438,8 @@ export interface ReviewJobStore {
   readonly strictSlots: StrictRefreshSlotStore;
   /** Durable follow-up wake causes: every accepted distinct cause per follow-up job key. */
   readonly wakeCauses: FollowUpWakeCauseStore;
+  /** Durable automerge-cancel verification obligation (at most one per PR). */
+  readonly automergeReconcile: AutomergeReconcileStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -1282,6 +1290,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly handoffs = new MemoryHandoffStore();
   readonly strictSlots = new MemoryStrictRefreshSlotStore();
   readonly wakeCauses = new MemoryFollowUpWakeCauseStore();
+  readonly automergeReconcile = new MemoryAutomergeReconcileStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly sharedLocks = new Map<string, Promise<void>>();
@@ -3591,6 +3600,8 @@ const REQUIRED_LEDGER_TABLES = [
   "review_handover_pending",
   "strict_refresh_slots",
   "follow_up_wake_causes",
+  "automerge_reconcile",
+  "automerge_reconcile_cause",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -3678,6 +3689,7 @@ export class PgReviewJobStore implements ReviewJobStore {
   readonly handoffs: PgHandoffStore;
   readonly strictSlots: PgStrictRefreshSlotStore;
   readonly wakeCauses: PgFollowUpWakeCauseStore;
+  readonly automergeReconcile: PgAutomergeReconcileStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
@@ -3686,6 +3698,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     this.handoffs = new PgHandoffStore(sql);
     this.strictSlots = new PgStrictRefreshSlotStore(sql);
     this.wakeCauses = new PgFollowUpWakeCauseStore(sql);
+    this.automergeReconcile = new PgAutomergeReconcileStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -3709,6 +3722,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
         await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
+        await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);
