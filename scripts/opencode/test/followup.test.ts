@@ -46,7 +46,7 @@ import { standingPodRuntime } from "../src/runtime.ts";
 import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
 import type { GitRunner } from "../src/workspace.ts";
-import { makeIssueApi } from "./fakes/forge.ts";
+import { forEachForge, makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
 import { withDirs } from "./harness/temp.ts";
 
@@ -3516,13 +3516,17 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("known infra flake comments and does not run OpenCode", async () => {
+  test("a checkout timeout log now runs the CI follow-up worker", async () => {
     await withDirs(async (home, workdir) => {
+      const rerunCalls: Array<{ jobId: number; runId?: number }> = [];
       const api = followupApi({
         listIssueComments: async () => [],
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
-        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
         getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number, runId?: number) => {
+          rerunCalls.push({ jobId, ...(runId !== undefined ? { runId } : {}) });
+        },
       });
       let openCode = 0;
       const result = await implementFollowUp({
@@ -3535,8 +3539,12 @@ describe("implementFollowUp", () => {
         home,
         workdir,
         heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
         },
         openCodeRunner: async () => {
           openCode++;
@@ -3544,16 +3552,17 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({
-        status: "skipped",
-        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
-      });
-      expect(openCode).toBe(0);
-      expect(api.comments.some((body) => body.includes("infra flake"))).toBe(true);
+      expect(result).toEqual({ status: "no-changes" });
+      expect(openCode).toBe(1);
+      expect(rerunCalls).toHaveLength(1);
+      expect(rerunCalls[0]?.jobId).toBe(9);
+      expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("Automatic rerun 1/1"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("no follow-up changes"))).toBe(true);
     });
   });
 
-  test("flake reruns the failed job once with a visible note", async () => {
+  test("no_changes on red CI reruns the failed job once with a visible note", async () => {
     await withDirs(async (home, workdir) => {
       const rerunCalls: Array<{ jobId: number; runId?: number }> = [];
       const api = followupApi({
@@ -3576,8 +3585,12 @@ describe("implementFollowUp", () => {
         home,
         workdir,
         heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args as string[]);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
         },
         openCodeRunner: async () => {
           openCode++;
@@ -3585,11 +3598,8 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({
-        status: "skipped",
-        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
-      });
-      expect(openCode).toBe(0);
+      expect(result).toEqual({ status: "no-changes" });
+      expect(openCode).toBe(1);
       expect(rerunCalls).toHaveLength(1);
       expect(rerunCalls[0]?.jobId).toBe(9);
       expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(true);
@@ -3597,7 +3607,7 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("second flake on the same head and check makes no rerun call", async () => {
+  test("second no_changes on the same head and check makes no rerun call", async () => {
     await withDirs(async (home, workdir) => {
       const rerunCalls: number[] = [];
       let calls = 0;
@@ -3615,6 +3625,13 @@ describe("implementFollowUp", () => {
           rerunCalls.push(jobId);
         },
       });
+      const cleanGitRunner = async (args: string[]) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
       const runOnce = async () => {
         let openCode = 0;
         const result = await realImplementFollowUp({
@@ -3627,9 +3644,7 @@ describe("implementFollowUp", () => {
           home,
           workdir,
           heartbeatIntervalMs: 0,
-          gitRunner: async () => {
-            throw new Error("git should not run");
-          },
+          gitRunner: cleanGitRunner as never,
           openCodeRunner: async () => {
             openCode++;
             return { status: "ok" };
@@ -3639,17 +3654,18 @@ describe("implementFollowUp", () => {
         return { result, openCode };
       };
       const first = await runOnce();
-      expect(first.result.status).toBe("skipped");
+      expect(first.result.status).toBe("no-changes");
+      expect(first.openCode).toBe(1);
       expect(rerunCalls).toHaveLength(1);
       const second = await runOnce();
-      expect(second.result.status).toBe("skipped");
+      expect(second.result.status).toBe("no-changes");
+      expect(second.openCode).toBe(1);
       expect(rerunCalls).toHaveLength(1);
-      expect(second.openCode).toBe(0);
-      expect(api.comments.some((body) => body.includes("already failed"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("already happened"))).toBe(true);
     });
   });
 
-  test("new head SHA resets the flake rerun budget", async () => {
+  test("new head SHA resets the rerun budget", async () => {
     await withDirs(async (home, workdir) => {
       const rerunCalls: number[] = [];
       const shas = ["headsha", "newsha"];
@@ -3674,6 +3690,7 @@ describe("implementFollowUp", () => {
       const api = followupApi({
         listIssueComments: async () => [],
         listOpenPulls: async () => [headPr(shas[Math.min(runIndex, shas.length - 1)] as string)],
+        getPR: async () => headPr(shas[Math.min(runIndex, shas.length - 1)] as string),
         listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
         listActionJobs: async () => [
           { id: 9, name: "build", head_sha: "headsha", run_id: 100 },
@@ -3684,6 +3701,13 @@ describe("implementFollowUp", () => {
           rerunCalls.push(jobId);
         },
       });
+      const cleanGitRunner = async (args: string[]) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
       const runOnce = async () => {
         const result = await realImplementFollowUp({
           api: api as never,
@@ -3695,9 +3719,7 @@ describe("implementFollowUp", () => {
           home,
           workdir,
           heartbeatIntervalMs: 0,
-          gitRunner: async () => {
-            throw new Error("git should not run");
-          },
+          gitRunner: cleanGitRunner as never,
           openCodeRunner: async () => {
             return { status: "ok" };
           },
@@ -3713,7 +3735,7 @@ describe("implementFollowUp", () => {
     });
   });
 
-  test("non-flake failure after the rerun reaches the CI-fix path", async () => {
+  test("a new log after the rerun reaches the CI-fix path", async () => {
     await withDirs(async (home, workdir) => {
       const rerunCalls: number[] = [];
       let calls = 0;
@@ -3743,18 +3765,23 @@ describe("implementFollowUp", () => {
         logger: () => undefined,
       };
       let openCode = 0;
+      const cleanGitRunner = async (args: string[]) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        if (gitArgs[0] === "status") return "";
+        if (gitArgs[0] === "rev-list") return "0";
+        return "";
+      };
       const first = await realImplementFollowUp({
         ...base,
         job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
-        gitRunner: async () => {
-          throw new Error("git should not run");
-        },
+        gitRunner: cleanGitRunner as never,
         openCodeRunner: async () => {
           openCode++;
           return { status: "ok" };
         },
       });
-      expect(first.status).toBe("skipped");
+      expect(first.status).toBe("no-changes");
       expect(rerunCalls).toHaveLength(1);
       const second = await realImplementFollowUp({
         ...base,
@@ -3771,12 +3798,13 @@ describe("implementFollowUp", () => {
           return { status: "ok" };
         },
       });
-      expect(openCode).toBe(1);
-      expect(second.status).not.toBe("skipped");
+      expect(openCode).toBe(2);
+      expect(second.status).toBe("no-changes");
+      expect(rerunCalls).toHaveLength(1);
     });
   });
 
-  test("rerun API error falls back to the human comment", async () => {
+  test("rerun API error falls back to the no-changes sit with an error note", async () => {
     await withDirs(async (home, workdir) => {
       const rerunCalls: number[] = [];
       const api = followupApi({
@@ -3800,8 +3828,12 @@ describe("implementFollowUp", () => {
         home,
         workdir,
         heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args as string[]);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
         },
         openCodeRunner: async () => {
           openCode++;
@@ -3809,18 +3841,15 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result).toEqual({
-        status: "skipped",
-        reason: "CI infra flake: GitHub 140.82 checkout/cache timeout or unreachable",
-      });
-      expect(openCode).toBe(0);
+      expect(result).toEqual({ status: "no-changes" });
+      expect(openCode).toBe(1);
       expect(rerunCalls).toHaveLength(1);
-      expect(api.comments.some((body) => body.includes("A human needs to rerun"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("no follow-up changes"))).toBe(true);
       expect(api.comments.some((body) => body.includes("Automatic rerun failed"))).toBe(true);
     });
   });
 
-  test("auto_rerun_flakes false keeps the human note and never reruns", async () => {
+  test("auto_rerun_flakes false never reruns after no_changes", async () => {
     await withDirs(async (home, workdir) => {
       let rerunCalls = 0;
       const api = followupApi({
@@ -3844,8 +3873,12 @@ describe("implementFollowUp", () => {
         home,
         workdir,
         heartbeatIntervalMs: 0,
-        gitRunner: async () => {
-          throw new Error("git should not run");
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args as string[]);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
         },
         openCodeRunner: async () => {
           openCode++;
@@ -3853,11 +3886,50 @@ describe("implementFollowUp", () => {
         },
         logger: () => undefined,
       });
-      expect(result.status).toBe("skipped");
-      expect(openCode).toBe(0);
+      expect(result.status).toBe("no-changes");
+      expect(openCode).toBe(1);
       expect(rerunCalls).toBe(0);
-      expect(api.comments.some((body) => body.includes("A human needs to rerun"))).toBe(true);
+      expect(api.comments.some((body) => body.includes("no follow-up changes"))).toBe(true);
       expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(false);
+    });
+  });
+
+  forEachForge("no_changes rerun passes the run id through on both forges", (preset) => {
+    return withDirs(async (home, workdir) => {
+      const seen: Array<{ jobId: number; runId?: number }> = [];
+      const base = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        // Gitea needs the run id; GitHub ignores it. The parent always passes it through.
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => "##[error]boom\n",
+        rerunActionJob: async (_o: string, _r: string, jobId: number, runId?: number) => {
+          seen.push({ jobId, ...(runId !== undefined ? { runId } : {}) });
+        },
+      });
+      const api = Object.assign(base, { capabilities: preset.capabilities });
+      const result = await realImplementFollowUp({
+        api: api as never,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: (async (args: string[]) => {
+          const gitArgs = stripGitConfigArgs(args);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        }) as never,
+        openCodeRunner: async () => ({ status: "ok" }),
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(seen).toEqual([{ jobId: 9, runId: 100 }]);
     });
   });
 

@@ -43,17 +43,17 @@ describe("pr_decision applyEffects", () => {
     expect(deps.stickyCalls).toEqual(["cap sticky"]);
   });
 
-  test("flake order keeps recordCiHandled after sticky", async () => {
+  test("recordCiHandled order keeps sticky first", async () => {
     const deps = depsWithSpies();
     const checks = [{ name: "build" }];
     const effects: Effect[] = [
-      { kind: "sticky", text: "flake sticky" },
+      { kind: "sticky", text: "ci sticky" },
       { kind: "recordCiHandled", checks },
-      { kind: "resolveHeld", holdKind: "skipped", reason: "flake" },
+      { kind: "resolveHeld", holdKind: "skipped", reason: "ci" },
       { kind: "forgetClaim" },
     ];
     await applyEffects(effects, deps);
-    expect(deps.calls).toEqual(["sticky", "recordCiHandled", "resolveHeld:skipped:flake", "forgetClaim"]);
+    expect(deps.calls).toEqual(["sticky", "recordCiHandled", "resolveHeld:skipped:ci", "forgetClaim"]);
   });
 
   test("same-finding log runs first", async () => {
@@ -103,7 +103,7 @@ describe("pr_decision applyEffects", () => {
     const effects: Effect[] = [
       { kind: "sticky", text: "x" },
       { kind: "recordCiHandled", checks: [{ name: "build" }] },
-      { kind: "resolveHeld", holdKind: "skipped", reason: "flake" },
+      { kind: "resolveHeld", holdKind: "skipped", reason: "ci" },
       { kind: "forgetClaim" },
     ];
     const error = await applyEffects(effects, deps).then(

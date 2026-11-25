@@ -180,6 +180,7 @@ export function buildFollowupPrompt(runnerType?: string, opts?: { prBodyFenced?:
   const addendumLine = opts?.prBodyFenced === false ? `\n${UNFENCED_PR_BODY_ADDENDUM_NOTE}` : "";
   return `Read JUMI_TASK.md (original issue) and JUMI_FEEDBACK.md (review comments).
 If JUMI_CI.md is present, it is a parent-injected tail of failed Gitea Actions logs for this head. Address those failures too.
+A transient or infrastructure failure is something to fix when the repo can reasonably make it robust: a retry or wait around a flaky network step, a pinned mirror or version, a cache. Do not rerun CI yourself and do not ask for a rerun; you hold no forge credentials and cannot trigger one. Call \`no_changes\` only for causes outside the repo that are already gone, and say what was checked in the reason.
 ${buildWorkerScope(runnerType)}
 Address the feedback in this repository on the current branch.
 A clean tree is a valid outcome: if you change nothing, call \`no_changes\` with the reason (what triggered this round and why the tree stays as it is).

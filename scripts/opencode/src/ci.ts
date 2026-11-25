@@ -20,7 +20,7 @@ interface CiHandledCheck {
   logHash: string;
 }
 
-interface FlakeRerunRecord {
+interface RerunRecord {
   sha: string;
   checkName: string;
 }
@@ -28,8 +28,12 @@ interface FlakeRerunRecord {
 export interface CiFollowUpState {
   prNumber: number;
   handled: CiHandledCheck[];
-  /** One automatic rerun per (head SHA, check name). Never includes logHash. */
-  flakeReruns?: FlakeRerunRecord[];
+  /**
+   * One automatic rerun per (head SHA, check name). Never includes logHash.
+   * Legacy storage name is `flakeReruns`; it now tracks the generic
+   * post-`no_changes` rerun, not a regex-classified flake.
+   */
+  flakeReruns?: RerunRecord[];
   /** One mechanical base refresh per (base SHA, check name). Never includes logHash. */
   ciRefreshes?: CiRefreshRecord[];
   updatedAt: string;
@@ -44,7 +48,6 @@ export interface FailedCheck {
   runId?: number;
   capped: string;
   logHash: string;
-  flake?: string;
   /** True when `capped` cut the full log (diagnostic cap or tail cut). */
   truncated?: boolean;
   /** `sha256(checkName + normalised failureLines)`, absent when no failure lines. */
@@ -362,7 +365,16 @@ function requiredCiContextsForPending(requiredContexts: readonly string[] | unde
  * The suffix fallbacks cover a required bare job name against a forge
  * `workflow / job (event)` context (or the reverse) so a naming-shape
  * difference never reads a reported check as missing.
+ * The event-suffix fallback treats `workflow / job (push)` and
+ * `workflow / job (pull_request)` as the same check: base runs on `push`
+ * while the head runs on `pull_request`, and the base-attribution gate must
+ * not miss them. Only the trailing ` (<event>)` is ignored, and only when
+ * the remaining prefix still matches by one of the rules above.
  */
+function stripCiEventSuffix(name: string): string {
+  return name.replace(/\s+\([^/()]*\)\s*$/, "");
+}
+
 function requiredMatchesCheck(checkContext: string | undefined, required: string): boolean {
   if (!checkContext) return false;
   if (checkContext === required) return true;
@@ -370,6 +382,15 @@ function requiredMatchesCheck(checkContext: string | undefined, required: string
   if (required.endsWith(` / ${checkContext}`)) return true;
   if (checkContext.includes(` / ${required} (`)) return true;
   if (required.includes(` / ${checkContext} (`)) return true;
+  const strippedContext = stripCiEventSuffix(checkContext);
+  const strippedRequired = stripCiEventSuffix(required);
+  if (strippedContext !== checkContext || strippedRequired !== required) {
+    if (strippedContext === strippedRequired) return true;
+    if (strippedContext.endsWith(` / ${strippedRequired}`)) return true;
+    if (strippedRequired.endsWith(` / ${strippedContext}`)) return true;
+    if (strippedContext.includes(` / ${strippedRequired} (`)) return true;
+    if (strippedRequired.includes(` / ${strippedContext} (`)) return true;
+  }
   return false;
 }
 
@@ -580,42 +601,6 @@ export function capFailedJobLog(log: string): string {
   return trimToBytes(text, CI_LOG_MAX_BYTES, true);
 }
 
-export function infraFlakeReason(log: string): string | undefined {
-  if (
-    /140\.82\.\d+\.\d+/.test(log) &&
-    (/timeout/i.test(log) ||
-      /timed out/i.test(log) ||
-      /unreachable/i.test(log) ||
-      /Failed to connect/i.test(log) ||
-      /Could not resolve host/i.test(log) ||
-      /Connection timed out/i.test(log))
-  ) {
-    return "GitHub 140.82 checkout/cache timeout or unreachable";
-  }
-  if (
-    (/values\.schema\.json/i.test(log) || /remote.?schema/i.test(log)) &&
-    (/timeout/i.test(log) || /\b429\b/.test(log) || /Too Many Requests/i.test(log))
-  ) {
-    return "Helm remote-schema timeout/429";
-  }
-  if (/Invalid cross-device link/i.test(log) && /dpkg/i.test(log)) {
-    return "GARM Invalid cross-device link on dpkg";
-  }
-  if (
-    /\b(tofu|terraform)\b/i.test(log) &&
-    (/state lock/i.test(log) || /Error acquiring the state lock/i.test(log) || /s3.*lock/i.test(log))
-  ) {
-    return "tofu S3 state lock";
-  }
-  if (/toomanyrequests/i.test(log) && /rate limit/i.test(log)) {
-    return "Docker Hub unauthenticated pull rate limit";
-  }
-  if (/kernel does not support overlay fs/i.test(log) || /'overlay' is not supported over/i.test(log)) {
-    return "Buildah overlay fs unsupported (kernel does not support overlay fs)";
-  }
-  return undefined;
-}
-
 function stripGiteaLogTimestamp(line: string): string {
   return line.replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+/, "").trimStart();
 }
@@ -695,21 +680,6 @@ export function failureFingerprint(checkName: string, capped: string): string | 
   return hashText(`${checkName}\n${lines.join("\n")}`);
 }
 
-export function classifyInfraFlake(capped: string): string | undefined {
-  const substantive = failureLines(capped);
-  if (substantive.length === 0) return undefined;
-  // A failing test is a real failure even if its title contains infra words.
-  if (substantive.some((line) => line.startsWith("(fail)") || line.startsWith("FAIL:") || line.startsWith("FAILED")))
-    return undefined;
-  let first: string | undefined;
-  for (const line of substantive) {
-    const reason = infraFlakeReason(line);
-    if (!reason) return undefined;
-    first ??= reason;
-  }
-  return first;
-}
-
 export function jobMatchesCheck(job: ActionJob, checkName: string, sha: string): boolean {
   if ((job.head_sha ?? "").toLowerCase() !== sha.toLowerCase()) return false;
   const name = job.name ?? "";
@@ -734,7 +704,7 @@ export function parseCiState(parsed: unknown): CiFollowUpState {
   return {
     prNumber: typeof state.prNumber === "number" ? state.prNumber : 0,
     handled: parseHandled(state.handled),
-    flakeReruns: parseFlakeReruns((state as { flakeReruns?: unknown }).flakeReruns),
+    flakeReruns: parseReruns((state as { flakeReruns?: unknown }).flakeReruns),
     ciRefreshes: parseCiRefreshes((state as { ciRefreshes?: unknown }).ciRefreshes),
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : "",
   };
@@ -758,9 +728,9 @@ function emptyCiState(): CiFollowUpState {
   return { prNumber: 0, handled: [], flakeReruns: [], ciRefreshes: [], updatedAt: "" };
 }
 
-function parseFlakeReruns(value: unknown): FlakeRerunRecord[] {
+function parseReruns(value: unknown): RerunRecord[] {
   if (!Array.isArray(value)) return [];
-  const out: FlakeRerunRecord[] = [];
+  const out: RerunRecord[] = [];
   for (const entry of value) {
     if (!entry || typeof entry !== "object") continue;
     const rec = entry as { sha?: unknown; checkName?: unknown };
@@ -837,17 +807,17 @@ export async function recordCiHandled(opts: {
 }
 
 /** Budget: one automatic rerun per (head SHA, check name). Log hashes stay out. */
-const FLAKE_RERUN_BUDGET_TOTAL = 1;
+const RERUN_BUDGET_TOTAL = 1;
 
-function flakeRerunKey(sha: string, checkName: string): string {
+function rerunKey(sha: string, checkName: string): string {
   return `${sha.toLowerCase()}:${checkName}`;
 }
 
-export function isFlakeRerunSpent(state: CiFollowUpState, sha: string, checkName: string): boolean {
+export function isRerunSpent(state: CiFollowUpState, sha: string, checkName: string): boolean {
   return (state.flakeReruns ?? []).some((entry) => entry.sha === sha.toLowerCase() && entry.checkName === checkName);
 }
 
-export function splitFlakeBudget(
+export function splitRerunBudget(
   state: CiFollowUpState,
   sha: string,
   checks: FailedCheck[]
@@ -855,13 +825,13 @@ export function splitFlakeBudget(
   const toRerun: FailedCheck[] = [];
   const exhausted: FailedCheck[] = [];
   for (const check of checks) {
-    if (isFlakeRerunSpent(state, sha, check.name)) exhausted.push(check);
+    if (isRerunSpent(state, sha, check.name)) exhausted.push(check);
     else toRerun.push(check);
   }
   return { toRerun, exhausted };
 }
 
-export async function recordFlakeReruns(opts: {
+export async function recordReruns(opts: {
   home: string;
   owner: string;
   repo: string;
@@ -875,10 +845,10 @@ export async function recordFlakeReruns(opts: {
   const store = skipLatchesFor(opts);
   const key = { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber };
   const state = await readCiLatch(store, key);
-  const seen = new Set((state.flakeReruns ?? []).map((entry) => flakeRerunKey(entry.sha, entry.checkName)));
+  const seen = new Set((state.flakeReruns ?? []).map((entry) => rerunKey(entry.sha, entry.checkName)));
   const next = [...(state.flakeReruns ?? [])];
   for (const checkName of opts.checkNames) {
-    const k = flakeRerunKey(opts.sha, checkName);
+    const k = rerunKey(opts.sha, checkName);
     if (seen.has(k)) continue;
     seen.add(k);
     next.push({ sha: opts.sha.toLowerCase(), checkName });
@@ -927,7 +897,7 @@ export function buildCiMarkdown(opts: {
         ? `\nBase (${opts.base?.sha.slice(0, 12)}): ${baseConclusion}${baseConclusion === "success" ? " — green on base, so this failure is attributable to the PR; a no-change disposition is not acceptable" : ""}`
         : "";
     const truncatedLine = check.truncated ? `\nLog truncated: true — reproduce the full failing command locally.` : "";
-    const header = `## ${check.name}\n\nState: ${check.state}${check.flake ? `\nInfra flake: ${check.flake}` : ""}${baseLine}${truncatedLine}\n`;
+    const header = `## ${check.name}\n\nState: ${check.state}${baseLine}${truncatedLine}\n`;
     const remaining = CI_LOG_MAX_BYTES - used - encoder.encode(header).byteLength - 2;
     if (remaining <= 0) break;
     const body = trimToBytes(check.capped, remaining, true);
@@ -938,35 +908,23 @@ export function buildCiMarkdown(opts: {
   return trimToBytes(sections.join("\n"), CI_LOG_MAX_BYTES, false);
 }
 
-function uniqueFlakeReasons(checks: FailedCheck[]): string[] {
-  return [...new Set(checks.map((check) => check.flake).filter((value): value is string => Boolean(value)))];
+export function rerunCommentFor(check: { name: string; targetUrl?: string }): string {
+  const link = check.targetUrl ? ` — [job](${check.targetUrl})` : "";
+  return `Reran \`${check.name}\`${link}. Automatic rerun ${RERUN_BUDGET_TOTAL}/${RERUN_BUDGET_TOTAL}.`;
 }
 
-export function flakeSkipReason(checks: FailedCheck[]): string {
-  return `CI infra flake: ${uniqueFlakeReasons(checks).join("; ")}`;
+export function rerunsCommentFor(checks: Array<{ name: string; targetUrl?: string }>): string {
+  return checks.map((check) => rerunCommentFor(check)).join("\n");
 }
 
-function flakeComment(checks: FailedCheck[]): string {
-  const names = checks.map((check) => check.name).join(", ");
-  return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
+export function rerunExhaustedComment(checks: FailedCheck[]): string {
+  const names = checks.map((check) => `\`${check.name}\``).join(", ");
+  return `Automatic rerun ${RERUN_BUDGET_TOTAL}/${RERUN_BUDGET_TOTAL} already happened for ${names} on this head; not rerunning again.`;
 }
 
-export function flakeRerunCommentFor(check: { name: string; flake?: string; targetUrl?: string }): string {
-  const reason = check.flake ? ` (${check.flake})` : "";
-  const link = check.targetUrl ? ` — [rerun](${check.targetUrl})` : "";
-  return `Reran \`${check.name}\`${reason}${link}. Automatic rerun ${FLAKE_RERUN_BUDGET_TOTAL}/${FLAKE_RERUN_BUDGET_TOTAL}.`;
-}
-
-export function flakeRerunsCommentFor(checks: Array<{ name: string; flake?: string; targetUrl?: string }>): string {
-  return checks.map((check) => flakeRerunCommentFor(check)).join("\n");
-}
-
-export function flakeExhaustedComment(checks: FailedCheck[]): string {
-  return `${flakeComment(checks)} Automatic rerun ${FLAKE_RERUN_BUDGET_TOTAL}/${FLAKE_RERUN_BUDGET_TOTAL} already failed.`;
-}
-
-export function flakeRerunFailedComment(checks: FailedCheck[], error: string): string {
-  return `${flakeComment(checks)} Automatic rerun failed: ${error}`;
+export function rerunFailedComment(checks: FailedCheck[], error: string): string {
+  const names = checks.map((check) => `\`${check.name}\``).join(", ");
+  return `Automatic rerun failed for ${names}: ${error}`;
 }
 
 async function logsForCheck(
@@ -1137,7 +1095,6 @@ export async function inspectCi(opts: {
       ...(runId !== undefined ? { runId } : {}),
       capped,
       logHash,
-      flake: classifyInfraFlake(capped),
       ...(fingerprint ? { fingerprint } : {}),
       ...(truncated ? { truncated: true as const } : {}),
     });

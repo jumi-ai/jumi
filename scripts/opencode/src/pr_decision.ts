@@ -6,7 +6,6 @@ import {
   CONFLICT_LEGACY_PREFIX,
   CREDIT_STUCK_TEXT,
   DEPENDENCY_CYCLE_REASON,
-  FLAKE_PREFIX,
   IGNORE_CONFLICTS_PREFIX,
   MERGE_DEFAULT_STUCK_TEXT,
   QUOTA_STUCK_TEXT,
@@ -31,7 +30,6 @@ export type SkipWhy =
   | "round-cap"
   | "ci-pending"
   | "no-unhandled-feedback"
-  | "flake"
   | "shared-failure"
   | "left-to-author"
   | "quota"
@@ -54,7 +52,6 @@ interface StuckFingerprintInput {
 
 export interface CiCheckRef {
   name: string;
-  flake?: string | undefined;
   fingerprint?: string | undefined;
   /** Preserved so `recordCiHandled` writes a latch `isCheckHandled` can match. */
   logHash?: string | undefined;
@@ -67,7 +64,6 @@ export type SkipParamsMap = {
   "round-cap": Record<string, never>;
   "ci-pending": Record<string, never>;
   "no-unhandled-feedback": Record<string, never>;
-  flake: { checks: CiCheckRef[] };
   "shared-failure": { firstPr: number; check: string; defaultBranch: string; checks: CiCheckRef[] };
   "left-to-author": { leftReason: string };
   quota: { quotaReason: string };
@@ -200,19 +196,6 @@ function conflictCapStickyFor(round: number, max: number): string {
   return `${conflictCapReasonFor(round, max)} — run a stuck kick to retry`;
 }
 
-function uniqueFlakeReasons(checks: CiCheckRef[]): string[] {
-  return [...new Set(checks.map((check) => check.flake).filter((value): value is string => Boolean(value)))];
-}
-
-function flakeSkipReasonFor(checks: CiCheckRef[]): string {
-  return `${FLAKE_PREFIX} ${uniqueFlakeReasons(checks).join("; ")}`;
-}
-
-function flakeCommentFor(checks: CiCheckRef[]): string {
-  const names = checks.map((check) => check.name).join(", ");
-  return `CI looks like an infra flake (${uniqueFlakeReasons(checks).join("; ")}) on ${names}. A human needs to rerun.`;
-}
-
 export function sharedFailureReasonFor(firstPr: number, check: string): string {
   return `waiting on #${firstPr} (check ${check})`;
 }
@@ -328,12 +311,6 @@ export const SKIP_WHY_TABLE: Record<SkipWhy, SkipRow> = {
     reason: () => "no unhandled feedback",
     sticky: () => undefined,
     hold: { kind: "completed" },
-    latchesIssue: false,
-  }),
-  flake: row<"flake">({
-    reason: (params) => flakeSkipReasonFor(params.checks),
-    sticky: (params) => flakeCommentFor(params.checks),
-    hold: { kind: "skipped", reason: "flake" },
     latchesIssue: false,
   }),
   "shared-failure": row<"shared-failure">({
@@ -490,8 +467,6 @@ export function parseSkipWhy(reason: string | null | undefined): ParsedSkipWhy {
   } else if (lowered.startsWith(IGNORE_CONFLICTS_PREFIX)) {
     // Preserves `isIgnoreConflictsSkipReason`: trimmed, case-insensitive leave prefix.
     why = "left-to-author";
-  } else if (trimmed.startsWith(FLAKE_PREFIX)) {
-    why = "flake";
   } else if (trimmed === reasonText("comment-already-handled", {})) {
     why = "comment-already-handled";
   } else if (trimmed === reasonText("settings-unreadable", {})) {
@@ -557,9 +532,6 @@ function buildSkipEffects(
   if (stickyText !== undefined) {
     effects.push({ kind: "sticky", text: stickyText });
   }
-  if (why === "flake") {
-    effects.push({ kind: "recordCiHandled", checks: (params as SkipParamsMap["flake"]).checks });
-  }
   // Waiting is deferred, not handled: the waiter posts the sticky and returns
   // without recording CI handled so a later qualifying wake re-evaluates.
   // The sticky upsert is idempotent, so no separate dedup marker is needed.
@@ -621,12 +593,6 @@ export function decide(snapshot: PrDecisionSnapshot, caller: DecideCaller = "fol
       if (snapshot.mergeable !== false) {
         return skip("no-unhandled-feedback", {}, snapshot, caller);
       }
-    } else if (
-      snapshot.mergeable !== false &&
-      snapshot.ciUnhandled.length > 0 &&
-      snapshot.ciUnhandled.every((check) => check.flake)
-    ) {
-      return skip("flake", { checks: snapshot.ciUnhandled }, snapshot, caller);
     } else if (snapshot.ciWake && snapshot.sharedFailure && snapshot.mergeable !== false) {
       // Shared failure waits instead of fixing again. It never counts toward
       // the round cap (CI wakes bypass it above) and its reason is not

@@ -1683,16 +1683,17 @@
   "followup.test.ts::91": {
     "name": "implementFollowUp",
     "reads": {
-      "findStickyIssueComment": 1,
+      "findStickyIssueComment": 2,
       "getActionJobLogs": 1,
-      "getIssue": 1,
+      "getIssue": 3,
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
+      "listIssueComments": 3,
       "listOpenPulls": 2,
       "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listPullReviews": 2,
+      "rerunActionJob": 1
     }
   },
   "followup.test.ts::92": {
