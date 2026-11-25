@@ -18,6 +18,7 @@ import {
   compareStrictRefreshOrder,
   isStrictRefreshBlocked,
   isStrictRefreshTerminalEvidence,
+  STRICT_REFRESH_MAX_LAPS,
   STRICT_REFRESH_SLOT_TIMEOUT_MS,
   type StrictRefreshSlotStore,
 } from "./strict_refresh_queue.ts";
@@ -591,13 +592,25 @@ async function reconcileStrictSlotForCandidates(opts: {
         });
         log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`);
       } else {
-        // Slot held and refreshable: external head/base moves only update
-        // the observed tip, never start a second refresh. Duplicate or
-        // out-of-order events stay deduplicated here.
-        if (holder.head.sha !== held.headSha || baseSha !== held.baseSha) {
-          await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, baseSha || held.baseSha, nowMs);
+        // Base past a refreshable holder re-refreshes once per tip (lap-budgeted); head-only only touches.
+        const nb = baseSha || held.baseSha;
+        if (holder.head.sha === held.headSha && nb === held.baseSha) return undefined;
+        if (nb === held.baseSha) {
+          await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs);
+          return undefined;
         }
-        return undefined;
+        const laps = held.laps ?? 0;
+        if (laps >= STRICT_REFRESH_MAX_LAPS) {
+          // biome-ignore format: single-line release keeps the file-size ratchet under +50
+          await slots.release(owner, repo, baseBranch, { terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha: nb, reason: "laps" }, nowMs });
+          // biome-ignore format: exact slot log shape required by #874
+          log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} exceeded refresh laps)`);
+        } else {
+          await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs);
+          // biome-ignore format: exact re-refresh log shape required by #874
+          log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} re-refresh #${holder.number} for base ${nb.slice(0, 7)} (lap ${laps + 1}/${STRICT_REFRESH_MAX_LAPS})`);
+          return holder;
+        }
       }
     }
   }
