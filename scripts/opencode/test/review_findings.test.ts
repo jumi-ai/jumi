@@ -19,6 +19,8 @@ import {
   normalizeFindingRunner,
   normalizeFindingSeverity,
   parseBlockingFindings,
+  parseFindingResponseSelector,
+  persistFindingResponses,
   touchedFromFilenames,
   validateFindingResponse,
 } from "../src/review_findings.ts";
@@ -182,6 +184,89 @@ forEachForge("unmatched findings and structured worker pushback are recorded", a
   const text = await renderLedgerMetrics(store);
   expect(text).toContain('outcome="unmatched"');
   expect(text).toContain("jumi_review_findings_unmatched_total");
+});
+
+forEachForge("touchedFiles (between-reviews delta) decides fixed vs dismissed", async (preset) => {
+  const store = new MemoryReviewJobStore();
+  const previous = ["src/a.ts:10: 🔴 bug: null deref. Guard it."];
+  const api = makeReviewApi({
+    capabilities: preset.capabilities,
+    getPRFiles: async () => [makeFile({ filename: "src/a.ts" })],
+    listCommitStatuses: async () => [{ id: 1, context: "build", status: "success" }],
+    createPullReview: async () => ({ id: 1 }),
+  });
+  // Full-PR list touches src/a.ts, but nothing between the reviews did: dismissed.
+  await publishReviewResult({
+    api,
+    owner: "kirmanak",
+    repo: "demo",
+    prNumber: 11,
+    expectedHeadSha: "headsha",
+    botUsername: "jumi",
+    logger: () => undefined,
+    forgeKind: preset.name,
+    resultRunner: "_Jumi · opencode · x_",
+    resultMarkdown: "unrelated note\n<!-- jumi-check: success -->",
+    previousFindings: previous,
+    changedFiles: [{ filename: "src/a.ts" }],
+    touchedFiles: [],
+    recordFindings: async (rows) => {
+      await store.recordReviewFindings(rows);
+    },
+  });
+  const totals = await store.getReviewFindingTotals();
+  expect(totals.find((row) => row.outcome === "dismissed")?.count ?? 0).toBe(1);
+  expect(totals.find((row) => row.outcome === "fixed")?.count ?? 0).toBe(0);
+});
+
+forEachForge("finding_response answers persist against rows by path and line", async (preset) => {
+  const store = new MemoryReviewJobStore();
+  await store.recordReviewFindings([
+    {
+      forge: preset.name,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 12,
+      severity: "bug",
+      reviewerRunner: "opencode",
+      writerRunner: "",
+      reviewRound: 1,
+      outcome: "repeated",
+      fingerprint: "fp-1",
+      path: "src/a.ts",
+      line: 10,
+    },
+  ]);
+  const recorded = await persistFindingResponses(
+    [{ finding: "src/a.ts:10: 🔴 bug: null deref.", status: "unchanged", reason: "Guarded upstream." }],
+    { owner: "kirmanak", repo: "demo", prNumber: 12 },
+    store,
+    () => undefined
+  );
+  expect(recorded).toBe(1);
+  // No selector at all matches nothing (and must not clobber another row).
+  expect(
+    await store.recordFindingResponse({ owner: "kirmanak", repo: "demo", prNumber: 12, status: "fixed", reason: "x" })
+  ).toBe(false);
+  expect(await persistFindingResponses([], { owner: "kirmanak", repo: "demo", prNumber: 12 }, store)).toBe(0);
+  expect(
+    await persistFindingResponses(
+      [{ finding: "src/a.ts:10: 🔴 bug: null deref.", status: "fixed", reason: "" }],
+      { owner: "kirmanak", repo: "demo", prNumber: 12 },
+      undefined
+    )
+  ).toBe(0);
+});
+
+describe("finding response selectors", () => {
+  test("path:line prefix parses, bare text stays a fingerprint", () => {
+    expect(parseFindingResponseSelector("src/a.ts:10: 🔴 bug: x.")).toEqual({
+      fingerprint: "src/a.ts:10: 🔴 bug: x.",
+      path: "src/a.ts",
+      line: 10,
+    });
+    expect(parseFindingResponseSelector("just some text")).toEqual({ fingerprint: "just some text" });
+  });
 });
 
 describe("blocking finding parsing", () => {
