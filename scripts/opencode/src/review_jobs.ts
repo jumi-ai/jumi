@@ -24,6 +24,12 @@ import {
 } from "./kick.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
 import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
+import {
+  MemoryPushConfirmStore,
+  PgPushConfirmStore,
+  PUSH_CONFIRM_SCHEMA_SQL,
+  type PushConfirmStore,
+} from "./push_confirm.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitMarker } from "./quota.ts";
 import { canonicalKickCoords, type RequeueForgeSnapshot, requeueForgeRefusal } from "./requeue_gate.ts";
@@ -445,6 +451,8 @@ export interface ReviewJobStore {
   readonly wakeCauses: FollowUpWakeCauseStore;
   /** Durable automerge-cancel verification obligation (at most one per PR). */
   readonly automergeReconcile: AutomergeReconcileStore;
+  /** Durable push-confirmation obligation (at most one per PR). */
+  readonly pushConfirm: PushConfirmStore;
   readIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   clearIssueSkipLatch(owner: string, repo: string, issueNumber: number): Promise<IssueSkipLatch>;
   setIssueSkipReason(owner: string, repo: string, issueNumber: number, reason: string): Promise<void>;
@@ -1329,6 +1337,7 @@ export class MemoryReviewJobStore implements ReviewJobStore {
   readonly strictSlots = new MemoryStrictRefreshSlotStore();
   readonly wakeCauses = new MemoryFollowUpWakeCauseStore();
   readonly automergeReconcile = new MemoryAutomergeReconcileStore();
+  readonly pushConfirm = new MemoryPushConfirmStore();
   private nextId = 1;
   private chain = Promise.resolve();
   private readonly sharedLocks = new Map<string, Promise<void>>();
@@ -4000,6 +4009,8 @@ const REQUIRED_LEDGER_TABLES = [
   "follow_up_wake_causes",
   "automerge_reconcile",
   "automerge_reconcile_cause",
+  "push_confirm",
+  "push_confirm_cause",
 ] as const;
 
 const REQUIRED_REVIEW_JOB_COLUMNS = [
@@ -4205,6 +4216,7 @@ export class PgReviewJobStore implements ReviewJobStore {
   readonly strictSlots: PgStrictRefreshSlotStore;
   readonly wakeCauses: PgFollowUpWakeCauseStore;
   readonly automergeReconcile: PgAutomergeReconcileStore;
+  readonly pushConfirm: PgPushConfirmStore;
 
   constructor(private readonly sql: SqlClient) {
     this.skipLatches = new PgSkipLatchStore(sql);
@@ -4214,6 +4226,7 @@ export class PgReviewJobStore implements ReviewJobStore {
     this.strictSlots = new PgStrictRefreshSlotStore(sql);
     this.wakeCauses = new PgFollowUpWakeCauseStore(sql);
     this.automergeReconcile = new PgAutomergeReconcileStore(sql);
+    this.pushConfirm = new PgPushConfirmStore(sql);
   }
 
   async migrate(): Promise<void> {
@@ -4240,6 +4253,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS pending_job JSONB`);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
         await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
+        await tx.unsafe(PUSH_CONFIRM_SCHEMA_SQL);
       });
     } catch (err) {
       wrapSqlError(err);

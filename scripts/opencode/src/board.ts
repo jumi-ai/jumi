@@ -283,6 +283,7 @@ const SIT_MESSAGES: Record<string, string> = {
   "not-labeled": "Pull is not labeled for pickup.",
   "conflict-ignored": "conflicted, left to author (ignore label)",
   "waiting-maintainer": "Waiting on a maintainer answer.",
+  "push-unregistered": "Jumi pushed a commit the forge did not register.",
 };
 
 export function sitMessage(reason: RouterSitReason): string {
@@ -305,6 +306,7 @@ const SIT_KICK_EFFECTS: Record<string, string> = {
   "no-write-access": "Remove this board row only",
   "not-labeled": "Remove this board row only",
   "conflict-ignored": "Report conflict left to author (no job queued)",
+  "push-unregistered": "Remove this board row only",
 };
 
 /** Effect text for a stuck-latch kick: conflict resolution for a conflict-capped latch, follow-up otherwise. */
@@ -320,6 +322,7 @@ const SIT_KICK_IDS: Record<string, string> = {
   "no-write-access": "sit-clear",
   "not-labeled": "sit-clear",
   "conflict-ignored": "sit-clear",
+  "push-unregistered": "sit-clear",
 };
 
 function kickForSit(reason: RouterSitReason, stuckReason?: string | null): BoardKick | undefined {
@@ -3621,6 +3624,13 @@ async function handleSitClearBody(
   } catch (err) {
     logger(`board unavailable: ${errorMessage(err)}`);
     return json(503, { error: "queue unavailable" });
+  }
+  if (sit.reason === "push-unregistered") {
+    try {
+      await store.pushConfirm?.dismiss(owner, repo, number);
+    } catch (err) {
+      logger(`push confirm dismiss failed ${owner}/${repo}#${number}: ${errorMessage(err)}`);
+    }
   }
   // The username attached after the edge check is what the kick log records.
   // The peer never forwards identity headers, so its kicks log without one.

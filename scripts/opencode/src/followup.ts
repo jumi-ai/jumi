@@ -104,6 +104,7 @@ import {
 } from "./pr_decision.ts";
 import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
+import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import {
@@ -1687,6 +1688,7 @@ async function runMergeOnlyFollowUp(
           issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,
+          pushConfirm: pushConfirmForJobOpts(opts as never),
         });
       } catch (err) {
         const { errorMessage } = await import("./util/error.ts");
@@ -3185,6 +3187,7 @@ export async function implementFollowUp(
             issueNumber: opts.job.issueNumber,
             botUsername: opts.botUsername,
             log,
+            pushConfirm: pushConfirmForJobOpts(opts as never),
           });
         } catch (err) {
           const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);
