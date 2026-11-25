@@ -16,6 +16,7 @@ import {
   WORKER_JOB_KINDS,
 } from "../src/review_jobs.ts";
 import { ISSUE_SKIP_LATCHES_SCHEMA_SQL } from "../src/skip_latches.ts";
+import type { IssueJob } from "../src/types.ts";
 import { makeIssueJob, makeJob } from "./fixtures.ts";
 import { recordingSql } from "./harness/sql.ts";
 
@@ -720,6 +721,195 @@ describe("MemoryReviewJobStore", () => {
       key: expect.any(String),
       queued: true,
     });
+  });
+});
+
+describe("follow-up wake admission (#841)", () => {
+  const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+
+  function followUpJob(overrides: Partial<IssueJob> = {}): IssueJob {
+    return makeIssueJob({
+      mode: "follow-up",
+      prNumber: 7,
+      headSha: "headsha",
+      trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+      ...overrides,
+    });
+  }
+
+  test("leased A; distinct B defers with its exact trigger; replays create nothing", async () => {
+    const store = new MemoryReviewJobStore();
+    const jobA = followUpJob({ delivery: "delivery-a" });
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: true });
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leased?.state).toBe("leased");
+    const jobB = followUpJob({
+      delivery: "delivery-b",
+      body: "Second wake",
+      trigger: { event: "issue_comment", sender: "bob", commentId: 2 },
+    });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    // The old row's payload is untouched: still A's delivery and trigger.
+    const inflight = store.rows.find((row) => row.jobKey === wakeKey);
+    expect(inflight?.delivery).toBe("delivery-a");
+    expect(inflight?.state).toBe("leased");
+    const pending = await store.wakeCauses.list(wakeKey, "pending");
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.payload).toMatchObject({
+      trigger: { event: "issue_comment", sender: "bob", commentId: 2 },
+      body: "Second wake",
+    });
+    // Replay of B with the same delivery creates no second cause.
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    // Replay of A's delivery creates none either: its cause is already promoted.
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+  });
+
+  test("queued normal + merge-only B, and queued merge-only A + normal B, each run with their own intent", async () => {
+    const normalThenMerge = new MemoryReviewJobStore();
+    await normalThenMerge.enqueueIssue(followUpJob({ delivery: "normal-a" }));
+    expect(
+      await normalThenMerge.enqueueIssue(
+        followUpJob({
+          delivery: "merge-b",
+          mergeOnly: true,
+          trigger: { event: "push", sender: "alice" },
+        })
+      )
+    ).toEqual({ key: wakeKey, queued: false, deferred: true });
+    const pendingMerge = await normalThenMerge.wakeCauses.list(wakeKey, "pending");
+    expect(pendingMerge).toHaveLength(1);
+    expect(pendingMerge[0]?.payload).toMatchObject({ mergeOnly: true });
+    const leasedNormal = await normalThenMerge.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leasedNormal?.payload).not.toMatchObject({ mergeOnly: true });
+    const settledNormal = await normalThenMerge.markPublished(leasedNormal!.id, leasedNormal!.leasedBy!, {
+      state: "succeeded",
+    });
+    expect(settledNormal).toMatchObject({ cancelled: false, promoted: 1, parked: 0 });
+    const mergeRun = await normalThenMerge.lease("worker-2", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(mergeRun?.payload).toMatchObject({ mergeOnly: true });
+
+    const mergeThenNormal = new MemoryReviewJobStore();
+    await mergeThenNormal.enqueueIssue(followUpJob({ delivery: "merge-a", mergeOnly: true }));
+    expect(await mergeThenNormal.enqueueIssue(followUpJob({ delivery: "normal-b" }))).toEqual({
+      key: wakeKey,
+      queued: false,
+      deferred: true,
+    });
+    const pendingNormal = await mergeThenNormal.wakeCauses.list(wakeKey, "pending");
+    expect(pendingNormal).toHaveLength(1);
+    const pendingPayload = pendingNormal[0]?.payload as { mergeOnly?: boolean } | undefined;
+    expect(pendingPayload?.mergeOnly).toBeUndefined();
+    const leasedMerge = await mergeThenNormal.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    expect(leasedMerge?.payload).toMatchObject({ mergeOnly: true });
+    const settledMerge = await mergeThenNormal.markPublished(leasedMerge!.id, leasedMerge!.leasedBy!, {
+      state: "succeeded",
+    });
+    expect(settledMerge).toMatchObject({ cancelled: false, promoted: 1, parked: 0 });
+    const normalRun = await mergeThenNormal.lease("worker-2", 60_000, undefined, WORKER_JOB_KINDS);
+    expect((normalRun?.payload as { mergeOnly?: boolean } | null)?.mergeOnly).toBeUndefined();
+  });
+
+  test("empty-delivery payloads dedupe canonically: same payload replays, different payload defers", async () => {
+    const store = new MemoryReviewJobStore();
+    const base = followUpJob({ delivery: "" });
+    expect(await store.enqueueIssue(base)).toEqual({ key: wakeKey, queued: true });
+    expect(await store.enqueueIssue(followUpJob({ delivery: "" }))).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(1);
+    const different = followUpJob({
+      delivery: "",
+      body: "A different wake",
+      trigger: { event: "issue_comment", sender: "alice", commentId: 9 },
+    });
+    expect(await store.enqueueIssue(different)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+  });
+
+  test("persistence failure throws and leaves no trace; a retry records once", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    const jobB = followUpJob({ delivery: "delivery-b" });
+    const record = store.wakeCauses.record.bind(store.wakeCauses);
+    store.wakeCauses.record = async () => {
+      throw new QueueUnavailableError("queue unavailable");
+    };
+    await expect(store.enqueueIssue(jobB)).rejects.toThrow("queue unavailable");
+    expect(store.rows).toHaveLength(1);
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(0);
+    store.wakeCauses.record = record;
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+  });
+
+  test("generation reset between record and settle parks generation-reset and promotes nothing", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    await store.enqueueIssue(followUpJob({ delivery: "delivery-b" }));
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    const settled = await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    expect(settled).toMatchObject({ cancelled: false, promoted: 0, parked: 1 });
+    const parked = await store.wakeCauses.list(wakeKey, "parked");
+    expect(parked).toHaveLength(1);
+    expect(parked[0]?.parkReason).toBe("generation-reset");
+    expect(store.rows.filter((row) => row.state === "queued")).toHaveLength(0);
+  });
+
+  test("concurrent B and C both persist; concurrent identical B persists once", async () => {
+    const store = new MemoryReviewJobStore();
+    await store.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    const jobB = followUpJob({
+      delivery: "delivery-b",
+      trigger: { event: "issue_comment", sender: "b", commentId: 2 },
+    });
+    const jobC = followUpJob({
+      delivery: "delivery-c",
+      trigger: { event: "issue_comment", sender: "c", commentId: 3 },
+    });
+    const [resultB, resultC] = await Promise.all([store.enqueueIssue(jobB), store.enqueueIssue(jobC)]);
+    expect(resultB).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(resultC).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(2);
+
+    const single = new MemoryReviewJobStore();
+    await single.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    const jobD = followUpJob({ delivery: "delivery-d" });
+    const [first, second] = await Promise.all([single.enqueueIssue(jobD), single.enqueueIssue({ ...jobD })]);
+    expect([first, second]).toContainEqual({ key: wakeKey, queued: false, deferred: true });
+    expect([first, second]).toContainEqual({ key: wakeKey, queued: false });
+    expect([first, second]).toHaveLength(2);
+    expect(await single.wakeCauses.countPending(wakeKey)).toBe(1);
+  });
+
+  test("a wake racing the settle is never stranded: pending-then-promoted or inserted ordinary", async () => {
+    const raced = new MemoryReviewJobStore();
+    await raced.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    const leasedA = await raced.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    const jobB = followUpJob({ delivery: "delivery-b" });
+    const [enqueued, settled] = await Promise.all([
+      raced.enqueueIssue(jobB),
+      raced.markPublished(leasedA!.id, leasedA!.leasedBy!, { state: "succeeded" }),
+    ]);
+    expect(enqueued).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(settled).toMatchObject({ promoted: 1, parked: 0 });
+    const queuedAfterRace = raced.rows.filter((row) => row.state === "queued");
+    expect(queuedAfterRace).toHaveLength(1);
+    expect(queuedAfterRace[0]?.delivery).toBe("delivery-b");
+
+    // When the settle lands first, the same wake inserts an ordinary row instead.
+    const settledFirst = new MemoryReviewJobStore();
+    await settledFirst.enqueueIssue(followUpJob({ delivery: "delivery-a" }));
+    const leasedFirst = await settledFirst.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
+    await settledFirst.markPublished(leasedFirst!.id, leasedFirst!.leasedBy!, { state: "succeeded" });
+    expect(await settledFirst.enqueueIssue(followUpJob({ delivery: "delivery-b" }))).toEqual({
+      key: wakeKey,
+      queued: true,
+    });
+    expect(settledFirst.rows.filter((row) => row.state === "queued")).toHaveLength(1);
   });
 });
 

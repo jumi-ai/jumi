@@ -298,6 +298,50 @@ describe("POST /webhooks/github", () => {
     expect(store.rows[0]?.prNumber).toBe(55);
   });
 
+  test("headerless label redelivery dedupes on the stable body digest, not a random fallback", async () => {
+    const { handler, store } = mailbox();
+    const labelKey = "follow-up:kirmanak/demo#55:headsha";
+    const payload = labeledForeignPrPayload();
+    const raw = encodeJson(payload);
+    const requestWithoutDelivery = async () => {
+      const signature = await signBody(raw, "webhook-secret");
+      const headers = new Headers();
+      headers.set("content-type", "application/json");
+      headers.set("x-hub-signature-256", `sha256=${signature}`);
+      headers.set("x-github-event", "pull_request");
+      return new Request("https://reviewer.test/webhooks/github", {
+        method: "POST",
+        body: raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength) as ArrayBuffer,
+        headers,
+      });
+    };
+    const first = await handler(await requestWithoutDelivery());
+    expect(first.status).toBe(202);
+    expect(await responseJson(first)).toEqual({ key: labelKey, queued: true });
+    // Same bytes, still no header: the fallback digest is identical, so this
+    // is a replay of the initial cause, not a distinct wake.
+    const replay = await handler(await requestWithoutDelivery());
+    expect(replay.status).toBe(202);
+    expect(await responseJson(replay)).toEqual({ key: labelKey, queued: false });
+    expect(store.rows).toHaveLength(1);
+    expect(await store.wakeCauses.list(labelKey)).toHaveLength(1);
+  });
+
+  test("different real delivery ids stay distinct on the label path", async () => {
+    const { handler, store } = mailbox();
+    const labelKey = "follow-up:kirmanak/demo#55:headsha";
+    const payload = labeledForeignPrPayload();
+    const first = await handler(
+      await signedGithubRequest(payload, { event: "pull_request", delivery: "real-delivery-1" })
+    );
+    expect(await responseJson(first)).toEqual({ key: labelKey, queued: true });
+    const second = await handler(
+      await signedGithubRequest(payload, { event: "pull_request", delivery: "real-delivery-2" })
+    );
+    expect(await responseJson(second)).toEqual({ key: labelKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(labelKey)).toBe(1);
+  });
+
   test("pull_request labeled does not enqueue review", async () => {
     const queue = makeReviewQueue();
     const { store } = mailbox();
@@ -1331,6 +1375,44 @@ describe("POST /webhooks/github", () => {
     expect(store.rows.find((row) => row.jobKey === "follow-up:kirmanak/demo#102:headsha:12")?.state).toBe("queued");
   });
 
+  test("store failure answers 503 with the delivery unmarked; a retry records once", async () => {
+    const store = new MemoryReviewJobStore();
+    let failEnqueue = true;
+    const handler = createFetchHandler(githubConfig(), {
+      queue: store,
+      worker: {
+        queue: {
+          enqueue: (job: IssueJob) => {
+            if (failEnqueue) throw new QueueUnavailableError("queue unavailable");
+            return store.enqueueIssue(job);
+          },
+        },
+        api: {
+          listOpenPulls: async () => [],
+          getIssue: async () => githubIssue({ number: 55, assignee: null, assignees: [] }),
+          getRepo: async () => githubRepo,
+          getCollaboratorPermission: async () => ({ permission: "write" }),
+        },
+      },
+    });
+    const labelKey = "follow-up:kirmanak/demo#55:headsha";
+    const payload = labeledForeignPrPayload();
+    const failed = await handler(
+      await signedGithubRequest(payload, { event: "pull_request", delivery: "retryable-delivery" })
+    );
+    expect(failed.status).toBe(503);
+    expect(store.rows).toHaveLength(0);
+    expect(await store.wakeCauses.list(labelKey)).toHaveLength(0);
+    failEnqueue = false;
+    const retried = await handler(
+      await signedGithubRequest(payload, { event: "pull_request", delivery: "retryable-delivery" })
+    );
+    expect(retried.status).toBe(202);
+    expect(await responseJson(retried)).toEqual({ key: labelKey, queued: true });
+    expect(store.rows).toHaveLength(1);
+    expect(await store.wakeCauses.list(labelKey)).toHaveLength(1);
+  });
+
   test("retried CI delivery repeats only unsettled follow-up effects", async () => {
     const store = new MemoryReviewJobStore();
     const bot = makeUser({ login: "kirmanak-jumi[bot]", type: "Bot" });
@@ -1391,16 +1473,11 @@ describe("POST /webhooks/github", () => {
     const delivery = "ci-delivery-retried-1";
     const testPolicy = { ...policy, isPickedUp: () => true };
     const deps = { worker: { queue: workerQueue, api }, logger: () => {} };
-    // The second effect fails once: `enqueueJobs` propagates the queue failure
-    // (the `return` without `await` skips the 503 mapping), so the delivery
-    // stays retryable. The first effect already settled in the ledger.
-    let failedOnce = false;
-    try {
-      await handleGithubWebhookEvent(raw, "workflow_job", delivery, testPolicy as never, deps as never);
-    } catch (err) {
-      failedOnce = err instanceof QueueUnavailableError;
-    }
-    expect(failedOnce).toBe(true);
+    // The second effect fails once: the queue failure maps to 503 (like every
+    // other ingress path), so the delivery stays retryable. The first effect
+    // already settled in the ledger.
+    const first = await handleGithubWebhookEvent(raw, "workflow_job", delivery, testPolicy as never, deps as never);
+    expect(first.status).toBe(503);
     const leased = await store.lease("worker-1", 60_000, undefined, WORKER_JOB_KINDS);
     expect(leased?.prNumber).toBe(102);
     await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
