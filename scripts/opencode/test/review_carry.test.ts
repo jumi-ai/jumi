@@ -141,6 +141,7 @@ forEachForge("carry clean merge without model", (preset) => {
     expect(published).toContain("main");
     expect(published.toLowerCase()).toContain("carried");
     expect(statuses.at(-1)?.state).toBe("success");
+    expect(statuses.at(-1)?.description).toContain(P1.slice(0, 12));
   })();
 });
 

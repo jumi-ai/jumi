@@ -2081,6 +2081,12 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
       questions: holdMaintainerCount,
     });
   }
+  // Carried reviews name their source SHA in the status too, not just the
+  // sticky, so the gate itself shows where the verdict came from.
+  if (state === "success") {
+    const carriedFrom = /Carried forward from\s+`([0-9a-f]{7,40})`/i.exec(comment)?.[1];
+    if (carriedFrom) description = `Carried from ${carriedFrom.slice(0, 12)}`;
+  }
   await postReviewStatus(forgeApi, opts.owner, opts.repo, opts.expectedHeadSha, state, description, pr.html_url);
   await logParentDiag(log, "post_review_done", { review: reviewLabel, status: result.status });
   return result;
