@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildFollowupPrompt, buildImplementPrompt } from "../src/git.ts";
+import { closesIssuePattern, visibleClosingText } from "../src/gitea_issues.ts";
 import {
   buildFollowupPullRequestBody,
   buildPullRequestBody,
@@ -93,8 +94,20 @@ describe("finished-or-partial comes from the explicit remaining list", () => {
     expect(isCiOnlyRemainingItem("full bun run ci green")).toBe(true);
     expect(isCiOnlyRemainingItem("Postgres tests pass on the forge")).toBe(true);
     expect(isCiOnlyRemainingItem("backfill the missing test")).toBe(false);
+    expect(isCiOnlyRemainingItem("add postgres regression test for queue")).toBe(false);
     expect(filterCiOnlyRemainingItems(["bun run test:pg", "backfill x"])).toEqual(["backfill x"]);
     expect(filterCiOnlyRemainingItems(["bun run test:pg", "full bun run ci"])).toEqual([]);
+    // A mixed list keeps the real postgres work item and drops the CI check.
+    expect(filterCiOnlyRemainingItems(["bun run test:pg", "add postgres regression test for queue"])).toEqual([
+      "add postgres regression test for queue",
+    ]);
+    const mixed = buildPullRequestBody(12, "Did part.", undefined, [], undefined, [
+      "bun run test:pg",
+      "add postgres regression test for queue",
+    ]);
+    expect(mixed).toContain("Refs #12");
+    expect(mixed).toContain("add postgres regression test for queue");
+    expect(mixed).not.toMatch(/fixes #12/i);
   });
 
   test("a bare Refs #N is rewritten to the closing keyword", () => {
@@ -129,6 +142,14 @@ describe("finished-or-partial comes from the explicit remaining list", () => {
         "full bun run ci",
       ])
     ).toMatch(/fixes #12/i);
+  });
+
+  test("remaining items never introduce a visible closing keyword", () => {
+    const body = buildPullRequestBody(12, "Did part.", undefined, [], undefined, ["Fixes #12"]);
+    expect(body).toContain("Refs #12");
+    expect(closesIssuePattern(12).test(visibleClosingText(body))).toBe(false);
+    const refsBody = buildPullRequestBody(12, "Did part.", undefined, [], "refs", ["Fixes #12"]);
+    expect(closesIssuePattern(12).test(visibleClosingText(refsBody))).toBe(false);
   });
 
   test("closing_keyword refs behaviour is unchanged", () => {

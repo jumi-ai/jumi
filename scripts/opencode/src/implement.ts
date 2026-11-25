@@ -730,16 +730,22 @@ export function rewriteClosingToRefs(text: string, issueNumber: number): string 
  */
 export function isCiOnlyRemainingItem(item: string): boolean {
   const lower = item.toLowerCase();
-  if (lower.includes("bun run ci")) return true;
-  if (lower.includes("test:pg")) return true;
-  if (lower.includes("bun test") && lower.includes("pg")) return true;
-  if (lower.includes("postgres") && (lower.includes("test") || lower.includes("ci"))) return true;
-  if (lower.includes("full") && lower.includes("ci")) return true;
+  if (lower.includes("bun run ci") || lower.includes("test:pg") || lower.includes("gitea actions")) return true;
+  if (lower.includes("ci green") || (lower.includes("ci") && lower.includes("green"))) return true;
+  if (lower.trim() === "ci" || (lower.includes("full") && lower.includes("ci"))) return true;
   if (lower.includes("forge") && lower.includes("ci")) return true;
-  if (lower.includes("gitea actions")) return true;
-  if (lower.includes("ci green")) return true;
-  if (lower.includes("ci") && lower.includes("green")) return true;
-  if (lower.trim() === "ci") return true;
+  if ((lower.includes("bun run") || lower.includes("bun test")) && (lower.includes("postgres") || /\bpg\b/.test(lower)))
+    return true;
+  // A postgres/pg mention is CI-only only when it names running the check on the forge,
+  // not code to write ("add postgres regression test for queue").
+  if (lower.includes("postgres") || /\bpg\b/.test(lower)) {
+    if (lower.includes("forge") && (lower.includes("pass") || lower.includes("green") || lower.includes("run")))
+      return true;
+    return (
+      lower.includes("ci") &&
+      (lower.includes("pass") || lower.includes("green") || lower.includes("run") || lower.includes("forge"))
+    );
+  }
   return false;
 }
 
@@ -760,9 +766,9 @@ export function filterCiOnlyRemainingItems(items: readonly string[]): string[] {
   return normalizeRemainingItems(items).filter((item) => !isCiOnlyRemainingItem(item));
 }
 
-/** Visible rendering of the remaining list for the PR body. */
-function renderRemainingItems(items: readonly string[]): string {
-  return `Remaining:\n${items.map((item) => `- ${item}`).join("\n")}`;
+/** Remaining list rendering; items are scrubbed so a non-empty list never visibly closes the worked issue. */
+function renderRemainingItems(items: readonly string[], issueNumber: number): string {
+  return `Remaining:\n${items.map((item) => `- ${rewriteClosingToRefs(item, issueNumber)}`).join("\n")}`;
 }
 
 export function rewriteRefsToClosing(text: string, issueNumber: number): string {
@@ -801,12 +807,12 @@ function pullRequestText(
   if (refs) {
     if (fileContents == null) {
       if (effective.length === 0) return fallback;
-      return `${fallback}\n\n${renderRemainingItems(effective)}`;
+      return `${fallback}\n\n${renderRemainingItems(effective, issueNumber)}`;
     }
     let text = parentOwnedProse(fileContents);
     if (!text) {
       if (effective.length === 0) return fallback;
-      return `${fallback}\n\n${renderRemainingItems(effective)}`;
+      return `${fallback}\n\n${renderRemainingItems(effective, issueNumber)}`;
     }
     if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
       text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
@@ -815,9 +821,10 @@ function pullRequestText(
     if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
     if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) {
       if (effective.length === 0) return text;
-      return `${text}\n\n${renderRemainingItems(effective)}`;
+      return `${text}\n\n${renderRemainingItems(effective, issueNumber)}`;
     }
-    if (effective.length > 0) return `${text}\n\nRefs #${issueNumber}\n\n${renderRemainingItems(effective)}`;
+    if (effective.length > 0)
+      return `${text}\n\nRefs #${issueNumber}\n\n${renderRemainingItems(effective, issueNumber)}`;
     return `${text}\n\n${fallback}`;
   }
   // Default (`closes`) mode: the finished-or-partial decision comes from the
@@ -827,7 +834,7 @@ function pullRequestText(
   // were already dropped above. Words like "follow-up" or "remaining" in
   // the prose never keep a body non-closing.
   if (effective.length > 0) {
-    const rendered = renderRemainingItems(effective);
+    const rendered = renderRemainingItems(effective, issueNumber);
     if (fileContents == null) return `Refs #${issueNumber}\n\n${rendered}`;
     let text = parentOwnedProse(fileContents);
     if (!text) return `Refs #${issueNumber}\n\n${rendered}`;
