@@ -148,6 +148,10 @@ export interface RunReviewJobExtras {
   recordSuggestions?: (counts: import("./review_suggestions.ts").ReviewSuggestionCounts) => Promise<void>;
   /** Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired to the ledger like suggestions. */
   recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for recorded finding rows (1-based ledger attempt). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner stamp for recorded finding rows. Resolved via provenance when unset. */
+  writerRunner?: string | null;
   engine?: Engine;
   openCodeRunner?: Engine;
   workspacePreparer?: WorkspacePreparer;
@@ -331,6 +335,8 @@ export async function runReviewJob(
       persistResult: extras.persistResult,
       recordSuggestions: extras.recordSuggestions,
       ...(extras.recordFindings ? { recordFindings: extras.recordFindings } : {}),
+      ...(extras.reviewRound !== undefined ? { reviewRound: extras.reviewRound } : {}),
+      ...(extras.writerRunner ? { writerRunner: extras.writerRunner } : {}),
       engine: extras.engine ?? extras.openCodeRunner,
       workspacePreparer: extras.workspacePreparer,
       gitRunner: extras.gitRunner,
@@ -1232,6 +1238,8 @@ export async function processEngineTick(
       jobId: String(row.id),
       previousError: row.error ?? extras.previousError ?? null,
       failedRunner: row.resultRunner ?? extras.failedRunner ?? null,
+      // Ledger attempt is 0-based; recorded review rounds are 1-based.
+      reviewRound: extras.reviewRound ?? Math.max(1, (row.attempt ?? 0) + 1),
       provenance: extras.provenance ?? store.provenance,
       skipLatches: extras.skipLatches ?? store.skipLatches,
       runnerCooldownConfig:

@@ -315,6 +315,10 @@ export interface ReviewOptions {
    * `publishReviewResult` alongside the 💡 counts.
    */
   recordFindings?: (rows: import("./review_findings.ts").NewReviewFindingRow[]) => Promise<void>;
+  /** Review round for recorded finding rows (1-based ledger attempt). Defaults to 1. */
+  reviewRound?: number;
+  /** Writer runner stamp for recorded finding rows. Resolved via provenance when unset. */
+  writerRunner?: string | null;
   abortSignal?: AbortSignal;
   jobId?: string;
   maxIncompleteRetries?: number;
@@ -405,6 +409,13 @@ export interface PublishReviewOptions {
    * reclaim path has no fetched files).
    */
   changedFiles?: readonly { filename: string }[];
+  /**
+   * Files touched between the previous review and this one (`delta.files`).
+   * The fixed/dismissed classification reads this; when unset it falls back
+   * to `changedFiles`. Kept separate because `changedFiles` (the full PR file
+   * list) still drives the settings-file gate.
+   */
+  touchedFiles?: readonly { filename: string }[];
   /**
    * Fail-open recorder for per-finding 🔴/🟡 outcomes. Wired by the engine
    * tick to the ledger; tests may omit it. Receives one row per blocking
@@ -1864,7 +1875,7 @@ export async function publishReviewResult(opts: PublishReviewOptions): Promise<R
     try {
       const prevBlocking = parseBlockingFindings(opts.previousFindings.join("\n\n"), { singleFilePath });
       const currBlocking = parseBlockingFindings(comment, { singleFilePath });
-      const touched = touchedFromFilenames((opts.changedFiles ?? []).map((file) => file.filename));
+      const touched = touchedFromFilenames((opts.touchedFiles ?? opts.changedFiles ?? []).map((file) => file.filename));
       const classified = classifyBlockingFindings(prevBlocking, currBlocking, touched);
       const rows = classified.map((entry) => ({
         forge: normalizeFindingForge(opts.forgeKind),
@@ -3098,6 +3109,26 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
           await appendReviewStuckState(stuckRef, { kind: "action", hash: actionHash });
         }
       }
+      // Writer runner for the finding rows: explicit stamp wins, otherwise the
+      // exact-head writer provenance (publisher, else last contributor).
+      // Fail-open to empty: attribution must never fail the review.
+      let writerRunner = opts.writerRunner ?? null;
+      if (!writerRunner && opts.provenance) {
+        try {
+          const lookup = await opts.provenance.lookupForReview({
+            forge: forgeCapabilities(opts.forgeKind).kind,
+            owner: opts.owner,
+            repo: opts.repo,
+            prNumber: opts.prNumber,
+            headSha: reviewedHeadSha,
+            branch: pr.head.ref,
+          });
+          const stamp = lookup.publisher ?? lookup.contributors[lookup.contributors.length - 1];
+          if (stamp) writerRunner = formatRunnerStamp(stamp);
+        } catch {
+          // Fail-open.
+        }
+      }
       return await publishReviewResult({
         api: forgeApi,
         forge: forgeApi,
@@ -3119,6 +3150,9 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
         recordSuggestions: opts.recordSuggestions,
         ...(opts.recordFindings ? { recordFindings: opts.recordFindings } : {}),
         changedFiles: prFiles,
+        touchedFiles: (delta?.files ?? prFiles).map((file) => ({ filename: file.filename })),
+        ...(opts.reviewRound !== undefined ? { reviewRound: opts.reviewRound } : {}),
+        ...(writerRunner ? { writerRunner } : {}),
         ...(excludedFiles.length > 0 ? { excludedFiles, allExcluded } : {}),
       });
     };
