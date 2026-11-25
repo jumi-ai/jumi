@@ -10,6 +10,7 @@
   "attachments.ts": 403,
   "auth.ts": 83,
   "automerge.ts": 2020,
+  "automerge_admission.ts": 144,
   "automerge_reconcile.ts": 777,
   "automerge_webhook.ts": 265,
   "board.ts": 3815,
