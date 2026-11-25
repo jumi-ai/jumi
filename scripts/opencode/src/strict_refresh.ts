@@ -5,7 +5,7 @@ import {
   isEligibleWorkerPR,
   isInScopeJumiPR,
 } from "./gitea_issues.ts";
-import type { BranchProtection, Pull } from "./ports.ts";
+import type { BranchProtection, Check, Pull } from "./ports.ts";
 import {
   isGiteaStrictForge,
   keepGiteaBehind,
@@ -84,7 +84,10 @@ export type StrictRefreshPolicy = WebhookPolicy & {
 };
 
 export type StrictRefreshApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
-  Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits">> &
+  Partial<
+    StrictBranchApi &
+      Pick<IssueApi, "getRepoFile" | "listPullCommits" | "getPR" | "listCommitStatuses" | "listCheckRuns">
+  > &
   Partial<{
     listIssueTimeline: (
       owner: string,
@@ -102,6 +105,99 @@ export type StrictRefreshApi = Pick<IssueApi, "listOpenPulls" | "getIssue"> &
  */
 export function isStrictRefreshBehind(pr: Pull): boolean {
   return typeof pr?.mergeableState === "string" && pr.mergeableState.toLowerCase() === "behind";
+}
+
+type StrictMergeApi = Partial<Pick<IssueApi, "getPR" | "getBranch" | "listCommitStatuses" | "listCheckRuns">>;
+
+/** Suffix-tolerant required-context match (mirrors the CI gate's matcher). */
+function strictRequiredMatches(checkContext: string | undefined, required: string): boolean {
+  if (!checkContext) return false;
+  if (checkContext === required) return true;
+  if (checkContext.endsWith(` / ${required}`)) return true;
+  if (required.endsWith(` / ${checkContext}`)) return true;
+  if (checkContext.includes(` / ${required} (`)) return true;
+  if (required.includes(` / ${checkContext} (`)) return true;
+  return false;
+}
+
+/**
+ * Terminal blocker for admission: a conflict (`mergeable === false` or
+ * `dirty`) or a `blocked` head with a failed/errored required check. A
+ * `blocked` head whose required checks are pending, missing, or unreadable
+ * is not terminal: the holder keeps the slot and a pending candidate waits.
+ * Callers pass the base branch's requiredContexts read for the strict gate,
+ * so this adds no getBranch call.
+ */
+async function isTerminallyStrictBlocked(opts: {
+  api: StrictMergeApi;
+  owner: string;
+  repo: string;
+  pr: Pull;
+  requiredContexts?: string[];
+  log?: (message: string) => void;
+}): Promise<boolean> {
+  const pr = opts.pr;
+  if (!pr || typeof pr !== "object") return false;
+  if (pr.mergeable === false) return true;
+  const state = typeof pr.mergeableState === "string" ? pr.mergeableState.toLowerCase() : "";
+  if (state === "dirty") return true;
+  if (state !== "blocked") return false;
+  const contexts = (opts.requiredContexts ?? []).filter((c) => typeof c === "string" && c.length > 0);
+  if (contexts.length === 0) return false;
+  const checks: Check[] = [];
+  const listStatuses = opts.api?.listCommitStatuses;
+  if (typeof listStatuses === "function") {
+    try {
+      checks.push(...(await listStatuses.call(opts.api, opts.owner, opts.repo, pr.head.sha)));
+    } catch (err) {
+      opts.log?.(`strict refresh status lookup failed for #${pr.number}: ${errorMessage(err)}`);
+    }
+  }
+  const listRuns = opts.api?.listCheckRuns;
+  if (typeof listRuns === "function") {
+    try {
+      checks.push(...(await listRuns.call(opts.api, opts.owner, opts.repo, pr.head.sha)));
+    } catch (err) {
+      opts.log?.(`strict refresh check lookup failed for #${pr.number}: ${errorMessage(err)}`);
+    }
+  }
+  for (const required of contexts) {
+    const match =
+      checks.find((check) => check?.context === required) ??
+      checks.find((check) => strictRequiredMatches(check?.context, required));
+    const matchState = String(match?.state ?? match?.status ?? "").toLowerCase();
+    if (matchState === "failure" || matchState === "error") return true;
+  }
+  return false;
+}
+
+/**
+ * Fresh holder read for admission. GitHub's open-pull list carries no merge
+ * state, so the holder is re-read with getPR (Gitea's list already maps
+ * mergeable and skips the extra call). Unreadable falls back to the listed
+ * pull, which keeps the slot.
+ */
+async function strictHolderPull(opts: {
+  api: StrictMergeApi;
+  owner: string;
+  repo: string;
+  pulls: Pull[];
+  prNumber: number;
+  gitea: boolean;
+  log?: (message: string) => void;
+}): Promise<Pull | undefined> {
+  const listed = opts.pulls.find((pr) => pr?.number === opts.prNumber);
+  if (!listed) return undefined;
+  const getPR = opts.api?.getPR;
+  if (opts.gitea || typeof getPR !== "function") return listed;
+  try {
+    const got = await getPR.call(opts.api, opts.owner, opts.repo, opts.prNumber);
+    if (got && typeof got === "object" && got.number === opts.prNumber) return got;
+    return listed;
+  } catch (err) {
+    opts.log?.(`strict refresh holder #${opts.prNumber} unreadable; keeping listed state: ${errorMessage(err)}`);
+    return listed;
+  }
 }
 
 async function strictIgnoreLabel(
@@ -183,21 +279,6 @@ function isZeroSha(value: string | undefined): boolean {
   return /^0+$/.test(value);
 }
 
-async function strictForBranches(
-  api: Partial<StrictBranchApi>,
-  owner: string,
-  repo: string,
-  branches: string[],
-  log?: (message: string) => void
-): Promise<Map<string, StrictPolicy>> {
-  const out = new Map<string, StrictPolicy>();
-  for (const branch of branches) {
-    if (out.has(branch)) continue;
-    out.set(branch, await resolveStrictPolicy(api, owner, repo, branch, log));
-  }
-  return out;
-}
-
 async function strictPolicyForBranch(
   api: unknown,
   owner: string,
@@ -206,39 +287,69 @@ async function strictPolicyForBranch(
   policy: StrictRefreshPolicy,
   defaultBranch: string,
   log?: (message: string) => void
-): Promise<StrictPolicy> {
+): Promise<{ strict: StrictPolicy; requiredContexts?: string[] }> {
   if (isGiteaStrictForge(api, policy)) {
-    return resolveStrictPolicyWithFallback(api, owner, repo, branch, {
-      forgeKind: "gitea",
-      defaultBranch,
-      log,
-    });
+    return {
+      strict: await resolveStrictPolicyWithFallback(api, owner, repo, branch, {
+        forgeKind: "gitea",
+        defaultBranch,
+        log,
+      }),
+    };
   }
-  const byBranch = await strictForBranches(api as Partial<StrictBranchApi>, owner, repo, [branch], log);
-  return byBranch.get(branch) ?? "unknown";
+  // One branch read feeds both the strict gate and the blocked-vs-pending
+  // check below (requiredContexts), so admission adds no extra getBranch.
+  const getBranch = (api as Partial<StrictBranchApi> | undefined)?.getBranch;
+  if (typeof getBranch !== "function" || !branch.trim()) return { strict: "unknown" };
+  try {
+    const fetched = await (getBranch as (o: string, r: string, b: string) => Promise<BranchProtection>).call(
+      api,
+      owner,
+      repo,
+      branch
+    );
+    const strict: StrictPolicy = fetched?.strict === true ? "strict" : fetched?.strict === false ? "off" : "unknown";
+    return {
+      strict,
+      ...(Array.isArray(fetched?.requiredContexts) ? { requiredContexts: [...fetched.requiredContexts] } : {}),
+    };
+  } catch (err) {
+    log?.(`strict policy unreadable for ${owner}/${repo}@${branch}: ${errorMessage(err)}`);
+    return { strict: "unknown" };
+  }
 }
 
 /**
  * Collect PRs that are otherwise ready apart from branch freshness: the
  * existing strict-policy, same-repo, non-draft, Jumi-managed and
  * armed-auto-merge gates, plus the ignore-conflicts left-to-author guard.
- * Known blockers (conflict or blocked mergeability) are filtered here so an
- * older blocked PR never holds the queue ahead of an otherwise-ready one.
- * Returned oldest first (created_at, PR number tie-break).
+ * Known terminal blockers (conflict or failing required checks) are filtered
+ * here so an older blocked PR never holds the queue ahead of an
+ * otherwise-ready one. Returned oldest first (created_at, PR number
+ * tie-break).
+ *
+ * Merge state comes from the list on Gitea (its list endpoint already maps
+ * mergeable) but GitHub's list carries none, so GitHub hydrates each
+ * inspected candidate with getPR in order and stops at the first ready one:
+ * the forge is called only for PRs admission inspects, not every open PR.
  */
 async function collectReadyStrictCandidates(opts: {
   pulls: Pull[];
   owner: string;
   repo: string;
   policy: StrictRefreshPolicy;
-  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits" | "getPR" | "listCommitStatuses" | "listCheckRuns">>;
   defaultBranch: string;
   baseBranch: string;
+  requiredContexts?: string[];
+  terminal?: { prNumber: number; headSha: string; baseSha: string };
+  baseSha?: string;
   log?: (message: string) => void;
 }): Promise<Pull[]> {
-  const { pulls, owner, repo, policy, api, defaultBranch, baseBranch, log } = opts;
+  const { pulls, owner, repo, policy, api, defaultBranch, baseBranch, requiredContexts, terminal, baseSha, log } = opts;
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
   const seen = new Set<number>();
-  const ready: Pull[] = [];
+  const prelim: Pull[] = [];
   for (const pr of pulls) {
     if (!pr || pr?.base?.ref !== baseBranch) continue;
     if (seen.has(pr.number)) continue;
@@ -257,13 +368,55 @@ async function collectReadyStrictCandidates(opts: {
       log?.(`strict refresh #${pr.number} left to author; skipping merge-only wake`);
       continue;
     }
-    if (isStrictRefreshBlocked(pr)) {
+    prelim.push(pr);
+  }
+  prelim.sort(compareStrictRefreshOrder);
+  if (gitea || typeof (api as StrictMergeApi)?.getPR !== "function") {
+    const ready: Pull[] = [];
+    for (const pr of prelim) {
+      if (isStrictRefreshBlocked(pr)) {
+        log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+        continue;
+      }
+      ready.push(pr);
+    }
+    return ready;
+  }
+  const getPR = (api as StrictMergeApi).getPR as NonNullable<StrictMergeApi["getPR"]>;
+  const ready: Pull[] = [];
+  for (const pr of prelim) {
+    let fresh: Pull | undefined;
+    try {
+      const got = await getPR.call(api, owner, repo, pr.number);
+      if (got && typeof got === "object" && got.number === pr.number) fresh = got;
+    } catch (err) {
+      log?.(`strict refresh #${pr.number} unreadable; skipping merge-only wake: ${errorMessage(err)}`);
+    }
+    if (!fresh) {
+      // A mismatched or unreadable read falls back to the listed state
+      // instead of dropping the PR: the pre-hydration behavior.
+      if (isStrictRefreshBlocked(pr)) {
+        log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
+        continue;
+      }
+      ready.push(pr);
+      break;
+    }
+    if (await isTerminallyStrictBlocked({ api, owner, repo, pr: fresh, requiredContexts, log })) {
       log?.(`strict refresh #${pr.number} blocked (conflict or failing checks); skipping`);
       continue;
     }
-    ready.push(pr);
+    if (
+      terminal &&
+      terminal.prNumber === fresh.number &&
+      (terminal.headSha ?? "").toLowerCase() === (fresh.head.sha ?? "").toLowerCase() &&
+      (terminal.baseSha ?? "").toLowerCase() === (baseSha ?? "").toLowerCase()
+    ) {
+      continue;
+    }
+    ready.push(fresh);
+    break;
   }
-  ready.sort(compareStrictRefreshOrder);
   return ready;
 }
 
@@ -367,7 +520,15 @@ export async function shouldEnqueueStrictRefreshOnPush(
       return { jobs: [] };
     }
   }
-  const strict = await strictPolicyForBranch(api, owner, repo, branch, policy, defaultBranch, log);
+  const { strict, requiredContexts } = await strictPolicyForBranch(
+    api,
+    owner,
+    repo,
+    branch,
+    policy,
+    defaultBranch,
+    log
+  );
   if (strict !== "strict") {
     // Fail-closed: only an explicit off clears a held slot. An unreadable
     // branch (unknown, e.g. transient fetch error) leaves the slot alone.
@@ -384,6 +545,14 @@ export async function shouldEnqueueStrictRefreshOnPush(
     }
     return { jobs: [] };
   }
+  let terminal: { prNumber: number; headSha: string; baseSha: string } | undefined;
+  if (slots) {
+    try {
+      terminal = (await slots.getTerminal(owner, repo, branch)) ?? undefined;
+    } catch (err) {
+      log?.(`strict refresh terminal lookup failed: ${errorMessage(err)}`);
+    }
+  }
   const readyRaw = await collectReadyStrictCandidates({
     pulls,
     owner,
@@ -392,6 +561,9 @@ export async function shouldEnqueueStrictRefreshOnPush(
     api,
     defaultBranch,
     baseBranch: branch,
+    requiredContexts,
+    terminal,
+    baseSha: pushedBase,
     log,
   });
   const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, log) : readyRaw;
@@ -410,6 +582,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
           policy,
           api,
           defaultBranch,
+          requiredContexts,
           nowMs,
           log,
         });
@@ -448,6 +621,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
       policy,
       api,
       defaultBranch,
+      requiredContexts,
       nowMs: now,
       log,
     });
@@ -485,12 +659,13 @@ async function releaseStaleStrictSlot(opts: {
   baseSha: string;
   pulls: Pull[];
   policy: StrictRefreshPolicy;
-  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits" | "getPR" | "listCommitStatuses" | "listCheckRuns">>;
   defaultBranch: string;
+  requiredContexts?: string[];
   nowMs?: number;
   log?: (message: string) => void;
 }): Promise<void> {
-  const { slots, owner, repo, baseBranch, baseSha, pulls, policy, api, defaultBranch, log } = opts;
+  const { slots, owner, repo, baseBranch, baseSha, pulls, policy, api, defaultBranch, requiredContexts, log } = opts;
   const now = opts.nowMs ?? Date.now();
   const held = await slots.getSlot(owner, repo, baseBranch);
   if (!held) return;
@@ -502,7 +677,8 @@ async function releaseStaleStrictSlot(opts: {
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
     return;
   }
-  const holder = pulls.find((pr) => pr?.number === held.prNumber);
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
+  const holder = await strictHolderPull({ api, owner, repo, pulls, prNumber: held.prNumber, gitea, log });
   if (!holder) {
     await slots.release(owner, repo, baseBranch, { nowMs: now });
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
@@ -527,7 +703,11 @@ async function releaseStaleStrictSlot(opts: {
     log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
     return;
   }
-  if (isStrictRefreshBlocked(holder)) {
+  if (
+    gitea
+      ? isStrictRefreshBlocked(holder)
+      : await isTerminallyStrictBlocked({ api, owner, repo, pr: holder, requiredContexts, log })
+  ) {
     await slots.release(owner, repo, baseBranch, {
       terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" },
       nowMs: now,
@@ -551,12 +731,28 @@ async function reconcileStrictSlotForCandidates(opts: {
   pulls: Pull[];
   ready: Pull[];
   policy: StrictRefreshPolicy;
-  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits">>;
+  api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits" | "getPR" | "listCommitStatuses" | "listCheckRuns">>;
   defaultBranch: string;
+  requiredContexts?: string[];
   nowMs: number;
   log?: (message: string) => void;
 }): Promise<Pull | undefined> {
-  const { slots, owner, repo, baseBranch, baseSha, pulls, ready, policy, api, defaultBranch, nowMs, log } = opts;
+  const {
+    slots,
+    owner,
+    repo,
+    baseBranch,
+    baseSha,
+    pulls,
+    ready,
+    policy,
+    api,
+    defaultBranch,
+    requiredContexts,
+    nowMs,
+    log,
+  } = opts;
+  const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
   const held = await slots.getSlot(owner, repo, baseBranch);
   if (held) {
     if (nowMs - held.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS) {
@@ -566,7 +762,11 @@ async function reconcileStrictSlotForCandidates(opts: {
       });
       log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
     } else {
-      const holder = pulls.find((pr) => pr?.number === held.prNumber);
+      // The ready list already carries fresh pulls on GitHub: reuse the
+      // hydrated holder instead of a second getPR for the same PR.
+      const holder =
+        (ready.find((pr) => pr?.number === held.prNumber) as Pull | undefined) ??
+        (await strictHolderPull({ api, owner, repo, pulls, prNumber: held.prNumber, gitea, log }));
       if (!holder) {
         await slots.release(owner, repo, baseBranch, { nowMs });
         log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
@@ -585,7 +785,11 @@ async function reconcileStrictSlotForCandidates(opts: {
       ) {
         await slots.release(owner, repo, baseBranch, { nowMs });
         log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
-      } else if (isStrictRefreshBlocked(holder)) {
+      } else if (
+        gitea
+          ? isStrictRefreshBlocked(holder)
+          : await isTerminallyStrictBlocked({ api, owner, repo, pr: holder, requiredContexts, log })
+      ) {
         await slots.release(owner, repo, baseBranch, {
           terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" },
           nowMs,
@@ -655,7 +859,13 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   defaultBranch: string;
   cloneUrl: string;
   policy: StrictRefreshPolicy;
-  api: Partial<StrictBranchApi & Pick<IssueApi, "getRepoFile" | "listPullCommits" | "listOpenPulls">> &
+  api: Partial<
+    StrictBranchApi &
+      Pick<
+        IssueApi,
+        "getRepoFile" | "listPullCommits" | "listOpenPulls" | "getPR" | "listCommitStatuses" | "listCheckRuns"
+      >
+  > &
     Partial<{
       listIssueTimeline: (
         owner: string,
@@ -727,10 +937,12 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
   // one getBranch plus one repo-settings read per reconcile, no TOCTOU
   // between the two reads. The left-to-author / blocked passes already ran
   // on the same enriched PR above, so they are skipped here for Gitea.
-  const strict: StrictPolicy =
+  const resolved =
     gitea && giteaStrict
-      ? giteaStrict
+      ? { strict: giteaStrict }
       : await strictPolicyForBranch(api, owner, repo, baseBranch, policy, opts.defaultBranch, opts.log);
+  const strict: StrictPolicy = resolved.strict;
+  const requiredContexts = resolved.requiredContexts;
   if (strict !== "strict") {
     // Fail-closed: only an explicit off clears a held slot; unknown (e.g.
     // transient getBranch failure) leaves the slot alone.
@@ -807,6 +1019,14 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     }
   }
   const baseSha = pr.base?.sha ?? "";
+  let terminal: { prNumber: number; headSha: string; baseSha: string } | undefined;
+  if (slots) {
+    try {
+      terminal = (await slots.getTerminal(owner, repo, baseBranch)) ?? undefined;
+    } catch (err) {
+      opts.log?.(`strict refresh terminal lookup failed: ${errorMessage(err)}`);
+    }
+  }
   const readyRaw = await collectReadyStrictCandidates({
     pulls,
     owner,
@@ -815,6 +1035,9 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     api,
     defaultBranch: opts.defaultBranch,
     baseBranch,
+    requiredContexts,
+    terminal,
+    baseSha,
     log: opts.log,
   });
   const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, opts.log) : readyRaw;
@@ -830,6 +1053,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
         policy,
         api,
         defaultBranch: opts.defaultBranch,
+        requiredContexts,
         nowMs: now,
         log: opts.log,
       });
@@ -853,6 +1077,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
         policy,
         api,
         defaultBranch: opts.defaultBranch,
+        requiredContexts,
         nowMs: now,
         log: opts.log,
       });
@@ -873,6 +1098,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
       policy,
       api,
       defaultBranch: opts.defaultBranch,
+      requiredContexts,
       nowMs: now,
       log: opts.log,
     });
