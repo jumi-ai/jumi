@@ -2,6 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
 import { pushClaimedBranchWithAutomergeRestore } from "./automerge.ts";
+import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -1636,6 +1637,7 @@ export async function implementConflict(opts: ImplementOptions): Promise<Conflic
             issueNumber: opts.job.issueNumber,
             botUsername: opts.botUsername,
             log,
+            pushConfirm: pushConfirmForJobOpts(opts as never),
           });
         } catch (err) {
           if (await inspectRemoteContainsDefault(loop, branch, opts.job.defaultBranch)) {

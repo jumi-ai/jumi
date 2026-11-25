@@ -2,6 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
 import { pushClaimedBranchWithAutomergeRestore, retryRefusedAutomergeSchedule } from "./automerge.ts";
+import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -1687,6 +1688,7 @@ async function runMergeOnlyFollowUp(
           issueNumber: opts.job.issueNumber,
           botUsername: opts.botUsername,
           log,
+          pushConfirm: pushConfirmForJobOpts(opts as never),
         });
       } catch (err) {
         const { errorMessage } = await import("./util/error.ts");
@@ -3185,6 +3187,7 @@ export async function implementFollowUp(
             issueNumber: opts.job.issueNumber,
             botUsername: opts.botUsername,
             log,
+            pushConfirm: pushConfirmForJobOpts(opts as never),
           });
         } catch (err) {
           const remoteSha = await inspectMovedPrHead(loop, branch, attemptedHeadSha);

@@ -649,6 +649,15 @@ export async function handleGithubWebhookEvent(
           return skipped(validation.skip, logger);
         }
         const job = { ...validation, delivery };
+        try {
+          const { confirmPushFromPrRead } = await import("./push_confirm.ts");
+          const store = (deps.review ?? deps.worker?.queue) as unknown as {
+            pushConfirm?: import("./push_confirm.ts").PushConfirmStore;
+          };
+          await confirmPushFromPrRead(store, job.owner, job.repo, job.prNumber, job.headSha, logger);
+        } catch {
+          // Best-effort: the drain re-reads the PR when the webhook is lost.
+        }
         if (deps.getPR) {
           try {
             const pr = await deps.getPR(job.owner, job.repo, job.prNumber);

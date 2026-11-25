@@ -15,6 +15,7 @@ import type { ForgeKind } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { senderCanSteer } from "./permissions.ts";
 import type { Forge, IssueTimelineEvent } from "./ports.ts";
+import { discardPushObligationAfterFailedPush, recordPushObligationBeforePush } from "./push_confirm.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import {
   compileReviewExcludePatterns,
@@ -1824,14 +1825,16 @@ export interface PushWithAutomergeRestoreInput {
   trustedSenderLogins?: readonly string[];
   issueNumber?: number;
   log?: (message: string) => void;
+  /** Durable push-confirmation obligation. Unset keeps today's push without a read-back. */
+  pushConfirm?: import("./push_confirm.ts").PushConfirmStore | undefined;
 }
 
 /**
- * Read the schedule state, push the claimed branch, then restore the
- * schedule when the forge dropped it. Person-cancelled stays cancelled.
- * A push that brings the settings file into the pull cancels the schedule
- * Jumi set earlier instead. Shared by the follow-up and conflict flows so
- * the restore logic has one home.
+ * Read the schedule state, record the push-confirmation obligation, push the
+ * claimed branch, then restore the schedule when the forge dropped it.
+ * Person-cancelled stays cancelled. A push that brings the settings file
+ * into the pull cancels the schedule Jumi set earlier instead. Shared by
+ * the follow-up and conflict flows so the restore logic has one home.
  */
 export async function pushClaimedBranchWithAutomergeRestore(
   loop: ClaimedLoop,
@@ -1846,7 +1849,32 @@ export async function pushClaimedBranchWithAutomergeRestore(
     input.prNumber,
     input.automergeRepos
   );
-  await pushClaimedBranch(loop, branch);
+  let pushGeneration: number | undefined;
+  try {
+    pushGeneration = await recordPushObligationBeforePush(
+      loop,
+      input.pushConfirm,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      branch,
+      input.log
+    );
+  } catch {
+    pushGeneration = undefined;
+  }
+  try {
+    await pushClaimedBranch(loop, branch);
+  } catch (err) {
+    await discardPushObligationAfterFailedPush(
+      input.pushConfirm,
+      input.owner,
+      input.repo,
+      input.prNumber,
+      pushGeneration
+    );
+    throw err;
+  }
   await ensureAutomergeAfterPush({
     api: input.api,
     forgeKind: input.forgeKind,

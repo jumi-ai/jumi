@@ -32,6 +32,7 @@ const ROUTER_SIT_REASONS = [
   "not-labeled",
   "conflict-ignored",
   "waiting-maintainer",
+  "push-unregistered",
 ] as const;
 
 export type RouterSitReason = (typeof ROUTER_SIT_REASONS)[number];
@@ -182,6 +183,9 @@ export function normalizeSitReason(reason: string | null | undefined): RouterSit
   // Shared CI failure: this PR waits for another open PR's fix to land.
   // Boards as waiting (never stuck) so waiters read as `waiting on #N`.
   if (text.startsWith("waiting on #")) return "waiting-maintainer";
+
+  // Push-confirmation exhaustion: Jumi pushed but the forge never registered it.
+  if (text.startsWith("forge did not register push ")) return "push-unregistered";
 
   return undefined;
 }
