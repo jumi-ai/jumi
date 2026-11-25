@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { drainAutomergeReconcile } from "./automerge_reconcile_drain.ts";
 import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
 import {
   CI_ABSENT_NOTE,
@@ -786,6 +787,7 @@ export async function reclaimExpiredJobs(
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
+  await drainAutomergeReconcile(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);

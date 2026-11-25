@@ -9,7 +9,7 @@
   "attachment_transfer.ts": 159,
   "attachments.ts": 403,
   "auth.ts": 83,
-  "automerge.ts": 2105,
+  "automerge.ts": 2020,
   "automerge_reconcile.ts": 777,
   "automerge_webhook.ts": 265,
   "board.ts": 3815,
@@ -129,7 +129,7 @@
   "searxng.ts": 342,
   "searxng_server.ts": 75,
   "sentinels.ts": 69,
-  "server.ts": 1695,
+  "server.ts": 1724,
   "server_mailbox.ts": 77,
   "shared_failure.ts": 135,
   "shutdown.ts": 40,
@@ -167,6 +167,8 @@
   "followup_ci_refresh.ts": 107,
   "reclaim_publish.ts": 113,
   "requeue_gate.ts": 103,
+  "automerge_decision.ts": 392,
+  "automerge_reconcile_drain.ts": 309,
   "worker_intent.ts": 97,
   "followup_wake_causes.ts": 666
 }
