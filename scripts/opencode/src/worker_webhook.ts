@@ -1,3 +1,4 @@
+import { automergeAdmissionFor, isAutomergeAdmissionError } from "./automerge_admission.ts";
 import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   parseWorkflowJobPayload,
@@ -14,6 +15,7 @@ import {
   shouldEnqueuePullRejectedFollowUpWithTrust,
 } from "./followup_webhook.ts";
 import { extractClosingIssueNumbers, type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
+import { settleHeldCancelThroughGate } from "./hold_cancel.ts";
 import {
   blockedIssueJobsToEnqueue,
   isDependencyWakeAction,
@@ -30,12 +32,7 @@ import { resolveRepoPolicy } from "./repo_policy.ts";
 import { enqueueCiWakeWithGate } from "./review_gate.ts";
 import { isQueueUnavailable, type ReviewJobStore } from "./review_jobs.ts";
 import { isKickableSitReason, normalizeSitReason, type RouterSitStore } from "./router_sits.ts";
-import {
-  type HoldStatusApi,
-  postSuggestionHoldSuccess,
-  readSuggestionHold,
-  suggestionHoldSkippedDescription,
-} from "./suggestion_hold.ts";
+import type { HoldStatusApi } from "./suggestion_hold.ts";
 import type { IssueJob, ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import { assertRepositoryPolicy, parsePullRequestPayload, peekWebhookAction, type WebhookPolicy } from "./webhook.ts";
@@ -154,6 +151,11 @@ export interface HandleWorkerWebhookDeps {
   review?: WorkerReviewQueue;
   /** Single-slot strict-refresh store; preferred over the cast on `review`. */
   strictSlots?: import("./strict_refresh_queue.ts").StrictRefreshSlotStore;
+  /**
+   * Durable automerge-cancel verification store (issue #839). Optional like
+   * `strictSlots`; absent preserves today's inline webhook behavior exactly.
+   */
+  automergeReconcile?: import("./automerge_reconcile.ts").AutomergeReconcileStore;
   api?: WorkerWebhookApi;
   cancel?: (owner: string, repo: string, issueNumber: number) => Promise<{ key: string; cancelled: true }>;
   logger?: (message: string) => void;
@@ -427,35 +429,39 @@ async function wakeJobsFromPull(
 
 export async function cancelLedgerWorkerJobs(opts: {
   store: Pick<ReviewJobStore, "cancelQueuedForIssue" | "clearIssueSkipLatch" | "skipLatches">;
-  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> & Partial<HoldStatusApi>;
+  // biome-ignore lint/suspicious/noExplicitAny: fresh-evidence reads need the full forge; fakes vary.
+  api: Pick<IssueApi, "findStickyIssueComment" | "createIssueComment" | "updateIssueComment"> &
+    Partial<HoldStatusApi> &
+    Record<string, any>;
   owner: string;
   repo: string;
   issueNumber: number;
   botUsername: string;
   logger?: (message: string) => void;
+  defaultBranch?: string;
+  deploymentTrusted?: readonly string[];
+  deploymentIgnore?: readonly string[];
+  deploymentBlocking?: readonly string[];
 }): Promise<{ key: string; cancelled: true }> {
   const key = cancelKey(opts.owner, opts.repo, opts.issueNumber);
-  // A held suggestion `pending` must resolve before the latch wipe below
-  // destroys the only record of it: the cancelled rows never run, so no
-  // follow-up job survives to clear it. Best-effort, never throws.
-  try {
-    const hold = await readSuggestionHold(opts.store.skipLatches, {
-      owner: opts.owner,
-      repo: opts.repo,
-      issueNumber: opts.issueNumber,
-    });
-    if (hold.consumed && hold.count && hold.headSha) {
-      await postSuggestionHoldSuccess(
-        opts.api,
-        opts.owner,
-        opts.repo,
-        hold.headSha,
-        suggestionHoldSkippedDescription(hold.count, "unassigned")
-      );
-    }
-  } catch {
-    // Best-effort: never fail the cancel on a status post.
-  }
+  // A held suggestion `pending` must resolve before the latch wipe below destroys the only record of it.
+  // Routes through the shared hold-settlement gate with fresh evidence: an unanswered maintainer hold stays
+  // pending and unknown evidence never becomes success. Best-effort, never throws.
+  await settleHeldCancelThroughGate({
+    api: opts.api,
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: opts.issueNumber,
+    latches: opts.store.skipLatches,
+    latchKey: { owner: opts.owner, repo: opts.repo, issueNumber: opts.issueNumber },
+    botUsername: opts.botUsername,
+    defaultBranch: opts.defaultBranch,
+    deploymentTrusted: opts.deploymentTrusted,
+    deploymentIgnore: opts.deploymentIgnore,
+    deploymentBlocking: opts.deploymentBlocking,
+    log: (message) => opts.logger?.(message),
+    reason: "unassigned",
+  });
   await opts.store.clearIssueSkipLatch(opts.owner, opts.repo, opts.issueNumber);
   const cancelled = await opts.store.cancelQueuedForIssue(opts.owner, opts.repo, opts.issueNumber);
   // Queued rows settle here, so the router posts `stopped` for them. Leased
@@ -478,7 +484,8 @@ export async function handleWorkerWebhookEvent(
   eventType: string | null,
   delivery: string,
   policy: WorkerWebhookPolicy,
-  deps: HandleWorkerWebhookDeps
+  deps: HandleWorkerWebhookDeps,
+  opts?: { forgeDeliveryId?: string | null }
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
   if (event === "ping" || eventType === "ping") return json(200, { ok: true });
@@ -490,19 +497,25 @@ export async function handleWorkerWebhookEvent(
   {
     const action = peekWebhookAction(rawBody);
     if (action === "labeled" || action === "unlabeled" || action === "label_updated" || action === "label_cleared") {
+      const forgeKind = (policy as { forgeKind?: string }).forgeKind ?? "gitea";
+      const admission = automergeAdmissionFor(deps, rawBody, forgeKind, delivery, opts);
       try {
         const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
         const handled = await tryHandleAutomergeLabelEvent({
           rawBody,
-          policy: {
-            ...policy,
-            forgeKind: (policy as { forgeKind?: string }).forgeKind ?? "gitea",
-          },
+          policy: { ...policy, forgeKind },
           api: deps.api,
           log: logger,
+          ...(admission ? { ...admission } : {}),
         });
         if (handled.handled) return json(202, { queued: false, reason: handled.reason });
       } catch (err) {
+        // A failed admission write bypasses the fall-through: the 503 keeps
+        // the delivery unmarked so the forge retry is processed, not deduped.
+        if (isAutomergeAdmissionError(err)) {
+          logger(`automerge admission failed: ${errorMessage(err)}`);
+          return json(503, { error: "queue unavailable" });
+        }
         logger(`automerge label webhook failed: ${errorMessage(err)}`);
       }
     }

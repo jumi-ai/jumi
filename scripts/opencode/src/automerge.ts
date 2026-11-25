@@ -1,10 +1,20 @@
+import {
+  type AutomergeApi,
+  type AutomergeLabelList,
+  cancelAutomergeScheduleOutcome,
+  evaluateAutomergeLabelState,
+  hasLabelCaseInsensitive,
+  isAutomergeRepo,
+  prBaseRefOf,
+  resolveLabelNames,
+} from "./automerge_decision.ts";
 import { branchRequiresReviewCheck, JUMI_REVIEW_CONTEXT } from "./ci.ts";
 import type { ClaimedLoop } from "./claimed_worktree.ts";
 import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { senderCanSteer } from "./permissions.ts";
-import type { Forge, IssueApi, IssueTimelineEvent } from "./ports.ts";
+import type { Forge, IssueTimelineEvent } from "./ports.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import {
   compileReviewExcludePatterns,
@@ -19,6 +29,11 @@ import {
 } from "./repo_settings.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
+
+export type { AutomergeLabelList } from "./automerge_decision.ts";
+// Re-exported so existing `automerge.ts` import sites (tests, review
+// suggestions) keep working after the read/decision split.
+export { cancelAutomergeScheduleOutcome, isAutomergeRepo } from "./automerge_decision.ts";
 
 const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
 const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
@@ -123,21 +138,6 @@ async function hasRefusedAutomergeNote(
   }
 }
 
-type AutomergeApi = Pick<
-  IssueApi,
-  | "getRepo"
-  | "getPR"
-  | "getBranch"
-  | "scheduleAutoMerge"
-  | "findStickyIssueComment"
-  | "createIssueComment"
-  | "updateIssueComment"
-  | "getIssue"
-  | "addIssueLabel"
-  | "getCollaboratorPermission"
-> &
-  Partial<Pick<Forge, "getPRFiles" | "getRepoFile" | "cancelAutoMerge" | "listIssueTimeline" | "listIssueComments">>;
-
 /**
  * Whether a (possibly partial) webhook forge client has every method the
  * label-change path requires. Missing methods fail closed with
@@ -155,41 +155,6 @@ function isFullAutomergeApi(api: Partial<AutomergeApi>): api is AutomergeApi {
     typeof api.getIssue === "function" &&
     typeof api.getCollaboratorPermission === "function"
   );
-}
-
-export type AutomergeLabelList = ReadonlyArray<string | { name?: string }>;
-
-/**
- * Deployment-level auto-merge opt-in, same CSV style as the allowlists.
- * Besides `owner/repo` entries it accepts a whole-owner entry (`owner`, also
- * written `owner/*`) and an every-repository entry (`*`, also written with a
- * slash-star suffix). Matching is case-insensitive; blank entries are ignored.
- *
- * An unset or empty list allows every repository: the repository's own
- * `.jumi.yml` alone decides. A non-empty list narrows further exactly as
- * before (deprecated `JUMI_AUTOMERGE_REPOS`).
- */
-export function isAutomergeRepo(owner: string, repo: string, list: readonly string[] | undefined): boolean {
-  if (!list || list.length === 0) return true;
-  const wantedOwner = owner.trim().toLowerCase();
-  const wantedRepo = repo.trim().toLowerCase();
-  const wanted = `${wantedOwner}/${wantedRepo}`;
-  for (const raw of list) {
-    const entry = raw.trim().toLowerCase();
-    if (!entry) continue;
-    if (entry === "*" || entry === "*/*") return true;
-    if (entry.endsWith("/*")) {
-      const prefix = entry.slice(0, -2);
-      if (prefix === "*" || prefix === wantedOwner) return true;
-      continue;
-    }
-    if (!entry.includes("/")) {
-      if (entry === wantedOwner) return true;
-      continue;
-    }
-    if (entry === wanted) return true;
-  }
-  return false;
 }
 
 export function githubMergeMethodForRepo(repo: {
@@ -457,18 +422,8 @@ async function readReviewGate(
   }
 }
 
-function labelNameOf(label: string | { name?: string }): string {
-  return typeof label === "string" ? label : (label.name ?? "");
-}
-
 export function hasAutomergeLabel(labels: AutomergeLabelList | null | undefined, name: string): boolean {
   return hasLabelCaseInsensitive(labels, name);
-}
-
-function hasLabelCaseInsensitive(labels: AutomergeLabelList | null | undefined, name: string): boolean {
-  const needle = name.trim().toLowerCase();
-  if (!needle) return false;
-  return (labels ?? []).some((label) => labelNameOf(label).trim().toLowerCase() === needle);
 }
 
 export function resolveAutomergeLabelNames(settings: RepoSettingsLoad): {
@@ -476,13 +431,6 @@ export function resolveAutomergeLabelNames(settings: RepoSettingsLoad): {
   noAutomergeLabel: string;
 } {
   return resolveLabelNames(settings);
-}
-
-function resolveLabelNames(settings: RepoSettingsLoad): { automergeLabel: string; noAutomergeLabel: string } {
-  if (settings.state === "valid") {
-    return { automergeLabel: settings.automergeLabel, noAutomergeLabel: settings.noAutomergeLabel };
-  }
-  return { automergeLabel: DEFAULT_AUTOMERGE_LABEL, noAutomergeLabel: DEFAULT_NO_AUTOMERGE_LABEL };
 }
 
 /**
@@ -646,46 +594,6 @@ export async function isAutomergeLabelAdmitted(opts: {
   }
 }
 
-export type CancelAutomergeOutcome = "removed" | "absent" | "unsupported" | "failed";
-
-/**
- * Truthful cancel outcome for a schedule Jumi set earlier. Never throws.
- * Missing entrypoint -> `unsupported`; resolved `true` -> `removed`;
- * resolved `false` -> `absent`; anything else (older fakes resolving `void`)
- * -> `removed`; threw -> `failed` (logged, never rethrown).
- */
-export async function cancelAutomergeScheduleOutcome(
-  api: AutomergeApi,
-  forgeKind: ForgeKind,
-  owner: string,
-  repo: string,
-  prNumber: number,
-  log: (message: string) => void
-): Promise<CancelAutomergeOutcome> {
-  void forgeKind;
-  try {
-    const cancel = api.cancelAutoMerge;
-    if (typeof cancel !== "function") {
-      log(`automerge cancel unsupported for ${owner}/${repo}#${prNumber}: forge does not expose cancellation`);
-      return "unsupported";
-    }
-    const removed = await cancel.call(api, owner, repo, prNumber);
-    if (removed === false) {
-      log(`automerge cancelled for ${owner}/${repo}#${prNumber} (nothing to remove)`);
-      return "absent";
-    }
-    // Older fakes resolve `void`: only an explicit `false` means "nothing
-    // to remove"; anything else keeps the previous claim-a-cancel behaviour.
-    log(`automerge cancelled for ${owner}/${repo}#${prNumber}`);
-    return "removed";
-  } catch (err) {
-    // A missing schedule is the steady state; any other failure stays in the
-    // server log and never fails the job.
-    log(`automerge cancel failed for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
-    return "failed";
-  }
-}
-
 /** Compatibility wrapper for the nine non-handler call sites: `true` only for `removed`. */
 async function cancelAutomergeSchedule(
   api: AutomergeApi,
@@ -805,18 +713,6 @@ async function loadPrLabels(
     log(`automerge pull unreadable for ${owner}/${repo}#${prNumber}: ${errorMessage(err)}`);
     return undefined;
   }
-}
-
-/**
- * PR's actual base branch ref, or undefined when missing. Safe against
- * partial PR shapes from webhook mailboxes and fakes.
- */
-function prBaseRefOf(pr: unknown): string | undefined {
-  if (!pr || typeof pr !== "object") return undefined;
-  const base = (pr as { base?: unknown }).base;
-  if (!base || typeof base !== "object") return undefined;
-  const ref = (base as { ref?: unknown }).ref;
-  return typeof ref === "string" && ref.trim() ? ref.trim() : undefined;
 }
 
 /**
@@ -1968,28 +1864,6 @@ export async function pushClaimedBranchWithAutomergeRestore(
 }
 
 /**
- * Decide what a label webhook on a Jumi PR should do. Returns
- * `"schedule"` when the effective decision (labels included) wants a schedule
- * and `"cancel"` when it wants none. Both labels together want cancel plus
- * the conflict note. `no_automerge` alone wants a silent cancel. Callers
- * re-run the full gate via `scheduleAutomergeForPr` for `"schedule"`.
- */
-function automergeLabelEventAction(
-  labels: AutomergeLabelList | null | undefined,
-  settings: RepoSettingsLoad
-): { action: "schedule" | "cancel"; conflict: boolean } {
-  const names = resolveLabelNames(settings);
-  const hasNo = hasLabelCaseInsensitive(labels, names.noAutomergeLabel);
-  const hasYes = hasLabelCaseInsensitive(labels, names.automergeLabel);
-  if (hasNo && hasYes) return { action: "cancel", conflict: true };
-  if (hasNo) return { action: "cancel", conflict: false };
-  if (hasYes) return { action: "schedule", conflict: false };
-  return settings.state === "valid" && settings.automerge === true
-    ? { action: "schedule", conflict: false }
-    : { action: "cancel", conflict: false };
-}
-
-/**
  * React to adding or removing either override label on an open Jumi PR:
  * re-run every gate (schedule) or cancel the schedule. Only PRs Jumi opened
  * reach here; takeovers and handoffs are filtered by the caller. The bot's
@@ -2015,10 +1889,18 @@ export async function handleAutomergeLabelChange(opts: {
   botUsername: string;
   issueNumber?: number;
   log?: (message: string) => void;
+  /**
+   * Durable-admission mode (issue #839): cancel branches return
+   * `cancel-deferred` without calling the forge; the leased drainer owns
+   * the actual cancellation. Scheduling is unchanged, and callers without
+   * this mode keep today's behavior.
+   */
+  deferCancel?: boolean;
 }): Promise<{
   action:
     | "scheduled"
     | "cancelled"
+    | "cancel-deferred"
     | "cancel-unsupported"
     | "cancel-failed"
     | "deployment-blocked"
@@ -2036,24 +1918,27 @@ export async function handleAutomergeLabelChange(opts: {
     );
     return { action: "none" };
   }
-  let prLabels: AutomergeLabelList = [];
-  let prBaseBranch: string | undefined = opts.prBaseBranch?.trim() ? opts.prBaseBranch.trim() : undefined;
-  try {
-    const pr = await api.getPR(opts.owner, opts.repo, opts.prNumber);
-    if (pr.merged || pr.state !== "open") return { action: "none" };
-    prLabels = ((pr as { labels?: AutomergeLabelList | null }).labels ?? []) as AutomergeLabelList;
-    if (!prBaseBranch) prBaseBranch = prBaseRefOf(pr);
-  } catch (err) {
-    log(`automerge label re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
-    return { action: "unreadable" };
-  }
-  const listed = isAutomergeRepo(opts.owner, opts.repo, opts.automergeRepos);
-  const enabled = opts.automergeEnabled ?? true;
-  if (!listed || !enabled) {
+  const evaluation = await evaluateAutomergeLabelState({
+    api,
+    owner: opts.owner,
+    repo: opts.repo,
+    prNumber: opts.prNumber,
+    baseBranch: opts.baseBranch,
+    ...(opts.prBaseBranch?.trim() ? { prBaseBranch: opts.prBaseBranch.trim() } : {}),
+    automergeRepos: opts.automergeRepos,
+    automergeEnabled: opts.automergeEnabled,
+    trustedSenderLogins: opts.trustedSenderLogins,
+    log,
+  });
+  if (evaluation.decision === "unreadable") return { action: "unreadable" };
+  if (evaluation.closed) return { action: "none" };
+  const prLabels = evaluation.prLabels;
+  const prBaseBranch = evaluation.prBaseBranch;
+  if (!evaluation.listed || !evaluation.enabled) {
     // Mirror the open-time deployment-blocked path: when the repository opted
     // in (file on, or an admitted `automerge` label) but the deployment
     // blocks, leave one sticky note saying the deployer has to act.
-    const gate = !listed ? ("not-listed" as const) : ("disabled" as const);
+    const gate = !evaluation.listed ? ("not-listed" as const) : ("disabled" as const);
     const res = await maybeNoteDeploymentBlocked({
       api,
       owner: opts.owner,
@@ -2069,33 +1954,28 @@ export async function handleAutomergeLabelChange(opts: {
     });
     return { action: res.posted ? "deployment-blocked" : "none" };
   }
-  let settings: RepoSettingsLoad;
-  try {
-    settings = (
-      await resolveRepoPolicy(
-        { api, owner: opts.owner, repo: opts.repo, ref: opts.baseBranch },
-        fallbackPolicyDeployment({ trustedSenderLogins: opts.trustedSenderLogins }),
-        { onUnreadable: "throw" }
-      )
-    ).load;
-  } catch (err) {
-    log(`automerge settings unreadable for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
-    return { action: "unreadable" };
-  }
-  if (settings.state === "invalid") {
-    await postAutomergeNote(
-      api,
-      opts.owner,
-      opts.repo,
-      opts.prNumber,
-      opts.botUsername,
-      invalidSettingsNote(settings.error)
-    );
+  const settings = evaluation.settings;
+  if (evaluation.invalid || !settings || settings.state === "invalid") {
+    const detail = settings?.state === "invalid" ? settings.error : "invalid";
+    await postAutomergeNote(api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, invalidSettingsNote(detail));
     return { action: "none" };
   }
   const names = resolveLabelNames(settings);
-  const decision = automergeLabelEventAction(prLabels, settings);
-  if (decision.conflict) {
+  if (evaluation.decision === "conflict-cancel") {
+    if (opts.deferCancel) {
+      // Deferred: the conflict note stays diagnostic and never claims the
+      // schedule is already gone; the drainer cancels under its lease.
+      await postAutomergeNote(
+        api,
+        opts.owner,
+        opts.repo,
+        opts.prNumber,
+        opts.botUsername,
+        automergeConflictNote(names.automergeLabel, names.noAutomergeLabel)
+      );
+      log(`automerge label change deferred for ${opts.owner}/${opts.repo}#${opts.prNumber}: cancel-deferred`);
+      return { action: "cancel-deferred" };
+    }
     const outcome = await cancelAutomergeScheduleOutcome(
       api,
       opts.forgeKind,
@@ -2116,9 +1996,14 @@ export async function handleAutomergeLabelChange(opts: {
       action: outcome === "failed" ? "cancel-failed" : outcome === "unsupported" ? "cancel-unsupported" : "cancelled",
     };
   }
-  if (decision.action === "cancel") {
+  if (evaluation.decision === "cancel") {
     // No-automerge label, or the label was removed and the file does not opt in:
-    // cancel anything scheduled.
+    // cancel anything scheduled. Deferred admissions leave the cancel to the
+    // leased drainer instead of calling the forge from the webhook handler.
+    if (opts.deferCancel) {
+      log(`automerge label change deferred for ${opts.owner}/${opts.repo}#${opts.prNumber}: cancel-deferred`);
+      return { action: "cancel-deferred" };
+    }
     const outcome = await cancelAutomergeScheduleOutcome(
       api,
       opts.forgeKind,

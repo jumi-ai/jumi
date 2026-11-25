@@ -14,9 +14,45 @@ export interface IssueSkipLatchRecord {
   reviewStuck: unknown;
 }
 
+export interface SkipLatchFence {
+  jobId: number;
+  leasedBy: string;
+  generation: number;
+}
+
+export class LatchFenceRejected extends Error {
+  constructor(message = "skip latch fence rejected") {
+    super(message);
+    this.name = "LatchFenceRejected";
+  }
+}
+
+export class LatchFenceUnsupported extends Error {
+  constructor(message = "skip latch fence is not supported by this store") {
+    super(message);
+    this.name = "LatchFenceUnsupported";
+  }
+}
+
+function isFenceGenerationValid(generation: unknown): generation is number {
+  return typeof generation === "number" && Number.isInteger(generation) && generation >= 0;
+}
+
+function assertFenceValid(fence: SkipLatchFence): void {
+  if (!Number.isInteger(fence.jobId) || fence.jobId <= 0) {
+    throw new LatchFenceRejected(`invalid skip latch fence jobId ${JSON.stringify(fence.jobId)}`);
+  }
+  if (typeof fence.leasedBy !== "string" || fence.leasedBy.length === 0) {
+    throw new LatchFenceRejected("invalid skip latch fence leasedBy");
+  }
+  if (!isFenceGenerationValid(fence.generation)) {
+    throw new LatchFenceRejected(`invalid skip latch fence generation ${JSON.stringify(fence.generation)}`);
+  }
+}
+
 export interface SkipLatchStore {
   get(key: SkipLatchKey): Promise<IssueSkipLatchRecord>;
-  put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>): Promise<void>;
+  put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>, fence?: SkipLatchFence): Promise<void>;
   delete(key: SkipLatchKey): Promise<void>;
 }
 
@@ -110,7 +146,14 @@ export class MemorySkipLatchStore implements SkipLatchStore {
     return row ? cloneRecord(row) : emptySkipLatchRecord();
   }
 
-  async put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>): Promise<void> {
+  async put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>, fence?: SkipLatchFence): Promise<void> {
+    if (fence !== undefined) {
+      // Standalone/home/path-backed memory stores have no ledger ownership
+      // check, so a requested fence must fail loudly instead of writing
+      // without it. Malformed fences reject before reaching that branch.
+      assertFenceValid(fence);
+      throw new LatchFenceUnsupported("fenced skip latch writes need a ledger-backed store");
+    }
     const current = this.rows.get(latchMapKey(key)) ?? emptySkipLatchRecord();
     const next: IssueSkipLatchRecord = {
       followup: patch.followup !== undefined ? structuredClone(patch.followup) : current.followup,
@@ -124,6 +167,49 @@ export class MemorySkipLatchStore implements SkipLatchStore {
 
   async delete(key: SkipLatchKey): Promise<void> {
     this.rows.delete(latchMapKey(key));
+  }
+}
+
+export interface MemoryLedgerLatchOwner {
+  findLedgerRow(jobId: number):
+    | {
+        state: string;
+        leasedBy: string | null;
+        owner: string;
+        repo: string;
+        issueNumber: number | null;
+      }
+    | undefined;
+  readLatchGeneration(owner: string, repo: string, issueNumber: number): number;
+}
+
+/**
+ * Ledger-backed memory latch adapter. The ownership/generation checks and the
+ * cell write run synchronously with no `await` between them, so no other
+ * synchronous section can interleave. Expiry (`leased_until`) is deliberately
+ * not compared (matching heartbeat/settle; reclaim is the revoker) and
+ * `cancel_requested` is not a rejection reason (cancel flows through
+ * `markPublished`/generation bump).
+ */
+export class LedgerMemorySkipLatchStore extends MemorySkipLatchStore {
+  constructor(private readonly ledger: MemoryLedgerLatchOwner) {
+    super();
+  }
+
+  async put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>, fence?: SkipLatchFence): Promise<void> {
+    if (fence === undefined) return super.put(key, patch);
+    assertFenceValid(fence);
+    const row = this.ledger.findLedgerRow(fence.jobId);
+    if (row?.state !== "leased" || row?.leasedBy !== fence.leasedBy) {
+      throw new LatchFenceRejected(`skip latch fence rejected for job ${fence.jobId}`);
+    }
+    if (row.owner !== key.owner || row.repo !== key.repo || row.issueNumber !== key.issueNumber) {
+      throw new LatchFenceRejected(`skip latch fence rejected for job ${fence.jobId}`);
+    }
+    if (this.ledger.readLatchGeneration(key.owner, key.repo, key.issueNumber) !== fence.generation) {
+      throw new LatchFenceRejected(`skip latch fence rejected for job ${fence.jobId}`);
+    }
+    return super.put(key, patch);
   }
 }
 
@@ -182,14 +268,15 @@ export class PgSkipLatchStore implements SkipLatchStore {
     };
   }
 
-  async put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>): Promise<void> {
+  async put(key: SkipLatchKey, patch: Partial<IssueSkipLatchRecord>, fence?: SkipLatchFence): Promise<void> {
     const followup = jsonParam(patch.followup);
     const conflict = jsonParam(patch.conflict);
     const ci = jsonParam(patch.ci);
     const stuck = jsonParam(patch.stuck);
     const reviewStuck = jsonParam(patch.reviewStuck);
-    await this.sql.unsafe(
-      `INSERT INTO issue_skip_latches (owner, repo, issue_number, followup, conflict, ci, stuck, review_stuck)
+    if (fence === undefined) {
+      await this.sql.unsafe(
+        `INSERT INTO issue_skip_latches (owner, repo, issue_number, followup, conflict, ci, stuck, review_stuck)
        VALUES (
          $1, $2, $3,
          COALESCE($4::jsonb, '{}'::jsonb),
@@ -205,8 +292,75 @@ export class PgSkipLatchStore implements SkipLatchStore {
          stuck = COALESCE($7::jsonb, issue_skip_latches.stuck),
          review_stuck = COALESCE($8::jsonb, issue_skip_latches.review_stuck),
          updated_at = NOW()`,
-      [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck, reviewStuck]
-    );
+        [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck, reviewStuck]
+      );
+      return;
+    }
+    // Malformed fences reject before any write, and the rejection below is
+    // thrown outside the transaction: the shared SQL client wraps every error
+    // raised inside `begin` as QueueUnavailableError, which would hide the
+    // fence verdict from callers.
+    assertFenceValid(fence);
+    const landed = await this.sql.begin(async (tx) => {
+      // Fenced latch write: the ledger row must still be leased by the exact
+      // token and bound to this latch identity. `FOR SHARE` conflicts with
+      // the `FOR UPDATE` row locks that reclaim/heartbeat/settle take, so a
+      // reclaim in flight blocks this check until it commits, and this check
+      // blocks a concurrent reclaim (which then skips the locked row via
+      // `SKIP LOCKED`). Expiry (`leased_until`) is deliberately not compared,
+      // matching heartbeat/settle; reclaim is the revoker. `cancel_requested`
+      // is not a rejection reason: cancel flows through
+      // `markPublished`/generation bump.
+      const held = asRows<{ one: unknown }>(
+        await tx.unsafe(
+          `SELECT 1 AS one FROM review_jobs
+           WHERE id = $1 AND leased_by = $2 AND state = 'leased'
+             AND owner = $3 AND repo = $4 AND issue_number = $5
+           FOR SHARE`,
+          [fence.jobId, fence.leasedBy, key.owner, key.repo, key.issueNumber]
+        )
+      );
+      if (held.length === 0) return false;
+      // Update branch: applies only when the latch row's generation equals
+      // the expected value. No unlocked EXISTS: the predicate is evaluated by
+      // the database against the latest committed row under the ledger lock.
+      const updated = asRows<{ generation: unknown }>(
+        await tx.unsafe(
+          `UPDATE issue_skip_latches SET
+             followup = COALESCE($4::jsonb, issue_skip_latches.followup),
+             conflict = COALESCE($5::jsonb, issue_skip_latches.conflict),
+             ci = COALESCE($6::jsonb, issue_skip_latches.ci),
+             stuck = COALESCE($7::jsonb, issue_skip_latches.stuck),
+             review_stuck = COALESCE($8::jsonb, issue_skip_latches.review_stuck),
+             updated_at = NOW()
+           WHERE owner = $1 AND repo = $2 AND issue_number = $3 AND generation = $9
+           RETURNING generation`,
+          [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck, reviewStuck, fence.generation]
+        )
+      );
+      if (updated.length > 0) return true;
+      // Insert branch: applies only when no latch row exists (absent = 0),
+      // expressed as a conditional insert gated on expected generation 0 so
+      // the check and the write stay in the same statement. A conflicting
+      // concurrent insert yields zero rows and rejects.
+      const inserted = asRows<{ generation: unknown }>(
+        await tx.unsafe(
+          `INSERT INTO issue_skip_latches (owner, repo, issue_number, followup, conflict, ci, stuck, review_stuck)
+           SELECT $1, $2, $3,
+             COALESCE($4::jsonb, '{}'::jsonb),
+             COALESCE($5::jsonb, '{}'::jsonb),
+             COALESCE($6::jsonb, '{}'::jsonb),
+             COALESCE($7::jsonb, '{}'::jsonb),
+             COALESCE($8::jsonb, '{}'::jsonb)
+           WHERE $9 = 0
+           ON CONFLICT (owner, repo, issue_number) DO NOTHING
+           RETURNING generation`,
+          [key.owner, key.repo, key.issueNumber, followup, conflict, ci, stuck, reviewStuck, fence.generation]
+        )
+      );
+      return inserted.length > 0;
+    });
+    if (!landed) throw new LatchFenceRejected(`skip latch fence rejected for job ${fence.jobId}`);
   }
 
   async delete(key: SkipLatchKey): Promise<void> {

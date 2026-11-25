@@ -48,7 +48,8 @@ import {
 } from "./run_usage.ts";
 import {
   ISSUE_SKIP_LATCHES_SCHEMA_SQL,
-  MemorySkipLatchStore,
+  LedgerMemorySkipLatchStore,
+  type MemorySkipLatchStore,
   PgSkipLatchStore,
   type SkipLatchStore,
 } from "./skip_latches.ts";
@@ -1116,7 +1117,10 @@ export function workerJobKey(job: IssueJob): string {
     return `implement:${tracker}:${trackerId}`;
   }
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
-  const base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  let base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  if (typeof job.strictBaseSha === "string" && job.strictBaseSha) {
+    base += `:${job.strictBaseSha}`;
+  }
   if (kind !== "follow-up" || job.trigger?.event !== "workflow_job") return base;
   const jobId = job.trigger.workflowJobId;
   if (typeof jobId === "number" && Number.isFinite(jobId)) return `${base}:${jobId}`;
@@ -1310,7 +1314,13 @@ function attemptKeyForRow(row: NewRunUsageRow & { id: number }): string {
 
 export class MemoryReviewJobStore implements ReviewJobStore {
   readonly rows: ReviewJobRecord[] = [];
-  readonly skipLatches = new MemorySkipLatchStore();
+  // Ledger-aware adapter (still a MemorySkipLatchStore so existing callers
+  // and assignments keep working); standalone memory stores reject fences.
+  readonly skipLatches: MemorySkipLatchStore = new LedgerMemorySkipLatchStore({
+    findLedgerRow: (jobId) => this.rows.find((row) => row.id === jobId),
+    readLatchGeneration: (owner, repo, issueNumber) =>
+      this.issueSkipLatches.get(issueSkipLatchKey(owner, repo, issueNumber))?.generation ?? 0,
+  });
   readonly sits = new MemoryRouterSitStore();
   readonly provenance = new MemoryProvenanceStore();
   readonly handoffs = new MemoryHandoffStore();
@@ -4096,6 +4106,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
         await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS laps INTEGER NOT NULL DEFAULT 0`);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
         await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
       });

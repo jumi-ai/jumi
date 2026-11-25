@@ -92,6 +92,7 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
             sits: deps.sits,
             handoffs: deps.handoffs,
             strictSlots: deps.strictSlots,
+            automergeReconcile: deps.automergeReconcile,
           },
           logger,
           deliveryDedupe,
@@ -156,7 +157,9 @@ export function createWorkerFetchHandler(config: WorkerConfig, deps: WorkerFetch
           sits: deps.sits,
           handoffs: deps.handoffs,
           strictSlots: deps.strictSlots,
-        }
+          automergeReconcile: deps.automergeReconcile,
+        },
+        { forgeDeliveryId: deliveryHeader }
       );
       if (deliveryHeader && (response.status === 200 || response.status === 202)) {
         deliveryDedupe.mark(delivery);
@@ -238,6 +241,7 @@ async function main() {
       sits: store?.sits,
       handoffs: store?.handoffs,
       strictSlots: store?.strictSlots,
+      automergeReconcile: store?.automergeReconcile,
       cancel: (owner, repo, issueNumber) =>
         handleIssueCancel(config, api, owner, repo, issueNumber, ramQueue, store, aborts, pids, skipLatches),
     }),
