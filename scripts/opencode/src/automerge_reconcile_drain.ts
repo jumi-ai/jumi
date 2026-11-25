@@ -3,11 +3,7 @@ import { reconcileAutomergeCancellation } from "./automerge_decision.ts";
 import type { ServiceConfig } from "./config.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import type { ReviewApi } from "./ports.ts";
-import {
-  HEARTBEAT_MS,
-  makeReclaimOwner,
-  type ReviewJobStore,
-} from "./review_jobs.ts";
+import { HEARTBEAT_MS, makeReclaimOwner, type ReviewJobStore } from "./review_jobs.ts";
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 import { redactGitSecrets } from "./workspace.ts";
@@ -184,14 +180,7 @@ async function processReconcileRow(
     }
     stopHeartbeat();
     if (result === "removed" || result === "absent" || result === "not-needed") {
-      const settled = await reconcile.complete(
-        row.owner,
-        row.repo,
-        row.prNumber,
-        token,
-        row.generation,
-        now()
-      );
+      const settled = await reconcile.complete(row.owner, row.repo, row.prNumber, token, row.generation, now());
       if (settled === "deleted") return "completed";
       logger(`automerge reconcile ${settled} ${coords} generation=${row.generation}`);
       return "retried";
@@ -240,7 +229,16 @@ async function processReconcileRow(
     stopHeartbeat();
     logger(`automerge reconcile failed ${coords}: ${errorMessage(err)}`);
     try {
-      await settleReconcileFail(store, api, config, logger, row, token, redactReconcileError(config, err), nowMsOverride);
+      await settleReconcileFail(
+        store,
+        api,
+        config,
+        logger,
+        row,
+        token,
+        redactReconcileError(config, err),
+        nowMsOverride
+      );
     } catch {
       // Best-effort: the row keeps its lease and is re-processed next tick.
     }

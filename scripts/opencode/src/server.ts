@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { drainAutomergeReconcile } from "./automerge_reconcile_drain.ts";
 import { BOARD_PORT, type BoardPullForge, createBoardFetchHandler } from "./board.ts";
 import {
   CI_ABSENT_NOTE,
@@ -36,7 +37,6 @@ import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { handleReclaimPublishFailure } from "./reclaim_publish.ts";
-import { drainAutomergeReconcile } from "./automerge_reconcile_drain.ts";
 import {
   effectiveLeaseMs,
   effectiveReviewBudget,

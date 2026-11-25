@@ -96,9 +96,7 @@ describePg("automerge reconcile drain against real postgres", () => {
     const after = await drainAutomergeReconcile(store, api as never, makeConfig(), () => undefined);
     expect(after.completed).toBe(1);
     expect(calls).toBe(2);
-    expect(
-      await store.automergeReconcile.claimDue("peek", 60_000, 10, Date.now())
-    ).toEqual([]);
+    expect(await store.automergeReconcile.claimDue("peek", 60_000, 10, Date.now())).toEqual([]);
   });
 
   test("labels now say schedule: completed with no schedule and no cancel", async () => {

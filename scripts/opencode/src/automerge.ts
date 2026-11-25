@@ -1,6 +1,3 @@
-import { branchRequiresReviewCheck, JUMI_REVIEW_CONTEXT } from "./ci.ts";
-import type { ClaimedLoop } from "./claimed_worktree.ts";
-import { pushClaimedBranch } from "./claimed_worktree.ts";
 import {
   type AutomergeApi,
   type AutomergeLabelList,
@@ -11,6 +8,9 @@ import {
   prBaseRefOf,
   resolveLabelNames,
 } from "./automerge_decision.ts";
+import { branchRequiresReviewCheck, JUMI_REVIEW_CONTEXT } from "./ci.ts";
+import type { ClaimedLoop } from "./claimed_worktree.ts";
+import { pushClaimedBranch } from "./claimed_worktree.ts";
 import type { ForgeKind } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { senderCanSteer } from "./permissions.ts";
@@ -30,10 +30,10 @@ import {
 import { upsertStickyComment } from "./sticky_comment.ts";
 import { errorMessage } from "./util/error.ts";
 
+export type { AutomergeLabelList } from "./automerge_decision.ts";
 // Re-exported so existing `automerge.ts` import sites (tests, review
 // suggestions) keep working after the read/decision split.
 export { cancelAutomergeScheduleOutcome, isAutomergeRepo } from "./automerge_decision.ts";
-export type { AutomergeLabelList } from "./automerge_decision.ts";
 
 const AUTOMERGE_REPOS_ENV = "JUMI_AUTOMERGE_REPOS";
 const AUTOMERGE_ENABLED_ENV = "JUMI_AUTOMERGE_ENABLED";
@@ -1949,14 +1949,7 @@ export async function handleAutomergeLabelChange(opts: {
   const settings = evaluation.settings;
   if (evaluation.invalid || !settings || settings.state === "invalid") {
     const detail = settings?.state === "invalid" ? settings.error : "invalid";
-    await postAutomergeNote(
-      api,
-      opts.owner,
-      opts.repo,
-      opts.prNumber,
-      opts.botUsername,
-      invalidSettingsNote(detail)
-    );
+    await postAutomergeNote(api, opts.owner, opts.repo, opts.prNumber, opts.botUsername, invalidSettingsNote(detail));
     return { action: "none" };
   }
   const names = resolveLabelNames(settings);

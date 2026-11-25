@@ -185,14 +185,9 @@ describe("drainAutomergeReconcile", () => {
     const { store } = await seeded();
     const { api, calls, notes } = drainApi({ cancelAutoMerge: undefined });
     const logs: string[] = [];
-    const summary = await drainAutomergeReconcile(
-      store,
-      api as never,
-      config(),
-      (m) => logs.push(m),
-      50,
-      { nowMs: 1_000 }
-    );
+    const summary = await drainAutomergeReconcile(store, api as never, config(), (m) => logs.push(m), 50, {
+      nowMs: 1_000,
+    });
     expect(summary).toEqual({ claimed: 1, completed: 0, retried: 0, blocked: 1 });
     expect(calls).not.toContain("cancelAutoMerge");
     const exhausted = await store.automergeReconcile.listExhausted(10);
@@ -298,9 +293,7 @@ describe("drainAutomergeReconcile", () => {
     expect(logs.filter((m) => m.includes("automerge_reconcile_exhausted")).length).toBe(1);
     expect(notes.length).toBe(1);
     // A repeated cause does not revive; only a new cause does.
-    expect((await store.automergeReconcile.request("kirmanak", "demo", 7, "cause-A", nowMs)).status).toBe(
-      "duplicate"
-    );
+    expect((await store.automergeReconcile.request("kirmanak", "demo", 7, "cause-A", nowMs)).status).toBe("duplicate");
     expect(await store.automergeReconcile.claimDue("peek", 60_000, 10, nowMs)).toEqual([]);
     const revived = await store.automergeReconcile.request("kirmanak", "demo", 7, "cause-fresh", nowMs);
     expect(revived.status).toBe("revived");
@@ -494,10 +487,11 @@ describe("existing handler behavior", () => {
         return jumiPrLabels(["automerge"], { number: index });
       },
     });
-    (api as unknown as { scheduleAutoMerge: (owner: string, repo: string, index: number) => Promise<void> }).scheduleAutoMerge =
-      async () => {
-        calls.push("scheduleAutoMerge");
-      };
+    (
+      api as unknown as { scheduleAutoMerge: (owner: string, repo: string, index: number) => Promise<void> }
+    ).scheduleAutoMerge = async () => {
+      calls.push("scheduleAutoMerge");
+    };
     (
       api as unknown as {
         listIssueTimeline: (owner: string, repo: string, index: number) => Promise<unknown[]>;

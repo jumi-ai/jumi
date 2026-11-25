@@ -2,11 +2,7 @@ import type { ForgeKind } from "./forge.ts";
 import { isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Forge, IssueApi } from "./ports.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
-import {
-  DEFAULT_AUTOMERGE_LABEL,
-  DEFAULT_NO_AUTOMERGE_LABEL,
-  type RepoSettingsLoad,
-} from "./repo_settings.ts";
+import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL, type RepoSettingsLoad } from "./repo_settings.ts";
 import { errorMessage } from "./util/error.ts";
 
 /**
@@ -333,9 +329,7 @@ export async function reconcileAutomergeCancellation(opts: {
     try {
       const info = await api.getRepo(opts.owner, opts.repo);
       baseBranch =
-        typeof info.default_branch === "string" && info.default_branch.trim()
-          ? info.default_branch.trim()
-          : "main";
+        typeof info.default_branch === "string" && info.default_branch.trim() ? info.default_branch.trim() : "main";
     } catch (err) {
       log(`automerge reconcile re-read failed for ${opts.owner}/${opts.repo}#${opts.prNumber}: ${errorMessage(err)}`);
       return "retry";
@@ -370,21 +364,16 @@ export async function reconcileAutomergeCancellation(opts: {
   if (evaluation.decision === "schedule" || evaluation.decision === "no-op") return "not-needed";
   const cancel = (api as Partial<Pick<Forge, "cancelAutoMerge">>).cancelAutoMerge;
   if (typeof cancel !== "function") {
-    log(`automerge reconcile unsupported for ${opts.owner}/${opts.repo}#${opts.prNumber}: forge does not expose cancellation`);
+    log(
+      `automerge reconcile unsupported for ${opts.owner}/${opts.repo}#${opts.prNumber}: forge does not expose cancellation`
+    );
     return "unsupported";
   }
   if (opts.beforeCancel) {
     const owned = await opts.beforeCancel();
     if (!owned) return "lost";
   }
-  const outcome = await cancelAutomergeScheduleOutcome(
-    api,
-    opts.forgeKind,
-    opts.owner,
-    opts.repo,
-    opts.prNumber,
-    log
-  );
+  const outcome = await cancelAutomergeScheduleOutcome(api, opts.forgeKind, opts.owner, opts.repo, opts.prNumber, log);
   if (outcome === "removed") return "removed";
   if (outcome === "absent") return "absent";
   if (outcome === "unsupported") return "unsupported";
