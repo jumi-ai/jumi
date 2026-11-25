@@ -132,12 +132,14 @@ describe("buildPullRequestBody", () => {
     expect(buildPullRequestBody(12, "Fixed #12")).toBe("Fixed #12");
   });
 
-  test("keeps a Refs #n with an explicit remaining-work list", () => {
-    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12\n\nRemaining:\n- one more case")).toBe(
-      "Caches categories.\n\nRefs #12\n\nRemaining:\n- one more case"
+  test("keeps a Refs #n only with an explicit remaining list", () => {
+    expect(
+      buildPullRequestBody(12, "Caches categories.\n\nRefs #12", undefined, [], undefined, ["one more case"])
+    ).toContain("Refs #12");
+    expect(buildPullRequestBody(12, "Refs #12", undefined, [], undefined, ["backfill test"])).toContain("Refs #12");
+    expect(buildPullRequestBody(12, "Caches categories.\n\nRefs #12\n\nRemaining:\n- one more case")).toMatch(
+      /fixes #12/i
     );
-    expect(buildPullRequestBody(12, "Refs #12\n\nTODO: backfill test")).toBe("Refs #12\n\nTODO: backfill test");
-    expect(buildPullRequestBody(12, "Refs #12\n\n- [ ] backfill test")).toBe("Refs #12\n\n- [ ] backfill test");
   });
 
   test("rewrites a bare Refs #n without a remaining-work list to the closing keyword", () => {

@@ -180,8 +180,44 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
 }): Promise<{ expired: number; enqueued: number }> {
   const now = opts.nowMs ?? Date.now();
   const held = await opts.slots.listHeldSlots();
-  const expired = held.filter((slot) => now - slot.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS);
   let enqueued = 0;
+  for (const slot of held) {
+    if (now - slot.admittedAtMs <= STRICT_REFRESH_SLOT_TIMEOUT_MS && slot.pendingJob) {
+      try {
+        const p = slot.pendingJob;
+        const job: IssueJob = {
+          owner: p.owner,
+          repo: p.repo,
+          issueNumber: p.issueNumber,
+          action: "push",
+          title: p.title,
+          body: p.body,
+          htmlUrl: p.htmlUrl,
+          issueUpdatedAt: p.issueUpdatedAt,
+          defaultBranch: p.defaultBranch,
+          cloneUrl: p.cloneUrl,
+          mode: "follow-up",
+          prNumber: p.prNumber,
+          headSha: p.headSha,
+          trigger: { event: "push", sender: "strict-refresh-pending" },
+          mergeOnly: true,
+          strictRefresh: true,
+          strictBaseSha: p.baseSha,
+          delivery: `strict-refresh-pending-${p.owner}-${p.repo}-${slot.baseBranch}-${p.prNumber}-${now}`,
+          receivedAt: new Date(now).toISOString(),
+        };
+        const res = (await opts.enqueueIssue(job)) as { queued?: boolean } | undefined;
+        await opts.slots
+          .clearPending(slot.owner, slot.repo, slot.baseBranch, slot.prNumber, slot.headSha)
+          .catch(() => undefined);
+        if ((res as { queued?: boolean } | undefined)?.queued !== false) enqueued += 1;
+        opts.log?.(`queued ${job.owner}/${job.repo}#${job.prNumber} delivery=${job.delivery} strict-refresh-pending`);
+      } catch (err) {
+        opts.log?.(`strict refresh pending drain failed: ${errorMessage(err)}`);
+      }
+    }
+  }
+  const expired = held.filter((slot) => now - slot.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS);
   for (const slot of expired) {
     try {
       let repo: { full_name: string; html_url: string; clone_url: string; default_branch: string };
@@ -217,7 +253,15 @@ export async function expireStrictRefreshSlotsOnTick(opts: {
           delivery: `strict-refresh-timeout-${slot.owner}-${slot.repo}-${slot.baseBranch}-${slot.prNumber}-${now}`,
           receivedAt: new Date(now).toISOString(),
         };
-        await opts.enqueueIssue(job);
+        try {
+          await opts.enqueueIssue(job);
+        } catch (err) {
+          opts.log?.(`strict refresh tick enqueue failed: ${errorMessage(err)}`);
+          continue;
+        }
+        await opts.slots
+          .clearPending(job.owner, job.repo, slot.baseBranch, job.prNumber ?? 0, job.headSha ?? "")
+          .catch(() => undefined);
         enqueued += 1;
         opts.log?.(`queued ${job.owner}/${job.repo}#${job.prNumber} delivery=${job.delivery} strict-refresh-timeout`);
       }

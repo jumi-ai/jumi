@@ -899,6 +899,16 @@ export async function handleWorkerWebhookEvent(
         for (const partial of strict.jobs) {
           const job: IssueJob = { ...partial, delivery, receivedAt };
           const result: EnqueueResult = await deps.queue.enqueue(job);
+          if (strictSlots && job.prNumber && job.headSha) {
+            const branch =
+              typeof payload.ref === "string" && payload.ref.startsWith("refs/heads/")
+                ? payload.ref.slice("refs/heads/".length)
+                : "";
+            if (branch)
+              await strictSlots
+                .clearPending(job.owner, job.repo, branch, job.prNumber, job.headSha)
+                .catch(() => undefined);
+          }
           keys.push(result.key);
           logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery} strict-refresh`);
         }
