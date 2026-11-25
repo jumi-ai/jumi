@@ -36,6 +36,7 @@ import { pullAuthorCanPush } from "./permissions.ts";
 import type { EnqueueResult } from "./queue.ts";
 import { isQuotaWaitError, type QuotaCooldown } from "./quota.ts";
 import { handleReclaimPublishFailure } from "./reclaim_publish.ts";
+import { drainAutomergeReconcile } from "./automerge_reconcile_drain.ts";
 import {
   effectiveLeaseMs,
   effectiveReviewBudget,
@@ -786,6 +787,7 @@ export async function reclaimExpiredJobs(
   logger: (message: string) => void = log
 ): Promise<ReclaimResultSummary> {
   await resumePendingHandoffs(store, api, config, logger).catch(() => undefined);
+  await drainAutomergeReconcile(store, api, config, logger).catch(() => undefined);
   const { requeued, publish } = await store.reclaimExpired(config.maxJobAttempts, undefined, HEARTBEAT_MS, [
     REVIEW_KIND,
   ]);
