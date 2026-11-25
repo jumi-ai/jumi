@@ -76,14 +76,53 @@ libc syscalls, x86_64/aarch64 syscall numbers 444/445/446 shared).
   in a job pod yet — the image job owns that confirmation.
 - `src/webfetch_probe.ts` (review section) registers the production OpenCode
   review plugin dir in a scratch global config and drives the installed
-  `opencode` binary through it: `shell` (the real 2.2.7 shell-tool name; a
-  `bash` call aliases to it before hooks run) must come back wrapped (HOME is
-  the sandbox home), `read`/`list` of the harness token must come back
-  blocked. The stub retries the shell call (bounded) until HOME comes back
-  wrapped — the plugin loads asynchronously with the first run, so the first
-  calls can race registration — and the plugin's setup writes a ready marker
-  the probe asserts, so a binary that never loads the plugin or drops either
-  hook fails the case instead of running unwrapped.
+  `opencode` binary through it: `shell` (the 2.3.2 shell-tool name, hash
+  unverified — the image installs the release tarball without a checksum, so
+  only the version is pinned; a `bash` call aliases to it before hooks run)
+  must come back wrapped (HOME is the sandbox home), `read`/`list` of the
+  harness token must come back blocked. The stub retries the shell call
+  (bounded) until HOME comes back wrapped — the plugin loads asynchronously
+  with the first run, so the first calls can race registration — and the
+  plugin's setup writes a ready marker the probe asserts, so a binary that
+  never loads the plugin or drops either hook fails the case instead of
+  running unwrapped.
+
+## First-call trace (offline diagnostic, not CI)
+
+`src/review_first_shell_probe.ts` records, per scenario, the ordered trace of
+plugin setup, the first model request, and the first shell call against the
+installed binary, and prints SAFE, UNSAFE, or UNKNOWN. Rerun offline from
+`scripts/opencode` with `bun src/review_first_shell_probe.ts` (loopback stubs
+only, scratch HOME/XDG, no provider or forge credentials, no real auth
+directory; the plugin is registered only through the config `plugins` key
+outside the auto-discovered plugin directories, so a missing or broken plugin
+cannot be rescued by discovery). Tool dispatch is detected with a harmless
+`touch` file the stubbed shell command creates.
+
+Observed against `opencode v2.3.2` (hash unverified, same install as above),
+isolated HOME/XDG, single local runs — not CI — 3 runs per scenario:
+
+| Scenario | Observed |
+|---|---|
+| `delayed-setup` (4 s sleep before the shell hook) | SAFE 3/3: the first model request arrived only after setup finished, and the first shell result was wrapped. |
+| `throw-after-one-hook` (setup throws after one hook, before the shell hook) | UNSAFE 3/3: the shell ran unwrapped, exit 0, no error. |
+| `missing-dir` (config `plugins` key points at a nonexistent directory) | UNSAFE 3/3: the shell ran unwrapped, exit 0, no error. |
+| `invalid-file` (syntactically broken plugin file) | UNSAFE 3/3: the shell ran unwrapped, exit 0, no error. |
+| `healthy` (control) | SAFE 3/3: the first shell result was wrapped. |
+
+This records fail-open behavior in those specific failure fixtures, not an
+exploited production installation: production registers the healthy plugin,
+and the image probe above asserts the ready marker plus the wrapped shell and
+blocked reads, so these fixtures fail that probe instead of passing
+unwrapped. SAFE is scoped to that scenario and binary build, not a universal
+containment guarantee.
+
+Scope note for the follow-on work: a bootstrap guard can enforce setup
+completion (the ready marker) at spawn, but that is narrower than every
+possible binary-side plugin rejection — a missing directory, an invalid file,
+or a mid-setup throw are binary-side rejections no spawn-time marker check
+can rescue. The diagnostic proves the gap; the guard only closes the
+bootstrap slice.
 
 ## Per-runner wiring
 
@@ -130,6 +169,21 @@ A runner with no Jumi-owned hook refuses instead of running unsandboxed
 (`assertReviewRunnerSandboxable`: one clear line, `review spawn refused:
 <runner> runner cannot be sandboxed ...`). All four pinned runners have hooks;
 unknown types refuse.
+
+Repository setup for reviews runs in the same sandbox: `setup.run` with
+`kind === "review"` executes through the shell wrapper with the shell policy
+(checkout plus scratch read-write, system paths read-only, no agent HOME) and
+a scratch `HOME`/XDG/`TMPDIR` created before spawn. Its git goes through the
+loopback credential proxy in read-only mode (fetch/clone served with the
+parent-held credential, every push endpoint refused with 404 without contacting
+the forge; the sandbox is filesystem-only, so the loopback proxy stays
+reachable), and a review setup without a credential, or whose read-only proxy
+cannot start, ends `failed` under the repository's `onFailure` policy instead
+of falling back to read-write, direct credentials, or no auth. Worker setup
+kinds keep today's env and spawn. Fail-closed matches the spawn gate below: an
+unavailable sandbox yields a setup `failed` outcome under the repository's
+`onFailure` policy, never an unwrapped run, unless
+`JUMI_ALLOW_UNSANDBOXED_REVIEWS=1` is set (logged).
 
 Fail-closed: if Landlock is unavailable or below ABI 6, review jobs fail
 with one clear status (`review spawn refused: Landlock sandbox

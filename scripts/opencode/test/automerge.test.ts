@@ -1543,7 +1543,7 @@ describe("router mailbox automerge label path", () => {
       botUsername: "jumi",
       log: () => undefined,
     } as never);
-    expect(result.action).toBe("cancelled");
+    expect(result.action).toBe("deployment-blocked");
     expect(api.notes).toHaveLength(1);
     expect(api.notes[0]).toContain("turned off");
 
@@ -1559,6 +1559,7 @@ describe("router mailbox automerge label path", () => {
     expect(handled.handled).toBe(true);
     expect(api2.notes).toHaveLength(1);
     expect(api2.notes[0]).toContain("turned off");
+    if (handled.handled) expect(handled.reason).toContain("deployment-blocked");
   });
 });
 
@@ -2314,5 +2315,278 @@ describe("PR base branch required checks diverge from default", () => {
     expect(unreadableApi.notes).toHaveLength(1);
     expect(unreadableApi.notes[0]).toContain("did not restore");
     expect(unreadableApi.notes[0]).toContain("base branch requirements could not be read");
+  });
+});
+
+describe("truthful automerge cancellation outcomes", () => {
+  test("cancel outcome mapping distinguishes all four results", async () => {
+    const { cancelAutomergeScheduleOutcome } = await import("../src/automerge.ts");
+    const logs: string[] = [];
+    const log = (m: string) => logs.push(m);
+    const base = { owner: "o", repo: "r", prNumber: 7, forgeKind: "gitea" as const, log };
+
+    const missing = await cancelAutomergeScheduleOutcome(
+      { cancelAutoMerge: undefined } as never,
+      base.forgeKind,
+      base.owner,
+      base.repo,
+      base.prNumber,
+      log
+    );
+    expect(missing).toBe("unsupported");
+
+    const removed = await cancelAutomergeScheduleOutcome(
+      { cancelAutoMerge: async () => true } as never,
+      base.forgeKind,
+      base.owner,
+      base.repo,
+      base.prNumber,
+      log
+    );
+    expect(removed).toBe("removed");
+
+    const absent = await cancelAutomergeScheduleOutcome(
+      { cancelAutoMerge: async () => false } as never,
+      base.forgeKind,
+      base.owner,
+      base.repo,
+      base.prNumber,
+      log
+    );
+    expect(absent).toBe("absent");
+
+    const voided = await cancelAutomergeScheduleOutcome(
+      { cancelAutoMerge: async () => undefined } as never,
+      base.forgeKind,
+      base.owner,
+      base.repo,
+      base.prNumber,
+      log
+    );
+    expect(voided).toBe("removed");
+
+    const failed = await cancelAutomergeScheduleOutcome(
+      {
+        cancelAutoMerge: async () => {
+          throw new Error("simulated forge outage");
+        },
+      } as never,
+      base.forgeKind,
+      base.owner,
+      base.repo,
+      base.prNumber,
+      log
+    );
+    expect(failed).toBe("failed");
+
+    expect(logs.some((m) => m.includes("automerge cancelled"))).toBe(true);
+    expect(logs.some((m) => m.includes("unsupported"))).toBe(true);
+    expect(logs.some((m) => m.includes("nothing to remove"))).toBe(true);
+    expect(logs.some((m) => m.includes("cancel failed"))).toBe(true);
+    // The legacy "cancelled" line never reports an unsupported or failed cancel.
+    expect(logs.filter((m) => m.includes("automerge cancelled")).length).toBe(3);
+  });
+
+  test("label-change cancel paths report truthfully and conflict still notes", async () => {
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const input = (api: ReturnType<typeof automergeApi>) => ({
+      api,
+      forgeKind: "gitea" as const,
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined as readonly string[] | undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+    });
+
+    const failing = automergeApi();
+    failing.getRepoFile = async () => {
+      failing.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    failing.getPR = async (_o: string, _r: string, index: number) => {
+      failing.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    failing.cancelAutoMerge = async () => {
+      failing.calls.push("cancelAutoMerge");
+      throw new Error("simulated forge outage");
+    };
+    const failed = await handleAutomergeLabelChange(input(failing) as never);
+    expect(failed.action).toBe("cancel-failed");
+
+    const absentApi = automergeApi();
+    absentApi.getRepoFile = async () => {
+      absentApi.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    absentApi.getPR = async (_o: string, _r: string, index: number) => {
+      absentApi.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    absentApi.cancelAutoMerge = async () => {
+      absentApi.calls.push("cancelAutoMerge");
+      return false;
+    };
+    expect((await handleAutomergeLabelChange(input(absentApi) as never)).action).toBe("cancelled");
+
+    const voidApi = automergeApi();
+    voidApi.getRepoFile = async () => {
+      voidApi.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    voidApi.getPR = async (_o: string, _r: string, index: number) => {
+      voidApi.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    voidApi.cancelAutoMerge = (async () => undefined) as never;
+    expect((await handleAutomergeLabelChange(input(voidApi) as never)).action).toBe("cancelled");
+
+    const bare = automergeApi();
+    bare.getRepoFile = async () => {
+      bare.calls.push("getRepoFile");
+      return { found: true, content: "automerge: false\n" };
+    };
+    bare.getPR = async (_o: string, _r: string, index: number) => {
+      bare.calls.push("getPR");
+      return makePR({ number: index, labels: [] as never });
+    };
+    delete (bare as unknown as Record<string, unknown>)["cancelAutoMerge"];
+    expect((await handleAutomergeLabelChange(input(bare) as never)).action).toBe("cancel-unsupported");
+
+    // Conflict path still posts its note even when the cancel fails.
+    const conflictFailed = automergeApi();
+    conflictFailed.getRepoFile = async () => {
+      conflictFailed.calls.push("getRepoFile");
+      return { found: true, content: "automerge: true\n" };
+    };
+    conflictFailed.getPR = async (_o: string, _r: string, index: number) => {
+      conflictFailed.calls.push("getPR");
+      return makePR({ number: index, labels: ["automerge", "no-automerge"] as never });
+    };
+    conflictFailed.cancelAutoMerge = async () => {
+      conflictFailed.calls.push("cancelAutoMerge");
+      throw new Error("simulated forge outage");
+    };
+    const conflict = await handleAutomergeLabelChange(input(conflictFailed) as never);
+    expect(conflict.action).toBe("cancel-failed");
+    expect(conflictFailed.notes).toHaveLength(1);
+    expect(conflictFailed.notes[0]).toContain("both");
+  });
+
+  test("webhook wrapper surfaces cancel-failed and cancel-unsupported", async () => {
+    const { workerMailboxApi } = await import("../src/server.ts");
+    const { tryHandleAutomergeLabelEvent } = await import("../src/automerge_webhook.ts");
+    const body = (action: string, label: string) =>
+      new TextEncoder().encode(
+        JSON.stringify({
+          action,
+          repository: {
+            full_name: "kirmanak/demo",
+            default_branch: "main",
+            html_url: "https://gitea.example.test/kirmanak/demo",
+            clone_url: "https://gitea.example.test/kirmanak/demo.git",
+          },
+          label: { name: label },
+          sender: { login: "alice" },
+          pull_request: { number: 3 },
+        })
+      );
+    const policy = {
+      giteaUrl: "https://gitea.example.test",
+      allowedOrgs: ["kirmanak"],
+      allowedRepos: [] as string[],
+      botUsername: "jumi",
+      forgeKind: "gitea",
+    };
+
+    const failing = automergeApi();
+    failing.getRepoFile = async () => ({ found: true, content: "automerge: false\n" });
+    failing.getPR = async (_o: string, _r: string, index: number) => {
+      failing.calls.push("getPR");
+      return makePR({
+        number: index,
+        user: makeUser({ login: "jumi" }),
+        head: makeBranch({ ref: "jumi/issue-12-foo", sha: "headsha" }),
+        title: "Jumi: fix the thing",
+        body: "Fixes #12",
+        labels: [] as never,
+      });
+    };
+    failing.cancelAutoMerge = async () => {
+      throw new Error("simulated forge outage");
+    };
+    const failed = await tryHandleAutomergeLabelEvent({
+      rawBody: body("unlabeled", "automerge"),
+      policy,
+      api: workerMailboxApi(failing as never) as never,
+      log: () => undefined,
+    });
+    expect(failed.handled).toBe(true);
+    if (failed.handled) expect(failed.reason).toContain("cancel-failed");
+
+    const bare = automergeApi();
+    bare.getRepoFile = async () => ({ found: true, content: "automerge: false\n" });
+    bare.getPR = async (_o: string, _r: string, index: number) =>
+      makePR({
+        number: index,
+        user: makeUser({ login: "jumi" }),
+        head: makeBranch({ ref: "jumi/issue-12-foo", sha: "headsha" }),
+        title: "Jumi: fix the thing",
+        body: "Fixes #12",
+        labels: [] as never,
+      });
+    delete (bare as unknown as Record<string, unknown>)["cancelAutoMerge"];
+    const unsupported = await tryHandleAutomergeLabelEvent({
+      rawBody: body("unlabeled", "automerge"),
+      policy,
+      api: workerMailboxApi(bare as never) as never,
+      log: () => undefined,
+    });
+    expect(unsupported.handled).toBe(true);
+    if (unsupported.handled) expect(unsupported.reason).toContain("cancel-unsupported");
+  });
+
+  test("label-change re-read and policy failures report unreadable", async () => {
+    const { handleAutomergeLabelChange } = await import("../src/automerge.ts");
+    const reReadApi = automergeApi();
+    reReadApi.getPR = async () => {
+      reReadApi.calls.push("getPR");
+      throw new Error("simulated forge outage");
+    };
+    const reRead = await handleAutomergeLabelChange({
+      api: reReadApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(reRead.action).toBe("unreadable");
+    expect(reReadApi.calls).not.toContain("cancelAutoMerge");
+
+    const policyApi = automergeApi();
+    policyApi.getRepoFile = async () => {
+      policyApi.calls.push("getRepoFile");
+      throw new Error("simulated forge outage");
+    };
+    const policy = await handleAutomergeLabelChange({
+      api: policyApi,
+      forgeKind: "gitea",
+      owner: "kirmanak",
+      repo: "demo",
+      prNumber: 3,
+      baseBranch: "main",
+      automergeRepos: undefined,
+      botUsername: "jumi",
+      log: () => undefined,
+    } as never);
+    expect(policy.action).toBe("unreadable");
+    expect(policyApi.calls).not.toContain("cancelAutoMerge");
   });
 });
