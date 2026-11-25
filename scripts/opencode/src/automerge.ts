@@ -1889,10 +1889,18 @@ export async function handleAutomergeLabelChange(opts: {
   botUsername: string;
   issueNumber?: number;
   log?: (message: string) => void;
+  /**
+   * Durable-admission mode (issue #839): cancel branches return
+   * `cancel-deferred` without calling the forge; the leased drainer owns
+   * the actual cancellation. Scheduling is unchanged, and callers without
+   * this mode keep today's behavior.
+   */
+  deferCancel?: boolean;
 }): Promise<{
   action:
     | "scheduled"
     | "cancelled"
+    | "cancel-deferred"
     | "cancel-unsupported"
     | "cancel-failed"
     | "deployment-blocked"
@@ -1954,6 +1962,20 @@ export async function handleAutomergeLabelChange(opts: {
   }
   const names = resolveLabelNames(settings);
   if (evaluation.decision === "conflict-cancel") {
+    if (opts.deferCancel) {
+      // Deferred: the conflict note stays diagnostic and never claims the
+      // schedule is already gone; the drainer cancels under its lease.
+      await postAutomergeNote(
+        api,
+        opts.owner,
+        opts.repo,
+        opts.prNumber,
+        opts.botUsername,
+        automergeConflictNote(names.automergeLabel, names.noAutomergeLabel)
+      );
+      log(`automerge label change deferred for ${opts.owner}/${opts.repo}#${opts.prNumber}: cancel-deferred`);
+      return { action: "cancel-deferred" };
+    }
     const outcome = await cancelAutomergeScheduleOutcome(
       api,
       opts.forgeKind,
@@ -1976,7 +1998,12 @@ export async function handleAutomergeLabelChange(opts: {
   }
   if (evaluation.decision === "cancel") {
     // No-automerge label, or the label was removed and the file does not opt in:
-    // cancel anything scheduled.
+    // cancel anything scheduled. Deferred admissions leave the cancel to the
+    // leased drainer instead of calling the forge from the webhook handler.
+    if (opts.deferCancel) {
+      log(`automerge label change deferred for ${opts.owner}/${opts.repo}#${opts.prNumber}: cancel-deferred`);
+      return { action: "cancel-deferred" };
+    }
     const outcome = await cancelAutomergeScheduleOutcome(
       api,
       opts.forgeKind,

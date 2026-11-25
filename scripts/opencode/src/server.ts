@@ -726,7 +726,8 @@ export function createFetchHandler(config: ServiceConfig, deps: FetchHandlerDeps
               automergeEnabled: config.automergeEnabled,
               forgeKind: config.forge,
             },
-            { ...deps.worker, logger: deps.worker.logger ?? logger }
+            { ...deps.worker, logger: deps.worker.logger ?? logger },
+            { forgeDeliveryId: deliveryHeader }
           )
         );
       }
@@ -1537,6 +1538,7 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
           logger,
           sits: store.sits,
           strictSlots: store.strictSlots,
+          automergeReconcile: store.automergeReconcile,
         },
       }),
       logger,
