@@ -694,10 +694,11 @@ export function buildPullRequestBody(
   fileContents: string | null | undefined,
   runner?: RunnerStamp,
   secrets: readonly (string | undefined)[] = [],
-  closingKeyword?: string
+  closingKeyword?: string,
+  remaining?: readonly string[] | null | undefined
 ): string {
   return redactGitSecrets(
-    appendRunnerStamp(pullRequestText(issueNumber, fileContents, closingKeyword), runner),
+    appendRunnerStamp(pullRequestText(issueNumber, fileContents, closingKeyword, remaining), runner),
     secrets
   );
 }
@@ -723,25 +724,45 @@ export function rewriteClosingToRefs(text: string, issueNumber: number): string 
 }
 
 /**
- * Whether `text` carries an explicit list of remaining Done items. A bare
- * `Refs #N` with none of these markers is treated as finished work: the
- * parent publishes it with the closing keyword instead of a non-closing
- * reference. Markers are intentionally narrow (unchecked boxes and
- * remaining/TODO/follow-up wording) so "Partial work." alone does not count;
- * the worker must name what is left.
+ * Remaining items that only name checks the forge CI runs on the PR never
+ * count as leftover work, even when the worker could not run them locally.
+ * Dropped items never keep a PR non-closing on their own.
  */
-export function hasRemainingWorkList(text: string): boolean {
-  const visible = visibleClosingText(text);
-  if (/^\s*(?:[-*]|\d+[.)])\s*\[ \]/m.test(visible)) return true;
-  return (
-    /remaining/i.test(visible) ||
-    /what's left|what is left|things? left/i.test(visible) ||
-    /left to do/i.test(visible) ||
-    /still (to do|needs?|missing|open|remaining)/i.test(visible) ||
-    /\btodo\b/i.test(visible) ||
-    /\bnot (done|finished|complete|yet)\b/i.test(visible) ||
-    /follow-?ups?/i.test(visible)
-  );
+export function isCiOnlyRemainingItem(item: string): boolean {
+  const lower = item.toLowerCase();
+  if (lower.includes("bun run ci")) return true;
+  if (lower.includes("test:pg")) return true;
+  if (lower.includes("bun test") && lower.includes("pg")) return true;
+  if (lower.includes("postgres") && (lower.includes("test") || lower.includes("ci"))) return true;
+  if (lower.includes("full") && lower.includes("ci")) return true;
+  if (lower.includes("forge") && lower.includes("ci")) return true;
+  if (lower.includes("gitea actions")) return true;
+  if (lower.includes("ci green")) return true;
+  if (lower.includes("ci") && lower.includes("green")) return true;
+  if (lower.trim() === "ci") return true;
+  return false;
+}
+
+/** Trimmed remaining items with blanks dropped. */
+function normalizeRemainingItems(input: readonly string[] | null | undefined): string[] {
+  if (input == null) return [];
+  const out: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.replaceAll("\0", "").trim();
+    if (trimmed) out.push(trimmed);
+  }
+  return out;
+}
+
+/** Remaining items minus CI-only checks. */
+export function filterCiOnlyRemainingItems(items: readonly string[]): string[] {
+  return normalizeRemainingItems(items).filter((item) => !isCiOnlyRemainingItem(item));
+}
+
+/** Visible rendering of the remaining list for the PR body. */
+function renderRemainingItems(items: readonly string[]): string {
+  return `Remaining:\n${items.map((item) => `- ${item}`).join("\n")}`;
 }
 
 export function rewriteRefsToClosing(text: string, issueNumber: number): string {
@@ -771,30 +792,57 @@ export function rewriteRefsToClosing(text: string, issueNumber: number): string 
 function pullRequestText(
   issueNumber: number,
   fileContents: string | null | undefined,
-  closingKeyword?: string
+  closingKeyword?: string,
+  remaining?: readonly string[] | null | undefined
 ): string {
   const refs = closingKeyword === "refs";
   const fallback = refs ? `Refs #${issueNumber}` : `Fixes #${issueNumber}`;
-  if (fileContents == null) return fallback;
-  let text = parentOwnedProse(fileContents);
-  if (!text) return fallback;
-  if (refs && closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
-    text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
-    if (!text) return fallback;
-  }
+  const effective = filterCiOnlyRemainingItems(remaining ?? []);
   if (refs) {
+    if (fileContents == null) {
+      if (effective.length === 0) return fallback;
+      return `${fallback}\n\n${renderRemainingItems(effective)}`;
+    }
+    let text = parentOwnedProse(fileContents);
+    if (!text) {
+      if (effective.length === 0) return fallback;
+      return `${fallback}\n\n${renderRemainingItems(effective)}`;
+    }
+    if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
+      text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
+      if (!text) return fallback;
+    }
     if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
-    if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
+    if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) {
+      if (effective.length === 0) return text;
+      return `${text}\n\n${renderRemainingItems(effective)}`;
+    }
+    if (effective.length > 0) return `${text}\n\nRefs #${issueNumber}\n\n${renderRemainingItems(effective)}`;
     return `${text}\n\n${fallback}`;
   }
-  // Default (`closes`) mode: a closing keyword always stays. A non-closing
-  // `Refs #N` stays only with an explicit remaining-work list; a bare Refs
-  // is finished work, so the parent publishes the closing keyword. This
-  // keeps a worker-written bare `Refs #N` from reaching a merged PR without
-  // a closing reference.
+  // Default (`closes`) mode: the finished-or-partial decision comes from the
+  // worker's explicit remaining list, never from words in the description.
+  // Empty or absent list publishes the closing keyword even when the
+  // markdown says `Refs #N` (or `Part of` / `Related to`); CI-only checks
+  // were already dropped above. Words like "follow-up" or "remaining" in
+  // the prose never keep a body non-closing.
+  if (effective.length > 0) {
+    const rendered = renderRemainingItems(effective);
+    if (fileContents == null) return `Refs #${issueNumber}\n\n${rendered}`;
+    let text = parentOwnedProse(fileContents);
+    if (!text) return `Refs #${issueNumber}\n\n${rendered}`;
+    if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) {
+      text = parentOwnedProse(rewriteClosingToRefs(text, issueNumber));
+      if (!text) return `Refs #${issueNumber}\n\n${rendered}`;
+    }
+    if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) return `${text}\n\n${rendered}`;
+    return `${text}\n\nRefs #${issueNumber}\n\n${rendered}`;
+  }
+  if (fileContents == null) return fallback;
+  const text = parentOwnedProse(fileContents);
+  if (!text) return fallback;
   if (closesIssuePattern(issueNumber).test(visibleClosingText(text))) return text;
   if (refsIssuePattern(issueNumber).test(visibleClosingText(text))) {
-    if (hasRemainingWorkList(text)) return text;
     const rewritten = parentOwnedProse(rewriteRefsToClosing(text, issueNumber));
     if (!rewritten) return fallback;
     if (closesIssuePattern(issueNumber).test(visibleClosingText(rewritten))) return rewritten;
@@ -1812,6 +1860,7 @@ export async function implementIssue(
 
         let incompleteHopped = false;
         let prFileContents: string | null = null;
+        let prRemaining: string[] | undefined;
         let porcelain = "";
         const customConventions = hasCustomConventions(conventions);
         const implementBasePrompt = (forQueue: boolean): string | undefined => {
@@ -1934,6 +1983,7 @@ export async function implementIssue(
           if (continuedYieldResult) return continuedYieldResult;
 
           prFileContents = await resolveWorkerPrBody(workerStore, worktree, log);
+          prRemaining = workerStore.getPrRemaining();
           const validatedSkip = await resolveWorkerSkip(workerStore, worktree, log);
           await saveWorkerHandoff(
             workerStore,
@@ -2029,7 +2079,8 @@ export async function implementIssue(
                 prFileContents,
                 runner,
                 workerPublishSecrets(loop.auth.token, jobChain),
-                conventions.closingKeyword
+                conventions.closingKeyword,
+                prRemaining
               )
             ),
             head: branch,

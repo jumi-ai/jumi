@@ -2388,6 +2388,7 @@ export async function implementFollowUp(
   // head's review). `fallbackHeadSha` (the worktree HEAD) covers a failed fetch.
   const refreshPullRequestBody = async (
     description: string | null,
+    remaining?: readonly string[] | null | undefined,
     fallbackHeadSha?: string
   ): Promise<{ changed: boolean; headSha: string; prUpdatedAt?: string }> => {
     const fallback = fallbackHeadSha || pr.head.sha;
@@ -2407,7 +2408,8 @@ export async function implementFollowUp(
           description,
           runner,
           workerPublishSecrets(loop.auth.token, jobChain),
-          followupConventions.closingKeyword
+          followupConventions.closingKeyword,
+          remaining
         )
       );
       if (body === live.body) {
@@ -2975,6 +2977,7 @@ export async function implementFollowUp(
 
         throwIfAborted(opts.abortSignal);
         const prFileContents = await resolveWorkerPrBody(workerStore, worktree, log, prSeed);
+        const prRemaining = workerStore.getPrRemaining();
         await saveWorkerHandoff(
           workerStore,
           worktree,
@@ -3081,7 +3084,7 @@ export async function implementFollowUp(
               if (successes.length > 0) parts.push(rerunsCommentFor(successes));
               if (budget.exhausted.length > 0) parts.push(rerunExhaustedComment(budget.exhausted));
               for (const failure of failures) parts.push(rerunFailedComment([failure.check], failure.error));
-              const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+              const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
               await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
               await sticky(parts.join("\n\n"), pr.number);
               await recordAttempt(sha || pr.head.sha);
@@ -3105,7 +3108,7 @@ export async function implementFollowUp(
                 await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
                 return { status: "skipped", reason };
               }
-              const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+              const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
               await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
               await sticky(`${noChangesSticky}\n\n${rerunExhaustedComment(budget.exhausted)}`, pr.number);
               await recordAttempt(sha || pr.head.sha);
@@ -3132,7 +3135,7 @@ export async function implementFollowUp(
             await runtime.destroyRuntimeWorkspace(loop, { pushLanded: false, logger: log });
             return { status: "skipped", reason };
           }
-          const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
+          const refreshed = await refreshPullRequestBody(prFileContents, prRemaining, sha || pr.head.sha);
           await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
           await sticky(noChangesSticky, pr.number);
           await recordAttempt(sha || pr.head.sha);
@@ -3197,7 +3200,7 @@ export async function implementFollowUp(
         throwIfAborted(opts.abortSignal);
         await persistConflictAttempt(mergeResult);
 
-        await refreshPullRequestBody(prFileContents);
+        await refreshPullRequestBody(prFileContents, prRemaining);
 
         const sha = (await loop.runConfiguredGit(["rev-parse", "HEAD"], { cwd: worktree, env: loop.env })).trim();
         await confirmProvenancePublication(

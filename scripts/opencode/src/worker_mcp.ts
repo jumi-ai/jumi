@@ -10,8 +10,8 @@
  *
  * Tools:
  * - `no_changes(reason)`: follow-up rounds that leave the tree clean;
- * - `set_pr_body(markdown)`: PR description (same Refs/Fixes rules as the
- *   parent prompt);
+ * - `set_pr_body(markdown, remaining?)`: PR description with an optional
+ *   structured remaining-items list (empty/absent means Done is met);
  * - `skip(reason)`: implement has nothing to change;
  * - `blocked_on(ref, reason)`: cross-repo ref like `owner/repo#N` (or `#N`
  *   for this repo), feeding the dependency/blocked path;
@@ -36,6 +36,12 @@ export const MAX_WORKER_NO_CHANGES_REASON_CHARS = 500;
 
 /** Longest accepted `set_pr_body` markdown (chars, after trim). Mirrors the parent prose cap. */
 export const MAX_WORKER_PR_BODY_CHARS = 8000;
+
+/** Longest accepted `set_pr_body` remaining list (items). */
+export const MAX_WORKER_PR_REMAINING_ITEMS = 20;
+
+/** Longest accepted single remaining item (chars, after trim). */
+export const MAX_WORKER_PR_REMAINING_ITEM_CHARS = 1000;
 
 /** Longest accepted `skip` reason (chars, after trim). Mirrors the parent prose cap. */
 export const MAX_WORKER_SKIP_REASON_CHARS = 8000;
@@ -105,6 +111,34 @@ export function validatePrBody(markdown: unknown): { ok: true; markdown: string 
     return { ok: false, error: `markdown is too long (max ${MAX_WORKER_PR_BODY_CHARS} chars)` };
   }
   return { ok: true, markdown: trimmed };
+}
+
+export function validatePrRemaining(
+  input: unknown
+): { ok: true; remaining: string[] | undefined } | { ok: false; error: string } {
+  if (input === undefined || input === null) return { ok: true, remaining: undefined };
+  if (!Array.isArray(input)) return { ok: false, error: "remaining must be an array of strings" };
+  if (input.length > MAX_WORKER_PR_REMAINING_ITEMS) {
+    return { ok: false, error: `remaining is too long (max ${MAX_WORKER_PR_REMAINING_ITEMS} items)` };
+  }
+  const items: string[] = [];
+  for (const entry of input) {
+    if (typeof entry !== "string") return { ok: false, error: "remaining must be an array of strings" };
+    const trimmed = entry.replaceAll("\0", "").trim();
+    if (!trimmed) continue;
+    if (trimmed.length > MAX_WORKER_PR_REMAINING_ITEM_CHARS) {
+      return { ok: false, error: `remaining item is too long (max ${MAX_WORKER_PR_REMAINING_ITEM_CHARS} chars)` };
+    }
+    items.push(trimmed);
+  }
+  return { ok: true, remaining: items };
+}
+
+function pickRemainingArg(args: Record<string, unknown>): unknown {
+  if (args.remaining !== undefined) return args.remaining;
+  if (args.remaining_items !== undefined) return args.remaining_items;
+  if (args.remainingItems !== undefined) return args.remainingItems;
+  return undefined;
 }
 
 export function validateSkipReason(reason: unknown): { ok: true; reason: string } | { ok: false; error: string } {
@@ -195,6 +229,7 @@ export interface WorkerBlockedOn {
 export class WorkerResultStore {
   private reason?: string;
   private prBody?: string;
+  private prRemaining?: string[] | undefined;
   private skipReason?: string;
   private blockedOn?: WorkerBlockedOn;
   private handoff?: string;
@@ -224,11 +259,25 @@ export class WorkerResultStore {
     return this.reason !== undefined;
   }
 
-  setPrBody(input: { markdown?: unknown }): { ok: true } | { ok: false; error: string } {
+  setPrBody(input: {
+    markdown?: unknown;
+    remaining?: unknown;
+    remaining_items?: unknown;
+    remainingItems?: unknown;
+  }): { ok: true } | { ok: false; error: string } {
     if (this.closed) return { ok: false, error: "worker spawn ended: result store is closed" };
     const validated = validatePrBody(input.markdown);
     if (!validated.ok) return validated;
+    const remainingArg =
+      input.remaining !== undefined
+        ? input.remaining
+        : input.remaining_items !== undefined
+          ? input.remaining_items
+          : input.remainingItems;
+    const validatedRemaining = validatePrRemaining(remainingArg);
+    if (!validatedRemaining.ok) return validatedRemaining;
     this.prBody = validated.markdown;
+    this.prRemaining = validatedRemaining.remaining;
     return { ok: true };
   }
 
@@ -238,6 +287,14 @@ export class WorkerResultStore {
 
   hasPrBody(): boolean {
     return this.prBody !== undefined;
+  }
+
+  getPrRemaining(): string[] | undefined {
+    return this.prRemaining ? [...this.prRemaining] : this.prRemaining;
+  }
+
+  hasPrRemaining(): boolean {
+    return this.prRemaining !== undefined && this.prRemaining.length > 0;
   }
 
   setSkip(input: { reason?: unknown }): { ok: true } | { ok: false; error: string } {
@@ -346,10 +403,13 @@ function toolSchemas(): Array<{ name: string; description: string; inputSchema: 
     {
       name: "set_pr_body",
       description:
-        "Record the pull-request description. If the change does not meet the issue Done condition, use Refs #N and list what is left, not a closing keyword like Fixes #N. A bare Refs #N with no remaining-work list is treated as finished. If the PR body is maintainer-written (no Jumi fence), your markdown becomes a fenced Jumi section appended below it: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description.",
+        "Record the pull-request description (markdown) with an optional structured list of remaining Done items (remaining). Pass the items that are still left; leave the list empty when Done is met. A non-empty list publishes a non-closing Refs #N and renders the items visibly; an empty or absent list publishes the closing keyword even when the markdown says Refs #N. Checks the forge CI runs on the PR never count as remaining work. If the PR body is maintainer-written (no Jumi fence), your markdown becomes a fenced Jumi section appended below it: include only what the reviewer asked to be disclosed plus verification notes, not a full replacement description.",
       inputSchema: {
         type: "object",
-        properties: { markdown: { type: "string" } },
+        properties: {
+          markdown: { type: "string" },
+          remaining: { type: "array", items: { type: "string" } },
+        },
         required: ["markdown"],
       },
     },
@@ -396,7 +456,10 @@ function callTool(
     return result.ok ? { ok: true, text: JSON.stringify({ recorded: true }) } : { ok: false, text: result.error };
   }
   if (name === "set_pr_body") {
-    const result = store.setPrBody({ markdown: args.markdown });
+    const result = store.setPrBody({
+      markdown: args.markdown,
+      remaining: pickRemainingArg(args),
+    });
     if (!result.ok) return { ok: false, text: result.error };
     if (opts?.prBodyFenced === false) {
       return {
