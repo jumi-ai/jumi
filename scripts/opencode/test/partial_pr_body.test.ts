@@ -66,11 +66,12 @@ function successSticky(headSha: string) {
   });
 }
 
-describe("partial work stays non-closing only with a remaining-work list", () => {
-  test("Refs and equivalents with a remaining list publish without a closing keyword", () => {
+describe("partial work stays non-closing only with an explicit remaining list", () => {
+  test("Refs and equivalents with an explicit remaining list publish without a closing keyword", () => {
     for (const phrase of ["Part of #12", "Progress toward #12", "Related to #12", "Refs #12"]) {
-      const body = buildPullRequestBody(12, `Partial work.\n\n${phrase}\n\nRemaining:\n- one more case`);
-      expect(body).toBe(`Partial work.\n\n${phrase}\n\nRemaining:\n- one more case`);
+      const body = buildPullRequestBody(12, `Partial work.\n\n${phrase}`, undefined, [], undefined, ["one more case"]);
+      expect(body).toContain(phrase);
+      expect(body).toContain("one more case");
       expect(body).not.toMatch(/fixes #12/i);
     }
   });
@@ -99,7 +100,7 @@ describe("worker prompts describe the PR body and partial work", () => {
     for (const prompt of [buildImplementPrompt(), buildImplementYieldPrompt(), buildFollowupPrompt()]) {
       expect(prompt).toContain("set_pr_body");
       expect(prompt).toContain("Refs #N");
-      expect(prompt).toContain("Done condition");
+      expect(prompt).toContain("leave the list empty when Done is met");
       expect(prompt).not.toContain("JUMI_PR.md is the pull-request description");
     }
   });
