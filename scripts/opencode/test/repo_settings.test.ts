@@ -44,6 +44,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -67,6 +68,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("# only a comment\n")).toEqual({
@@ -87,6 +89,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -110,6 +113,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -146,6 +150,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("null\n")).toEqual({
@@ -166,6 +171,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -203,6 +209,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("no_automerge_label: hold\n")).toEqual({
@@ -223,6 +230,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     for (const text of [
@@ -272,6 +280,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -295,6 +304,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -318,6 +328,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -365,6 +376,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("takeover_authors: []\n")).toEqual({
@@ -385,6 +397,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -408,6 +421,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -479,6 +493,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("ignore_conflicts_authors: [a, a, b]\n")).toEqual({
@@ -499,6 +514,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -522,6 +538,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("automerge: true\nblocking_question_authors:\n  - Alice\n  - renovate-bot\n")).toEqual(
@@ -543,6 +560,7 @@ describe("parseRepoSettingsText", () => {
           reviewBudget: {},
           strictBranchRefresh: false,
           reviewCarry: true,
+          workerReviewRules: true,
         },
       }
     );
@@ -567,6 +585,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -612,6 +631,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("mode: review-only\n")).toEqual({
@@ -632,6 +652,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
     expect(parseRepoSettingsText("mode: off\n")).toEqual({
@@ -652,6 +673,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -675,6 +697,7 @@ describe("parseRepoSettingsText", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -725,6 +748,7 @@ describe("loadRepoSettings", () => {
       reviewBudget: {},
       strictBranchRefresh: false,
       reviewCarry: true,
+      workerReviewRules: true,
     });
   });
 
@@ -753,6 +777,7 @@ describe("loadRepoSettings", () => {
       reviewBudget: {},
       strictBranchRefresh: false,
       reviewCarry: true,
+      workerReviewRules: true,
     });
   });
 
@@ -776,6 +801,7 @@ describe("loadRepoSettings", () => {
       reviewBudget: {},
       strictBranchRefresh: false,
       reviewCarry: true,
+      workerReviewRules: true,
     });
   });
 
@@ -810,6 +836,7 @@ describe("loadRepoSettings", () => {
       reviewBudget: {},
       strictBranchRefresh: false,
       reviewCarry: true,
+      workerReviewRules: true,
     });
   });
 
@@ -975,6 +1002,7 @@ describe("effectiveBlockingQuestionAuthors", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       })
     ).toEqual(["deployer-bot", "repo-bot"]);
   });
@@ -1013,6 +1041,7 @@ describe("repoMode", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       })
     ).toBe("full");
     expect(
@@ -1033,6 +1062,7 @@ describe("repoMode", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       })
     ).toBe("review-only");
     expect(
@@ -1053,6 +1083,7 @@ describe("repoMode", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       })
     ).toBe("off");
   });
@@ -1167,6 +1198,7 @@ describe("parseRepoSettingsTimeouts", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -1190,6 +1222,7 @@ describe("parseRepoSettingsTimeouts", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -1213,6 +1246,7 @@ describe("parseRepoSettingsTimeouts", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
     });
   });
@@ -1285,6 +1319,7 @@ describe("effectiveTimeoutMsForKind", () => {
           reviewBudget: {},
           strictBranchRefresh: false,
           reviewCarry: true,
+          workerReviewRules: true,
         },
         "review",
         900_000,
@@ -1314,6 +1349,7 @@ describe("effectiveTimeoutMsForKind", () => {
           reviewBudget: {},
           strictBranchRefresh: false,
           reviewCarry: true,
+          workerReviewRules: true,
         },
         "review",
         900_000,
@@ -1339,6 +1375,7 @@ describe("effectiveTimeoutMsForKind", () => {
           reviewBudget: {},
           strictBranchRefresh: false,
           reviewCarry: true,
+          workerReviewRules: true,
         },
         "review",
         900_000,
@@ -1367,6 +1404,7 @@ describe("effectiveTimeoutMsForKind", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
       },
       "follow-up",
       3_600_000,
@@ -1722,6 +1760,7 @@ describe("suggestions_hold_merge", () => {
         reviewBudget: {},
         strictBranchRefresh: false,
         reviewCarry: true,
+        workerReviewRules: true,
         timeouts: {},
         automergeLabel: "automerge",
         noAutomergeLabel: "no-automerge",
@@ -1749,6 +1788,7 @@ describe("suggestions_hold_merge", () => {
       reviewBudget: {},
       strictBranchRefresh: false,
       reviewCarry: true,
+      workerReviewRules: true,
       timeouts: {},
       automergeLabel: "automerge",
       noAutomergeLabel: "no-automerge",

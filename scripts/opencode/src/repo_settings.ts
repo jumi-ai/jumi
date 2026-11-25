@@ -622,6 +622,16 @@ export const REPO_SETTINGS_REGISTRY = [
       return { ok: true, value: raw };
     },
   }),
+  requiredSetting({
+    key: "worker_review_rules",
+    field: "workerReviewRules",
+    doc: "Share the base-branch REVIEW.md rules with implement and follow-up workers; false keeps workers on today's prompts.",
+    defaultValue: true,
+    parse: (raw): RepoSettingResult<boolean> => {
+      if (typeof raw !== "boolean") return { ok: false, error: `"worker_review_rules" must be a boolean` };
+      return { ok: true, value: raw };
+    },
+  }),
 ];
 
 /**
@@ -1045,6 +1055,9 @@ function defaultRepoSettingsFromRegistry(): RepoSettings {
  * `squash`, `rebase`, `rebase-merge`, or `fast-forward-only`. Absent
  * `strict_branch_refresh` (or `false`) means no Gitea opt-in, as today;
  * `true` lets Gitea strict refresh run when branch protection is unreadable.
+ * Absent `worker_review_rules` (or `true`) means implement and follow-up
+ * workers receive the base-branch REVIEW.md rules; `false` keeps workers on
+ * today's prompts.
  */
 export function parseRepoSettingsText(text: string): RepoSettingsParse {
   let parsed: unknown;
@@ -1577,6 +1590,17 @@ export function isSuggestionFollowupEnabled(load: RepoSettingsLoad): boolean {
 export function isAutoRerunFlakesEnabled(load: RepoSettingsLoad): boolean {
   if (load.state !== "valid") return true;
   return load.autoRerunFlakes !== false;
+}
+
+/**
+ * Whether implement and follow-up workers receive the base-branch REVIEW.md
+ * rules. Default on: missing, invalid, or unreadable files behave as today
+ * (on when the repo has a REVIEW.md, nothing new when it does not). The
+ * repository opts out with `worker_review_rules: false`.
+ */
+export function isWorkerReviewRulesEnabled(load: RepoSettingsLoad): boolean {
+  if (load.state !== "valid") return true;
+  return load.workerReviewRules !== false;
 }
 
 /**

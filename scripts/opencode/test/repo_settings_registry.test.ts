@@ -46,6 +46,7 @@ conflict_regenerate:
   - file: package-lock.json
     run: npm install --package-lock-only --ignore-scripts
 mode: full
+worker_review_rules: true
 branch_prefix: bot/jumi
 pr_title: "feat: {title}"
 commit_message: "chore: {title} (#{issue})"
@@ -86,6 +87,7 @@ const expectedNoneKeys = [
   "reviewBudget",
   "strictBranchRefresh",
   "reviewCarry",
+  "workerReviewRules",
 ];
 
 const expectedFullKeys = [
@@ -121,6 +123,7 @@ const expectedFullKeys = [
   "setup",
   "strictBranchRefresh",
   "reviewCarry",
+  "workerReviewRules",
   "suggestionsHoldMerge",
   "maintainerQuestionsHoldMerge",
 ];
@@ -180,11 +183,12 @@ const invalidPerKey: Array<[string, string, string]> = [
   ["setup", "setup: {}\n", '"setup.run" must be a non-blank string'],
   ["strict_branch_refresh", 'strict_branch_refresh: "yes"\n', '"strict_branch_refresh" must be a boolean'],
   ["review_carry", 'review_carry: "yes"\n', '"review_carry" must be a boolean'],
+  ["worker_review_rules", 'worker_review_rules: "yes"\n', '"worker_review_rules" must be a boolean'],
 ];
 
 describe("repo_settings registry", () => {
   test("every registry key is known and documented", () => {
-    expect(REPO_SETTINGS_REGISTRY).toHaveLength(33);
+    expect(REPO_SETTINGS_REGISTRY).toHaveLength(34);
     const table = keyTableSection(page);
     for (const def of REPO_SETTINGS_REGISTRY) {
       expect(KNOWN_KEYS.has(def.key)).toBe(true);
