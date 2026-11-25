@@ -142,7 +142,7 @@
   "sticky_comment.ts": 34,
   "sticky_failure.ts": 48,
   "sticky_worker.ts": 234,
-  "strict_refresh.ts": 1003,
+  "strict_refresh.ts": 1279,
   "strict_refresh_gitea.ts": 235,
   "strict_refresh_queue.ts": 610,
   "strict_refresh_terminal.ts": 229,
