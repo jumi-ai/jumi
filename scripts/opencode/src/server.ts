@@ -59,7 +59,7 @@ import {
   skipReasonForPR,
 } from "./review.ts";
 import { enqueueReviewWithCiGate } from "./review_gate.ts";
-import { clearPendingHandover, recordPendingHandover, resumePendingHandoffs } from "./review_handover_pending.ts";
+import { clearPendingHandover, resumePendingHandoffs } from "./review_handover_pending.ts";
 import {
   createPgReviewJobStore,
   HEARTBEAT_MS,
@@ -940,16 +940,16 @@ async function publishAndCompleteJob(
 ): Promise<ReviewResult> {
   const result = await publishPersistedJob(api, config, row, logger, store);
   if (row.leasedBy == null) throw new Error(`cannot mark published for job ${row.id}`);
-  try {
-    await recordPendingHandover(store, row.id, result.status);
-  } catch (err) {
-    logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
-  }
   const failed = Boolean(row.error) && !row.resultMarkdown;
-  const outcome = await store.markPublished(row.id, row.leasedBy, {
-    state: failed ? "failed" : publishedState(result),
-    reason: result.reason,
-  });
+  const outcome = await store.markPublishedWithHandover(
+    row.id,
+    row.leasedBy,
+    {
+      state: failed ? "failed" : publishedState(result),
+      reason: result.reason,
+    },
+    result.status
+  );
   if (outcome.cancelled) {
     await clearPendingHandover(store, row.id).catch(() => undefined);
     return result;
@@ -1276,12 +1276,12 @@ export async function processEngineTick(
     }
     stopHeartbeat();
     const state = publishedState(result);
-    try {
-      await recordPendingHandover(store, row.id, result.status);
-    } catch (err) {
-      logger(`handoff pending record failed ${row.jobKey}: ${errorMessage(err)}`);
-    }
-    const outcome = await store.markPublished(row.id, leasedBy, { state, reason: result.reason });
+    const outcome = await store.markPublishedWithHandover(
+      row.id,
+      leasedBy,
+      { state, reason: result.reason },
+      result.status
+    );
     recordJobCompleted(row.kind, state);
     if (result.status === "skipped" && result.reason === CI_PENDING_REASON) {
       // Backstop race: the router gate should have held this row until CI
