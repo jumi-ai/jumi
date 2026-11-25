@@ -556,6 +556,8 @@ export async function reclaimExpiredWorkerJobs(
             );
           }
           logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
+          const { settleStrictSlotForWorkerRow } = await import("./strict_refresh_terminal.ts");
+          await settleStrictSlotForWorkerRow({ slots: store.strictSlots, row, status: "failed", reason, log: logger });
         }
       } else {
         const published = await store.markPublished(row.id, row.leasedBy, {
@@ -563,7 +565,11 @@ export async function reclaimExpiredWorkerJobs(
           reason: row.error ?? row.resultReason ?? undefined,
         });
         if (published.cancelled) logger(`reclaim-cancelled ${row.jobKey}`);
-        else logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
+        else {
+          const { settleStrictSlotForWorkerRow } = await import("./strict_refresh_terminal.ts");
+          await settleStrictSlotForWorkerRow({ slots: store.strictSlots, row, status: "failed", log: logger });
+          logger(`reclaim-published ${row.jobKey} failed${row.error ? `: ${row.error}` : ""}`);
+        }
       }
     } catch (err) {
       logger(`reclaim-publish failed ${row.jobKey}: ${errorMessage(err)}`);
@@ -1064,6 +1070,16 @@ export async function processWorkerTick(
     }
     const state = workerPublishedState(result.status);
     const published = await store.markPublished(row.id, leasedBy, { state, reason });
+    if (result.status === "skipped") {
+      const { settleStrictSlotForWorkerOutcome } = await import("./strict_refresh_terminal.ts");
+      await settleStrictSlotForWorkerOutcome({
+        slots: store.strictSlots,
+        job,
+        status: result.status,
+        ...(reason !== undefined ? { reason } : {}),
+        log: logger,
+      });
+    }
     if (published.cancelled) {
       if (job.mode === "follow-up") {
         await resolveWorkerHeld(
@@ -1224,6 +1240,14 @@ export async function processWorkerTick(
             }
             logger(`${row.jobKey} cancelled`);
           } else {
+            const { settleStrictSlotForWorkerRow } = await import("./strict_refresh_terminal.ts");
+            await settleStrictSlotForWorkerRow({
+              slots: store.strictSlots,
+              row,
+              status: "failed",
+              reason: decision.reason,
+              log: logger,
+            });
             if (row.kind === "follow-up" && row.issueNumber != null) {
               await resolveWorkerHeld(
                 api,
