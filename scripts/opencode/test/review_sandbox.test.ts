@@ -346,6 +346,13 @@ describe("resolveReviewSpawnSandbox", () => {
     expect(wrapped).toContain("HOME=/work/repo/.jumi-tmp/scratch/sandbox-home");
     expect(wrapped).toContain("/w/review_sandbox.py");
     expect(wrapped).toContain("sh -c");
+    expect(wrapped).not.toContain("sh -e -c");
+    const wrappedErrexit = wrapShellCommand("bun test", rules, {
+      wrapperPath: "/w/review_sandbox.py",
+      scratchDir: "/work/repo/.jumi-tmp/scratch",
+      errexit: true,
+    });
+    expect(wrappedErrexit).toContain("sh -e -c");
   });
 
   test("per-runner hooks are Jumi-owned code that wrap shells and deny credential reads", async () => {

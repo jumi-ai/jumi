@@ -1,4 +1,6 @@
 import { handleAutomergeLabelChange } from "./automerge.ts";
+import { automergeCauseId, requestAutomergeAdmission, settleAutomergeAdmission } from "./automerge_admission.ts";
+import type { AutomergeReconcileStore } from "./automerge_reconcile.ts";
 import { isJumiPrIdentity } from "./gitea_issues.ts";
 import { fallbackPolicyDeployment, resolveRepoPolicy } from "./repo_policy.ts";
 import { DEFAULT_AUTOMERGE_LABEL, DEFAULT_NO_AUTOMERGE_LABEL } from "./repo_settings.ts";
@@ -149,6 +151,15 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   policy: AutomergeWebhookPolicy;
   api?: AutomergeWebhookApi;
   log?: (message: string) => void;
+  /**
+   * Durable admission store (issue #839). Absent preserves today's inline
+   * behavior exactly. When wired, a cancellation-verification obligation is
+   * requested before any forge attempt or read, cancels run deferred in the
+   * leased drainer, and only a decisive fresh non-cancel outcome settles.
+   */
+  automergeReconcile?: AutomergeReconcileStore;
+  /** Stable cause identity (the original forge delivery header when known). */
+  causeId?: string;
 }): Promise<{ handled: true; reason: string } | { handled: false }> {
   const log = opts.log ?? (() => undefined);
   const parsed = parseAutomergeLabelEvent(opts.rawBody);
@@ -169,6 +180,24 @@ export async function tryHandleAutomergeLabelEvent(opts: {
   if (loginEquals(parsed.senderLogin, policy.botUsername)) {
     log(`automerge label event ignored (sender is bot) for ${parsed.owner}/${parsed.repo}#${parsed.number}`);
     return { handled: true, reason: "sender is bot" };
+  }
+  // Durable admission: surviving candidates request a cancellation-verification
+  // obligation before any forge attempt or read; the write settles inline
+  // only on a decisive fresh non-cancel outcome.
+  const automergeReconcile = opts.automergeReconcile;
+  let admissionGeneration: number | undefined;
+  if (automergeReconcile) {
+    const admission = await requestAutomergeAdmission({
+      store: automergeReconcile,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      prNumber: parsed.number,
+      causeId: opts.causeId ?? automergeCauseId(opts.rawBody, policy.forgeKind ?? "gitea", null),
+      action: parsed.action,
+      log,
+    });
+    if (admission.status === "duplicate") return { handled: true, reason: admission.reason };
+    admissionGeneration = admission.generation;
   }
   const api = opts.api;
   if (!api || typeof api.getPR !== "function" || typeof api.getRepo !== "function") return { handled: false };
@@ -259,7 +288,19 @@ export async function tryHandleAutomergeLabelEvent(opts: {
     trustedSenderLogins: policy.trustedSenderLogins,
     botUsername: policy.botUsername,
     ...(issueNumber !== undefined ? { issueNumber } : {}),
+    ...(admissionGeneration !== undefined ? { deferCancel: true } : {}),
     log,
   });
+  if (admissionGeneration !== undefined && automergeReconcile) {
+    await settleAutomergeAdmission({
+      store: automergeReconcile,
+      owner: parsed.owner,
+      repo: parsed.repo,
+      prNumber: parsed.number,
+      generation: admissionGeneration,
+      action: result.action,
+      log,
+    });
+  }
   return { handled: true, reason: `automerge label ${parsed.action}: ${result.action}` };
 }

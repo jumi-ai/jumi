@@ -1,4 +1,5 @@
 import { hasLabel, type IssueAssignees, type PickupPolicy } from "./assignee.ts";
+import { automergeAdmissionFor, isAutomergeAdmissionError } from "./automerge_admission.ts";
 import { deleteCheckpointForIssueViaForge } from "./checkpoint.ts";
 import {
   parseWorkflowJobPayload,
@@ -553,7 +554,8 @@ export async function handleGithubWebhookEvent(
   event: string | null,
   delivery: string,
   policy: GithubWebhookPolicy,
-  deps: GithubWebhookDeps
+  deps: GithubWebhookDeps,
+  opts?: { forgeDeliveryId?: string | null }
 ): Promise<Response> {
   const logger = deps.logger ?? ((message: string) => console.log(message));
   rememberWebhookInstallation(rawBody, deps);
@@ -845,6 +847,7 @@ export async function handleGithubWebhookEvent(
       }
     }
     if (deps.worker && (action === "labeled" || action === "unlabeled")) {
+      const admission = automergeAdmissionFor(deps.worker, rawBody, "github", delivery, opts);
       try {
         const { tryHandleAutomergeLabelEvent } = await import("./automerge_webhook.ts");
         const automergeHandled = await tryHandleAutomergeLabelEvent({
@@ -857,9 +860,16 @@ export async function handleGithubWebhookEvent(
           },
           api: deps.worker.api,
           log: logger,
+          ...(admission ? { ...admission } : {}),
         });
         if (automergeHandled.handled) return json(202, { queued: false, reason: automergeHandled.reason });
       } catch (err) {
+        // A failed admission write bypasses the fall-through: the 503 keeps
+        // the delivery unmarked so the forge retry is processed, not deduped.
+        if (isAutomergeAdmissionError(err)) {
+          logger(`automerge admission failed: ${errorMessage(err)}`);
+          return json(503, { error: "queue unavailable" });
+        }
         logger(`automerge label webhook failed: ${errorMessage(err)}`);
       }
       try {
@@ -1484,7 +1494,8 @@ export async function handleGithubWebhook(
     request.headers.get("x-github-event"),
     delivery,
     githubWebhookPolicy(config),
-    deps
+    deps,
+    { forgeDeliveryId: deliveryHeader }
   );
   // Durable outcomes only: a 400/500/503 leaves the delivery unmarked so the
   // forge retry is processed, not answered as a replay.

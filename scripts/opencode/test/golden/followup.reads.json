@@ -3,7 +3,11 @@
     "name": "implementFollowUp",
     "reads": {
       "getIssue": 1,
-      "listOpenPulls": 1
+      "getPR": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::10": {
@@ -126,10 +130,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::110": {
@@ -232,10 +236,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::120": {
@@ -261,77 +265,91 @@
     "name": "implementFollowUp",
     "reads": {
       "findStickyIssueComment": 2,
-      "getCollaboratorPermission": 2,
+      "getCollaboratorPermission": 5,
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::123": {
     "name": "implementFollowUp",
     "reads": {
-      "getCollaboratorPermission": 1,
+      "getCollaboratorPermission": 3,
       "getIssue": 1,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listCommitStatuses": 2,
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::124": {
     "name": "implementFollowUp",
     "reads": {
+      "getCollaboratorPermission": 1,
       "getIssue": 1,
       "listActionJobs": 4,
       "listCheckRuns": 2,
-      "listCommitStatuses": 2,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listCommitStatuses": 3,
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::125": {
     "name": "implementFollowUp",
     "reads": {
-      "getIssue": 1
+      "getIssue": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 1,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::126": {
     "name": "implementFollowUp",
     "reads": {
       "getIssue": 1,
-      "listOpenPulls": 1
+      "getPR": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::127": {
     "name": "implementFollowUp",
     "reads": {
+      "getCollaboratorPermission": 1,
       "getIssue": 1,
-      "listOpenPulls": 1
+      "listCommitStatuses": 1,
+      "listIssueComments": 1,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 1,
+      "listPullReviews": 1
     }
   },
   "followup.test.ts::128": {
     "name": "implementFollowUp",
     "reads": {
       "findStickyIssueComment": 2,
-      "getCollaboratorPermission": 2,
+      "getCollaboratorPermission": 5,
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::129": {
@@ -347,10 +365,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::130": {
@@ -454,10 +472,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::2": {
@@ -484,10 +502,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::21": {
@@ -516,10 +534,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::23": {
@@ -531,10 +549,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::24": {
@@ -546,10 +564,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::25": {
@@ -561,10 +579,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::26": {
@@ -576,10 +594,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::27": {
@@ -591,10 +609,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::28": {
@@ -606,10 +624,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::29": {
@@ -623,10 +641,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::3": {
@@ -655,10 +673,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::31": {
@@ -670,10 +688,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::32": {
@@ -685,10 +703,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::33": {
@@ -717,10 +735,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::35": {
@@ -732,10 +750,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::36": {
@@ -745,11 +763,11 @@
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::37": {
@@ -759,11 +777,11 @@
       "getIssue": 1,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listCommitStatuses": 2,
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::38": {
@@ -775,10 +793,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::39": {
@@ -790,10 +808,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::4": {
@@ -822,10 +840,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::41": {
@@ -838,10 +856,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::42": {
@@ -852,10 +870,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::43": {
@@ -867,10 +885,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::44": {
@@ -881,10 +899,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::45": {
@@ -896,10 +914,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::46": {
@@ -911,10 +929,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::47": {
@@ -926,10 +944,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::48": {
@@ -956,10 +974,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::5": {
@@ -987,10 +1005,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::51": {
@@ -1002,10 +1020,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::52": {
@@ -1017,10 +1035,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::53": {
@@ -1031,10 +1049,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::54": {
@@ -1105,10 +1123,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::59": {
@@ -1120,10 +1138,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::6": {
@@ -1167,10 +1185,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::62": {
@@ -1182,10 +1200,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::63": {
@@ -1214,10 +1232,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::65": {
@@ -1229,10 +1247,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::66": {
@@ -1291,10 +1309,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::7": {
@@ -1338,10 +1356,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::72": {
@@ -1352,11 +1370,11 @@
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::73": {
@@ -1368,10 +1386,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::74": {
@@ -1383,10 +1401,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::75": {
@@ -1398,11 +1416,11 @@
       "getIssue": 3,
       "listActionJobs": 3,
       "listCheckRuns": 2,
-      "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listCommitStatuses": 3,
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::76": {
@@ -1413,26 +1431,26 @@
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::77": {
     "name": "implementFollowUp",
     "reads": {
       "findStickyIssueComment": 2,
-      "getCollaboratorPermission": 2,
+      "getCollaboratorPermission": 3,
       "getIssue": 3,
       "listActionJobs": 1,
       "listCheckRuns": 1,
-      "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listCommitStatuses": 2,
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::78": {
@@ -1444,10 +1462,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::79": {
@@ -1459,10 +1477,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::8": {
@@ -1536,10 +1554,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::84": {
@@ -1566,10 +1584,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::86": {
@@ -1596,10 +1614,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::88": {
@@ -1609,10 +1627,10 @@
       "listActionJobs": 4,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::89": {
@@ -1625,10 +1643,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::9": {
@@ -1641,10 +1659,10 @@
       "listActionJobs": 1,
       "listCheckRuns": 1,
       "listCommitStatuses": 1,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::90": {
@@ -1656,10 +1674,10 @@
       "listActionJobs": 5,
       "listCheckRuns": 3,
       "listCommitStatuses": 3,
-      "listIssueComments": 2,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 3,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::91": {
@@ -1671,10 +1689,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 1,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 1,
-      "listPullReviews": 1
+      "listIssueComments": 2,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 2,
+      "listPullReviews": 2
     }
   },
   "followup.test.ts::92": {
@@ -1687,10 +1705,10 @@
       "listActionJobs": 3,
       "listCheckRuns": 2,
       "listCommitStatuses": 2,
-      "listIssueComments": 3,
-      "listOpenPulls": 1,
-      "listPullReviewComments": 2,
-      "listPullReviews": 2
+      "listIssueComments": 4,
+      "listOpenPulls": 2,
+      "listPullReviewComments": 3,
+      "listPullReviews": 3
     }
   },
   "followup.test.ts::93": {
