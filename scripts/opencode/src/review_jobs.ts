@@ -22,12 +22,7 @@ import {
   STUCK_KICK_ALIASES,
 } from "./kick.ts";
 import { parseSkipWhy } from "./pr_decision.ts";
-import {
-  MemoryProvenanceStore,
-  PgProvenanceStore,
-  PROVENANCE_SCHEMA_SQL,
-  type ProvenanceStore,
-} from "./provenance.ts";
+import { MemoryProvenanceStore, PgProvenanceStore, PROVENANCE_SCHEMA_SQL, type ProvenanceStore } from "./provenance.ts";
 import {
   MemoryPushConfirmStore,
   PgPushConfirmStore,

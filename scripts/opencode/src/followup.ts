@@ -2,7 +2,6 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stageIssueAttachments } from "./attachments.ts";
 import { pushClaimedBranchWithAutomergeRestore, retryRefusedAutomergeSchedule } from "./automerge.ts";
-import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import {
   beginCheckpointing,
   checkpointRefForJob,
@@ -105,6 +104,7 @@ import {
 } from "./pr_decision.ts";
 import { buildFollowUpSnapshot } from "./pr_snapshot.ts";
 import { ProvenanceCollector } from "./provenance.ts";
+import { pushConfirmForJobOpts } from "./push_confirm.ts";
 import { isQuotaError, isQuotaText, quotaStuckReasonForText } from "./quota.ts";
 import { hasHealthyRunnerForQuota, throwIfQuotaWait } from "./quota_wait.ts";
 import {
