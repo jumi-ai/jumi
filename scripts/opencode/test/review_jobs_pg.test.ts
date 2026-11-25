@@ -18,7 +18,9 @@ import {
 } from "../src/review_jobs.ts";
 import { processEngineTick, reclaimExpiredJobs } from "../src/server.ts";
 import type { SqlClient } from "../src/sql_client.ts";
+import type { IssueJob } from "../src/types.ts";
 import { processWorkerTick } from "../src/worker.ts";
+import { decodeWorkerJobIntent, InvalidJobIntentError, type WorkerJobIntentKind } from "../src/worker_intent.ts";
 import { makeReviewApi as makeSharedReviewApi } from "./fakes/forge.ts";
 import {
   makeComment,
@@ -1156,6 +1158,196 @@ describePg("PgReviewJobStore against real postgres", () => {
     expect(await countJobs(`delivery = 'ci-delivery-1'`)).toBe(2);
     // A new delivery for the same PR stays eligible.
     expect((await store.enqueueIssue({ ...jobA, delivery: "ci-delivery-2" })).queued).toBe(true);
+  });
+
+  test("enqueueIssue pins producer key, payload and intent and rejects invalid intents without writing", async () => {
+    type PinnedPayload = {
+      issueNumber: number;
+      title: string;
+      body: string;
+      htmlUrl: string;
+      issueUpdatedAt: string;
+      defaultBranch: string;
+      cloneUrl: string;
+      generation: number;
+      action: string;
+      mergeOnly?: boolean;
+      strictRefresh?: boolean;
+      strictBaseSha?: string;
+    };
+    const payloadFor = (
+      issueNumber: number,
+      extra: { action: string; mergeOnly?: boolean; strictRefresh?: boolean; strictBaseSha?: string } & {
+        generation?: number;
+      } = { action: "assigned" }
+    ): PinnedPayload => ({
+      issueNumber,
+      title: "Fix the thing",
+      body: "Please implement this.",
+      htmlUrl: "https://gitea.kirmanak.stream/kirmanak/demo/issues/12",
+      issueUpdatedAt: "2026-05-23T00:00:00Z",
+      defaultBranch: "main",
+      cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+      generation: 0,
+      ...extra,
+    });
+    const shapes: Array<{
+      name: string;
+      job: IssueJob;
+      key: string;
+      intent: WorkerJobIntentKind;
+      payload: PinnedPayload;
+    }> = [
+      {
+        name: "implement",
+        job: makeIssueJob({ delivery: "pg-implement", issueNumber: 200 }),
+        key: "implement:kirmanak/demo#200",
+        intent: "implement",
+        payload: payloadFor(200, { action: "assigned" }),
+      },
+      {
+        name: "comment follow-up with head",
+        job: makeIssueJob({
+          delivery: "pg-comment",
+          issueNumber: 201,
+          mode: "follow-up",
+          prNumber: 301,
+          headSha: "hs-a",
+        }),
+        key: "follow-up:kirmanak/demo#301:hs-a",
+        intent: "follow-up",
+        payload: payloadFor(201, { action: "assigned" }),
+      },
+      {
+        name: "comment follow-up without head",
+        job: makeIssueJob({
+          delivery: "pg-nohead",
+          issueNumber: 202,
+          mode: "follow-up",
+          prNumber: 302,
+          headSha: undefined,
+        }),
+        key: "follow-up:kirmanak/demo#302:",
+        intent: "follow-up",
+        payload: payloadFor(202, { action: "assigned" }),
+      },
+      {
+        name: "shared-failure waiter merge-only",
+        job: makeIssueJob({
+          delivery: "pg-waiter",
+          issueNumber: 203,
+          mode: "follow-up",
+          prNumber: 303,
+          headSha: "hs",
+          action: "push",
+          mergeOnly: true,
+        }),
+        key: "follow-up:kirmanak/demo#303:hs",
+        intent: "follow-up-merge-only",
+        payload: payloadFor(203, { action: "push", mergeOnly: true }),
+      },
+      {
+        name: "strict refresh keeps flags and latched generation",
+        job: makeIssueJob({
+          delivery: "pg-strict",
+          issueNumber: 204,
+          mode: "follow-up",
+          prNumber: 304,
+          headSha: "hs",
+          action: "push",
+          mergeOnly: true,
+          strictRefresh: true,
+          strictBaseSha: "base",
+        }),
+        key: "follow-up:kirmanak/demo#304:hs",
+        intent: "follow-up-strict-refresh",
+        payload: payloadFor(204, {
+          action: "push",
+          mergeOnly: true,
+          strictRefresh: true,
+          strictBaseSha: "base",
+          generation: 1,
+        }),
+      },
+      {
+        name: "pickup conflict",
+        job: makeIssueJob({
+          delivery: "pg-pickup",
+          issueNumber: 205,
+          mode: "conflict",
+          prNumber: 305,
+          headSha: "hs",
+        }),
+        key: "conflict:kirmanak/demo#305:hs",
+        intent: "conflict",
+        payload: payloadFor(205, { action: "assigned" }),
+      },
+      {
+        name: "conflict keeps leaked parent flags in payload but not intent",
+        job: makeIssueJob({
+          delivery: "pg-spread",
+          issueNumber: 206,
+          mode: "conflict",
+          prNumber: 306,
+          headSha: "hs2",
+          mergeOnly: true,
+          strictRefresh: true,
+        }),
+        key: "conflict:kirmanak/demo#306:hs2",
+        intent: "conflict",
+        payload: payloadFor(206, { action: "assigned", mergeOnly: true, strictRefresh: true }),
+      },
+    ];
+    // Bump the latch for the strict-refresh issue so the stored payload pins
+    // the existing generation handling alongside the default (0) cases above.
+    await store.clearIssueSkipLatch("kirmanak", "demo", 204);
+    for (const shape of shapes) {
+      const enqueued = await store.enqueueIssue(shape.job);
+      expect(enqueued, shape.name).toEqual({ key: shape.key, queued: true });
+    }
+    expect(await countJobs(`state = 'queued'`)).toBe(shapes.length);
+    const ids = asRows<{ id: unknown; job_key: unknown }>(
+      await sql.unsafe(`SELECT id, job_key FROM review_jobs ORDER BY id`)
+    );
+    for (const shape of shapes) {
+      const found = ids.find((row) => String(row.job_key) === shape.key);
+      if (!found) throw new Error(`missing stored row for ${shape.key}`);
+      const stored = await store.get(Number(found.id));
+      if (!stored) throw new Error(`missing stored row ${String(found.id)}`);
+      expect(stored.payload, shape.name).toEqual(shape.payload);
+      expect(decodeWorkerJobIntent(stored), shape.name).toEqual({ kind: shape.intent });
+    }
+
+    const invalid: IssueJob[] = [
+      makeIssueJob({ delivery: "pg-bad-0", issueNumber: 210, mode: "follow-up", prNumber: 0, headSha: "sha" }),
+      makeIssueJob({ delivery: "pg-bad-1", issueNumber: 211, mode: "follow-up", headSha: "sha" }),
+      makeIssueJob({ delivery: "pg-bad-2", issueNumber: 212, mode: "follow-up", prNumber: -1, headSha: "sha" }),
+      makeIssueJob({ delivery: "pg-bad-3", issueNumber: 213, mode: "conflict", prNumber: 0, headSha: "sha" }),
+      makeIssueJob({ delivery: "pg-bad-4", issueNumber: 214, mode: "conflict", headSha: "sha" }),
+      makeIssueJob({
+        delivery: "pg-bad-5",
+        issueNumber: 215,
+        mode: "follow-up",
+        prNumber: 315,
+        headSha: "sha",
+        strictRefresh: true,
+      }),
+      makeIssueJob({
+        delivery: "pg-bad-6",
+        issueNumber: 216,
+        mode: "follow-up",
+        prNumber: 316,
+        headSha: "sha",
+        mergeOnly: false,
+        strictRefresh: true,
+      }),
+    ];
+    for (const job of invalid) {
+      await expect(store.enqueueIssue(job)).rejects.toThrow(InvalidJobIntentError);
+    }
+    // Every rejection happens before the transaction, so the seven valid rows
+    // above are still the only rows.
+    expect(await countJobs(`1 = 1`)).toBe(shapes.length);
   });
 
   test("job-mode schema check covers the review handover pending table", async () => {
