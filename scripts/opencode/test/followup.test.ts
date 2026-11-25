@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { readCiState } from "../src/ci.ts";
 import {
@@ -5749,17 +5748,32 @@ describe("suggestion hold latch", () => {
   test("a no-changes round resolves a held pending to success", async () => {
     const { markSuggestionHoldConsumed } = await import("../src/suggestion_hold.ts");
     await withDirs(async (home, workdir) => {
+      const hexHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       const { memorySkipLatchesFor: forHome } = await import("../src/skip_latches.ts");
-      await markSuggestionHoldConsumed(
-        forHome(home),
-        { owner: "kirmanak", repo: "demo", issueNumber: 12 },
-        "headsha",
-        2
-      );
+      await markSuggestionHoldConsumed(forHome(home), { owner: "kirmanak", repo: "demo", issueNumber: 12 }, hexHead, 2);
       const statuses: Array<{ state: string; description?: string }> = [];
+      const suggestionSticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${hexHead}\``,
+          "",
+          "src/foo.ts:12: 💡 suggestion: extract a helper",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const hexPr = (() => {
+        const base = jumiPr();
+        return { ...base, head: { ...base.head, sha: hexHead } };
+      })();
       const api = followupApi({
+        listOpenPulls: async () => [hexPr],
         listIssueComments: async () => [
           makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          suggestionSticky,
         ],
         // deno-lint-ignore no-explicit-any
         ...({
@@ -5804,18 +5818,41 @@ describe("suggestion hold latch", () => {
 
   test("an already-handled trigger resolves a held pending to success", async () => {
     await withDirs(async (home, workdir) => {
+      const hexHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
         round: 1,
         lastHeadSha: "abc",
         handledCommentIds: [55],
         handledReviewIds: [],
-        handledReviewFindings: [],
+        handledReviewFindings: [{ id: 38022, sha: hexHead }],
         updatedAt: "2026-05-23T00:00:00Z",
-        suggestionHold: { consumed: true, headSha: "headsha", count: 2 },
+        suggestionHold: { consumed: true, headSha: hexHead, count: 2 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
+      const suggestionSticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${hexHead}\``,
+          "",
+          "src/foo.ts:12: 💡 suggestion: extract a helper",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const hexPr = (() => {
+        const base = jumiPr();
+        return { ...base, head: { ...base.head, sha: hexHead } };
+      })();
       const api = followupApi({
+        listOpenPulls: async () => [hexPr],
+        listIssueComments: async () => [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          suggestionSticky,
+        ],
         // deno-lint-ignore no-explicit-any
         ...({
           createCommitStatus: async (
@@ -5854,19 +5891,38 @@ describe("suggestion hold latch", () => {
 
   test("CI still pending resolves a held pending to success", async () => {
     await withDirs(async (home, workdir) => {
+      const hexHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
         round: 1,
         lastHeadSha: "abc",
         handledCommentIds: [],
         handledReviewIds: [],
-        handledReviewFindings: [],
+        handledReviewFindings: [{ id: 38022, sha: hexHead }],
         updatedAt: "2026-05-23T00:00:00Z",
-        suggestionHold: { consumed: true, headSha: "headsha", count: 1 },
+        suggestionHold: { consumed: true, headSha: hexHead, count: 1 },
       });
       const statuses: Array<{ state: string; description?: string }> = [];
+      const suggestionSticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${hexHead}\``,
+          "",
+          "src/foo.ts:12: 💡 suggestion: extract a helper",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const hexPr = (() => {
+        const base = jumiPr();
+        return { ...base, head: { ...base.head, sha: hexHead } };
+      })();
       const api = followupApi({
-        listIssueComments: async () => [],
+        listOpenPulls: async () => [hexPr],
+        listIssueComments: async () => [suggestionSticky],
         listCommitStatuses: async () => [
           { id: 1, context: "build", status: "failure" },
           { id: 2, context: "test", status: "pending" },
@@ -5910,7 +5966,7 @@ describe("suggestion hold latch", () => {
     });
   });
 
-  test("an unassigned issue (cancelled) resolves a held pending to success", async () => {
+  test("an unassigned issue (cancelled) keeps a held pending without fresh evidence", async () => {
     await withDirs(async (home, workdir) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
@@ -5957,13 +6013,11 @@ describe("suggestion hold latch", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "cancelled" });
-      expect(statuses).toHaveLength(1);
-      expect(statuses[0]).toMatchObject({ state: "success" });
-      expect(statuses[0]?.description).toContain("job cancelled");
+      expect(statuses).toHaveLength(0);
     });
   });
 
-  test("no open jumi closing PR resolves a held pending to success", async () => {
+  test("no open jumi closing PR keeps a held pending without a fresh read", async () => {
     await withDirs(async (home, workdir) => {
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
@@ -6010,14 +6064,13 @@ describe("suggestion hold latch", () => {
         logger: () => undefined,
       });
       expect(result).toEqual({ status: "skipped", reason: "no open jumi closing PR" });
-      expect(statuses).toHaveLength(1);
-      expect(statuses[0]).toMatchObject({ state: "success" });
-      expect(statuses[0]?.description).toContain("no open jumi closing PR");
+      expect(statuses).toHaveLength(0);
     });
   });
 
   test("default-branch refusal resolves a held pending to success", async () => {
     await withDirs(async (home, workdir) => {
+      const hexHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       await writeFollowUpState(followUpStatePath(home, "kirmanak", "demo", 12), {
         prNumber: 127,
         round: 1,
@@ -6026,13 +6079,30 @@ describe("suggestion hold latch", () => {
         handledReviewIds: [],
         handledReviewFindings: [],
         updatedAt: "2026-05-23T00:00:00Z",
-        suggestionHold: { consumed: true, headSha: "headsha", count: 1 },
+        suggestionHold: { consumed: true, headSha: hexHead, count: 1 },
       });
       const base = jumiPr();
-      const pr = { ...base, head: { ...base.head, ref: "main" } };
+      const pr = { ...base, head: { ...base.head, ref: "main", sha: hexHead } };
       const statuses: Array<{ state: string; description?: string }> = [];
+      const suggestionSticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${hexHead}\``,
+          "",
+          "src/foo.ts:12: 💡 suggestion: extract a helper",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
       const api = followupApi({
         listOpenPulls: async () => [pr],
+        listIssueComments: async () => [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          suggestionSticky,
+        ],
         // deno-lint-ignore no-explicit-any
         ...({
           createCommitStatus: async (
@@ -6075,19 +6145,42 @@ describe("suggestion hold latch", () => {
     const { markSuggestionHoldConsumed } = await import("../src/suggestion_hold.ts");
     const { memorySkipLatchesFor } = await import("../src/skip_latches.ts");
     await withDirs(async (home, workdir) => {
+      const hexHead = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
       await markSuggestionHoldConsumed(
         memorySkipLatchesFor(home),
         { owner: "kirmanak", repo: "demo", issueNumber: 12 },
-        "headsha",
+        hexHead,
         2
       );
       let gets = 0;
       const statuses: Array<{ state: string; description?: string }> = [];
+      const suggestionSticky = makeComment({
+        id: 38022,
+        body: [
+          "<!-- jumi-review:kirmanak/demo#127 -->",
+          "### Jumi review",
+          "",
+          `Reviewed commit: \`${hexHead}\``,
+          "",
+          "src/foo.ts:12: 💡 suggestion: extract a helper",
+          "<!-- jumi-check: success; 1 suggestion -->",
+        ].join("\n"),
+        user: makeUser({ login: "jumi" }),
+      });
+      const hexPr = (() => {
+        const base = jumiPr();
+        return { ...base, head: { ...base.head, sha: hexHead } };
+      })();
       const api = followupApi({
+        listOpenPulls: async () => [hexPr],
         getIssue: async () => {
           gets++;
           return gets >= 3 ? makeIssue({ state: "closed" }) : makeIssue();
         },
+        listIssueComments: async () => [
+          makeComment({ id: 55, body: "please fix the tests", user: makeUser({ login: "alice" }) }),
+          suggestionSticky,
+        ],
         // deno-lint-ignore no-explicit-any
         ...({
           createCommitStatus: async (
