@@ -10,6 +10,7 @@ import {
   type FollowUpWakeCauseStore,
   MemoryFollowUpWakeCauseStore,
   PgFollowUpWakeCauseStore,
+  payloadGenerationOf,
 } from "./followup_wake_causes.ts";
 import { type HandoffStore, ISSUE_HANDOFFS_SCHEMA_SQL, MemoryHandoffStore, PgHandoffStore } from "./handoff.ts";
 import { INFRA_BREAKER_CONSECUTIVE, INFRA_BREAKER_COOLDOWN_MS, isInfraRetryMarker } from "./infra.ts";
@@ -1058,13 +1059,7 @@ const WAKE_PARK_DROPPED = "dropped";
 const WAKE_PARK_OBSOLETE_HEAD = "obsolete-head";
 const WAKE_PARK_GENERATION_RESET = "generation-reset";
 
-function wakePayloadGeneration(payload: unknown): number {
-  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const generation = (payload as { generation?: unknown }).generation;
-    if (typeof generation === "number" && Number.isFinite(generation)) return Math.trunc(generation);
-  }
-  return 0;
-}
+/** Single shared payload-generation helper lives in followup_wake_causes.ts. */
 
 function isFollowUpKind(kind: JobKind | string | null | undefined): boolean {
   return kind === "follow-up";
@@ -1151,7 +1146,7 @@ function issueJobPayload(job: IssueJob): IssueJobPayload {
 }
 
 function payloadGeneration(payload: IssueJobPayload | null | undefined): number {
-  return typeof payload?.generation === "number" && Number.isFinite(payload.generation) ? payload.generation : 0;
+  return payloadGenerationOf(payload);
 }
 
 function issueJobPayloadAt(job: IssueJob, generation: number): IssueJobPayload {
@@ -3979,7 +3974,7 @@ function pgPayloadGeneration(payload: unknown): number {
       return 0;
     }
   }
-  return wakePayloadGeneration(parsed);
+  return payloadGenerationOf(parsed);
 }
 
 async function pgLatchGenerationTx(

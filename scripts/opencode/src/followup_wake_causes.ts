@@ -146,7 +146,7 @@ function sha256Hex(input: string | Uint8Array): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
-function payloadGenerationOf(payload: unknown): number {
+export function payloadGenerationOf(payload: unknown): number {
   if (payload && typeof payload === "object") {
     const generation = (payload as { generation?: unknown }).generation;
     if (typeof generation === "number" && Number.isFinite(generation)) return Math.trunc(generation);
