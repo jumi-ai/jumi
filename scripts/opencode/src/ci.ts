@@ -369,10 +369,26 @@ function requiredCiContextsForPending(requiredContexts: readonly string[] | unde
  * `workflow / job (pull_request)` as the same check: base runs on `push`
  * while the head runs on `pull_request`, and the base-attribution gate must
  * not miss them. Only the trailing ` (<event>)` is ignored, and only when
- * the remaining prefix still matches by one of the rules above.
+ * the remaining prefix still matches by one of the rules above. Only known
+ * forge workflow-trigger event names are stripped; anything else in parens
+ * (matrix legs like `build (arm)` vs `build (x64)`) is part of the check
+ * name and must not collapse.
  */
+const CI_EVENT_NAMES = new Set([
+  "push",
+  "pull_request",
+  "pull_request_target",
+  "workflow_dispatch",
+  "workflow_call",
+  "schedule",
+  "merge_group",
+  "release",
+]);
 function stripCiEventSuffix(name: string): string {
-  return name.replace(/\s+\([^/()]*\)\s*$/, "");
+  const match = /\s+\(([^/()]+)\)\s*$/.exec(name);
+  if (!match) return name;
+  if (!CI_EVENT_NAMES.has(match[1].trim().toLowerCase())) return name;
+  return name.slice(0, match.index);
 }
 
 function requiredMatchesCheck(checkContext: string | undefined, required: string): boolean {

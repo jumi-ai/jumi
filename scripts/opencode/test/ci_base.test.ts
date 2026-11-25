@@ -110,6 +110,12 @@ describe("attributableToPr", () => {
     expect(attributableToPr([{ name: "CI / checks (pull_request)" }], base)).toEqual(["CI / checks (pull_request)"]);
     expect(isBaseGreen(base.results, "CI / checks (pull_request)")).toBe(true);
   });
+
+  test("matrix legs in parens are not an event suffix", () => {
+    const base = { sha: "basesha", results: [{ name: "CI / build (arm)", conclusion: "success" }] };
+    expect(isBaseGreen(base.results, "CI / build (x64)")).toBe(false);
+    expect(attributableToPr([{ name: "CI / build (x64)" }], base)).toEqual([]);
+  });
 });
 
 describe("buildCiMarkdown base evidence", () => {
