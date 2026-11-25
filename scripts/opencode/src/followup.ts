@@ -74,7 +74,7 @@ import { isEligibleWorkerPR, resolveWorkerPullRequest, upsertWorkerComment } fro
 import { handoffKeyForJob, handoffsFor, injectStoredHandoff } from "./handoff.ts";
 import { settleFollowUpHold } from "./hold_settlement.ts";
 import {
-  buildPullRequestBody,
+  buildFollowupPullRequestBody,
   buildTaskMarkdown,
   confirmProvenancePublication,
   ensureProvenanceIntent,
@@ -2403,9 +2403,10 @@ export async function implementFollowUp(
       const seen = { headSha: liveHeadSha, ...(liveUpdatedAt ? { prUpdatedAt: liveUpdatedAt } : {}) };
       const body = replaceJumiPrBodyRegion(
         live.body,
-        buildPullRequestBody(
+        buildFollowupPullRequestBody(
           issueNumber,
           description,
+          live.body,
           runner,
           workerPublishSecrets(loop.auth.token, jobChain),
           followupConventions.closingKeyword,

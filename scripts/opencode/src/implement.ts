@@ -851,6 +851,38 @@ function pullRequestText(
   return `${text}\n\n${fallback}`;
 }
 
+/** Whether the live body keeps the issue open: visible Refs with no visible closing keyword. */
+export function isNonClosingLiveBody(liveBody: string | null | undefined, issueNumber: number): boolean {
+  const visible = visibleClosingText(liveBody ?? "");
+  if (closesIssuePattern(issueNumber).test(visible)) return false;
+  return refsIssuePattern(issueNumber).test(visible);
+}
+
+/**
+ * Follow-up re-publish: same rule as the initial body, except an absent
+ * remaining list keeps the previous round's decision instead of closing.
+ * An explicit list (including an explicitly empty one) always decides:
+ * non-empty (after CI-only filtering) publishes Refs, empty publishes the
+ * closing keyword. `refs` repos always stay non-closing.
+ */
+export function buildFollowupPullRequestBody(
+  issueNumber: number,
+  fileContents: string | null | undefined,
+  liveBody: string | null | undefined,
+  runner?: RunnerStamp,
+  secrets: readonly (string | undefined)[] = [],
+  closingKeyword?: string,
+  remaining?: readonly string[] | null | undefined
+): string {
+  if (closingKeyword === "refs" || remaining != null) {
+    return buildPullRequestBody(issueNumber, fileContents, runner, secrets, closingKeyword, remaining);
+  }
+  const built = buildPullRequestBody(issueNumber, fileContents, runner, secrets, closingKeyword, undefined);
+  const region = jumiPrBodyRegion(liveBody) ?? liveBody;
+  if (isNonClosingLiveBody(region, issueNumber)) return rewriteClosingToRefs(built, issueNumber);
+  return built;
+}
+
 /** Render the PR title template for one forge issue. Defaults to the issue title verbatim. */
 function renderPrTitle(template: string | undefined, title: string, issueNumber: number): string {
   return renderIssueTemplate(template ?? DEFAULT_PR_TITLE_TEMPLATE, title, issueNumber);
