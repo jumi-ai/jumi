@@ -1,6 +1,6 @@
 import { hasLabel, isIssuePickedUp, type PickupPolicy } from "./assignee.ts";
 import { MAX_CONFLICT_ROUNDS } from "./conflict.ts";
-import { MAX_FOLLOWUP_ROUNDS } from "./followup.ts";
+import { MAX_FOLLOWUP_ROUNDS, readFollowUpLatch } from "./followup.ts";
 import { extractWorkingIssueNumber, isAssignedForeignPR, isJumiPrIdentity } from "./gitea_issues.ts";
 import type { Pull, Repo, ReviewApi, Task } from "./ports.ts";
 import { TOO_MANY_FOLLOWUP_ROUNDS_REASON } from "./pr_decision.ts";
@@ -444,8 +444,12 @@ export async function enqueueFollowUpFromReview(
     return logSkip("suggestions disabled");
   }
 
-  const followUpSucceeded = await opts.store.countSucceeded("follow-up", opts.row.owner, opts.row.repo, issueNumber);
-  if (followUpSucceeded >= policy.maxFollowupRounds) {
+  const followUpLatch = await readFollowUpLatch(opts.store.skipLatches, {
+    owner: opts.row.owner,
+    repo: opts.row.repo,
+    issueNumber,
+  });
+  if (followUpLatch.round >= policy.maxFollowupRounds) {
     await upsertStuckText(
       opts.api,
       opts.row.owner,
