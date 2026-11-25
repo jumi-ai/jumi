@@ -3,6 +3,7 @@ import { chmod, cp, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm } from 
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { childScratchDir, ensureEngineScratchIgnored } from "./engine_scratch.ts";
 import { forgeCommitterEmail, forgeCommitterName } from "./forge.ts";
+import { runGitInOwnedGroup } from "./git_abort.ts";
 import type { Pull, Repo } from "./ports.ts";
 import type { ReviewJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
@@ -30,8 +31,10 @@ type GitCredentials = {
 
 export type GitRunner = (
   args: string[],
-  opts: { cwd: string; env: Record<string, string | undefined> }
+  opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal }
 ) => Promise<string>;
+
+export { GIT_ABORT_GRACE_MS } from "./git_abort.ts";
 
 export interface CheckoutPullRequestWorkspaceOptions {
   workdir: string;
@@ -596,16 +599,36 @@ export function gitEnv(auth: GitAuth): Record<string, string | undefined> {
 
 export async function runGit(
   args: string[],
-  opts: { cwd: string; env: Record<string, string | undefined> }
+  opts: { cwd: string; env: Record<string, string | undefined>; signal?: AbortSignal }
 ): Promise<string> {
-  const proc = Bun.spawn(["git", ...args], {
-    cwd: opts.cwd,
-    stdout: "pipe",
-    stderr: "pipe",
-    env: opts.env,
-  });
+  const signal = opts.signal;
+  if (!signal) {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd: opts.cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: opts.env,
+    });
 
-  const [stdout, stderr, exitCode] = await Promise.all([readStream(proc.stdout), readStream(proc.stderr), proc.exited]);
+    const [stdout, stderr, exitCode] = await Promise.all([
+      readStream(proc.stdout),
+      readStream(proc.stderr),
+      proc.exited,
+    ]);
+    if (exitCode !== 0) {
+      const secrets = [opts.env.GIT_AUTH_TOKEN];
+      const details = redactGitSecrets([stdout, stderr].filter(Boolean).join("\n"), secrets);
+      const command = redactGitSecrets(args.join(" "), secrets);
+      throw new Error(`git ${command} failed with exit code ${exitCode}${details ? `:\n${details}` : ""}`);
+    }
+    return stdout;
+  }
+
+  const { stdout, stderr, exitCode } = await runGitInOwnedGroup(args, {
+    cwd: opts.cwd,
+    env: opts.env,
+    signal,
+  });
   if (exitCode !== 0) {
     const secrets = [opts.env.GIT_AUTH_TOKEN];
     const details = redactGitSecrets([stdout, stderr].filter(Boolean).join("\n"), secrets);
