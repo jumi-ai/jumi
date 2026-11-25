@@ -134,7 +134,7 @@
   "server_mailbox.ts": 77,
   "shared_failure.ts": 135,
   "shutdown.ts": 40,
-  "skip_latches.ts": 225,
+  "skip_latches.ts": 379,
   "skip_why_texts.ts": 52,
   "sql_client.ts": 72,
   "status_description.ts": 67,
