@@ -3059,7 +3059,6 @@ export async function implementFollowUp(
               if (successes.length > 0) parts.push(rerunsCommentFor(successes));
               if (budget.exhausted.length > 0) parts.push(rerunExhaustedComment(budget.exhausted));
               for (const failure of failures) parts.push(rerunFailedComment([failure.check], failure.error));
-              if (redactedReason) parts.push(`Worker no_changes reason: ${redactedReason}`);
               const refreshed = await refreshPullRequestBody(prFileContents, sha || pr.head.sha);
               await maybeQueueBodyOnlyReview(refreshed, sha || pr.head.sha);
               await sticky(parts.join("\n\n"), pr.number);

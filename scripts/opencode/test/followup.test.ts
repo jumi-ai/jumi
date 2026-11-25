@@ -45,6 +45,7 @@ import { QUOTA_MESSAGE, QUOTA_STUCK_TEXT } from "../src/quota.ts";
 import { standingPodRuntime } from "../src/runtime.ts";
 import { fingerprintFollowUpText, writeStuckState } from "../src/stuck.ts";
 import type { GiteaPullReview } from "../src/types.ts";
+import { probeWorkerMcpServer } from "../src/worker_mcp.ts";
 import type { GitRunner } from "../src/workspace.ts";
 import { forEachForge, makeIssueApi } from "./fakes/forge.ts";
 import { makeComment, makeIssue, makeIssueJob, makePR, makeRepo, makeUser } from "./fixtures.ts";
@@ -3604,6 +3605,60 @@ describe("implementFollowUp", () => {
       expect(rerunCalls[0]?.jobId).toBe(9);
       expect(api.comments.some((body) => body.includes("Reran `build`"))).toBe(true);
       expect(api.comments.some((body) => body.includes("Automatic rerun 1/1"))).toBe(true);
+    });
+  });
+
+  test("rerun comment posts the worker reason once, sanitized", async () => {
+    await withDirs(async (home, workdir) => {
+      const rerunCalls: Array<{ jobId: number; runId?: number }> = [];
+      const api = followupApi({
+        listIssueComments: async () => [],
+        listCommitStatuses: async () => [{ id: 1, context: "build", status: "failure" }],
+        listActionJobs: async () => [{ id: 9, name: "build", head_sha: "headsha", run_id: 100 }],
+        getActionJobLogs: async () => "##[error]Failed to connect to 140.82.112.4 port 443: Connection timed out\n",
+        rerunActionJob: async (_owner: string, _repo: string, jobId: number, runId?: number) => {
+          rerunCalls.push({ jobId, ...(runId !== undefined ? { runId } : {}) });
+        },
+      });
+      let openCode = 0;
+      const result = await realImplementFollowUp({
+        api: api as never,
+        job: followUpJob({ trigger: { event: "workflow_job", sender: "alice" } }),
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        model: "openai/gpt-5.5",
+        home,
+        workdir,
+        heartbeatIntervalMs: 0,
+        gitRunner: async (args) => {
+          const gitArgs = stripGitConfigArgs(args as string[]);
+          if (gitArgs[0] === "rev-parse") return "abc123";
+          if (gitArgs[0] === "status") return "";
+          if (gitArgs[0] === "rev-list") return "0";
+          return "";
+        },
+        openCodeRunner: async (opts) => {
+          const mcp = (opts as unknown as { workerMcp?: { url: string; token: string } }).workerMcp;
+          expect(mcp).toBeDefined();
+          const out = await probeWorkerMcpServer(mcp!.url, mcp!.token, "no_changes", {
+            reason: "Mirror lag is gone;\nchecked the Astral mirror serves the release now.",
+          });
+          expect(out.ok).toBe(true);
+          openCode++;
+          return { status: "ok" };
+        },
+        logger: () => undefined,
+      });
+      expect(result).toEqual({ status: "no-changes" });
+      expect(openCode).toBe(1);
+      expect(rerunCalls).toHaveLength(1);
+      const comment = api.comments.find((body) => body.includes("Reran `build`"));
+      expect(comment).toBeDefined();
+      expect(comment).not.toContain("Worker no_changes reason:");
+      expect(comment).not.toContain("\nchecked the Astral mirror");
+      const occurrences = comment!.split("Astral mirror").length - 1;
+      expect(occurrences).toBe(1);
     });
   });
 
