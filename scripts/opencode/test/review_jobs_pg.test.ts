@@ -13,6 +13,7 @@ import {
   MAX_ATTEMPTS_REASON,
   openPgReviewJobStoreForJob,
   PgReviewJobStore,
+  QueueUnavailableError,
   WORKER_JOB_KINDS,
   WORKER_MAX_ATTEMPTS_REASON,
 } from "../src/review_jobs.ts";
@@ -1352,6 +1353,261 @@ describePg("PgReviewJobStore against real postgres", () => {
     // Every rejection happens before the transaction, so the seven valid rows
     // above are still the only rows.
     expect(await countJobs(`1 = 1`)).toBe(shapes.length);
+  });
+
+  test("follow-up admission defers a distinct cause behind a leased row and dedupes replays", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    const jobA = followUpJob({ delivery: "pg-wake-a" });
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: true });
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leased?.state).toBe("leased");
+    const jobB = followUpJob({
+      delivery: "pg-wake-b",
+      body: "Second wake",
+      trigger: { event: "issue_comment", sender: "bob", commentId: 2 },
+    });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    // The old row's payload is untouched: still A's delivery.
+    const inflight = asRows<{ delivery: unknown; state: unknown }>(
+      await sql.unsafe(`SELECT delivery, state FROM review_jobs WHERE job_key = $1`, [wakeKey])
+    );
+    expect(inflight).toHaveLength(1);
+    expect(String(inflight[0]?.delivery)).toBe("pg-wake-a");
+    expect(String(inflight[0]?.state)).toBe("leased");
+    const pending = await store.wakeCauses.list(wakeKey, "pending");
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.payload).toMatchObject({
+      trigger: { event: "issue_comment", sender: "bob", commentId: 2 },
+      body: "Second wake",
+    });
+    // Replay of B with the same delivery creates no second cause.
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    // Replay of A's delivery creates none either: its cause is already promoted.
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+    // Settle A: B promotes, and a later replay of the now-promoted B still
+    // creates nothing.
+    const settled = await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    expect(settled).toMatchObject({ promoted: 1, parked: 0 });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(0);
+    expect(await countJobs(`state = 'queued'`)).toBe(1);
+    // Consume the promoted row: replays of the consumed cause still create nothing.
+    const leasedB = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leasedB?.delivery).toBe("pg-wake-b");
+    await store.markPublished(leasedB!.id, leasedB!.leasedBy!, { state: "succeeded" });
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.enqueueIssue(jobA)).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+  });
+
+  test("queued normal/merge-only interplay keeps each cause's intent on postgres", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    await store.enqueueIssue(followUpJob({ delivery: "pg-normal-a" }));
+    expect(
+      await store.enqueueIssue(
+        followUpJob({ delivery: "pg-merge-b", mergeOnly: true, trigger: { event: "push", sender: "alice" } })
+      )
+    ).toEqual({ key: wakeKey, queued: false, deferred: true });
+    const pendingMerge = await store.wakeCauses.list(wakeKey, "pending");
+    expect(pendingMerge).toHaveLength(1);
+    expect(pendingMerge[0]?.payload).toMatchObject({ mergeOnly: true });
+    const leasedNormal = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leasedNormal?.payload).not.toMatchObject({ mergeOnly: true });
+    const settledNormal = await store.markPublished(leasedNormal!.id, leasedNormal!.leasedBy!, {
+      state: "succeeded",
+    });
+    expect(settledNormal).toMatchObject({ cancelled: false, promoted: 1, parked: 0 });
+    const mergeRun = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(mergeRun?.payload).toMatchObject({ mergeOnly: true });
+
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
+    await store.enqueueIssue(followUpJob({ delivery: "pg-merge-a", mergeOnly: true }));
+    expect(await store.enqueueIssue(followUpJob({ delivery: "pg-normal-b" }))).toEqual({
+      key: wakeKey,
+      queued: false,
+      deferred: true,
+    });
+    const pendingNormal = await store.wakeCauses.list(wakeKey, "pending");
+    expect(pendingNormal).toHaveLength(1);
+    expect((pendingNormal[0]?.payload as { mergeOnly?: boolean } | undefined)?.mergeOnly).toBeUndefined();
+    const leasedMerge = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect(leasedMerge?.payload).toMatchObject({ mergeOnly: true });
+    const settledMerge = await store.markPublished(leasedMerge!.id, leasedMerge!.leasedBy!, {
+      state: "succeeded",
+    });
+    expect(settledMerge).toMatchObject({ cancelled: false, promoted: 1, parked: 0 });
+    const normalRun = await store.lease("worker-2", 60_000, new Date(), WORKER_JOB_KINDS);
+    expect((normalRun?.payload as { mergeOnly?: boolean } | null)?.mergeOnly).toBeUndefined();
+  });
+
+  test("empty-delivery payloads dedupe canonically on postgres", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    expect(await store.enqueueIssue(followUpJob({ delivery: "" }))).toEqual({ key: wakeKey, queued: true });
+    expect(await store.enqueueIssue(followUpJob({ delivery: "" }))).toEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(1);
+    const different = followUpJob({
+      delivery: "",
+      body: "A different wake",
+      trigger: { event: "issue_comment", sender: "alice", commentId: 9 },
+    });
+    expect(await store.enqueueIssue(different)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+  });
+
+  test("concurrent distinct enqueues both persist; identical concurrent persists once", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    await store.enqueueIssue(followUpJob({ delivery: "pg-conc-a" }));
+    const jobB = followUpJob({
+      delivery: "pg-conc-b",
+      trigger: { event: "issue_comment", sender: "b", commentId: 2 },
+    });
+    const jobC = followUpJob({
+      delivery: "pg-conc-c",
+      trigger: { event: "issue_comment", sender: "c", commentId: 3 },
+    });
+    const [resultB, resultC] = await Promise.all([store.enqueueIssue(jobB), store.enqueueIssue(jobC)]);
+    expect(resultB).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(resultC).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(2);
+
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
+    await store.enqueueIssue(followUpJob({ delivery: "pg-dup-a" }));
+    const jobD = followUpJob({ delivery: "pg-dup-d" });
+    const [first, second] = await Promise.all([store.enqueueIssue(jobD), store.enqueueIssue({ ...jobD })]);
+    expect([first, second]).toContainEqual({ key: wakeKey, queued: false, deferred: true });
+    expect([first, second]).toContainEqual({ key: wakeKey, queued: false });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+  });
+
+  test("a wake racing the settle is never stranded on postgres", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    // True concurrent transactions: both sides take the same per-key
+    // advisory lock, so the wake either records pending before the settle's
+    // promote scan (then the settle promotes it) or inserts an ordinary row
+    // after the settle. Either way exactly one queued row survives and no
+    // pending cause is stranded.
+    await store.enqueueIssue(followUpJob({ delivery: "pg-race-a" }));
+    const leasedA = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    const jobB = followUpJob({ delivery: "pg-race-b" });
+    const [enqueued, settled] = await Promise.all([
+      store.enqueueIssue(jobB),
+      store.markPublished(leasedA!.id, leasedA!.leasedBy!, { state: "succeeded" }),
+    ]);
+    expect(enqueued.key).toBe(wakeKey);
+    expect(settled.cancelled).toBe(false);
+    expect(await countJobs(`state = 'queued'`)).toBe(1);
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(0);
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+
+    // Settle-first ordering inserts an ordinary row instead.
+    await sql.unsafe(`TRUNCATE review_jobs, follow_up_wake_causes RESTART IDENTITY`);
+    await store.enqueueIssue(followUpJob({ delivery: "pg-race2-a" }));
+    const leasedFirst = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    await store.markPublished(leasedFirst!.id, leasedFirst!.leasedBy!, { state: "succeeded" });
+    expect(await store.enqueueIssue(followUpJob({ delivery: "pg-race2-b" }))).toEqual({
+      key: wakeKey,
+      queued: true,
+    });
+    expect(await countJobs(`state = 'queued'`)).toBe(1);
+  });
+
+  test("generation reset between record and settle parks generation-reset on postgres", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    await store.enqueueIssue(followUpJob({ delivery: "pg-gen-a" }));
+    await store.enqueueIssue(followUpJob({ delivery: "pg-gen-b" }));
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
+    await store.clearIssueSkipLatch("kirmanak", "demo", 12);
+    const leased = await store.lease("worker-1", 60_000, new Date(), WORKER_JOB_KINDS);
+    const settled = await store.markPublished(leased!.id, leased!.leasedBy!, { state: "succeeded" });
+    expect(settled).toMatchObject({ cancelled: false, promoted: 0, parked: 1 });
+    const parked = await store.wakeCauses.list(wakeKey, "parked");
+    expect(parked).toHaveLength(1);
+    expect(parked[0]?.parkReason).toBe("generation-reset");
+    expect(await countJobs(`state = 'queued'`)).toBe(0);
+    // A replay of the parked cause still creates nothing.
+    expect(await store.enqueueIssue(followUpJob({ delivery: "pg-gen-b" }))).toEqual({
+      key: wakeKey,
+      queued: false,
+    });
+    expect(await store.wakeCauses.list(wakeKey)).toHaveLength(2);
+  });
+
+  test("follow-up persistence failure throws and leaves no trace on postgres", async () => {
+    const wakeKey = "follow-up:kirmanak/demo#7:headsha";
+    const followUpJob = (overrides: Partial<IssueJob> = {}): IssueJob =>
+      makeIssueJob({
+        mode: "follow-up",
+        prNumber: 7,
+        headSha: "headsha",
+        trigger: { event: "issue_comment", sender: "alice", commentId: 1 },
+        ...overrides,
+      });
+    await store.enqueueIssue(followUpJob({ delivery: "pg-fail-a" }));
+    const jobB = followUpJob({ delivery: "pg-fail-b" });
+    const record = store.wakeCauses.record.bind(store.wakeCauses);
+    store.wakeCauses.record = async () => {
+      throw new QueueUnavailableError("queue unavailable");
+    };
+    try {
+      await expect(store.enqueueIssue(jobB)).rejects.toThrow("queue unavailable");
+    } finally {
+      store.wakeCauses.record = record;
+    }
+    expect(await countJobs(`job_key = $1`, [wakeKey])).toBe(1);
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(0);
+    expect(await store.enqueueIssue(jobB)).toEqual({ key: wakeKey, queued: false, deferred: true });
+    expect(await store.wakeCauses.countPending(wakeKey)).toBe(1);
   });
 
   test("job-mode schema check covers the review handover pending table", async () => {
