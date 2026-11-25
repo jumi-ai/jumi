@@ -278,6 +278,16 @@ function formatBlockingQuestions(blocking: boolean | undefined, runner: PromptRu
 </blocking_questions>`;
 }
 
+/** Guidance for REVIEW.md rules that point at sources a review cannot reach. */
+export const REVIEW_MD_UNREACHABLE_SOURCE_GUIDANCE =
+  "Private repositories, packages, and pages on the forge host are unreachable from a review by design. " +
+  "Check a REVIEW.md rule that points at one as far as the checkout, CI results, pasted context, and public sources allow. " +
+  "What stays unchecked is a 💡 suggestion finding that names the rule and the source that could not be reached: " +
+  "never a failure verdict, never a 🔴/🟡 finding, and never a ❓ (❓ also fails the check). " +
+  "A failure verdict still needs a real 🔴/🟡 finding with a location; " +
+  '"could not verify" alone is never a failure. ' +
+  "A rule you can check (the change itself breaks it, visible in the diff or the checkout) is still reported as a finding exactly as above.";
+
 function formatReviewMd(reviewMd: PROpenedPromptOptions["reviewMd"]): string {
   if (!reviewMd?.text) return "";
   const truncated = reviewMd.truncated
@@ -285,7 +295,7 @@ function formatReviewMd(reviewMd: PROpenedPromptOptions["reviewMd"]): string {
     : "";
   return `
 
-The repository's REVIEW.md sections that apply to this pull request are below: repo-wide sections, plus path sections whose globs match a changed file. They come from the base branch the pull request targets, at the base commit the review diffs against. They are this repository's review rules. Check the change against every rule, and report each violation as a finding with the rule it breaks.${truncated}
+The repository's REVIEW.md sections that apply to this pull request are below: repo-wide sections, plus path sections whose globs match a changed file. They come from the base branch the pull request targets, at the base commit the review diffs against. They are this repository's review rules. Check the change against every rule, and report each violation as a finding with the rule it breaks.${truncated} ${REVIEW_MD_UNREACHABLE_SOURCE_GUIDANCE}
 
 <review_md path="REVIEW.md" truncated="${reviewMd.truncated}"><![CDATA[
 ${escapeCdata(reviewMd.text)}
