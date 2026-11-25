@@ -1,6 +1,7 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CI_ABSENT_NOTE, type CiCheckSummary, inspectCi, reviewSkipReasonForCi } from "./ci.ts";
+import { cleanupJobHarnessTemp } from "./codex_home.ts";
 import { type Engine, type EngineRunOptions, throwIfEngineFailed } from "./engine.ts";
 import { registeredEngine } from "./engine_dispatch.ts";
 import { ensureEngineScratchIgnored } from "./engine_scratch.ts";
@@ -1191,7 +1192,7 @@ export async function runReplayCase(opts: RunReplayCaseOptions): Promise<ReplayR
   } finally {
     await rm(join(workdir, "JUMI_REVIEW.md"), { recursive: true, force: true }).catch(() => undefined);
     await rm(join(workdir, "JUMI_TASK.md"), { recursive: true, force: true }).catch(() => undefined);
-    await rm(join(workdir, ".jumi-tmp"), { recursive: true, force: true }).catch(() => undefined);
+    await cleanupJobHarnessTemp(workdir);
     if (!opts.createWorkspace) {
       await rm(workdir, { recursive: true, force: true }).catch(() => undefined);
     }

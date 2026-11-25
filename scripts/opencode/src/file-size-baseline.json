@@ -175,5 +175,6 @@
   "automerge_reconcile_drain.ts": 309,
   "worker_intent.ts": 97,
   "followup_wake_causes.ts": 674,
+  "codex_home.ts": 165,
   "worker_latch_fence.ts": 205
 }

@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { cleanupCodexJobHomes } from "../../src/codex_home.ts";
 import { REVIEW_SANDBOX_WRAPPER_ENV } from "../../src/review_sandbox.ts";
 
 export interface FakeEnv {
@@ -65,6 +66,10 @@ export async function withFakeBins(
     await run({ workdir, home, argsLog: join(dir, "args.log") });
   } finally {
     restoreEnv(saved);
+    // Retained Codex homes live outside the workdir (keyed to it) and
+    // survive spawns by design; the harness removes the job dir so unit
+    // tests never litter /tmp. Production removes it with the job.
+    await cleanupCodexJobHomes(workdir);
     await rm(dir, { recursive: true, force: true });
     await rm(workdir, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

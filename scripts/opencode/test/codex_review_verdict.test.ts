@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REVIEW_ARTIFACT, runCodex } from "../src/codex.ts";
+import { codexJobDir } from "../src/codex_home.ts";
 import type { PersistReviewResult, ReviewApi } from "../src/review.ts";
 import { reviewPullRequest } from "../src/review.ts";
 import type { NamedRunner } from "../src/runners.ts";
@@ -341,5 +342,153 @@ describe("codex review MCP integration", () => {
     expect(run.reviews).toBe(1);
     expect(run.persisted).toHaveLength(1);
     expect(run.persisted[0]?.kind).toBe("markdown");
+  });
+});
+
+describe("codex review retry resume", () => {
+  const THREAD_LINE = '{"type":"thread.started","thread_id":"thread-9"}';
+  const RISK_FINDING = {
+    path: "src/demo.ts",
+    line: 1,
+    severity: "risk",
+    title: "unguarded deref",
+    body: "Guard it.",
+  };
+
+  /**
+   * Stub Codex child with a same-job session store: the first spawn writes a
+   * rollout file and snapshots its config; the resume spawn fails loudly with
+   * `no rollout found` unless the first spawn's session file survived in the
+   * same CODEX_HOME. Spawn argv and homes are logged into the workspace.
+   */
+  function sessionMcpBin(first: string[], resume: string[]): string {
+    return `#!/bin/sh
+printf 'codex %s\\n' "$*" >> "$PWD/codex-args.log"
+printf '%s\\n' "$CODEX_HOME" >> "$PWD/codex-homes.log"
+${MCP_PREAMBLE}
+SESSION="$CODEX_HOME/sessions/2026/11/25/rollout-thread-9.jsonl"
+case " $* " in
+  *" resume "*)
+    if [ ! -f "$SESSION" ]; then printf 'no rollout found\\n' >&2; exit 1; fi
+    cp "$CODEX_HOME/config.toml" "$PWD/config-resume.toml"
+    ${resume.join("\n")}
+    ;;
+  *)
+    mkdir -p "$CODEX_HOME/sessions/2026/11/25"
+    printf '{"thread":"thread-9"}\\n' > "$SESSION"
+    cp "$CODEX_HOME/config.toml" "$PWD/config-first.toml"
+    ${first.join("\n")}
+    ;;
+esac
+printf '%s\\n' '${THREAD_LINE}'
+exit 0
+`;
+  }
+
+  async function readLines(path: string): Promise<string[]> {
+    try {
+      return (await readFile(path, "utf8")).trim().split("\n").filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  async function runSessionReview(codexBin: string): Promise<{
+    workspace: string;
+    status: unknown;
+    reviews: number;
+    jobDirGoneAfterReview: boolean;
+  }> {
+    const workspace = await mkdtemp(join(tmpdir(), "jumi-codex-resume-"));
+    let status: unknown;
+    let reviews = 0;
+    let jobDirGoneAfterReview = false;
+    await withFakeBins({ codex: codexBin }, async ({ home }) => {
+      const result = (await reviewPullRequest({
+        owner: "kirmanak",
+        repo: "demo",
+        prNumber: 7,
+        model: "gpt-6-sol",
+        chain: CODEX_CHAIN,
+        workspace,
+        home,
+        giteaUrl: "https://gitea.kirmanak.stream",
+        giteaToken: "bot-token",
+        botUsername: "jumi",
+        workspacePreparer: async () => undefined,
+        logger: () => undefined,
+        api: makeApi({
+          getPR: async () => makePR({ head: { ...makePR().head, sha: "headsha" } }),
+          getPRFiles: async () => [makeFile({ filename: "src/demo.ts" })],
+          createPullReview: async () => {
+            reviews++;
+            return { id: reviews };
+          },
+          createCommitStatus: async (_o, _r, _s, cstatus) => cstatus,
+        }),
+        gitRunner,
+        persistResult: async () => undefined,
+      })) as { status: string; reason?: string };
+      status = result;
+      // Before the harness tears down: the review's own finally must have
+      // removed the retained home with the rest of the harness temp.
+      jobDirGoneAfterReview = !(await Bun.file(codexJobDir(workspace)).exists());
+    });
+    return { workspace, status, reviews, jobDirGoneAfterReview };
+  }
+
+  test("failure verdict with no findings retries with resume in the same session store", async () => {
+    const bin = sessionMcpBin(
+      [mcpCall(1, "set_verdict", { state: "failure", reason: "blocking risk stands" })],
+      [
+        mcpCall(2, "add_finding", RISK_FINDING),
+        mcpCall(3, "set_verdict", { state: "failure", reason: "blocking risk stands" }),
+      ]
+    );
+    const { workspace, status, reviews, jobDirGoneAfterReview } = await runSessionReview(bin);
+    try {
+      expect(status).toMatchObject({ status: "posted" });
+      expect(reviews).toBeGreaterThanOrEqual(1);
+      const args = await readLines(join(workspace, "codex-args.log"));
+      expect(args).toHaveLength(2);
+      expect(args[1]).toContain("resume thread-9");
+      // The resume spawn saw the first spawn's session file in the same home.
+      const homes = await readLines(join(workspace, "codex-homes.log"));
+      expect(homes).toHaveLength(2);
+      expect(homes[0]).toBeTruthy();
+      expect(homes[1]).toBe(homes[0]);
+      // Per-spawn rebuild: one review-MCP entry in each spawn's config.
+      for (const name of ["config-first.toml", "config-resume.toml"]) {
+        const parsed = Bun.TOML.parse(await readFile(join(workspace, name), "utf8")) as {
+          mcp_servers?: Record<string, unknown>;
+        };
+        expect(Object.keys(parsed.mcp_servers ?? {})).toEqual(["jumi-review"]);
+      }
+      // Job end removed the retained home with the rest of the harness temp.
+      expect(jobDirGoneAfterReview).toBe(true);
+    } finally {
+      await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  test("no verdict retries with resume in the same session store", async () => {
+    const bin = sessionMcpBin(
+      [mcpCall(1, "add_finding", RISK_FINDING)],
+      [mcpCall(2, "set_verdict", { state: "failure", reason: "blocking risk stands" })]
+    );
+    const { workspace, status, reviews, jobDirGoneAfterReview } = await runSessionReview(bin);
+    try {
+      expect(status).toMatchObject({ status: "posted" });
+      expect(reviews).toBeGreaterThanOrEqual(1);
+      const args = await readLines(join(workspace, "codex-args.log"));
+      expect(args).toHaveLength(2);
+      expect(args[1]).toContain("resume thread-9");
+      const homes = await readLines(join(workspace, "codex-homes.log"));
+      expect(homes).toHaveLength(2);
+      expect(homes[1]).toBe(homes[0]);
+      expect(jobDirGoneAfterReview).toBe(true);
+    } finally {
+      await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
+    }
   });
 });
