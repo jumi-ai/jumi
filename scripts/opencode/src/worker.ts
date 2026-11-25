@@ -16,6 +16,7 @@ import { logDiagnostic } from "./diagnostics.ts";
 import { thrownRunner } from "./engine.ts";
 import { resolveWorkerHeld } from "./exhausted_hold.ts";
 import { implementFollowUp, parsePrHeadChangedReason } from "./followup.ts";
+import { payloadGenerationOf } from "./followup_wake_causes.ts";
 import { createForge } from "./forge.ts";
 import { forgeCapabilities } from "./forge_capabilities.ts";
 import { type IssueApi, upsertWorkerComment } from "./gitea_issues.ts";
@@ -56,6 +57,11 @@ import type { IssueJob } from "./types.ts";
 import { errorMessage } from "./util/error.ts";
 import type { WorkerConfig } from "./worker_config.ts";
 import { decodeWorkerJobIntent, settleInvalidWorkerJobIntent } from "./worker_intent.ts";
+import {
+  fencedSkipLatchesForWorkerJob,
+  settleWorkerLatchFenceFailure,
+  type WorkerLatchFenceFailure,
+} from "./worker_latch_fence.ts";
 import { gitAuthResolverFor } from "./workspace.ts";
 
 export { issueJobKey };
@@ -850,6 +856,15 @@ export async function processWorkerTick(
     return true;
   }
 
+  // Runner-local latch fence: the wrapper records the first rejection and
+  // aborts the job; the flag (not the runner return/throw) is authoritative.
+  // Already-issued forge calls are not rolled back.
+  let latchFenceFailure: WorkerLatchFenceFailure | undefined;
+  const recordModelReached = (): void | Promise<void> => {
+    if (extras.breaker) extras.breaker.recordModelReached();
+    else return store.recordRoleSuccess("worker");
+  };
+
   try {
     let job: IssueJob;
     try {
@@ -942,7 +957,18 @@ export async function processWorkerTick(
       },
       extendLease: () => store.heartbeat(row.id, leasedBy, effectiveLease),
       home: effectiveConfig.home,
-      skipLatches: store.skipLatches,
+      // Runner-local: runners see the fenced wrapper; operator kick/cancel
+      // and settleObservedCancel keep the original unfenced store.
+      skipLatches: fencedSkipLatchesForWorkerJob({
+        skipLatches: store.skipLatches,
+        jobId: rowId,
+        leasedBy,
+        generation: payloadGenerationOf(row.payload),
+        abort,
+        record: (failure) => {
+          if (!latchFenceFailure) latchFenceFailure = failure;
+        },
+      }),
       ledger: store,
       handoffs: store.handoffs,
       workdir: effectiveConfig.workdir,
@@ -1050,12 +1076,41 @@ export async function processWorkerTick(
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
     }
+    // Cancel, lost-owner, and external-shutdown above win. A recorded fence
+    // failure overrides any runner return before ordinary settlement.
+    if (latchFenceFailure) {
+      const fenced = await settleWorkerLatchFenceFailure({
+        failure: latchFenceFailure,
+        store,
+        api,
+        config,
+        rowId,
+        leasedBy,
+        target: {
+          owner: job.owner,
+          repo: job.repo,
+          issueNumber: job.issueNumber,
+          headSha: job.headSha ?? "",
+          ...(job.prNumber !== undefined ? { prNumber: job.prNumber } : {}),
+          ...(job.mode !== undefined ? { mode: job.mode } : {}),
+          jobKey: issueJobKey(job),
+          jobKind: row.kind,
+        },
+        logger,
+        recordModelReached,
+      });
+      if (fenced) return fenced;
+    }
     const reason =
       result.status === "no-changes" ? "no-changes" : result.status === "skipped" ? result.reason : undefined;
     const latchReason = skipLatchReasonFromResult(result);
     if (latchReason) {
       await store.setIssueSkipReason(job.owner, job.repo, job.issueNumber, latchReason);
     }
+    // A head-moved skip parks (never promotes) pending wakes: the pass ran
+    // on a head that no longer exists. Set where the existing re-enqueue
+    // condition holds, and passed to `markPublished` below.
+    let parkWakesReason: string | undefined;
     if (result.status === "skipped" && job.mode === "follow-up" && reason) {
       const moved = parsePrHeadChangedReason(reason);
       if (moved?.to && moved.to !== job.headSha) {
@@ -1066,10 +1121,25 @@ export async function processWorkerTick(
           receivedAt: new Date().toISOString(),
         });
         logger(`${enqueued.queued ? "queued" : "deduped"} ${enqueued.key} after PR head changed`);
+        // A cause accepted on the old head must not promote afterwards: a
+        // pass on a head that moved would run stale. Park it instead; the
+        // new-head row above is the wake. The re-enqueue is unchanged.
+        parkWakesReason = "head-changed";
       }
     }
     const state = workerPublishedState(result.status);
-    const published = await store.markPublished(row.id, leasedBy, { state, reason });
+    const published = await store.markPublished(
+      row.id,
+      leasedBy,
+      parkWakesReason ? { state, reason, parkWakesReason } : { state, reason }
+    );
+    if (published.promoted > 0) {
+      logger(`promoted ${published.promoted} pending wake(s) for ${issueJobKey(job)}`);
+    }
+    if (published.parked > 0) {
+      const parkReason = parkWakesReason ?? (published.cancelled ? "cancelled" : "generation-reset");
+      logger(`parked ${published.parked} pending wake(s) for ${issueJobKey(job)}: ${parkReason}`);
+    }
     if (result.status === "skipped") {
       const { settleStrictSlotForWorkerOutcome } = await import("./strict_refresh_terminal.ts");
       await settleStrictSlotForWorkerOutcome({
@@ -1112,7 +1182,12 @@ export async function processWorkerTick(
     }
     recordJobCompleted(row.kind, state);
     logger(`${issueJobKey(job)} ${result.status}${reason ? `: ${reason}` : ""}`);
-    if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
+    if (published.promoted > 0) {
+      // The promoted row is the live board state now: clear the finished
+      // pass's reason instead of remembering it next to a queued successor.
+      // `enqueueIssue` only clears on insert, and promotion inserts directly.
+      await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
+    } else if (result.status === "no-changes" || (result.status === "skipped" && reason)) {
       await rememberSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, reason, logger);
     } else if (result.status === "pr" || result.status === "pushed" || state === "succeeded") {
       await clearSitBestEffort(store.sits, job.owner, job.repo, job.issueNumber, logger);
@@ -1163,6 +1238,30 @@ export async function processWorkerTick(
       logger(`worker job ${row.jobKey} interrupted`);
       await releaseLeaseOnShutdown(store, row.id, row.jobKey, leasedBy, logger, "worker expire failed");
       return "processed";
+    }
+    // A swallowed fence rejection settles before the per-job-aborted return.
+    if (latchFenceFailure) {
+      const fenced = await settleWorkerLatchFenceFailure({
+        failure: latchFenceFailure,
+        store,
+        api,
+        config,
+        rowId,
+        leasedBy,
+        target: {
+          owner: row.owner,
+          repo: row.repo,
+          issueNumber: row.issueNumber ?? 0,
+          headSha: row.headSha ?? "",
+          ...(row.prNumber != null ? { prNumber: row.prNumber } : {}),
+          mode: row.kind,
+          jobKey: row.jobKey,
+          jobKind: row.kind,
+        },
+        logger,
+        recordModelReached,
+      });
+      if (fenced) return fenced;
     }
     if (abort.signal.aborted) {
       logger(`${row.jobKey} cancelled`);

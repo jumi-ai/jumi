@@ -1,6 +1,7 @@
-import { lstat, rm } from "node:fs/promises";
+import { lstat, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { claudeApiKeyVarNames, RUNNER_AUTH_API_KEY } from "./claude_credentials.ts";
+import { cleanupCodexJobHomes, codexHomeKindPath, hasCodexSessionState, readCodexHomeKind } from "./codex_home.ts";
 import { recordOpenCodeRun, shouldDeferQuotaExit } from "./control_metrics.ts";
 import { logDiagnostic } from "./diagnostics.ts";
 import {
@@ -164,11 +165,23 @@ async function pathIsFile(path: string): Promise<boolean> {
 }
 
 export async function hasResumableSession(workdir: string): Promise<boolean> {
-  return (
-    (await pathIsFile(openCodeSessionDbPath(workdir))) ||
-    (await pathIsFile(agyConversationPath(workdir))) ||
-    (await pathIsFile(codexThreadPath(workdir)))
-  );
+  if ((await pathIsFile(openCodeSessionDbPath(workdir))) || (await pathIsFile(agyConversationPath(workdir)))) {
+    return true;
+  }
+  // A Codex thread id outlives its rollout: the id alone must not count as
+  // resumable when the spawn owned a Jumi home. With no marker (a run
+  // without a Jumi-owned home, or a thread from before the marker) the
+  // session lives under `$HOME/.codex` and resumes as today.
+  let threadId: string | undefined;
+  try {
+    threadId = (await readFile(codexThreadPath(workdir), "utf8")).trim() || undefined;
+  } catch {
+    return false;
+  }
+  if (!threadId) return false;
+  const kind = await readCodexHomeKind(workdir);
+  if (kind !== "review" && kind !== "worker") return true;
+  return hasCodexSessionState(workdir, kind, threadId);
 }
 
 export async function clearOpenCodeSession(workdir: string): Promise<void> {
@@ -177,6 +190,10 @@ export async function clearOpenCodeSession(workdir: string): Promise<void> {
   await rm(agyConversationPath(workdir), { force: true });
   await rm(codexThreadPath(workdir), { force: true });
   await rm(codexThreadUsagePath(workdir), { force: true });
+  await rm(codexHomeKindPath(workdir), { force: true });
+  // A hop starts the next runner from scratch: drop the retained Codex
+  // session state with the ids so a later retry cannot resume a stale home.
+  await cleanupCodexJobHomes(workdir);
 }
 
 async function leaseAllowsHop(hop: ModelHopOptions, timeoutMs: number | undefined): Promise<boolean> {

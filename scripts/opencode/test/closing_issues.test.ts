@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { buildFollowupPrompt, buildImplementPrompt } from "../src/git.ts";
+import { closesIssuePattern, visibleClosingText } from "../src/gitea_issues.ts";
 import {
+  buildFollowupPullRequestBody,
   buildPullRequestBody,
-  hasRemainingWorkList,
+  filterCiOnlyRemainingItems,
+  isCiOnlyRemainingItem,
+  isNonClosingLiveBody,
   rewriteClosingToRefs,
   rewriteRefsToClosing,
 } from "../src/implement.ts";
@@ -84,16 +88,26 @@ describe("closing rewrite keeps ignored ranges", () => {
   });
 });
 
-describe("bare Refs without a remaining-work list cannot ship non-closing", () => {
-  test("hasRemainingWorkList needs an explicit marker; prose alone does not count", () => {
-    expect(hasRemainingWorkList("Refs #12")).toBe(false);
-    expect(hasRemainingWorkList("Partial work.\n\nRefs #12")).toBe(false);
-    expect(hasRemainingWorkList("Caches categories.\n\nRefs #12")).toBe(false);
-    expect(hasRemainingWorkList("Refs #12\n\nRemaining:\n- one more case")).toBe(true);
-    expect(hasRemainingWorkList("Refs #12\n\nTODO: backfill test")).toBe(true);
-    expect(hasRemainingWorkList("Refs #12\n\n- [ ] backfill test")).toBe(true);
-    expect(hasRemainingWorkList("Refs #12\n\nStill to do: backfill")).toBe(true);
-    expect(hasRemainingWorkList("`Remaining`\n\nRefs #12")).toBe(false);
+describe("finished-or-partial comes from the explicit remaining list", () => {
+  test("CI-only checks never count as remaining work", () => {
+    expect(isCiOnlyRemainingItem("bun run test:pg")).toBe(true);
+    expect(isCiOnlyRemainingItem("full bun run ci green")).toBe(true);
+    expect(isCiOnlyRemainingItem("Postgres tests pass on the forge")).toBe(true);
+    expect(isCiOnlyRemainingItem("backfill the missing test")).toBe(false);
+    expect(isCiOnlyRemainingItem("add postgres regression test for queue")).toBe(false);
+    expect(filterCiOnlyRemainingItems(["bun run test:pg", "backfill x"])).toEqual(["backfill x"]);
+    expect(filterCiOnlyRemainingItems(["bun run test:pg", "full bun run ci"])).toEqual([]);
+    // A mixed list keeps the real postgres work item and drops the CI check.
+    expect(filterCiOnlyRemainingItems(["bun run test:pg", "add postgres regression test for queue"])).toEqual([
+      "add postgres regression test for queue",
+    ]);
+    const mixed = buildPullRequestBody(12, "Did part.", undefined, [], undefined, [
+      "bun run test:pg",
+      "add postgres regression test for queue",
+    ]);
+    expect(mixed).toContain("Refs #12");
+    expect(mixed).toContain("add postgres regression test for queue");
+    expect(mixed).not.toMatch(/fixes #12/i);
   });
 
   test("a bare Refs #N is rewritten to the closing keyword", () => {
@@ -106,10 +120,36 @@ describe("bare Refs without a remaining-work list cannot ship non-closing", () =
     expect(buildPullRequestBody(12, "Did the work.\n\nRefs #12")).toMatch(/fixes #12/i);
   });
 
-  test("a Refs #N with an explicit remaining-work list is kept non-closing", () => {
-    const body = buildPullRequestBody(12, "Did part.\n\nRefs #12\n\nRemaining:\n- one more case");
-    expect(body).toBe("Did part.\n\nRefs #12\n\nRemaining:\n- one more case");
+  test("words in the prose never keep a body non-closing without an explicit list", () => {
+    expect(buildPullRequestBody(12, "Partial work.\n\nRefs #12\n\nRemaining:\n- one more case")).toMatch(/fixes #12/i);
+    expect(buildPullRequestBody(12, "Review follow-up: addressed comments.\n\nRefs #12")).toBe(
+      "Review follow-up: addressed comments.\n\nFixes #12"
+    );
+    expect(buildPullRequestBody(12, "Did part.\n\nRefs #12\n\nTODO: backfill test")).toMatch(/fixes #12/i);
+  });
+
+  test("an explicit remaining list publishes Refs and shows the item", () => {
+    const body = buildPullRequestBody(12, "Did part.\n\nRefs #12", undefined, [], undefined, ["one more case"]);
+    expect(body).toContain("Refs #12");
+    expect(body).toContain("one more case");
     expect(body).not.toMatch(/fixes #12/i);
+  });
+
+  test("an explicit remaining list of only CI checks publishes the closing keyword", () => {
+    expect(
+      buildPullRequestBody(12, "Did the work.\n\nRefs #12", undefined, [], undefined, [
+        "bun run test:pg",
+        "full bun run ci",
+      ])
+    ).toMatch(/fixes #12/i);
+  });
+
+  test("remaining items never introduce a visible closing keyword", () => {
+    const body = buildPullRequestBody(12, "Did part.", undefined, [], undefined, ["Fixes #12"]);
+    expect(body).toContain("Refs #12");
+    expect(closesIssuePattern(12).test(visibleClosingText(body))).toBe(false);
+    const refsBody = buildPullRequestBody(12, "Did part.", undefined, [], "refs", ["Fixes #12"]);
+    expect(closesIssuePattern(12).test(visibleClosingText(refsBody))).toBe(false);
   });
 
   test("closing_keyword refs behaviour is unchanged", () => {
@@ -123,13 +163,74 @@ describe("bare Refs without a remaining-work list cannot ship non-closing", () =
     );
   });
 
-  test("worker prompts cover bare Refs and forge CI for CI-green Done items", () => {
+  test("merged PR fixtures with no remaining items publish the closing keyword", () => {
+    // #867/#870 style: Jumi's own "follow-up" vocabulary in the prose.
+    expect(buildPullRequestBody(12, "Review follow-up: addressed comments.\n\nRefs #12")).toBe(
+      "Review follow-up: addressed comments.\n\nFixes #12"
+    );
+    expect(buildPullRequestBody(12, "Follow-up round: fixed lint.\n\nRefs #12")).toMatch(/fixes #12/i);
+    // #864 style: the word "remaining" in an unrelated sentence.
+    expect(
+      buildPullRequestBody(
+        12,
+        "The 9 remaining bun test failures reproduce identically on the clean base tree.\n\nRefs #12"
+      )
+    ).toMatch(/fixes #12/i);
+    // #856 style: a prose "Remaining work"/"Left:" list of only CI-run checks, with no explicit list.
+    expect(buildPullRequestBody(12, "Done.\n\nRefs #12\n\nLeft:\n- bun run test:pg\n- full bun run ci")).toMatch(
+      /fixes #12/i
+    );
+  });
+
+  test("worker prompts name the explicit remaining list and forge CI", () => {
     for (const prompt of [buildImplementPrompt(), buildFollowupPrompt()]) {
-      expect(prompt).toContain("bare");
+      expect(prompt).toContain("set_pr_body");
       expect(prompt).toContain("Refs #N");
-      expect(prompt).toContain("remaining-work list");
+      expect(prompt).toContain("leave the list empty when Done is met");
       expect(prompt).toContain("forge's CI is what counts");
       expect(prompt).toContain("clean default-branch tree");
     }
+  });
+});
+
+describe("follow-up re-publish keeps the previous decision without a new list", () => {
+  test("no list preserves a non-closing live body", () => {
+    const live = "Old writeup.\n\nRefs #12\n\nRemaining:\n- one more case";
+    const body = buildFollowupPullRequestBody(12, "Review follow-up: addressed comments.", live);
+    expect(body).toContain("Refs #12");
+    expect(body).not.toMatch(/fixes #12/i);
+  });
+
+  test("no list keeps a closing live body closing", () => {
+    const live = "Old writeup.\n\nFixes #12";
+    const body = buildFollowupPullRequestBody(12, "Review follow-up: addressed comments.\n\nRefs #12", live);
+    expect(body).toMatch(/fixes #12/i);
+    expect(body).not.toContain("Refs #12");
+  });
+
+  test("a new non-empty list switches to Refs and shows the item", () => {
+    const live = "Old writeup.\n\nFixes #12";
+    const body = buildFollowupPullRequestBody(12, "Still partial.", live, undefined, [], undefined, ["one more case"]);
+    expect(body).toContain("Refs #12");
+    expect(body).toContain("one more case");
+    expect(body).not.toMatch(/fixes #12/i);
+  });
+
+  test("an explicit empty or CI-only list publishes the closing keyword", () => {
+    const live = "Old writeup.\n\nRefs #12\n\nRemaining:\n- one more case";
+    expect(buildFollowupPullRequestBody(12, "Done now.", live, undefined, [], undefined, [])).toMatch(/fixes #12/i);
+    expect(
+      buildFollowupPullRequestBody(12, "Done now.", live, undefined, [], undefined, [
+        "bun run test:pg",
+        "full bun run ci",
+      ])
+    ).toMatch(/fixes #12/i);
+  });
+
+  test("isNonClosingLiveBody ignores closing keywords and code spans", () => {
+    expect(isNonClosingLiveBody("Refs #12", 12)).toBe(true);
+    expect(isNonClosingLiveBody("Fixes #12", 12)).toBe(false);
+    expect(isNonClosingLiveBody("Refs #12\n\nFixes #12", 12)).toBe(false);
+    expect(isNonClosingLiveBody("`Refs #12`", 12)).toBe(false);
   });
 });

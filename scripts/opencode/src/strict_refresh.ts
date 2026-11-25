@@ -20,6 +20,7 @@ import {
   isStrictRefreshTerminalEvidence,
   STRICT_REFRESH_MAX_LAPS,
   STRICT_REFRESH_SLOT_TIMEOUT_MS,
+  type StrictRefreshPendingJob,
   type StrictRefreshSlotStore,
 } from "./strict_refresh_queue.ts";
 import type { GiteaPushPayload, IssueJob } from "./types.ts";
@@ -453,6 +454,33 @@ function strictRefreshJobFor(
   };
 }
 
+function strictRefreshPendingFor(
+  pr: Pull,
+  opts: {
+    owner: string;
+    repo: string;
+    botUsername: string;
+    defaultBranch: string;
+    cloneUrl: string;
+    baseSha: string;
+  }
+): StrictRefreshPendingJob {
+  return {
+    owner: opts.owner,
+    repo: opts.repo,
+    issueNumber: strictRefreshIssueNumber(pr, opts.owner, opts.repo, opts.botUsername),
+    prNumber: pr.number,
+    headSha: pr.head.sha,
+    baseSha: opts.baseSha,
+    title: pr.title,
+    body: pr.body ?? "",
+    htmlUrl: pr.html_url,
+    issueUpdatedAt: pr.updated_at,
+    defaultBranch: opts.defaultBranch,
+    cloneUrl: opts.cloneUrl,
+  };
+}
+
 /**
  * Ledger identity for a strict-refresh merge-only job. A Jumi closer is keyed
  * to its closing issue (the same `issueNumber` the conflict and ordinary
@@ -621,6 +649,7 @@ export async function shouldEnqueueStrictRefreshOnPush(
       policy,
       api,
       defaultBranch,
+      cloneUrl: payload.repository.clone_url,
       requiredContexts,
       nowMs: now,
       log,
@@ -733,6 +762,7 @@ async function reconcileStrictSlotForCandidates(opts: {
   policy: StrictRefreshPolicy;
   api: Partial<Pick<IssueApi, "getRepoFile" | "listPullCommits" | "getPR" | "listCommitStatuses" | "listCheckRuns">>;
   defaultBranch: string;
+  cloneUrl: string;
   requiredContexts?: string[];
   nowMs: number;
   log?: (message: string) => void;
@@ -748,96 +778,217 @@ async function reconcileStrictSlotForCandidates(opts: {
     policy,
     api,
     defaultBranch,
+    cloneUrl,
     requiredContexts,
     nowMs,
     log,
   } = opts;
   const gitea = isGiteaStrictForge(api, policy as { forgeKind?: string });
-  const held = await slots.getSlot(owner, repo, baseBranch);
-  if (held) {
-    if (nowMs - held.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS) {
-      await slots.release(owner, repo, baseBranch, {
-        terminal: { prNumber: held.prNumber, headSha: held.headSha, baseSha: held.baseSha, reason: "timeout" },
-        nowMs,
-      });
-      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
-    } else {
-      // The ready list already carries fresh pulls on GitHub: reuse the
-      // hydrated holder instead of a second getPR for the same PR.
-      const holder =
-        (ready.find((pr) => pr?.number === held.prNumber) as Pull | undefined) ??
-        (await strictHolderPull({ api, owner, repo, pulls, prNumber: held.prNumber, gitea, log }));
-      if (!holder) {
-        await slots.release(owner, repo, baseBranch, { nowMs });
-        log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
-      } else if (!isStrictRefreshCandidate(holder, owner, repo, policy.botUsername, policy)) {
-        await slots.release(owner, repo, baseBranch, { nowMs });
-        log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} ineligible)`);
-      } else if (
-        await isStrictRefreshLeftToAuthor(
-          api,
-          owner,
-          repo,
-          holder,
-          { botUsername: policy.botUsername, ignoreConflictsLabel: policy.ignoreConflictsLabel, defaultBranch },
-          log
-        )
-      ) {
-        await slots.release(owner, repo, baseBranch, { nowMs });
-        log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
-      } else if (
-        gitea
-          ? isStrictRefreshBlocked(holder)
-          : await isTerminallyStrictBlocked({ api, owner, repo, pr: holder, requiredContexts, log })
-      ) {
-        await slots.release(owner, repo, baseBranch, {
-          terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" },
-          nowMs,
-        });
-        log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`);
-      } else {
-        // Base past a refreshable holder re-refreshes once per tip (lap-budgeted); head-only only touches.
-        const nb = baseSha || held.baseSha;
-        if (holder.head.sha === held.headSha && nb === held.baseSha) return undefined;
-        if (nb === held.baseSha) {
-          await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs);
-          return undefined;
-        }
-        const laps = held.laps ?? 0;
-        if (laps >= STRICT_REFRESH_MAX_LAPS) {
-          // biome-ignore format: single-line release keeps the file-size ratchet under +50
-          await slots.release(owner, repo, baseBranch, { terminal: { prNumber: holder.number, headSha: holder.head.sha, baseSha: nb, reason: "laps" }, nowMs });
-          // biome-ignore format: exact slot log shape required by #874
-          log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} exceeded refresh laps)`);
-        } else {
-          await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs);
-          // biome-ignore format: exact re-refresh log shape required by #874
-          log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} re-refresh #${holder.number} for base ${nb.slice(0, 7)} (lap ${laps + 1}/${STRICT_REFRESH_MAX_LAPS})`);
-          return holder;
-        }
-      }
+  const pendingFor = (pr: Pull, base: string) =>
+    strictRefreshPendingFor(pr, {
+      owner,
+      repo,
+      botUsername: policy.botUsername,
+      defaultBranch,
+      cloneUrl,
+      baseSha: base,
+    });
+  const refill = async (terminal: { prNumber: number; headSha: string; baseSha: string } | undefined) => {
+    const rec = await collectReadyStrictCandidates({
+      pulls,
+      owner,
+      repo,
+      policy,
+      api,
+      defaultBranch,
+      baseBranch,
+      requiredContexts,
+      terminal,
+      baseSha,
+      log,
+    });
+    const kept = gitea ? await keepGiteaBehind(api, rec, owner, repo, log) : rec;
+    return kept.filter((pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, terminal));
+  };
+  const admitFresh = async (selected: Pull): Promise<Pull | undefined> => {
+    const ok = await slots.tryAdmit(
+      {
+        owner,
+        repo,
+        baseBranch,
+        prNumber: selected.number,
+        headSha: selected.head.sha,
+        baseSha,
+        admittedAtMs: nowMs,
+        updatedAtMs: nowMs,
+      },
+      pendingFor(selected, baseSha)
+    );
+    if (!ok) {
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} race lost; another admission holds it`);
+      return undefined;
     }
+    log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} admitted #${selected.number}`);
+    return selected;
+  };
+  const handoffTo = async (
+    expectedPrNumber: number,
+    terminal: { prNumber: number; headSha: string; baseSha: string; reason: string } | undefined,
+    next: Pull,
+    reasonLog: string
+  ): Promise<Pull | undefined> => {
+    const ok = await slots.handoff(owner, repo, baseBranch, {
+      expectedPrNumber,
+      ...(terminal ? { terminal } : {}),
+      next: {
+        owner,
+        repo,
+        baseBranch,
+        prNumber: next.number,
+        headSha: next.head.sha,
+        baseSha,
+        admittedAtMs: nowMs,
+        updatedAtMs: nowMs,
+      },
+      pendingJob: pendingFor(next, baseSha),
+      nowMs,
+    });
+    if (!ok) {
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} race lost; another admission holds it`);
+      return undefined;
+    }
+    log?.(reasonLog);
+    log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} admitted #${next.number}`);
+    return next;
+  };
+  const held = await slots.getSlot(owner, repo, baseBranch);
+  if (!held) {
+    const terminal = await slots.getTerminal(owner, repo, baseBranch);
+    const selected = ready.filter(
+      (pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, terminal)
+    )[0];
+    if (!selected) return undefined;
+    return admitFresh(selected);
   }
-  const terminal = await slots.getTerminal(owner, repo, baseBranch);
-  const eligible = ready.filter((pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, terminal));
-  const selected = eligible[0];
-  if (!selected) return undefined;
-  const admitted = await slots.tryAdmit({
-    owner,
-    repo,
-    baseBranch,
-    prNumber: selected.number,
-    headSha: selected.head.sha,
-    baseSha,
-    admittedAtMs: nowMs,
-    updatedAtMs: nowMs,
-  });
-  if (!admitted) {
-    log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} race lost; another admission holds it`);
+  if (nowMs - held.admittedAtMs > STRICT_REFRESH_SLOT_TIMEOUT_MS) {
+    const predicted = { prNumber: held.prNumber, headSha: held.headSha, baseSha: held.baseSha, reason: "timeout" };
+    const next = (await refill(predicted))[0];
+    if (!next) {
+      await slots.release(owner, repo, baseBranch, { terminal: predicted, nowMs });
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`);
+      return undefined;
+    }
+    return handoffTo(
+      held.prNumber,
+      predicted,
+      next,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} timed out for #${held.prNumber}`
+    );
+  }
+  const holder =
+    (ready.find((pr) => pr?.number === held.prNumber) as Pull | undefined) ??
+    (await strictHolderPull({ api, owner, repo, pulls, prNumber: held.prNumber, gitea, log }));
+  const terminalNow = await slots.getTerminal(owner, repo, baseBranch);
+  const waiting = ready.filter(
+    (pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, terminalNow)
+  )[0];
+  if (!holder) {
+    if (!waiting) {
+      await slots.release(owner, repo, baseBranch, { nowMs });
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`);
+      return undefined;
+    }
+    return handoffTo(
+      held.prNumber,
+      undefined,
+      waiting,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} gone)`
+    );
+  }
+  if (!isStrictRefreshCandidate(holder, owner, repo, policy.botUsername, policy)) {
+    if (!waiting || waiting.number === holder.number) {
+      await slots.release(owner, repo, baseBranch, { nowMs });
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} ineligible)`);
+      return undefined;
+    }
+    return handoffTo(
+      held.prNumber,
+      undefined,
+      waiting,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} ineligible)`
+    );
+  }
+  if (
+    await isStrictRefreshLeftToAuthor(
+      api,
+      owner,
+      repo,
+      holder,
+      { botUsername: policy.botUsername, ignoreConflictsLabel: policy.ignoreConflictsLabel, defaultBranch },
+      log
+    )
+  ) {
+    if (!waiting || waiting.number === holder.number) {
+      await slots.release(owner, repo, baseBranch, { nowMs });
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`);
+      return undefined;
+    }
+    return handoffTo(
+      held.prNumber,
+      undefined,
+      waiting,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} left to author)`
+    );
+  }
+  if (
+    gitea
+      ? isStrictRefreshBlocked(holder)
+      : await isTerminallyStrictBlocked({ api, owner, repo, pr: holder, requiredContexts, log })
+  ) {
+    const predicted = { prNumber: holder.number, headSha: holder.head.sha, baseSha, reason: "blocked" };
+    const next = ready.filter((pr) => !isStrictRefreshTerminalEvidence(pr.number, pr.head.sha, baseSha, predicted))[0];
+    if (!next) {
+      await slots.release(owner, repo, baseBranch, { terminal: predicted, nowMs });
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`);
+      return undefined;
+    }
+    return handoffTo(
+      held.prNumber,
+      predicted,
+      next,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} blocked)`
+    );
+  }
+  const nb = baseSha || held.baseSha;
+  if (holder.head.sha === held.headSha && nb === held.baseSha) return undefined;
+  if (nb === held.baseSha) {
+    await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs, null);
     return undefined;
   }
-  log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} admitted #${selected.number}`);
-  return selected;
+  const laps = held.laps ?? 0;
+  if (laps >= STRICT_REFRESH_MAX_LAPS) {
+    const predicted = { prNumber: holder.number, headSha: holder.head.sha, baseSha: nb, reason: "laps" };
+    const next = (await refill(predicted))[0];
+    if (!next) {
+      // biome-ignore format: single-line release keeps the file-size ratchet under +50
+      await slots.release(owner, repo, baseBranch, { terminal: predicted, nowMs });
+      // biome-ignore format: exact slot log shape required by #874
+      log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} exceeded refresh laps)`);
+      return undefined;
+    }
+    // biome-ignore format: exact slot log shape required by #874
+    log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} exceeded refresh laps)`);
+    return handoffTo(
+      held.prNumber,
+      predicted,
+      next,
+      `strict refresh slot ${owner}/${repo}#${baseBranch} released (holder #${held.prNumber} exceeded refresh laps)`
+    );
+  }
+  await slots.touch(owner, repo, baseBranch, held.prNumber, holder.head.sha, nb, nowMs, pendingFor(holder, nb));
+  // biome-ignore format: exact re-refresh log shape required by #874
+  log?.(`strict refresh slot ${owner}/${repo}#${baseBranch} re-refresh #${holder.number} for base ${nb.slice(0, 7)} (lap ${laps + 1}/${STRICT_REFRESH_MAX_LAPS})`);
+  return holder;
 }
 
 /**
@@ -1019,6 +1170,19 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     }
   }
   const baseSha = pr.base?.sha ?? "";
+  // The triggering PR's base.sha can be stale (older than the slot's tip):
+  // anchor on the held slot's base so waiter activity never downgrades the
+  // tip or spuriously re-refreshes the holder. A free slot uses the PR's tip.
+  let heldBefore: { baseSha: string; prNumber: number } | undefined;
+  if (slots) {
+    try {
+      const held = await slots.getSlot(owner, repo, baseBranch);
+      if (held) heldBefore = { baseSha: held.baseSha, prNumber: held.prNumber };
+    } catch {
+      // Fail open to the PR's tip; reconcile re-reads under lock.
+    }
+  }
+  const effBase = heldBefore?.baseSha || baseSha;
   let terminal: { prNumber: number; headSha: string; baseSha: string } | undefined;
   if (slots) {
     try {
@@ -1037,7 +1201,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     baseBranch,
     requiredContexts,
     terminal,
-    baseSha,
+    baseSha: effBase,
     log: opts.log,
   });
   const ready = gitea ? await keepGiteaBehind(api, readyRaw, owner, repo, opts.log) : readyRaw;
@@ -1048,7 +1212,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
         owner,
         repo,
         baseBranch,
-        baseSha,
+        baseSha: effBase,
         pulls,
         policy,
         api,
@@ -1062,25 +1226,49 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     }
     return null;
   }
-  // Only the oldest ready candidate may hold the slot; a newer or blocked
-  // PR activity never preempts the holder.
+  // Only the oldest ready candidate may hold the slot; a newer PR's activity
+  // still hands the slot to the oldest (same reconcile as a push) and returns
+  // the oldest's job so the caller enqueues it instead of dropping it. A
+  // re-refresh of the already-held oldest is suppressed here: the holder
+  // already has its job and the triggering PR's tip may be stale.
   if (ready[0]?.number !== pr.number) {
     try {
-      await reconcileStrictSlotForCandidates({
+      const admitted = await reconcileStrictSlotForCandidates({
         slots,
         owner,
         repo,
         baseBranch,
-        baseSha,
+        baseSha: effBase,
         pulls,
         ready,
         policy,
         api,
         defaultBranch: opts.defaultBranch,
+        cloneUrl: opts.cloneUrl,
         requiredContexts,
         nowMs: now,
         log: opts.log,
       });
+      if (!admitted || (heldBefore && admitted.number === heldBefore.prNumber)) return null;
+      return {
+        owner,
+        repo,
+        issueNumber: strictRefreshIssueNumber(admitted, owner, repo, policy.botUsername),
+        action: "push",
+        title: admitted.title,
+        body: admitted.body ?? "",
+        htmlUrl: admitted.html_url,
+        issueUpdatedAt: admitted.updated_at,
+        defaultBranch: opts.defaultBranch,
+        cloneUrl: opts.cloneUrl,
+        mode: "follow-up",
+        prNumber: admitted.number,
+        headSha: admitted.head.sha,
+        trigger: { event: "pull_request", sender: opts.sender ?? "pull_request" },
+        mergeOnly: true,
+        strictRefresh: true,
+        ...(effBase ? { strictBaseSha: effBase } : {}),
+      };
     } catch (err) {
       opts.log?.(`strict refresh slot reconcile failed: ${errorMessage(err)}`);
     }
@@ -1092,12 +1280,13 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
       owner,
       repo,
       baseBranch,
-      baseSha,
+      baseSha: effBase,
       pulls,
       ready,
       policy,
       api,
       defaultBranch: opts.defaultBranch,
+      cloneUrl: opts.cloneUrl,
       requiredContexts,
       nowMs: now,
       log: opts.log,
@@ -1124,7 +1313,7 @@ export async function shouldEnqueueStrictRefreshForPR(opts: {
     trigger: { event: "pull_request", sender: opts.sender ?? "pull_request" },
     mergeOnly: true,
     strictRefresh: true,
-    ...(pr.base?.sha ? { strictBaseSha: pr.base.sha } : {}),
+    ...(effBase ? { strictBaseSha: effBase } : {}),
   };
 }
 
