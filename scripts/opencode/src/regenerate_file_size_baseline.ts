@@ -1,14 +1,16 @@
 #!/usr/bin/env bun
 /**
- * Regenerate `src/file-size-baseline.json` from the current `src/*.ts` line
- * counts. Run `bun run regenerate:file-sizes` (from `scripts/opencode`)
+ * Regenerate `src/file-size-baseline.json` from the current line counts for
+ * every TypeScript file under `src` (top level plus subdirectories such as
+ * `repo_settings_keys/` and `util/`, keyed by `src`-relative paths). Run
+ * `bun run regenerate:file-sizes` (from `scripts/opencode`)
  * after adding, removing, or growing a source file, and commit the result:
  * the freshness test fails when the committed baseline differs from the
  * regenerated one, and the conflict job rebuilds this file with this script
  * instead of handing it to the model.
  */
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 
 const srcDir = import.meta.dir;
 const baselinePath = join(srcDir, "file-size-baseline.json");
@@ -20,13 +22,23 @@ export function countLines(text: string): number {
   return parts.length;
 }
 
-/** Line counts for every `*.ts` file in `dir`, keyed by basename. */
+/** Line counts for every `*.ts` file under `dir`, keyed by `dir`-relative path. */
 export function readLineCounts(dir: string): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const entry of readdirSync(dir).sort()) {
-    if (!entry.endsWith(".ts")) continue;
-    out[entry] = countLines(readFileSync(join(dir, entry), "utf8"));
-  }
+  const walk = (current: string): void => {
+    const entries = readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts")) continue;
+      const key = relative(dir, full).split(sep).join("/");
+      out[key] = countLines(readFileSync(full, "utf8"));
+    }
+  };
+  walk(dir);
   return out;
 }
 
