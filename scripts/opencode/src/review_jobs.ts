@@ -1091,7 +1091,10 @@ export function workerJobKey(job: IssueJob): string {
     return `implement:${tracker}:${trackerId}`;
   }
   if (kind === "implement") return `implement:${job.owner}/${job.repo}#${job.issueNumber}`;
-  const base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  let base = `${kind}:${job.owner}/${job.repo}#${job.prNumber ?? 0}:${job.headSha ?? ""}`;
+  if (typeof job.strictBaseSha === "string" && job.strictBaseSha) {
+    base += `:${job.strictBaseSha}`;
+  }
   if (kind !== "follow-up" || job.trigger?.event !== "workflow_job") return base;
   const jobId = job.trigger.workflowJobId;
   if (typeof jobId === "number" && Number.isFinite(jobId)) return `${base}:${jobId}`;
@@ -3723,6 +3726,7 @@ export class PgReviewJobStore implements ReviewJobStore {
         await tx.unsafe(ISSUE_HANDOFFS_SCHEMA_SQL);
         await tx.unsafe(REVIEW_HANDOVER_PENDING_SCHEMA_SQL);
         await tx.unsafe(STRICT_REFRESH_SLOTS_SCHEMA_SQL);
+        await tx.unsafe(`ALTER TABLE strict_refresh_slots ADD COLUMN IF NOT EXISTS laps INTEGER NOT NULL DEFAULT 0`);
         await tx.unsafe(FOLLOW_UP_WAKE_CAUSES_SCHEMA_SQL);
         await tx.unsafe(AUTOMERGE_RECONCILE_SCHEMA_SQL);
       });
