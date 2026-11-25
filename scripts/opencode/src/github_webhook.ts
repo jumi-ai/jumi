@@ -863,9 +863,13 @@ export async function handleGithubWebhookEvent(
           log: (message) => logger(message),
         });
         if (decision.type === "skip") return skipped(decision.reason, logger);
-        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const job: IssueJob = {
+          ...decision.job,
+          delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
+          receivedAt: new Date().toISOString(),
+        };
         const result: EnqueueResult = await deps.worker.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        logger(enqueueLogLine(result, result.key, job.delivery));
         return json(202, result);
       } catch (err) {
         logger(`takeover failed: ${errorMessage(err)}`);
@@ -957,9 +961,13 @@ export async function handleGithubWebhookEvent(
           if (cleared) return cleared;
           return json(202, result);
         }
-        const job: IssueJob = { ...decision.job, delivery, receivedAt: new Date().toISOString() };
+        const job: IssueJob = {
+          ...decision.job,
+          delivery: isFollowUpJob(decision.job) ? followupDelivery : delivery,
+          receivedAt: new Date().toISOString(),
+        };
         const result: EnqueueResult = await deps.worker.queue.enqueue(job);
-        logger(`${result.queued ? "queued" : "deduped"} ${result.key} delivery=${delivery}`);
+        logger(enqueueLogLine(result, result.key, job.delivery));
         if (result.queued) {
           const cleared = await clearGithubSit(deps.worker.sits, job.owner, job.repo, job.issueNumber, logger);
           if (cleared) return cleared;
@@ -1121,7 +1129,7 @@ export async function handleGithubWebhookEvent(
           delivery: isFollowUpJob(partial) ? followupDelivery : delivery,
           receivedAt,
         }));
-        return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
+        return await enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
       }
       if (reviewResults.length === 1 && reviewResults[0]) return json(202, reviewResults[0]);
       if (reviewResults.length > 1) return json(202, { queued: true, keys: reviewResults.map((item) => item.key) });
@@ -1213,7 +1221,7 @@ export async function handleGithubWebhookEvent(
         return skipped("no managed jumi PRs", logger);
       }
       // Push is out of scope for sits: enqueue without remembering or clearing.
-      return enqueueJobs(jobs, deps.worker.queue, delivery, logger);
+      return await enqueueJobs(jobs, deps.worker.queue, delivery, logger);
     }
 
     if (GITHUB_FOLLOWUP_EVENTS.has(event ?? "")) {
@@ -1503,7 +1511,7 @@ export async function handleGithubWebhookEvent(
       return skipped("no blocked issues to wake", logger);
     }
 
-    return enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
+    return await enqueueJobs(jobs, deps.worker.queue, delivery, logger, deps.worker.sits);
   } catch (err) {
     if (isQueueUnavailable(err)) {
       logger(`queue unavailable: ${err.message}`);

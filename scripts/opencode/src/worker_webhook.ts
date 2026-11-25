@@ -660,7 +660,7 @@ export async function handleWorkerWebhookEvent(
           } catch {
             // Best-effort marker only; the enqueue below owns the response.
           }
-          return enqueueJobList(jobs, deps.queue, delivery, logger, deps.sits);
+          return await enqueueJobList(jobs, deps.queue, delivery, logger, deps.sits);
         } catch (err) {
           return wakeFailedResponse(err, logger);
         }
@@ -722,7 +722,7 @@ export async function handleWorkerWebhookEvent(
         }
         try {
           const jobs = await wakeJobsFromPull(payload, delivery, policy, deps, logger);
-          if (jobs.length > 0) return enqueueJobList(jobs, deps.queue, delivery, logger, deps.sits);
+          if (jobs.length > 0) return await enqueueJobList(jobs, deps.queue, delivery, logger, deps.sits);
         } catch (err) {
           return wakeFailedResponse(err, logger);
         }
