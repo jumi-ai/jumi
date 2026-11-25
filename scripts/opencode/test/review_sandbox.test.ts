@@ -15,6 +15,7 @@ import {
   agyReviewHookScriptCode,
   agyReviewHooksJson,
   allowUnsandboxedReviews,
+  assertOpenCodeReviewPluginReady,
   assertReviewRunnerSandboxable,
   checkReviewSandbox,
   claudeReviewHookScriptCode,
@@ -25,8 +26,10 @@ import {
   makeReviewHarnessTempRoot,
   OPENCODE_REVIEW_FILE_TOOLS,
   openCodeReviewShellPluginCode,
+  REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS,
   REVIEW_SANDBOX_MIN_ABI,
   REVIEW_SANDBOX_WRAPPER_ENV,
+  REVIEW_SHELL_PLUGIN_FAILED_NAME,
   REVIEW_SHELL_PLUGIN_READY_NAME,
   resolveAgentBin,
   resolveReviewSpawnSandbox,
@@ -36,6 +39,7 @@ import {
   reviewSandboxWrapperPath,
   reviewShellDeniedReadPrefixes,
   reviewShellDenyPredicateSnippet,
+  reviewShellPluginFailedPath,
   reviewShellSandboxRules,
   sandboxedShellEnv,
   setReviewSandboxProbeForTests,
@@ -567,6 +571,227 @@ describe("resolveReviewSpawnSandbox", () => {
     expect(allowUnsandboxedReviews({ [ALLOW_UNSANDBOXED_REVIEWS_ENV]: "0" })).toBe(false);
     expect(allowUnsandboxedReviews({ [ALLOW_UNSANDBOXED_REVIEWS_ENV]: "yes" })).toBe(false);
     expect(allowUnsandboxedReviews({ [ALLOW_UNSANDBOXED_REVIEWS_ENV]: "1" })).toBe(true);
+  });
+
+  test("startup-failed watch defaults to 100 ms", () => {
+    expect(REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS).toBe(100);
+  });
+});
+
+describe("review plugin first-init guard (jumi#831)", () => {
+  test("generated plugin contains the fail-closed bootstrap", async () => {
+    await withWorkspace(async (workdir) => {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const plugin = openCodeReviewShellPluginCode({
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        });
+        // Bootstrap: dynamic API import inside a non-throwing setup covering
+        // import, hook installation, and the ready-marker write.
+        expect(plugin).toContain('await import("@opencode/plugin")');
+        expect(plugin).toContain(REVIEW_SHELL_PLUGIN_FAILED_NAME);
+        expect(plugin).toContain(reviewShellPluginFailedPath(harnessTemp));
+        expect(plugin).toContain("new Promise(() => {})");
+        expect(plugin).toContain("failClosed");
+        // No static plugin-API import that could throw before setup runs.
+        expect(plugin).not.toContain('from "@opencode/plugin"');
+        expect(plugin).not.toContain("Plugin.define(");
+        // Plain V2 definition shape (id + setup) without the helper.
+        expect(plugin).toContain('id: "jumi-review-shell-sandbox"');
+        expect(plugin).toContain("async setup(ctx)");
+        // Healthy setup retains today's wrapping behavior.
+        expect(plugin).toContain('ctx.tool.hook("execute.before"');
+        expect(plugin).toContain('ctx.shell.hook("create.before"');
+        expect(plugin).toContain(REVIEW_SHELL_PLUGIN_READY_NAME);
+        // The generated file parses, so the pre-spawn transpile check passes it.
+        expect(() => new Bun.Transpiler({ loader: "js" }).transformSync(plugin)).not.toThrow();
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("preflight passes a healthy plugin and refuses missing, unregistered, and invalid plugins", async () => {
+    await withWorkspace(async (workdir) => {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        const pluginDir = await writeOpenCodeReviewShellPlugin(harnessTemp, input);
+        const globalPath = join(harnessTemp, "xdg-config", "opencode", "opencode.json");
+        await writeFile(globalPath, JSON.stringify({ plugins: [pluginDir] }));
+        await expect(assertOpenCodeReviewPluginReady(pluginDir, globalPath)).resolves.toBeUndefined();
+        // Missing plugin file refuses.
+        await rm(join(pluginDir, "index.js"), { force: true });
+        await expect(assertOpenCodeReviewPluginReady(pluginDir, globalPath)).rejects.toThrow(
+          /review spawn refused.*review shell plugin missing/
+        );
+        await writeOpenCodeReviewShellPlugin(harnessTemp, input);
+        // Config not referencing the plugin directory refuses.
+        await writeFile(globalPath, JSON.stringify({ plugins: [] }));
+        await expect(assertOpenCodeReviewPluginReady(pluginDir, globalPath)).rejects.toThrow(
+          /review spawn refused.*not registered/
+        );
+        await writeFile(globalPath, JSON.stringify({ plugins: [pluginDir] }));
+        // Syntactically invalid plugin refuses.
+        await writeFile(join(pluginDir, "index.js"), "this is not valid javascript {{{ probe\n");
+        await expect(assertOpenCodeReviewPluginReady(pluginDir, globalPath)).rejects.toThrow(
+          /review spawn refused.*invalid syntax/
+        );
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("hook-install failure writes the startup-failed marker and never settles", async () => {
+    await withWorkspace(async (workdir) => {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        // Stub plugin-API module with a valid define so setup reaches hook
+        // installation; the mock ctx then throws there.
+        const stubPath = join(harnessTemp, "stub-plugin-api.mjs");
+        await writeFile(stubPath, `export const Plugin = { define(x) { return x; } };\n`);
+        const source = openCodeReviewShellPluginCode(input).replaceAll(
+          '"@opencode/plugin"',
+          JSON.stringify(`file://${stubPath}`)
+        );
+        const pluginPath = join(harnessTemp, "hook-fail-index.mjs");
+        await writeFile(pluginPath, source);
+        const mod = await import(`file://${pluginPath}`);
+        const throwingCtx = {
+          tool: { hook: async () => Promise.reject(new Error("hook install boom")) },
+          shell: { hook: async () => undefined },
+        };
+        let settled: string | undefined;
+        void (mod.default.setup(throwingCtx) as Promise<unknown>).then(
+          () => (settled = "resolved"),
+          () => (settled = "rejected")
+        );
+        await Bun.sleep(250);
+        const { existsSync } = await import("node:fs");
+        expect(existsSync(reviewShellPluginFailedPath(harnessTemp))).toBe(true);
+        expect(settled).toBeUndefined();
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("plugin-API import failure writes the marker and never settles", async () => {
+    await withWorkspace(async (workdir) => {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const harnessTemp = await makeReviewHarnessTempRoot();
+      try {
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: harnessTemp,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        const stubPath = join(harnessTemp, "stub-plugin-api-throw.mjs");
+        await writeFile(stubPath, `throw new Error("stub plugin API import boom");\n`);
+        const source = openCodeReviewShellPluginCode(input).replaceAll(
+          '"@opencode/plugin"',
+          JSON.stringify(`file://${stubPath}`)
+        );
+        const pluginPath = join(harnessTemp, "import-fail-index.mjs");
+        await writeFile(pluginPath, source);
+        const mod = await import(`file://${pluginPath}`);
+        const ctx = { tool: { hook: async () => undefined }, shell: { hook: async () => undefined } };
+        let settled: string | undefined;
+        void (mod.default.setup(ctx) as Promise<unknown>).then(
+          () => (settled = "resolved"),
+          () => (settled = "rejected")
+        );
+        await Bun.sleep(250);
+        const { existsSync } = await import("node:fs");
+        expect(existsSync(reviewShellPluginFailedPath(harnessTemp))).toBe(true);
+        expect(settled).toBeUndefined();
+      } finally {
+        await rm(harnessTemp, { recursive: true, force: true });
+      }
+    });
+  });
+
+  test("marker-write failure still never settles, and markers are per-spawn", async () => {
+    await withWorkspace(async (workdir) => {
+      const scratch = join(workdir, ".jumi-tmp", "scratch");
+      const { mkdir } = await import("node:fs/promises");
+      await mkdir(scratch, { recursive: true });
+      const first = await makeReviewHarnessTempRoot();
+      const second = await makeReviewHarnessTempRoot();
+      try {
+        // Fresh per-spawn identity: distinct paths, neither present up front.
+        expect(reviewShellPluginFailedPath(first)).not.toBe(reviewShellPluginFailedPath(second));
+        const { existsSync } = await import("node:fs");
+        expect(existsSync(reviewShellPluginFailedPath(first))).toBe(false);
+        expect(existsSync(reviewShellPluginFailedPath(second))).toBe(false);
+        const input = {
+          workdir,
+          scratchDir: scratch,
+          harnessTempDir: first,
+          homeDir: "/data",
+          wrapperPath: "/w/review_sandbox.py",
+        };
+        // Make the marker unwritable (a directory at the marker path) so the
+        // bootstrap's marker write itself throws; setup must still pend.
+        await mkdir(reviewShellPluginFailedPath(first), { recursive: true });
+        const stubPath = join(first, "stub-plugin-api.mjs");
+        await writeFile(stubPath, `export const Plugin = { define(x) { return x; } };\n`);
+        const source = openCodeReviewShellPluginCode(input).replaceAll(
+          '"@opencode/plugin"',
+          JSON.stringify(`file://${stubPath}`)
+        );
+        const pluginPath = join(first, "marker-fail-index.mjs");
+        await writeFile(pluginPath, source);
+        const mod = await import(`file://${pluginPath}`);
+        const throwingCtx = {
+          tool: { hook: async () => Promise.reject(new Error("hook install boom")) },
+          shell: { hook: async () => undefined },
+        };
+        let settled: string | undefined;
+        void (mod.default.setup(throwingCtx) as Promise<unknown>).then(
+          () => (settled = "resolved"),
+          () => (settled = "rejected")
+        );
+        await Bun.sleep(250);
+        expect(settled).toBeUndefined();
+        // The sibling spawn's marker is untouched.
+        expect(existsSync(reviewShellPluginFailedPath(second))).toBe(false);
+      } finally {
+        await rm(first, { recursive: true, force: true });
+        await rm(second, { recursive: true, force: true });
+      }
+    });
   });
 });
 
