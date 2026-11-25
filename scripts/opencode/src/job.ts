@@ -161,6 +161,7 @@ export async function oneShotWorkspacePreparer(
     username: string;
     token: string;
     logger?: (message: string) => void;
+    abortSignal?: AbortSignal;
   },
   timing: { cloneSeconds?: number }
 ): Promise<void> {
@@ -169,8 +170,11 @@ export async function oneShotWorkspacePreparer(
   const configArgs = workspace.gitConfigArgs();
   const auth = { giteaUrl: opts.giteaUrl, username: opts.username, token: opts.token };
   const env = workspace.gitEnv(auth);
+  const signal = opts.abortSignal;
   const runConfiguredGit = (args: string[], runOpts: { cwd: string; env: Record<string, string | undefined> }) =>
-    workspace.runGit([...configArgs, ...args], runOpts);
+    signal
+      ? workspace.runGit([...configArgs, ...args], { ...runOpts, signal })
+      : workspace.runGit([...configArgs, ...args], runOpts);
   const cloneUrl = workspace.validateCloneUrl(opts.repo.clone_url, opts.giteaUrl);
   const parent = dirname(opts.workdir);
   await mkdir(parent, { recursive: true });
@@ -276,6 +280,7 @@ export async function runOneShotJob(options: OneShotRunOptions): Promise<OneShot
           username: preparerOpts.username,
           token: preparerOpts.token,
           logger: preparerOpts.logger,
+          abortSignal: preparerOpts.abortSignal ?? options.abortSignal ?? options.engineExtras?.abortSignal,
         },
         timing
       );

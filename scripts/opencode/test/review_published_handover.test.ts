@@ -23,7 +23,7 @@ describe("markPublishedWithHandover (memory)", () => {
     const store = new MemoryReviewJobStore();
     const leased = await leaseReview(store);
     const res = await store.markPublishedWithHandover(leased.id, "engine-1", { state: "succeeded" }, "posted");
-    expect(res).toEqual({ cancelled: false });
+    expect(res).toEqual({ cancelled: false, promoted: 0, parked: 0 });
     expect((await store.get(leased.id))?.state).toBe("succeeded");
     expect(pendingsOf(store).get(leased.id)?.publishedStatus).toBe("posted");
 
@@ -61,7 +61,7 @@ describe("markPublishedWithHandover (memory)", () => {
     expect(pendingsOf(store).size).toBe(1);
     expect(await store.cancelQueuedForPull("kirmanak", "demo", 7)).toBe(0);
     const res = await store.markPublishedWithHandover(leased.id, "engine-1", { state: "succeeded" }, "posted");
-    expect(res).toEqual({ cancelled: true });
+    expect(res).toEqual({ cancelled: true, promoted: 0, parked: 0 });
     expect((await store.get(leased.id))?.state).toBe("cancelled");
     expect(pendingsOf(store).size).toBe(0);
   });
@@ -79,7 +79,7 @@ describe("markPublishedWithHandover (memory)", () => {
       { state: "skipped", reason: CI_PENDING_REASON },
       "skipped"
     );
-    expect(res).toEqual({ cancelled: false });
+    expect(res).toEqual({ cancelled: false, promoted: 0, parked: 0 });
     const row = await store.get(leased.id);
     expect(row?.state).toBe("queued");
     expect(pendingsOf(store).size).toBe(0);

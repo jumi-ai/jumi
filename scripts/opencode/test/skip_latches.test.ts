@@ -12,7 +12,7 @@ import { readStuckState, writeStuckState } from "../src/stuck.ts";
 import { markSuggestionHoldConsumed } from "../src/suggestion_hold.ts";
 import { handleIssueCancel } from "../src/worker.ts";
 import { cancelLedgerWorkerJobs } from "../src/worker_webhook.ts";
-import { makeComment, makeIssueJob, makeWorkerConfig } from "./fixtures.ts";
+import { makeComment, makeIssueJob, makePR, makeRepo, makeUser, makeWorkerConfig } from "./fixtures.ts";
 
 const key = { owner: "kirmanak", repo: "demo", issueNumber: 12 };
 
@@ -141,9 +141,34 @@ describe("kill switch deletes skip latches", () => {
   });
 
   test("cancelLedgerWorkerJobs resolves a held pending to success with an unassigned note", async () => {
+    const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const store = new MemoryReviewJobStore();
-    await markSuggestionHoldConsumed(store.skipLatches, key, "abc123", 2);
+    await markSuggestionHoldConsumed(store.skipLatches, key, HEAD, 2);
     const statuses: Array<{ sha: string; state: string; description?: string }> = [];
+    const suggestionBody = [
+      "<!-- jumi-review:kirmanak/demo#12 -->",
+      "### Jumi review",
+      "",
+      `Reviewed commit: \`${HEAD}\``,
+      "",
+      "src/foo.ts:12: 💡 suggestion: extract a helper",
+      "<!-- jumi-check: success; 1 suggestion -->",
+    ].join("\n");
+    const pr = {
+      ...makePR({
+        number: 127,
+        title: "Fix the thing",
+        body: "Fixes #12",
+        user: makeUser({ login: "jumi" }),
+      }),
+      head: {
+        label: "kirmanak:jumi/issue-12-fix-the-thing",
+        ref: "jumi/issue-12-fix-the-thing",
+        sha: HEAD,
+        repo: makeRepo(),
+        repo_id: 10,
+      },
+    };
     await cancelLedgerWorkerJobs({
       store,
       api: {
@@ -159,6 +184,24 @@ describe("kill switch deletes skip latches", () => {
           statuses.push({ sha, state: status.state, description: status.description });
           return status;
         },
+        listOpenPulls: async () => [pr],
+        getPR: async () => pr,
+        getRepo: async () => makeRepo(),
+        getRepoFile: async () => ({ found: false }),
+        getCollaboratorPermission: async () => ({ permission: "write" }),
+        listPullReviews: async () => [
+          {
+            id: 4110,
+            body: suggestionBody,
+            user: makeUser({ login: "jumi" }),
+            commit_id: HEAD,
+            submitted_at: "2026-11-19T18:29:20Z",
+            updated_at: "2026-11-19T18:29:20Z",
+          },
+        ],
+        listIssueComments: async () => [],
+        listPullReviewComments: async () => [],
+        listCommitStatuses: async () => [],
       },
       owner: key.owner,
       repo: key.repo,
@@ -166,7 +209,7 @@ describe("kill switch deletes skip latches", () => {
       botUsername: "jumi",
     });
     expect(statuses).toHaveLength(1);
-    expect(statuses[0]).toMatchObject({ sha: "abc123", state: "success" });
+    expect(statuses[0]).toMatchObject({ sha: HEAD, state: "success" });
     expect(statuses[0]?.description).toContain("unassigned");
     expect(await store.readIssueSkipLatch(key.owner, key.repo, key.issueNumber)).toEqual({
       generation: 1,

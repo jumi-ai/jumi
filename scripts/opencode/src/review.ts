@@ -210,6 +210,7 @@ export type WorkspacePreparer = (opts: {
   authorName?: string;
   authorEmail?: string;
   logger?: (message: string) => void;
+  abortSignal?: AbortSignal;
 }) => Promise<void>;
 
 export interface ReviewOptions {
@@ -2577,8 +2578,13 @@ export async function reviewPullRequest(opts: ReviewOptions): Promise<ReviewResu
       authorName: gitAuth.authorName,
       authorEmail: gitAuth.authorEmail,
       logger: log,
+      abortSignal: opts.abortSignal,
     });
 
+    // Post-checkout git commands below are deliberately not abortable (known
+    // limitation): `opts.gitRunner ?? runGit` calls without a signal,
+    // `replay.ts` runners, and `fallback.ts` `git status` spawns are short
+    // local commands, not network clone/fetch.
     const git = opts.gitRunner ?? runGit;
     const gitCmdEnv: Record<string, string | undefined> = {
       PATH: process.env.PATH,

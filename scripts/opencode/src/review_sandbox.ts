@@ -789,6 +789,16 @@ function agyReviewHookMatcher(): string {
  * so a plugin that loads but drops a hook fails the case instead of running
  * half-wrapped).
  *
+ * Fail-closed bootstrap (jumi#831): the default export is a plain
+ * `{ id, setup }` object (accepted by V2 without a static `@opencode/plugin`
+ * import) whose `setup` dynamically imports the plugin API inside a
+ * non-throwing `try` covering the import, both hook installations, and the
+ * ready-marker write. A caught failure writes the per-spawn startup-failed
+ * marker (`REVIEW_SHELL_PLUGIN_FAILED_NAME` in the harness temp root) and
+ * then awaits a promise that never settles, so the binary stays parked before
+ * its first model request and the parent kills the owned child. Even a failure
+ * while writing that marker still pends forever; the engine timeout bounds it.
+ *
  * Wrapping lives only in `create.before` (exactly once per shell): the observed
  * binary (2.3.2, hash unverified) ships the shell tool as `shell` and every shell creation
  * passes through this hook, so a second rewrite in `execute.before` would
@@ -796,8 +806,90 @@ function agyReviewHookMatcher(): string {
  * where the wrapper path itself is denied unless it sits in the allow-list.
  * Each hook's firing is distinctly observable: wrapped HOME proves the shell
  * hook, blocked reads prove the tool hook.
+ *
+ * Limitation: a binary-side rejection of a syntactically valid plugin before
+ * its factory runs produces no failure marker and is not covered by this
+ * slice.
  */
 export const REVIEW_SHELL_PLUGIN_READY_NAME = "review-shell-plugin.ready";
+/**
+ * Per-spawn startup-failed marker (jumi#831). The review plugin's
+ * fail-closed bootstrap writes it when the plugin API import, hook
+ * installation, or ready-marker write throws, then awaits a promise that
+ * never settles so the binary cannot dispatch a model/tool run unwrapped.
+ * The parent watches for this file while the child runs (local-file check,
+ * `REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS`) and kills the owned child on
+ * sight. The harness temp root is fresh per spawn (`makeReviewHarnessTempRoot`),
+ * so a previous spawn's marker can never cancel a new spawn.
+ *
+ * Limitation (honest): a binary-side rejection of a syntactically valid
+ * plugin before its factory runs produces no failure marker and is not
+ * covered by this slice. Neither the existing eventual-wrapping image probe
+ * nor the selected local scenarios proves that every such rejection fails
+ * closed.
+ */
+export const REVIEW_SHELL_PLUGIN_FAILED_NAME = "review-shell-plugin.startup-failed";
+/** Default poll interval for the parent's startup-failed marker watch. */
+export const REVIEW_PLUGIN_STARTUP_WATCH_INTERVAL_MS = 100;
+/** Absolute path of the per-spawn startup-failed marker. */
+export function reviewShellPluginFailedPath(harnessTempDir: string): string {
+  return join(harnessTempDir, REVIEW_SHELL_PLUGIN_FAILED_NAME);
+}
+/**
+ * Pre-spawn refusal for the OpenCode review shell plugin (jumi#831). Verifies
+ * before spawn that the generated plugin file exists, that the Jumi-owned
+ * global config's `plugins` list references its directory, and that its
+ * contents parse (transpile check). Any failure throws the existing
+ * engine-failed error type with a clear message. No auto-discovery is relied
+ * on: the config reference is asserted, not inferred.
+ */
+export async function assertOpenCodeReviewPluginReady(pluginDir: string, globalConfigPath: string): Promise<void> {
+  const indexPath = join(pluginDir, "index.js");
+  let code: string;
+  try {
+    const { readFile } = await import("node:fs/promises");
+    code = await readFile(indexPath, "utf8");
+  } catch (err) {
+    throw new EngineFailedError(
+      `opencode review spawn refused: review shell plugin missing at ${indexPath}: ${errorMessage(err)}`,
+      false
+    );
+  }
+  let raw: string;
+  try {
+    const { readFile } = await import("node:fs/promises");
+    raw = await readFile(globalConfigPath, "utf8");
+  } catch (err) {
+    throw new EngineFailedError(
+      `opencode review spawn refused: review global config missing at ${globalConfigPath}: ${errorMessage(err)}`,
+      false
+    );
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    throw new EngineFailedError(
+      `opencode review spawn refused: review global config at ${globalConfigPath} is not valid JSON: ${errorMessage(err)}`,
+      false
+    );
+  }
+  const plugins = Array.isArray(parsed.plugins) ? (parsed.plugins as unknown[]) : [];
+  if (!plugins.includes(pluginDir)) {
+    throw new EngineFailedError(
+      `opencode review spawn refused: review shell plugin ${pluginDir} is not registered in ${globalConfigPath}`,
+      false
+    );
+  }
+  try {
+    new Bun.Transpiler({ loader: "js" }).transformSync(code);
+  } catch (err) {
+    throw new EngineFailedError(
+      `opencode review spawn refused: review shell plugin at ${indexPath} has invalid syntax: ${errorMessage(err)}`,
+      false
+    );
+  }
+}
 export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): string {
   const prefix = reviewShellHookPrefix(input);
   const shellEnv = JSON.stringify(sandboxedShellEnv(input.scratchDir));
@@ -809,45 +901,67 @@ export function openCodeReviewShellPluginCode(input: ReviewShellHookInput): stri
     reviewShellDeniedReadPrefixes(input)
   );
   const readyPath = JSON.stringify(join(input.harnessTempDir, REVIEW_SHELL_PLUGIN_READY_NAME));
-  return `// Jumi-owned review shell sandbox (jumi#550). Loaded from the harness temp root, never the checkout.
-import { Plugin } from "@opencode/plugin";
+  const failedPath = JSON.stringify(reviewShellPluginFailedPath(input.harnessTempDir));
+  return `// Jumi-owned review shell sandbox (jumi#550, fail-closed bootstrap jumi#831). Loaded from the harness temp root, never the checkout.
+// The bootstrap below never throws, never resolves on failure, and never
+// permits model/tool dispatch when the plugin API import, hook installation,
+// or ready-marker write fails: a caught failure writes the per-spawn
+// startup-failed marker and then awaits a promise that never settles, so the
+// binary stays parked before its first model request and the parent (watching
+// for that marker) kills the owned child. Even a failure while writing the
+// marker still pends forever; the existing overall engine timeout then bounds
+// the blocked child. A healthy setup keeps today's wrapping behavior.
 import { realpathSync, writeFileSync } from "node:fs";
-export default Plugin.define({
+export default {
   id: "jumi-review-shell-sandbox",
   async setup(ctx) {
+    const failedPath = ${failedPath};
+    const failClosed = async (err) => {
+      try {
+        writeFileSync(failedPath, "review shell plugin startup failed: " + String(err?.message ?? err));
+      } catch {}
+      await new Promise(() => {});
+    };
+    try {
+      const pluginApi = await import("@opencode/plugin");
+      const Plugin = pluginApi?.Plugin;
+      if (typeof Plugin?.define !== "function") throw new Error("missing Plugin.define in @opencode/plugin");
 ${denyPredicate
   .split("\n")
-  .map((line) => `    ${line}`)
+  .map((line) => `      ${line}`)
   .join("\n")}
-    const prefix = ${JSON.stringify(prefix)};
-    const shellEnv = ${shellEnv};
-    const scrubKeys = ${scrubKeys};
-    const fileTools = ${fileTools};
-    const readyPath = ${readyPath};
-    const escape = (cmd) => "'" + cmd.replace(/'/g, "'\\\\''") + "'";
-    // File reads only: shell wrapping lives in create.before below (exactly
-    // once). A rewrite here too would double-wrap.
-    await ctx.tool.hook("execute.before", (event) => {
-      const tool = event.tool;
-      if (typeof tool === "string" && fileTools.includes(tool)) {
-        const toolInput = event.input ?? {};
-        const p = toolInput.filePath ?? toolInput.path;
-        if (isDenied(p)) throw new Error("Blocked: review sandbox denies reads of agent credentials");
-      }
-    });
-    await ctx.shell.hook("create.before", (event) => {
-      const cmd = event.command;
-      if (typeof cmd === "string" && cmd.length > 0) {
-        event.command = prefix + " sh -c " + escape(cmd);
-      }
-      for (const [key, value] of Object.entries(shellEnv)) event.env[key] = value;
-      for (const key of scrubKeys) delete event.env[key];
-    });
-    // Both hooks registered: a load that drops one fails the image probe,
-    // which asserts this marker, instead of running half-wrapped.
-    writeFileSync(readyPath, "ready");
+      const prefix = ${JSON.stringify(prefix)};
+      const shellEnv = ${shellEnv};
+      const scrubKeys = ${scrubKeys};
+      const fileTools = ${fileTools};
+      const readyPath = ${readyPath};
+      const escape = (cmd) => "'" + cmd.replace(/'/g, "'\\\\''") + "'";
+      // File reads only: shell wrapping lives in create.before below (exactly
+      // once). A rewrite here too would double-wrap.
+      await ctx.tool.hook("execute.before", (event) => {
+        const tool = event.tool;
+        if (typeof tool === "string" && fileTools.includes(tool)) {
+          const toolInput = event.input ?? {};
+          const p = toolInput.filePath ?? toolInput.path;
+          if (isDenied(p)) throw new Error("Blocked: review sandbox denies reads of agent credentials");
+        }
+      });
+      await ctx.shell.hook("create.before", (event) => {
+        const cmd = event.command;
+        if (typeof cmd === "string" && cmd.length > 0) {
+          event.command = prefix + " sh -c " + escape(cmd);
+        }
+        for (const [key, value] of Object.entries(shellEnv)) event.env[key] = value;
+        for (const key of scrubKeys) delete event.env[key];
+      });
+      // Both hooks registered: a load that drops one fails the image probe,
+      // which asserts this marker, instead of running half-wrapped.
+      writeFileSync(readyPath, "ready");
+    } catch (err) {
+      await failClosed(err);
+    }
   },
-});
+};
 `;
 }
 

@@ -18,6 +18,7 @@
   "handover.test.ts::11": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -39,10 +40,8 @@
   "handover.test.ts::14": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1,
-      "getRepoFile": 1
+      "getRepo": 1
     }
   },
   "handover.test.ts::15": {
@@ -50,7 +49,8 @@
     "reads": {
       "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1
+      "getRepo": 1,
+      "getRepoFile": 1
     }
   },
   "handover.test.ts::16": {
@@ -64,6 +64,7 @@
   "handover.test.ts::17": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -93,7 +94,6 @@
   "handover.test.ts::20": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "findStickyIssueComment": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -101,7 +101,7 @@
   "handover.test.ts::21": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
+      "findStickyIssueComment": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -109,26 +109,25 @@
   "handover.test.ts::22": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
   },
   "handover.test.ts::23": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {}
-  },
-  "handover.test.ts::24": {
-    "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
   },
+  "handover.test.ts::24": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {}
+  },
   "handover.test.ts::25": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
@@ -145,7 +144,12 @@
   },
   "handover.test.ts::27": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {}
+    "reads": {
+      "findStickyIssueComment": 1,
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
   },
   "handover.test.ts::28": {
     "name": "enqueueFollowUpFromReview",
@@ -165,12 +169,7 @@
   },
   "handover.test.ts::30": {
     "name": "enqueueFollowUpFromReview",
-    "reads": {
-      "findStickyIssueComment": 1,
-      "getIssue": 1,
-      "getPR": 1,
-      "getRepo": 1
-    }
+    "reads": {}
   },
   "handover.test.ts::31": {
     "name": "enqueueFollowUpFromReview",
@@ -193,6 +192,7 @@
   "handover.test.ts::33": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
@@ -201,22 +201,22 @@
   "handover.test.ts::34": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
-      "getRepo": 1,
-      "getRepoFile": 1
+      "getRepo": 1
     }
   },
   "handover.test.ts::35": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
       "getPR": 1,
-      "getRepo": 1
+      "getRepo": 1,
+      "getRepoFile": 1
     }
   },
   "handover.test.ts::36": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -232,6 +232,7 @@
   "handover.test.ts::38": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -254,7 +255,6 @@
   "handover.test.ts::40": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
     }
@@ -284,6 +284,14 @@
     }
   },
   "handover.test.ts::44": {
+    "name": "enqueueFollowUpFromReview",
+    "reads": {
+      "getIssue": 1,
+      "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "handover.test.ts::45": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
       "getPR": 1,
@@ -317,7 +325,6 @@
   "handover.test.ts::8": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
-      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
@@ -326,6 +333,7 @@
   "handover.test.ts::9": {
     "name": "enqueueFollowUpFromReview",
     "reads": {
+      "findStickyIssueComment": 1,
       "getIssue": 1,
       "getPR": 1,
       "getRepo": 1
