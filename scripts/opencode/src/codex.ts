@@ -11,6 +11,12 @@ import {
 } from "./child_git_proxy.ts";
 import { limitText, readStreamLimited, scrubbedKey, stripAnsi } from "./claude.ts";
 import { ensureCodexPublishedAuth } from "./codex_auth.ts";
+import {
+  ensureCodexRetainedHome,
+  makeCodexSpawnRoot,
+  resolveCodexResumeThreadId,
+  writeCodexHomeKind,
+} from "./codex_home.ts";
 import { exportCodexTrace, shouldCollectCodexTrace } from "./codex_tracing.ts";
 import { CodexStreamParser, type CodexTokens, codexTokensFrom } from "./codex_usage.ts";
 import { observeEngineRun } from "./control_metrics.ts";
@@ -36,7 +42,6 @@ import { stageBaseSkillsIntoWorkdir, writeCodexReviewHome } from "./review_base.
 import {
   assertReviewRunnerSandboxable,
   ensureSandboxedShellHome,
-  makeReviewHarnessTempRoot,
   resolveReviewSpawnSandbox,
   resolveWorktreeGitDirsSync,
   reviewSandboxWrapperPath,
@@ -359,13 +364,13 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
   const isReview = opts.trace?.kind === "review";
   const hasWorkerMcp = !!opts.workerMcp && !isReview;
   const ownsOutsideTemp = isReview || hasWorkerMcp;
-  // Review harness files live outside the checkout (jumi#550) so sandboxed
-  // shells cannot reach them. Worker MCP configs live outside too.
-  const tempRoot = isReview
-    ? await makeReviewHarnessTempRoot()
-    : hasWorkerMcp
-      ? await (await import("./worker_mcp.ts")).makeWorkerHarnessTempRoot()
-      : join(opts.workdir, ".jumi-tmp");
+  // Jumi-owned homes are retained for the job under the worktree-keyed job
+  // dir, so a same-job resume finds its rollout. Only the per-spawn root is
+  // deleted when the spawn ends; the job removes the whole job dir.
+  const { jobDir, spawnRoot } = ownsOutsideTemp
+    ? await makeCodexSpawnRoot(opts.workdir, isReview ? "review" : "worker")
+    : { jobDir: undefined as string | undefined, spawnRoot: join(opts.workdir, ".jumi-tmp") };
+  const tempRoot = spawnRoot;
   await mkdir(tempRoot, { recursive: true });
   const scratchDir = await ensureChildScratchDir(opts.workdir);
 
@@ -408,19 +413,26 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       throw new EngineFailedError(authMessage, false, { auth: true });
     }
     const isReview = opts.trace?.kind === "review";
+    // Record which home this spawn owned so a later spawn never resumes
+    // across kinds. Runs without a Jumi-owned home keep `$HOME/.codex`.
+    await writeCodexHomeKind(opts.workdir, isReview ? "review" : hasWorkerMcp ? "worker" : "home");
     if (isReview) {
       // Review-only home: the workdir is untrusted, so the head's `.codex`
-      // config, hooks, rules, and MCP servers never load. The home lives
-      // under the outside harness temp (never the checkout). Auth still comes
-      // from the real HOME: link it in when present so the review keeps the
-      // parent's credential without copying the grant.
-      reviewHome = join(tempRoot, "codex-home");
+      // config, hooks, rules, and MCP servers never load. The home is
+      // retained for the job under the outside job dir (never the checkout);
+      // only `config.toml`, `hooks.json` and the `auth.json` link below are
+      // rebuilt per spawn. Auth still comes from the real HOME: link it in
+      // when present so the review keeps the parent's credential.
+      reviewHome = await ensureCodexRetainedHome(opts.workdir, "review");
       await writeCodexReviewHome(reviewHome, opts.workdir);
       try {
         const home = opts.home ?? process.env.HOME ?? opts.workdir;
         const authSrc = join(home, ".codex", "auth.json");
         const authDst = join(reviewHome, "auth.json");
-        const { readlink, symlink } = await import("node:fs/promises");
+        const { readlink, rm, symlink } = await import("node:fs/promises");
+        // The home is retained: drop the previous spawn's link first so a
+        // resume never runs on a stale target.
+        await rm(authDst, { force: true }).catch(() => undefined);
         const target = await readlink(authSrc).catch(() => undefined);
         if (target) await symlink(target, authDst).catch(() => undefined);
         else {
@@ -452,7 +464,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       await writeCodexReviewShellHooks(reviewHome, {
         workdir: opts.workdir,
         scratchDir,
-        harnessTempDir: tempRoot,
+        // Deny the whole job dir for file tools (spawn files and retained
+        // sessions alike); shells cannot reach it either (no shared tmpdir).
+        harnessTempDir: jobDir ?? tempRoot,
         ...(opts.home ? { homeDir: opts.home } : {}),
         gitDirs: resolveWorktreeGitDirsSync(opts.workdir),
         wrapperPath: reviewSandboxWrapperPath(),
@@ -467,11 +481,12 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
       }
     }
     if (hasWorkerMcp) {
-      // Parent-owned worker MCP server: a worker-only CODEX_HOME under the
-      // outside harness temp (never the checkout). Unlike the review home it
-      // stays trusted so the head's `.codex` still loads; only the MCP entry
-      // is Jumi-owned. Auth links in from the real HOME like the review home.
-      workerHome = join(tempRoot, "codex-worker-home");
+      // Parent-owned worker MCP server: a worker-only CODEX_HOME retained
+      // for the job under the outside job dir (never the checkout). Unlike
+      // the review home it stays trusted so the head's `.codex` still loads;
+      // only the MCP entry is Jumi-owned, rewritten on every spawn, so a
+      // resume never runs on a stale token. Only session state carries over.
+      workerHome = await ensureCodexRetainedHome(opts.workdir, "worker");
       const { mkdir, writeFile } = await import("node:fs/promises");
       await mkdir(workerHome, { recursive: true });
       await writeFile(join(workerHome, "config.toml"), "# Worker-only home: Jumi-owned MCP entry below.\n").catch(
@@ -481,7 +496,9 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
         const home = opts.home ?? process.env.HOME ?? opts.workdir;
         const authSrc = join(home, ".codex", "auth.json");
         const authDst = join(workerHome, "auth.json");
-        const { readlink, symlink } = await import("node:fs/promises");
+        const { readlink, rm, symlink } = await import("node:fs/promises");
+        // Retained home: drop the previous spawn's link before relinking.
+        await rm(authDst, { force: true }).catch(() => undefined);
         const target = await readlink(authSrc).catch(() => undefined);
         if (target) await symlink(target, authDst).catch(() => undefined);
         else {
@@ -507,7 +524,16 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     // worker skill. Staged into the repo-local `.agents/skills` Codex scans,
     // cleaned up before return so the tree stays clean.
     imageStaging = await stageWorkdirImageSkills(opts.workdir, opts.trace?.kind);
-    const threadId = opts.continueSession ? await readThreadId(opts.workdir) : undefined;
+    // Without the rollout a resume would fail with "no rollout found" (and
+    // a resumed run never hops), so fall back to a fresh spawn instead of
+    // emitting `exec resume`. Runs without a Jumi-owned home keep
+    // `$HOME/.codex` and resume as today.
+    const requestedThreadId = opts.continueSession ? await readThreadId(opts.workdir) : undefined;
+    const threadId = await resolveCodexResumeThreadId(
+      opts.workdir,
+      isReview ? "review" : hasWorkerMcp ? "worker" : undefined,
+      requestedThreadId
+    );
     const args = codexArgv(opts, threadId);
     if (opts.sanitizeEnv) {
       const request = childProxyRequestFrom(opts.extraEnv, opts.trace);
@@ -719,6 +745,8 @@ export async function runCodex(opts: EngineRunOptions): Promise<EngineResult> {
     await baseStaging?.cleanup().catch(() => undefined);
     await gitProxy?.close().catch(() => undefined);
     await rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    // Only the per-spawn root goes: the retained job dir (with both Codex
+    // homes) survives for same-job resumes and is removed with the job.
     if (ownsOutsideTemp) await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 }
