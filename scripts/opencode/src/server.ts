@@ -820,6 +820,28 @@ export async function reclaimExpiredJobs(
       await handleReclaimPublishFailure(store, api, row, err, logger, "worker");
     }
   }
+  // Engine-tick expiry for strict-refresh slots (#875): with no webhook
+  // traffic nothing else releases a timed-out slot, so the tick reaps it and
+  // admits the next ready PR. No expired slot means no forge calls.
+  try {
+    const { expireStrictRefreshSlotsOnTick } = await import("./strict_refresh_terminal.ts");
+    await expireStrictRefreshSlotsOnTick({
+      slots: store.strictSlots,
+      api: api as never,
+      policy: {
+        giteaUrl: config.giteaUrl,
+        allowedOrgs: config.allowedOrgs,
+        allowedRepos: config.allowedRepos,
+        botUsername: config.botUsername,
+        ignoreConflictsLabel: config.ignoreConflictsLabel,
+        forgeKind: config.forge,
+      } as never,
+      enqueueIssue: (job) => store.enqueueIssue(job),
+      log: logger,
+    });
+  } catch (err) {
+    logger(`strict refresh tick expire failed: ${errorMessage(err)}`);
+  }
   return {
     requeued: requeued.length + worker.requeued.length,
     published: publish.length + worker.publish.length,
@@ -869,6 +891,10 @@ async function publishWorkerReclaimRow(
   const published = await store.markPublished(row.id, token, { state: "failed", reason });
   if (published.cancelled && row.issueNumber != null) {
     await upsertWorkerComment(api, row.owner, row.repo, row.issueNumber, config.botUsername, "stopped");
+  }
+  if (!published.cancelled) {
+    const { settleStrictSlotForWorkerRow } = await import("./strict_refresh_terminal.ts");
+    await settleStrictSlotForWorkerRow({ slots: store.strictSlots, row, status: "failed", reason, log: logger });
   }
 }
 
@@ -1534,6 +1560,9 @@ export async function startReviewer(config: ServiceConfig, deps: StartReviewerDe
               issueNumber,
               botUsername: config.botUsername,
               logger,
+              deploymentTrusted: config.trustedSenderLogins,
+              deploymentIgnore: config.followupIgnoreLogins,
+              deploymentBlocking: config.blockingQuestionAuthors,
             }),
           logger,
           sits: store.sits,

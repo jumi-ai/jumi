@@ -256,7 +256,9 @@ async function writeFollowUpLatch(store: SkipLatchStore, key: SkipLatchKey, stat
 /**
  * Early-exit settlement before a `pr` snapshot exists. Routes through the
  * shared hold-settlement gate once a PR number is known (job or latch);
- * keeps without posting when the PR cannot be re-read fresh. Never throws.
+ * resolves the PR for the held head through the existing closing-PR
+ * resolution when no number is known; keeps with one `unknown` log and no
+ * write when no PR or review can be found. Never throws.
  */
 async function resolveHeldEarlyThroughGate(
   api: HoldStatusPort,
@@ -286,7 +288,27 @@ async function resolveHeldEarlyThroughGate(
         prNumber = 0;
       }
     }
-    if (!prNumber) return;
+    if (!prNumber) {
+      try {
+        const resolved =
+          typeof (api as { listOpenPulls?: unknown }).listOpenPulls === "function"
+            ? await resolveWorkerPullRequest(
+                api as Parameters<typeof resolveWorkerPullRequest>[0],
+                opts.owner,
+                opts.repo,
+                latchKey.issueNumber,
+                opts.botUsername
+              )
+            : undefined;
+        if (resolved) prNumber = resolved.number ?? 0;
+      } catch {
+        prNumber = 0;
+      }
+    }
+    if (!prNumber) {
+      opts.log(`hold settlement kept for ${opts.owner}/${opts.repo}#${latchKey.issueNumber}: unknown (no closing PR)`);
+      return;
+    }
     await settleFollowUpHold({
       api,
       owner: opts.owner,

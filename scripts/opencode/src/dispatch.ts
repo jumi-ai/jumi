@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import type { ControlConfig } from "./control_config.ts";
+import { payloadGenerationOf } from "./followup_wake_causes.ts";
 import { JOB_ID_ENV } from "./job_env.ts";
 import { readK8sCa, withK8sCa } from "./k8s_ca.ts";
 import {
@@ -26,9 +27,9 @@ function roleGateForDispatchRole(role: DispatchRole): RoleGateRole {
 }
 
 function payloadGeneration(row: ReviewJobRecord): number {
-  const payload = row.payload as { generation?: unknown } | null;
-  const gen = payload?.generation;
-  return typeof gen === "number" && Number.isFinite(gen) && gen >= 0 ? Math.floor(gen) : 0;
+  // Shared truncating helper; clamp here so a corrupt negative generation
+  // still yields a valid `g<generation>` job-name segment.
+  return Math.max(0, payloadGenerationOf(row.payload));
 }
 
 /**
