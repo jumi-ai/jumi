@@ -25,7 +25,9 @@ import {
 import { type Engine, EngineFailedError } from "../src/engine.ts";
 import { hasJumiLabel } from "../src/github_webhook.ts";
 import type { GitRunner } from "../src/workspace.ts";
+import { runGit } from "../src/workspace.ts";
 import { makeIssue, makeIssueJob, makeUser, stripGitConfigArgs } from "./fixtures.ts";
+import { fakeBin, withFakeBins } from "./harness/bins.ts";
 import { withDirs } from "./harness/temp.ts";
 
 const fallbackEngine: Engine = async () => ({ status: "ok" });
@@ -1003,4 +1005,303 @@ describe("sentinel strip, ship, abort, push-fail", () => {
       ).toBe(true);
     });
   });
+});
+
+describe("abortable preparation git", () => {
+  test("ensureBareCache forwards abortSignal to clone and fetch, not to remote set-url", async () => {
+    await withDirs(async (home, workdir) => {
+      const signals = new Map<string, AbortSignal | undefined>();
+      const git: GitRunner = async (args, opts) => {
+        const gitArgs = stripGitConfigArgs(args);
+        const key = gitArgs[0] === "clone" ? "clone" : gitArgs[0] === "fetch" ? "fetch" : gitArgs.join(" ");
+        signals.set(key, opts.signal);
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      loop.auth = { ...loop.auth, embedTokenInUrl: true };
+      const abort = new AbortController();
+      await ensureBareCache(loop, {
+        cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+        giteaUrl: "https://gitea.kirmanak.stream",
+        abortSignal: abort.signal,
+        log: () => undefined,
+      });
+      expect(signals.get("clone")).toBe(abort.signal);
+      expect(signals.get("fetch")).toBe(abort.signal);
+      expect(signals.get("remote set-url origin https://gitea.kirmanak.stream/kirmanak/demo.git")).toBeUndefined();
+    });
+  });
+
+  test("attachIssueWorktree forwards abortSignal to worktree add, not to quick commands", async () => {
+    await withDirs(async (home, workdir) => {
+      const seen: Array<{ args: string[]; signal?: AbortSignal }> = [];
+      const git: GitRunner = async (args, opts) => {
+        const gitArgs = stripGitConfigArgs(args);
+        seen.push({ args: gitArgs, signal: opts.signal });
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const abort = new AbortController();
+      await attachIssueWorktree(loop, {
+        branch: "jumi/issue-12-fix-the-thing",
+        defaultBranch: "main",
+        abortSignal: abort.signal,
+        log: () => undefined,
+      });
+      const add = seen.find((entry) => entry.args[0] === "worktree" && entry.args[1] === "add");
+      expect(add?.signal).toBe(abort.signal);
+      for (const entry of seen) {
+        const [cmd, sub] = entry.args;
+        if (
+          cmd === "show-ref" ||
+          cmd === "rev-parse" ||
+          cmd === "checkout" ||
+          (cmd === "worktree" && sub === "prune")
+        ) {
+          expect(entry.signal).toBeUndefined();
+        }
+      }
+    });
+  });
+
+  test("custom gitRunner ignoring signal keeps working with abortSignal set", async () => {
+    await withDirs(async (home, workdir) => {
+      const git: GitRunner = async (args) => {
+        const gitArgs = stripGitConfigArgs(args);
+        if (gitArgs[0] === "show-ref") return "";
+        if (gitArgs[0] === "rev-parse") return "abc123";
+        return "";
+      };
+      const claimed = await beginClaimedWorktree({
+        job: makeIssueJob(),
+        home,
+        workdir,
+        fallbackEngine,
+        gitRunner: git,
+        useClaim: false,
+      });
+      if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+      const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+      const abort = new AbortController();
+      await ensureBareCache(loop, {
+        cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+        giteaUrl: "https://gitea.kirmanak.stream",
+        abortSignal: abort.signal,
+        log: () => undefined,
+      });
+      const headSha = await attachIssueWorktree(loop, {
+        branch: "jumi/issue-12-fix-the-thing",
+        defaultBranch: "main",
+        abortSignal: abort.signal,
+        log: () => undefined,
+      });
+      expect(headSha).toBe("abc123");
+    });
+  });
+});
+
+const hasSetsidForPrepAbort = Boolean(Bun.which("setsid"));
+const itSetsidForPrepAbort = hasSetsidForPrepAbort ? test : test.skip;
+
+async function readPrepPidLog(path: string): Promise<number[]> {
+  const text = await readFile(path, "utf8").catch(() => "");
+  const pids = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((pid) => Number.isFinite(pid) && pid > 0);
+  return [...new Set(pids)];
+}
+
+async function pidPrepIsLive(pid: number): Promise<boolean> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const state = stat
+      .slice(stat.lastIndexOf(")") + 1)
+      .trim()
+      .split(/\s+/)[0];
+    return state !== "Z" && state !== "X" && state !== "x";
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function waitForPrepPids(path: string, count: number, timeoutMs = 5000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let pids: number[] = [];
+  while (Date.now() < deadline) {
+    pids = await readPrepPidLog(path);
+    if (pids.length >= count) return pids;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return pids;
+}
+
+async function waitForPrepAllGone(pids: number[], timeoutMs = 3000): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs;
+  let live: number[] = [];
+  do {
+    live = [];
+    for (const pid of pids) {
+      if (await pidPrepIsLive(pid)) live.push(pid);
+    }
+    if (live.length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  return live;
+}
+
+const PREP_BLOCK_BODY = `trap '' TERM
+echo $$ >> "$PIDS_LOG"
+sleep 60 &
+echo $! >> "$PIDS_LOG"
+sh -c 'trap "" TERM; echo $$ >> "$PIDS_LOG"; sleep 60 & echo $! >> "$PIDS_LOG"; wait' &
+echo $! >> "$PIDS_LOG"
+wait`;
+
+describe("preparation abort kills the owned git group", () => {
+  itSetsidForPrepAbort(
+    "blocked clone --bare rejects AbortError with no group member left",
+    async () => {
+      await withFakeBins({ git: fakeBin("git", PREP_BLOCK_BODY) }, async ({ workdir, home, argsLog }) => {
+        const pidsLog = `${argsLog}.pids`;
+        const gitWithLogs: GitRunner = (args, opts) =>
+          runGit(args, { ...opts, env: { ...opts.env, PIDS_LOG: pidsLog, ARGS_LOG: argsLog } });
+        const claimed = await beginClaimedWorktree({
+          job: makeIssueJob(),
+          home,
+          workdir,
+          fallbackEngine,
+          gitRunner: gitWithLogs,
+          useClaim: false,
+        });
+        if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+        const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+        const controller = new AbortController();
+        const pending = ensureBareCache(loop, {
+          cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+          giteaUrl: "https://gitea.kirmanak.stream",
+          abortSignal: controller.signal,
+          log: () => undefined,
+        });
+        const pids = await waitForPrepPids(pidsLog, 4);
+        expect(pids.length).toBeGreaterThanOrEqual(4);
+        controller.abort();
+        const err = await pending.then(
+          () => null,
+          (caught: unknown) => caught
+        );
+        expect(err instanceof Error && err.name).toBe("AbortError");
+        expect(await waitForPrepAllGone(pids)).toEqual([]);
+      });
+    },
+    15_000
+  );
+
+  itSetsidForPrepAbort(
+    "blocked fetch rejects AbortError with no group member left",
+    async () => {
+      await withFakeBins({ git: fakeBin("git", PREP_BLOCK_BODY) }, async ({ workdir, home, argsLog }) => {
+        const pidsLog = `${argsLog}.pids`;
+        const gitWithLogs: GitRunner = (args, opts) =>
+          runGit(args, { ...opts, env: { ...opts.env, PIDS_LOG: pidsLog, ARGS_LOG: argsLog } });
+        const claimed = await beginClaimedWorktree({
+          job: makeIssueJob(),
+          home,
+          workdir,
+          fallbackEngine,
+          gitRunner: gitWithLogs,
+          useClaim: false,
+        });
+        if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+        await mkdir(claimed.barePath, { recursive: true });
+        const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+        const controller = new AbortController();
+        const pending = ensureBareCache(loop, {
+          cloneUrl: "https://gitea.kirmanak.stream/kirmanak/demo.git",
+          giteaUrl: "https://gitea.kirmanak.stream",
+          abortSignal: controller.signal,
+          log: () => undefined,
+        });
+        const pids = await waitForPrepPids(pidsLog, 4);
+        expect(pids.length).toBeGreaterThanOrEqual(4);
+        controller.abort();
+        const err = await pending.then(
+          () => null,
+          (caught: unknown) => caught
+        );
+        expect(err instanceof Error && err.name).toBe("AbortError");
+        expect(await waitForPrepAllGone(pids)).toEqual([]);
+      });
+    },
+    15_000
+  );
+
+  itSetsidForPrepAbort(
+    "blocked worktree add rejects AbortError with no group member left",
+    async () => {
+      const body = `case "$*" in *"worktree add"*) ;; *) exit 0;; esac
+${PREP_BLOCK_BODY}`;
+      await withFakeBins({ git: fakeBin("git", body) }, async ({ workdir, home, argsLog }) => {
+        const pidsLog = `${argsLog}.pids`;
+        const gitWithLogs: GitRunner = (args, opts) =>
+          runGit(args, { ...opts, env: { ...opts.env, PIDS_LOG: pidsLog, ARGS_LOG: argsLog } });
+        const claimed = await beginClaimedWorktree({
+          job: makeIssueJob(),
+          home,
+          workdir,
+          fallbackEngine,
+          gitRunner: gitWithLogs,
+          useClaim: false,
+        });
+        if (isClaimedEarlyResult(claimed)) throw new Error("expected session");
+        await mkdir(claimed.barePath, { recursive: true });
+        const loop = openClaimedLoop(claimed, { ...loopAuth, heartbeatIntervalMs: 0 });
+        const controller = new AbortController();
+        const pending = attachIssueWorktree(loop, {
+          branch: "jumi/issue-12-fix-the-thing",
+          defaultBranch: "main",
+          abortSignal: controller.signal,
+          log: () => undefined,
+        });
+        const pids = await waitForPrepPids(pidsLog, 4);
+        expect(pids.length).toBeGreaterThanOrEqual(4);
+        controller.abort();
+        const err = await pending.then(
+          () => null,
+          (caught: unknown) => caught
+        );
+        expect(err instanceof Error && err.name).toBe("AbortError");
+        expect(isAbortError(err)).toBe(true);
+        expect(await waitForPrepAllGone(pids)).toEqual([]);
+      });
+    },
+    15_000
+  );
 });

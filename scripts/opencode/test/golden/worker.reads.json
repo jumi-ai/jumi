@@ -446,10 +446,23 @@
       "getRepo": 1
     }
   },
+  "worker.test.ts::69": {
+    "name": "processWorkerTick",
+    "reads": {
+      "getRepo": 1
+    }
+  },
   "worker.test.ts::7": {
     "name": "processWorkerTick",
     "reads": {
       "getPR": 1,
+      "getRepo": 1
+    }
+  },
+  "worker.test.ts::70": {
+    "name": "processWorkerTick",
+    "reads": {
+      "findStickyIssueComment": 1,
       "getRepo": 1
     }
   },
